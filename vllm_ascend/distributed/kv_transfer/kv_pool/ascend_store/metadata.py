@@ -463,6 +463,12 @@ class ChunkedTokenDatabase:
         if group_num_layers is not None:
             self.group_num_layers[cache_role] = group_num_layers.copy()
 
+    def has_local_kv_group(self, group_id: int) -> bool:
+        layer_count = self.group_num_layers["kv"].get(group_id)
+        if layer_count is not None:
+            return layer_count > 0
+        return bool(self.group_kv_caches_base_addr.get(group_id) and self.group_block_len.get(group_id))
+
     def _get_group_buffers(
         self, kv_cache_group_id: int, cache_role: str = "kv"
     ) -> tuple[list[int], list[int], list[int] | None]:

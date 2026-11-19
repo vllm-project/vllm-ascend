@@ -50,6 +50,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    ChunkedTokenDatabase,
+    KeyMetadata,
     LoadSpec,
     ReqMeta,
 )
@@ -701,6 +703,113 @@ class TestKVPPPoolWorker(unittest.TestCase):
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
 
+    def test_pp_group_ownership_fallbacks(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.num_kv_cache_groups = 2
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["layer.0"]),
+                SimpleNamespace(layer_names=[]),
+            ]
+        )
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with patch(f"{module}.get_pp_group", return_value=SimpleNamespace(cpu_group=object())):
+            for manifest in ([(True, False), (True,)], [(True, False), (True, False)]):
+                with self.subTest(manifest=manifest):
+
+                    def gather(gathered, local_presence, *, group, manifest=manifest):
+                        gathered[:] = manifest
+
+                    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
+                        self.assertIsNone(worker._collect_pp_group_owners())
+
+            with patch.object(torch.distributed, "all_gather_object", side_effect=RuntimeError("collective failed")):
+                self.assertIsNone(worker._collect_pp_group_owners())
+
+        with patch(f"{module}.get_pp_group", return_value=SimpleNamespace()):
+            self.assertIsNone(worker._collect_pp_group_owners())
+        worker.pp_size = 1
+        with patch.object(torch.distributed, "all_gather_object") as gather:
+            self.assertIsNone(worker._collect_pp_group_owners())
+            gather.assert_not_called()
+
+    def test_pp_lookup_falls_back_to_all_ranks(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.group_uses_align_state = [False, False]
+        key = "model@pp_rank:0@group:0@"
+        for owners, group_id in ((None, 0), (((0,),), -1), (((0,),), 1)):
+            with self.subTest(owners=owners, group_id=group_id):
+                worker._pp_group_owners = owners
+                self.assertEqual(
+                    worker._expand_lookup_keys_by_rank([key], group_id),
+                    [key, "model@pp_rank:1@group:0@"],
+                )
+
+    def test_pp_hybrid_lookup_requires_only_group_owners(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["model.layers.0.self_attn"]),
+                SimpleNamespace(layer_names=[]),
+            ]
+        )
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 16]
+        worker.group_uses_align_state = [False, False]
+        worker.cache_coordinator = None
+        cpu_group = object()
+
+        def gather(gathered, local_presence, *, group):
+            assert local_presence == (True, False)
+            assert group is cpu_group
+            gathered[:] = [(True, False), (False, True)]
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pp_group",
+                return_value=SimpleNamespace(cpu_group=cpu_group),
+            ),
+            patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        ):
+            worker._pp_group_owners = worker._collect_pp_group_owners()
+        self.assertEqual(worker._pp_group_owners, ((0,), (1,)))
+        worker.token_database = ChunkedTokenDatabase(
+            [
+                KeyMetadata("llama-7b", 0, 0, 0, 0),
+                KeyMetadata("llama-7b", 0, 0, 0, 1),
+            ],
+            [16, 16],
+            None,
+        )
+
+        def only_real_owner_exists(keys):
+            return [
+                int(("@group:0@" in key and "@pp_rank:0@" in key) or ("@group:1@" in key and "@pp_rank:1@" in key))
+                for key in keys
+            ]
+
+        worker.m_store.exists.side_effect = only_real_owner_exists
+
+        self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0, 1]), 16)
+        queried_keys = [key for call in worker.m_store.exists.call_args_list for key in call.args[0]]
+        self.assertEqual(len(queried_keys), 2)
+        self.assertTrue(any("@group:0@" in key and "@pp_rank:0@" in key for key in queried_keys))
+        self.assertTrue(any("@group:1@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:0@" in key and "@pp_rank:1@" in key for key in queried_keys))
+        self.assertFalse(any("@group:1@" in key and "@pp_rank:0@" in key for key in queried_keys))
+
+    def test_pp_hybrid_lookup_does_not_report_partial_pipeline_hit(self):
+        worker = make_worker(self, pp_size=2, pp_partition=[1, 1])
+        worker._pp_group_owners = ((0, 1),)
+        for result in ([1, 0], [1]):
+            with self.subTest(result=result):
+                worker.m_store.exists.return_value = result
+                self.assertEqual(worker.lookup_scheduler(16, ["h0"], [0]), 0)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 2)
+        self.assertIn("@pp_rank:0@", keys[0])
+        self.assertIn("@pp_rank:1@", keys[1])
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
@@ -972,6 +1081,22 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         worker.token_database.process_token_key_strings.side_effect = process_token_key_strings
         return worker
+
+    def test_external_coordinator_lookup_requires_every_pipeline_shard(self):
+        worker = self._make_lookup_worker(self._make_worker_class(), self._make_sparse_swa_coordinator())
+        worker._expand_lookup_key_variants = MagicMock(return_value=["pp0", "pp1"])
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[False, True],
+        ):
+            for result, expected in (([1], 0), ([1, 0], 0), ([1, 1], 256)):
+                with self.subTest(result=result):
+                    worker.m_store.exists.return_value = result
+                    self.assertEqual(
+                        worker._lookup_with_coordinator(256, [b"h0", b"h1"], [0], include_all_ranks=True),
+                        expected,
+                    )
 
     def test_external_coordinator_lookup_uses_only_lookup_mask(self):
         cls = self._make_worker_class()
@@ -1457,6 +1582,33 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_start_load_kv_sync_skips_pp_local_empty_group(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.grouped_block_size = [16, 16]
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [160], 1: []},
+            group_num_layers={0: 1, 1: 0},
+        )
+        req = ReqMeta(
+            req_id="pp-local-empty",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[1000]])
+        self.assertEqual(sizes, [[160]])
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",

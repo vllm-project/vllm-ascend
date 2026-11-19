@@ -102,6 +102,7 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        self._pp_group_owners = self._collect_pp_group_owners()
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
@@ -178,6 +179,34 @@ class BaseKVPoolWorker(ABC):
             )
             self.pp_layer_offset = 0
             self.total_layers = None
+
+    def _collect_pp_group_owners(self) -> tuple[tuple[int, ...], ...] | None:
+        # The KV cache config is projected onto the local stage, while the
+        # lookup worker needs the full set of stages for each group.
+        if self.pp_size <= 1 or self.use_layerwise or self.kv_cache_config is None:
+            return None
+        cpu_group = getattr(get_pp_group(), "cpu_group", None)
+        if cpu_group is None:
+            return None
+        local_presence = tuple(bool(group.layer_names) for group in self.kv_cache_config.kv_cache_groups)
+        gathered: list[tuple[bool, ...] | None] = [None] * self.pp_size
+        try:
+            torch.distributed.all_gather_object(gathered, local_presence, group=cpu_group)
+        except (RuntimeError, ValueError) as error:
+            logger.warning("Failed to collect PP cache group ownership: %s", error)
+            return None
+
+        if any(presence is None or len(presence) != self.num_kv_cache_groups for presence in gathered):
+            logger.warning("Inconsistent PP cache group ownership; checking all PP ranks during lookup")
+            return None
+        owners = tuple(
+            tuple(rank for rank, presence in enumerate(gathered) if presence is not None and presence[group_id])
+            for group_id in range(self.num_kv_cache_groups)
+        )
+        if any(not ranks for ranks in owners):
+            logger.warning("Unowned PP cache group; checking all PP ranks during lookup")
+            return None
+        return owners
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
@@ -1050,7 +1079,9 @@ class BaseKVPoolWorker(ABC):
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        for pp_rank in range(self.pp_size):
+        owners = getattr(self, "_pp_group_owners", None)
+        pp_ranks = owners[group_id] if owners is not None and 0 <= group_id < len(owners) else range(self.pp_size)
+        for pp_rank in pp_ranks:
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
@@ -1107,7 +1138,7 @@ class BaseKVPoolWorker(ABC):
                 offset = 0
                 for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                     values = res[offset : offset + count]  # type: ignore[index]
-                    if values and all(value == 1 for value in values):
+                    if count and len(values) == count and all(value == 1 for value in values):
                         present.append(chunk_hash)
                     offset += count
 
@@ -1168,6 +1199,8 @@ class BaseKVPoolWorker(ABC):
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+                if len(res) < len(multi_tp_keys):
+                    return 0
                 num_block = len(keys)
                 if use_layerwise:
                     res = self.check_all_layers_exists(
@@ -1441,7 +1474,15 @@ class KVPoolWorker(BaseKVPoolWorker):
             key_list = []
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+            invalid_descriptors = False
             for group_id in load_group_ids:
+                if not self.token_database.has_local_kv_group(group_id):
+                    logger.debug(
+                        "Skipping KV pool get for PP-local empty group: request=%s group=%d",
+                        request.req_id,
+                        group_id,
+                    )
+                    continue
                 if group_id >= len(request.block_ids_by_group):
                     continue
                 block_ids = request.block_ids_by_group[group_id]
@@ -1474,10 +1515,24 @@ class KVPoolWorker(BaseKVPoolWorker):
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
+                    if not addr or not size or len(addr) != len(size):
+                        logger.warning(
+                            "Skipping KV pool get key without valid local descriptors: request=%s group=%d key=%s",
+                            request.req_id,
+                            group_id,
+                            key,
+                        )
+                        invalid_descriptors = True
+                        break
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                if invalid_descriptors:
+                    break
+            if invalid_descriptors:
+                self._record_failed_request(request)
+                continue
             if not key_list:
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
