@@ -275,7 +275,7 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
             use_a5_c8
             and not reuse_target
             and (self.latent_dim, self.rope_dim) == (512, 64)
-            and vllm_config.additional_config.get("hy4flash_fuse_c8_qk", False)
+            and vllm_config.additional_config.get("hy4flash_fuse_c8_qk", True)
         )
         self.fuse_indexpool_select = (
             use_a5_c8 and not reuse_target and vllm_config.additional_config.get("hy4flash_fuse_indexpool_select", True)
@@ -284,14 +284,14 @@ class AscendHYV4FlashAttention(nn.Module, AttentionLayerBase):
         self.fuse_swa_q_norm = (
             self.is_window_layer
             and not reuse_target
-            and vllm_config.additional_config.get("hy4flash_fuse_swa_q_norm", False)
+            and vllm_config.additional_config.get("hy4flash_fuse_swa_q_norm", True)
             and get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION)
             and hasattr(torch.ops.npu, "npu_rms_norm_dynamic_mx_quant")
         )
         self.fuse_attn_output_gate = (
             not reuse_target
             and HAS_TRITON
-            and vllm_config.additional_config.get("hy4flash_fuse_attn_output_gate", False)
+            and vllm_config.additional_config.get("hy4flash_fuse_attn_output_gate", True)
             and get_ascend_device_type() is AscendDeviceType.A5
         )
         self.overlap_attn_output_gate = (

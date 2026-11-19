@@ -132,10 +132,10 @@ export HY4FLASH_MAX_MODEL_LEN=131072
 | `hy4flash_share_swa_c8_reads` | 满足 950DT + C8 等条件时为 `true` | FULL 图中每路 6 query、8 个本地头、512 窗口的 SWA 共读 KV，`false` 可回到逐 query 读取。 |
 | `hy4flash_fuse_indexpool_fp8` | 满足 950DT + C8 + FULL decode 等条件时为 `true` | 融合 IndexPool query 与 pooled key 的 128 维 Hadamard 和 E4M3 舍入，沿用 CANN 行 scale 与除法。支持连续 BF16 输入、最多 8192 行，`false` 可回到参考路径。 |
 | `hy4flash_fuse_indexpool_select` | 满足 950DT + C8 + FULL decode 等条件时为 `true` | 压缩比 4、16 个 index heads、每路 6 个验证 query 共读池页并打分，保留现有 TopK、排序和候选拼接。 |
-| `hy4flash_fuse_swa_q_norm` | `false` | 实验开关。将 SWA 的 query RMSNorm 和已有 MXFP8 投影的动态激活量化合并。BF16 投影和 IndexPool 层沿用原路径。 |
-| `hy4flash_fuse_attn_output_gate` | `false` | 950DT FULL decode 的目标模型实验。融合 attention 输出门的 sigmoid、乘法和 `o_proj` 的 OCP MXFP8 激活量化。适用于已测的 1,024 和 2,048 本地宽度。 |
+| `hy4flash_fuse_swa_q_norm` | 满足硬件和投影条件时为 `true` | 将 SWA 的 query RMSNorm 和已有 MXFP8 投影的动态激活量化合并。BF16 投影和 IndexPool 层沿用原路径。 |
+| `hy4flash_fuse_attn_output_gate` | 950DT FULL decode 为 `true` | 用于目标模型。融合 attention 输出门的 sigmoid、乘法和 `o_proj` 的 OCP MXFP8 激活量化。适用于已测的 1,024 和 2,048 本地宽度。 |
 | `hy4flash_overlap_attn_output_gate` | 950DT FULL decode 为 `true` | 目标模型的输出 gate 投影与分页 attention 并行提交，`o_proj` 前等待 gate。 |
-| `hy4flash_fuse_c8_qk` | `false` | 950DT C8 FULL decode 实验。融合 sparse MLA 页读取、反量化和 IEEE FP32 QK。每路 6 query、4 个本地头、2,048 候选，给 PV 保留 512 维 FP32 latent。 |
+| `hy4flash_fuse_c8_qk` | 950DT C8 FULL decode 为 `true` | 融合 sparse MLA 页读取、反量化和 IEEE FP32 QK。每路 6 query、4 个本地头、2,048 候选，给 PV 保留 512 维 FP32 latent。 |
 | `hy4flash_triton_mla_logits` | `false` | Triton logits 实验，单算子输出及回放已验证，实测性能收益不足。 |
 | `hy4flash_cannbot_mla_prolog` | `false` | CANNBot BF16 prolog 实验。需要匹配容器 Python 和 CPU 架构的 CANNBot 运行时，并从 `PYTHONPATH` 导入 `mla_prolog_v4`。整网对照 336 个输出 token 中有 126 个位置不同。 |
 | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` 或 JSON `enable_flashcomm1: true` | `0` / `false` | FlashComm1 / sequence parallel 实验已启动验证，观测到首 token 和后续输出差异。关闭时设变量为 `0` 并保持 JSON 为 `false` 或省略该键。 |
@@ -179,10 +179,10 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 
 - **IndexPool Hadamard 与 E4M3 舍入**。950DT TP8 + EP、C8、DFly 5 在相同预热的 FULL decode A/B 中，414 个固定续写位置、2,240 个采样原始 logits 及 DFly 计数逐值一致。四档主图 p50 时间下降 6.4%–7.4%。4K 单路、512 token BS8、513 token BS9 和 4K BS6 的 p50 TPOT 分别下降 5.79%、6.52%、6.19% 和 0.88%。单算子额外覆盖 E4M3 中点及相邻 FP32 值，144,384 个值逐位一致。
 - **SWA 共读 KV**。950DT TP8 + EP、C8、DFly 5、同步调度的 FULL 图 A/B 中，23 个请求、414 个固定续写位置的 token ID、2,242 个采样的原始 logits（top-5 和固定续写 token）及 DFly 计数逐值一致。自由生成时，512 token × BS8 的 p50 TPOT 从 22.76 降至 22.20 ms，513 token × BS9 补齐到 BS16 的 p50 从 57.98 降至 56.56 ms。64 和 4K 单路基本持平。
-- **SWA query RMSNorm 与动态 MXFP8 量化融合**。在共读版本上打开融合，固定续写的 414 个位置仍逐项一致。四组自由生成的 p50 TPOT 相对共读版变化介于 −0.23% 和 +0.15%，默认关闭。
+- **SWA query RMSNorm 与动态 MXFP8 量化融合**。在共读版本上打开融合，固定续写的 414 个位置仍逐项一致。四组自由生成的 p50 TPOT 相对共读版变化介于 −0.23% 和 +0.15%。完成整套优化的评测回归后默认开启。
 - **Attention 输出 gate**。950DT TP8 + EP、C8、DFly 5、8K 上下文配置下，Triton 融合和旁流各自与基线的 360 个固定续写位置、1,949 个采样原始 logits、DFly 计数及自由生成一致。4K 单路 p50 TPOT 为基线 12.1042 ms、Triton 12.0461 ms、旁流 11.9375 ms。512 token BS8 和 513 token BS9 的旁流 p50 TPOT 分别下降 0.46% 和 0.39%。
 - **Attention 输出 gate 的 128K 对照**。对 130,944 token 输入完成实际 prefill，生成 128 token。在同一请求的 24 个 decode 步上，用相同 KV 和输入配对回放三张目标图。8 个 rank 的目标 hidden states 逐值一致。Rank 0 主图 p50 为基线 32.3193 ms、Triton 32.2176 ms（−0.31%）、旁流 32.0118 ms（−0.95%）。本次测量范围为目标图回放。
-- **C8 页读取与 QK**。对 6 个 query、4 个本地头和 2,048 候选，Triton 融合页读取、反量化和 IEEE FP32 QK。QK 核只将 512 维 FP32 latent 写回给 PV。单卡页读到 PV 从 288.04 降到 215.81 µs，QK 和 PV 逐值一致。PV 直接读 C8 页的尝试耗时 382.70 µs，出现 4 个 BF16 值差异。整网支持通过 `hy4flash_fuse_c8_qk` 单独开启。
+- **C8 页读取与 QK**。对 6 个 query、4 个本地头和 2,048 候选，Triton 融合页读取、反量化和 IEEE FP32 QK。QK 核只将 512 维 FP32 latent 写回给 PV。单卡页读到 PV 从 288.04 降到 215.81 µs，QK 和 PV 逐值一致。PV 直接读 C8 页的尝试耗时 382.70 µs，出现 4 个 BF16 值差异。满足已验证形状条件时默认开启，通过 `hy4flash_fuse_c8_qk=false` 可关闭。
 - **IndexPool 分页打分和共读池页**。复用同一份池页为 6 个 query 打分，将 Cube 运算拆成 4+2 个 query，在 128 组 tile 内完成。原 TopK、排序和候选拼接在全有效、尾行 padding 和分数并列场景逐项一致。128K 配置下，实际 4K、16K 和 128K 时，页读、打分至 TopK 的回放耗时从 234.84、239.67 和 281.77 µs 降到 96.65、98.69 和 214.85 µs。满足形状条件的 FULL decode 路径默认开启。
 - **Gate 旁流和 IndexPool 分页打分的默认路径**。950DT TP8 + EP、DFly 5 和 C8 下，对照旧路径、新默认和新默认加 C8 QK。396 个固定续写位置及 2,237 个采样 raw logits 逐值一致，短测自由生成和 DFly 计数一致。配对回放中，BS1、BS8、BS9 和 128K 的有效 hidden 与 5 层 DFly 候选逐值一致。实际 130,944 token 输入的主图 p50 为 32.44 → 31.47 → 30.21 ms。C8 QK 相对新默认的主图 p50 降幅为 3.97%–11.82%。
 - **iHC inverse RMS**。48 行单卡图回放中 CANN 与 Triton 探针从现行逐行归约的 103 µs 降至约 14 µs。用 4 层 checkpoint 的 attention/MLP 门控权重及合成 BF16 输入继续验证，两种探针均改变门控和 BF16 残差，模型沿用现行逐行归约。
@@ -212,6 +212,8 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 | `SwigluMxQuant` | 246 |
 
 ### 全套优化的评测与启动
+
+所有已验证的融合在支持条件满足时默认启用。各项 `hy4flash_*` 配置仍可显式设为 `false` 做对照。
 
 `all-optimizations.json` 保存 950DT、TP8 + EP、DFly 5 和 C8 的已验证配置，包含 Gate 旁流及量化融合、SWA 共读及 query RMSNorm 量化融合、IndexPool Hadamard 和分页打分、分页 C8 读取与 FP32 QK。第 1 层（从 0 编号）的 `q_b_proj` 固定使用 checkpoint 解量后的 BF16 权重。启动脚本根据 checkpoint 选择计算 dtype。
 
