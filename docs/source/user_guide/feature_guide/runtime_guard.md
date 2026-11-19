@@ -130,21 +130,27 @@ Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hard
 
 Runtime Guard is wired on **Model Runner v2** only (v1 is not wired). Tracking epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976).
 
-**白盒** = code-path analysis. **验证** = UT / live NPU. They are not the same.
+Status meanings:
 
-| Area | Notes |
-|------|--------|
-| TP / PP | Detect last-PP TP0; `dump_kv` last PP × all TP. Exercised in functional runs. |
-| DP | Per-replica report/dump; watch multi-DP `manual_dump` quota. |
-| SP (MoE) | Sample-time rows are post all-gather; no Guard-specific SP handling needed. |
-| PCP | Detection must use the post-`restore_for_sampling` batch (see #22026). Dump path tags need `pcp_manager.pcp_rank` (#22028). |
-| DCP / CP interleave | Each rank dumps its **local dense shard**; no CP stitch in-tree. Treat `.pt` as per-rank shards. |
-| Spec / MTP / adaptive | `spec_acceptance` needs real draft lengths, not padded row width (#22027). |
-| Hybrid / multi KV group / draft KV | `dump_kv` must resolve `block_ids` per group (#22025). |
-| C8 / TQ4 / kernel pages | Prefer forward-context tuple KV; expand manager→kernel ids when `blocks_per_kv_block > 1` (#22025). |
-| Prefix cache / APC | Finish / +1-wave dump may see freed or reused pages (`request_finished_at_dump`). |
-| KV Pool / Offload / PD disagg | Dump reads **device** `kv_caches` only; not a first-class offload/remote source. |
-| Grammar / structured output | `logits_finite` default async gate may observe post-grammar logits; use `item_sync: true` for sync kind. |
+- **Supported** — code path analyzed and exercised (unit tests and/or live NPU).
+- **Partial** — works with documented limits or follow-up fixes; see Notes / linked issues.
+- **Caveat** — usable only with the listed operational constraints.
+
+Code-path analysis and live verification are tracked separately; Status below reflects both.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| TP / PP | Supported | Detect last-PP TP0; `dump_kv` last PP × all TP. Exercised in functional runs. |
+| DP | Supported | Per-replica report/dump; watch multi-DP `manual_dump` quota. |
+| SP (MoE) | Supported | Sample-time rows are post all-gather; no Guard-specific SP handling needed. |
+| PCP | Partial | Detection must use the post-`restore_for_sampling` batch (see [#22026](https://github.com/vllm-project/vllm-ascend/issues/22026)). Dump path tags need `pcp_manager.pcp_rank` ([#22028](https://github.com/vllm-project/vllm-ascend/issues/22028)). |
+| DCP / CP interleave | Partial | Each rank dumps its **local dense shard**; no CP stitch in-tree. Treat `.pt` as per-rank shards. |
+| Spec / MTP / adaptive | Partial | `spec_acceptance` needs real draft lengths, not padded row width ([#22027](https://github.com/vllm-project/vllm-ascend/issues/22027)). |
+| Hybrid / multi KV group / draft KV | Partial | `dump_kv` must resolve `block_ids` per group ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| C8 (INT8 KV cache) / TQ4 (quantized sparse flash-attention KV) / kernel pages | Partial | Prefer forward-context tuple KV; expand manager→kernel ids when `blocks_per_kv_block > 1` ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| Prefix cache / APC | Caveat | Finish / +1-wave dump may see freed or reused pages (`request_finished_at_dump`). |
+| KV Pool / Offload / PD disagg | Caveat | Dump reads **device** `kv_caches` only; not a first-class offload/remote source. |
+| Grammar / structured output | Supported | `logits_finite` default async gate may observe post-grammar logits; use `item_sync: true` for sync kind. |
 
 Residual risks (PD cross-machine, DCP full-sequence stitch, offload-backed dump) stay documentation-only until product requires them.
 
