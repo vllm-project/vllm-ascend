@@ -101,7 +101,7 @@ from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimCon
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.utils import get_rotation_path, is_950
+from vllm_ascend.utils import get_rotation_path, is_950, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
@@ -1045,6 +1045,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             # A materialized state at start_layer belongs to this stage,
             # unlike the raw state emitted by the preceding stage.
             self._aux_slot_base_cached = bisect_left(self.aux_hidden_state_layers, self.start_layer)
+            # v0.34.0 caches the receive count inside the mixin, before the
+            # boundary above moves into this stage; sync it for collection.
+            if vllm_version_is("0.34.0") and pp.is_last_rank:
+                self._aux_upstream_total_cached = self._aux_slot_base_cached
 
     def aux_hidden_state_slot_keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if self.config.attn_res_block_size is None or not self.dspark_aux_capture_materialized:
@@ -1155,9 +1159,11 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             residual = intermediate_tensors["residual"]
 
         materialized_aux = self.dspark_aux_capture_materialized
-        # The runner relays upstream slots and merges them once on the last
-        # stage.
-        aux_hidden_states: list[torch.Tensor] = []
+        # v0.34.0 relays earlier stages' aux slots through the PP tensors;
+        # vLLM main merges them in the runner, so this yields [] there.
+        aux_hidden_states: list[torch.Tensor] = (
+            [] if get_pp_group().is_first_rank else self.collect_remote_aux_hidden_states(intermediate_tensors)
+        )
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
