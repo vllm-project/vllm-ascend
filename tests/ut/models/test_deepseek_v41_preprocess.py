@@ -162,7 +162,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
         packed_cache_ops=A5Backend() if a5_batch else None,
         rotary_emb=SimpleNamespace(layername="layer"),
         dsa_attn=SimpleNamespace(
-            swa_cache_layer=SimpleNamespace(kv_cache=[cache]),
+            swa_cache_layer=SimpleNamespace(kv_cache=cache),
             dsa_attn=SimpleNamespace(
                 impl=SimpleNamespace(
                     cv_wq_a=CVLinearWrapper(qa), cv_wq_b=CVLinearWrapper(qb), cv_wkv=CVLinearWrapper(kv)

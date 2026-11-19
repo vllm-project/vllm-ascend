@@ -14,18 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Allow Engram on Ascend and host table sharing across PCP replicas."""
+"""Allow Engram host table sharing across PCP replicas."""
 
 import importlib.util
 
 # Older vLLM builds have no Engram config to patch.
 if importlib.util.find_spec("vllm.config.engram") is not None:
-    from vllm.config.engram import EngramConfig, model_has_engram_layers
-
-    def verify_model_config(self, model_config) -> None:
-        # Keep upstream's model/layer checks; only its CUDA requirement is lifted.
-        if not model_has_engram_layers(model_config):
-            raise ValueError("EngramConfig requires a supported model with non-empty n-gram layer ids.")
+    from vllm.config.engram import EngramConfig
 
     # TODO: Remove this override once all supported vLLM versions natively
     # support Engram PCP, including DP x PCP groups and parallel validation.
@@ -41,5 +36,4 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
         if self.embedding_across_dp and parallel_config.data_parallel_size > 1 and parallel_config.enable_elastic_ep:
             raise ValueError("Engram embedding_across_dp is not supported with elastic EP yet.")
 
-    EngramConfig.verify_model_config = verify_model_config
     EngramConfig.verify_parallel_config = verify_parallel_config

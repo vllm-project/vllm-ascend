@@ -71,12 +71,16 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    MLAPrefillBackend = None
+    MLAPrefillSelectorConfig = None
     AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
@@ -505,6 +509,15 @@ class NPUPlatform(Platform):
             cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
 
     @classmethod
+    def get_mla_prefill_backend_cls(cls, mla_selector_config: MLAPrefillSelectorConfig) -> type[MLAPrefillBackend]:
+        # Ascend's AscendSFAImpl/AscendMLAImpl handles the full MLA forward
+        # pass (including prefill) via impl.forward(), so return the no-op
+        # Ascend backend instead of the CUDA capability-based selection.
+        from vllm_ascend.attention.mla_prefill import AscendMLAPrefillBackend
+
+        return AscendMLAPrefillBackend
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -656,6 +669,7 @@ class NPUPlatform(Platform):
         _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_deepseek_v41_adaptive_config(vllm_config)
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
@@ -2204,6 +2218,26 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     if num_experts == 384:
         return "V4 Pro"
     return None
+
+
+def _validate_deepseek_v41_adaptive_config(vllm_config: VllmConfig) -> None:
+    spec = vllm_config.speculative_config
+    if spec is None or not spec.enable_adaptive_verification:
+        return
+    if _get_deepseek_v4_variant(vllm_config.model_config) != "V4.1":
+        return
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_size = parallel.decode_context_parallel_size
+    # CP partitions from host boundaries, which do not describe the per-request
+    # draft budgets allocated on device by adaptive verification.
+    if pcp_size > 1 or dcp_size > 1:
+        raise ValueError(
+            "DeepSeek V4.1 adaptive verification on Ascend does not support "
+            f"context parallelism (PCP={pcp_size}, DCP={dcp_size}). "
+            "Set --prefill-context-parallel-size 1 and --decode-context-parallel-size 1, "
+            "or set enable_adaptive_verification=false in --speculative-config."
+        )
 
 
 def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
