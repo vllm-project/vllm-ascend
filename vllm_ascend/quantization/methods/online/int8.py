@@ -36,6 +36,7 @@ from __future__ import annotations
 import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.quantization.method_adapters import (
@@ -57,14 +58,25 @@ __all__ = [
 # Symmetric INT8: the representable magnitudes are -127..127 and the dequant
 # scale is ``amax / 127``, matching ModelSlim and llm-compressor's
 # INT8 W8A8_DYNAMIC recipe.
-_INT8_MAX = 127
-# Bound the float32 staging buffer used while quantizing. Each element costs
-# 4 bytes, so 32M elements is a 128 MB temporary regardless of the weight shape.
+_INT8_MAX = torch.iinfo(torch.int8).max
+# Bound the float32 intermediate of the quantize pass: each element costs 4
+# bytes, so 32M elements is a 128 MB temporary regardless of the weight shape.
+# The amax pass needs no such bound -- ``weight_amax`` reduces with ``aminmax``
+# and never materializes a full-size ``|weight|``.
 _QUANT_CHUNK_ELEMS = 32 * 1024 * 1024
 
 # Same contract as upstream online quantization: a layer's process pass is
 # idempotent and may be re-entered by vLLM's post-load hook.
 _PROCESSED_FLAG = "_already_called_process_weights_after_loading"
+
+
+def _int8_max(device: torch.device) -> torch.Tensor:
+    """0-d float32 divisor, so the scale uses the kernels' true division.
+
+    Dividing by a Python scalar can be lowered to multiply-by-reciprocal, which
+    rounds differently; upstream's FP8 scale helper uses the same trick.
+    """
+    return torch.tensor(_INT8_MAX, device=device, dtype=torch.float32)
 
 
 def _reduce_amax(amax: torch.Tensor, reduce_group) -> torch.Tensor:
@@ -121,12 +133,10 @@ def quantize_last_dim_to_int8(
 
     flat = weight.reshape(-1, contraction_dim)
     rows = flat.shape[0]
-    row_step = max(1, _QUANT_CHUNK_ELEMS // contraction_dim)
 
-    amax = torch.empty((rows, 1), dtype=torch.float32, device=flat.device)
-    for start in range(0, rows, row_step):
-        end = min(start + row_step, rows)
-        amax[start:end] = flat[start:end].float().abs().amax(dim=1, keepdim=True)
+    # ``weight_amax`` reduces with ``aminmax``, so no full-size ``|weight|`` is
+    # ever materialized and the amax pass needs no chunking.
+    amax = weight_amax(flat, dim=-1, keepdim=True).float()
     amax = _reduce_amax(amax, reduce_group)
 
     # An all-zero row would make the scale zero and the division undefined.
@@ -134,16 +144,18 @@ def quantize_last_dim_to_int8(
     # reconstruction ``q * scale`` is still exactly zero.
     nonzero = amax > 0
     safe_amax = torch.where(nonzero, amax, torch.ones_like(amax))
-    scale = (safe_amax / _INT8_MAX).to(scale_dtype)
+    scale = (safe_amax / _int8_max(amax.device)).to(scale_dtype)
 
     # Quantize with the *stored* scale so ``q * scale`` is the best
     # reconstruction the round-tripped scale allows.
     scale_fp32 = scale.float()
+    row_step = max(1, _QUANT_CHUNK_ELEMS // contraction_dim)
     qweight = torch.empty(flat.shape, dtype=torch.int8, device=flat.device)
     for start in range(0, rows, row_step):
         end = min(start + row_step, rows)
+        # The divide allocates the only float32 temporary; round/clamp on it.
         codes = flat[start:end].float() / scale_fp32[start:end]
-        qweight[start:end] = codes.round().clamp_(-_INT8_MAX, _INT8_MAX).to(torch.int8)
+        qweight[start:end] = codes.round_().clamp_(-_INT8_MAX, _INT8_MAX).to(torch.int8)
 
     scale = torch.where(nonzero, scale, torch.zeros_like(scale))
     return qweight.view(original_shape), scale.view(reduction_shape)

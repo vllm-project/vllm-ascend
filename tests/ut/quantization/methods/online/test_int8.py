@@ -142,6 +142,30 @@ class TestQuantizeLastDimToInt8(TestBase):
         self.assertEqual(all_reduce.call_args.kwargs["op"], torch.distributed.ReduceOp.MAX)
         self.assertAlmostEqual(scale[0].item(), 1.0 / 127, places=7)
 
+    def test_chunked_quantization_matches_a_single_chunk(self):
+        """The chunk loop must only bound memory, never change the result."""
+        torch.manual_seed(0)
+        weight = torch.randn(2, 6, 12, dtype=torch.bfloat16)
+
+        qweight, scale = quantize_last_dim_to_int8(weight, scale_dtype=torch.bfloat16)
+        with patch(f"{MODULE}._QUANT_CHUNK_ELEMS", 8):
+            chunked_qweight, chunked_scale = quantize_last_dim_to_int8(weight, scale_dtype=torch.bfloat16)
+
+        self.assertTrue(torch.equal(qweight, chunked_qweight))
+        self.assertTrue(torch.equal(scale, chunked_scale))
+
+    def test_does_not_modify_the_input_weight(self):
+        # `.float()` is a no-op view for an f32 input, so an in-place divide
+        # would rewrite the caller's weight.
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                weight = torch.randn(8, 16, dtype=dtype)
+                original = weight.clone()
+
+                quantize_last_dim_to_int8(weight, scale_dtype=dtype)
+
+                self.assertTrue(torch.equal(weight, original))
+
 
 class TestInt8PerChannelOnlineLinearMethod(TestBase):
     def _layer(self, weight=None):
