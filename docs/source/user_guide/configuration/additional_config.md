@@ -35,8 +35,9 @@ LLM(model="Qwen/Qwen3-8B", additional_config={"config_key":"config_value"})
 #### DSpark expert-pool routing with expert offload
 
 `dspark_expert_pool` enables L routing on the target model. It is off by default.
-The initial configuration uses ModelRunner V2, the single-device A5/MXFP
-expert-offload path, five speculative tokens and up to two requests. For example:
+It uses ModelRunner V2 and the single-device A5/MXFP expert-offload path.
+For the initial validation with 84 slots, five speculative tokens and up to two
+requests, use:
 
 ```json
 {
@@ -49,12 +50,14 @@ expert-offload path, five speculative tokens and up to two requests. For example
 Top-6 experts, and each suffix row contributes `suffix_experts` candidates.
 Every suffix row still selects six experts from the batch union.
 
-For `FULL_DECODE_ONLY` with compilation mode `NONE`, include 6 and 12 in
-`cudagraph_capture_sizes` for one or two full DSpark5 requests. Set
-`max_num_seqs=2` to allow both sizes. Include sizes 1 and 2 to capture native
-single-token decode as well. The 84-slot capacity check and existing expert
-loading policy also apply when L is enabled. Mixed or short verification
-batches use eager execution.
+The verification width is `num_speculative_tokens + 1`. Expert offload admits
+a graph when its padded token count times Top-K fits the configured device
+slots, subject to its normal descriptor checks. L adds no slot or batch-size
+limit. Mixed or short verification batches use eager execution.
+
+For the initial example, set `max_num_seqs=2` and include 6 and 12 in
+`cudagraph_capture_sizes` with `FULL_DECODE_ONLY` and compilation mode `NONE`.
+Include sizes 1 and 2 to capture native single-token decode as well.
 
 The following table lists additional configuration options available in vLLM Ascend:
 
