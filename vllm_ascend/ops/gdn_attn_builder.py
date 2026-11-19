@@ -1459,24 +1459,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             conv_cache_indices = non_spec_indices
         elif clear_spec and graph_state_updates is not None and m.num_prefills == 0:
             self.spec_state_indices_tensor[: m.non_spec_query_start_loc.size(0) - 1].fill_(PAD_SLOT_ID)
-        result = replace(
-            m,
-            spec_state_indices_tensor=spec_indices,
-            non_spec_state_indices_tensor=non_spec_indices,
-            prefill_state_indices=prefill_indices,
-        )
-        # dataclasses.replace rebuilds from declared fields, so attributes that
-        # main attaches dynamically (e.g. pcp_context) must be carried over.
-        for name, value in vars(m).items():
-            if name not in vars(result):
-                setattr(result, name, value)
+        # A shallow copy preserves declared fields and dynamically attached
+        # Ascend metadata (e.g. pcp_context, gdn_num_reqs) without the vars()
+        # walk that dataclasses.replace() needs. Rebind only the group-local
+        # state inputs; nested descriptors are replaced below so this group
+        # does not mutate the cached template.
+        result = copy(m)
+        result.spec_state_indices_tensor = spec_indices
+        result.non_spec_state_indices_tensor = non_spec_indices
+        result.prefill_state_indices = prefill_indices
         # Checkpoint metadata is optional and absent from vLLM v0.30.0.
         checkpoint = getattr(m, "checkpoint", None)
         if checkpoint is not None:
             result.checkpoint = checkpoint.regather_state_indices(blk_table)
-        for name in ("gdn_num_reqs", "gdn_seq_lens", "spec_sequence_indices", "non_spec_sequence_indices"):
-            if hasattr(m, name):
-                setattr(result, name, getattr(m, name))
         result.non_spec_prefill_metadata = m.non_spec_prefill_metadata
         if m.non_spec_prefill_metadata is not None:
             assert conv_cache_indices is not None, "Prefill metadata requires cache indices"
