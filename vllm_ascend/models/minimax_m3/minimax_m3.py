@@ -1209,7 +1209,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            aux_hidden_states = []
+            # v0.34.0 relays earlier stages' aux slots through the PP tensors;
+            # vLLM main instead merges them in the runner, so this returns [].
+            aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         hidden_states_are_sp = False
         sp_forward_context = None
