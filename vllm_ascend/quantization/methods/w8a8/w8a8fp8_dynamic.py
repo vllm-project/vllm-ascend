@@ -117,7 +117,18 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         # the EPLB per-expert weight list path).
         activation = mlp_compute_input.activation
         if not mlp_compute_input.fusion or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            return super().apply_gmm1_act_quant(mlp_compute_input)
+            hidden_states = self.apply_gmm1(mlp_compute_input)
+            if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+                hidden_states = torch_npu.npu_clipped_swiglu(
+                    hidden_states,
+                    interleaved=False,
+                    alpha=mlp_compute_input.swiglu_alpha,
+                    limit=mlp_compute_input.swiglu_limit,
+                    bias=mlp_compute_input.swiglu_beta,
+                )
+            else:
+                hidden_states = torch_npu.npu_swiglu(hidden_states)
+            return self.apply_act_quant(mlp_compute_input, hidden_states)
 
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
