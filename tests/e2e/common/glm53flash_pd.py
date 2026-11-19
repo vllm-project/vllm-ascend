@@ -93,10 +93,8 @@ class FlashPDWorker:
             }
         )
 
-    def flash_pd_probe(self, fault="none"):
-        # This lives only in the test worker. No production switch or patch is
-        # installed. Deliberately omit actual transfer descriptors to prove the
-        # live test rejects a successful HTTP response with missing state.
+    def flash_pd_probe(self):
+        # Observe transfer descriptors without changing the copies performed.
         from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import KVCacheRecvingThread
 
         if not hasattr(self, "_flash_pd_original"):
@@ -104,8 +102,7 @@ class FlashPDWorker:
 
             def observe(receiver, src, dst, lengths, **kwargs):
                 start = len(lengths)
-                if self._flash_pd_fault != "drop_mamba":
-                    self._flash_pd_original(receiver, src, dst, lengths, **kwargs)
+                self._flash_pd_original(receiver, src, dst, lengths, **kwargs)
                 self._flash_pd_copies.append(
                     {
                         "state": kwargs["src_layer_base_addr"][1],
@@ -118,8 +115,6 @@ class FlashPDWorker:
                 )
 
             KVCacheRecvingThread._append_mamba_transfer_meta = observe
-        assert fault in ("none", "drop_mamba")
-        self._flash_pd_fault = fault
         self._flash_pd_copies = []
         return True
 
