@@ -23,6 +23,8 @@ def worker(cache_names=("model.layers.2.long", "model.layers.2.swa")):
                 }
             )
         ),
+        _shared_layer_indices={},
+        _shared_layer_writes={},
         _layer_indices={"model.layers.2.long": 0, "model.layers.2.swa": 1, "draft": 2},
         _layer_index_by_name={"model.layers.2.long": layer, "model.layers.2.swa": layer, "draft": ("draft", 0)},
         _layer_names_by_index={layer: ["model.layers.2.long", "model.layers.2.swa"], ("draft", 0): ["draft"]},
@@ -92,3 +94,13 @@ def test_hbm_prefix_is_ready_while_external_prefix_waits_in_same_batch(num_exter
     for state in states.values():
         assert state.available_layers["model.layers.2.long"][0] == 32
         assert state.available_layers["model.layers.2.swa"][0] == 32
+
+
+def test_swa_only_attention_ready_does_not_publish_draft_with_same_layer_number():
+    obj = worker()
+    obj.vllm_config.compilation_config.static_forward_context["swa-only.attn"] = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(prefix="model.layers.2.swa")
+    )
+    load(PUSH, "_register_composite_layer_aliases", {}, OWNER)(obj)
+    assert obj._layer_index_by_name["swa-only.attn"] == ("model", 2)
+    assert obj._layer_index_by_name["swa-only.attn"] != obj._layer_index_by_name["draft"]

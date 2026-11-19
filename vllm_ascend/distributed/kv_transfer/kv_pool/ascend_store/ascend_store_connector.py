@@ -464,6 +464,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 
+    def clear_connector_metadata(self) -> None:
+        # V2 collects results before DSpark writes its prompt windows. Late
+        # draft loads may still use these addresses until step finalization.
+        worker = self.connector_worker
+        if (
+            isinstance(worker, LayerwiseKVPoolWorker)
+            and getattr(worker.kv_cache_config, "dsv4_dspark_push", False) is True
+        ):
+            worker.release_step_load_leases()
+        super().clear_connector_metadata()
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.

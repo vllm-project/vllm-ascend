@@ -23,6 +23,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
@@ -43,7 +44,9 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, proce
 from vllm.platforms import current_platform
 
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
+from vllm_ascend.models.deepseek_v4.cache_reuse import uses_dspark_push
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
     DeepseekV4DecoderLayer,
@@ -112,6 +115,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self.vllm_config = vllm_config
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
+        self.publish_prompt_context = uses_dspark_push(vllm_config)
         self.hc_mult = config.hc_mult
         self.hidden_size = config.hidden_size
         self.block_size = int(config.dspark_block_size)
@@ -292,7 +296,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         if context_states.numel() == 0 or context_positions.numel() == 0:
             return
@@ -307,6 +311,21 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         if context_slot_mapping is None:
             return
+
+        # The native drafter supplies one tensor when all draft layers share a group.
+        if isinstance(context_slot_mapping, torch.Tensor):
+            context_slot_mapping = [context_slot_mapping] * len(self.layers)
+        connector = None
+        if self.publish_prompt_context:
+            if not has_kv_transfer_group() or not get_kv_transfer_group().has_connector_metadata():
+                raise RuntimeError("DSpark Push requires bound connector metadata for prompt context writes.")
+            connector = get_kv_transfer_group()
+            if len(context_slot_mapping) != len(self.layers) or any(
+                slots is None or slots.shape[0] != context_states.shape[0] for slots in context_slot_mapping
+            ):
+                raise ValueError("DSpark Push needs a slot mapping for every context row and draft layer.")
+            if any(layer.self_attn.dsa_attn.swa_cache_layer.kv_cache is None for layer in self.layers.values()):
+                raise RuntimeError("DSpark Push requires bound draft SWA caches.")
 
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(
@@ -324,7 +343,15 @@ class DeepseekV4DSparkModel(nn.Module):
                 attn,
                 rope=rope,
             )
+            if connector is not None:
+                cache = attn.dsa_attn.swa_cache_layer
+                connector.wait_for_layer_load(cache.prefix)
+                record_attention_compute_start()
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+            if connector is not None:
+                # Some prompt chunks skip the draft query. Scatter is their last
+                # writer; the regular Store and Push callbacks can now read.
+                connector.save_kv_layer(cache.prefix, cache.kv_cache, None)
 
     def forward(
         self,
@@ -493,7 +520,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         self.model.precompute_and_store_context_kv(
             context_states,

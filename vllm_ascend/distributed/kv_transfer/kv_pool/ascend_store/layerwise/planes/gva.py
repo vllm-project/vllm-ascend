@@ -136,6 +136,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                 continue
             block_hashes = request.block_hashes
 
+            window_public_pages = {}
+            if getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None:
+                from vllm_ascend.models.deepseek_v4.cache_transfer import prompt_window_masks
+
+                window_public_pages = prompt_window_masks(worker, request, request.target_token_len, saving=True)
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
@@ -186,14 +191,19 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for block_idx in range(save_start_block, end_limit)
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
+                window_public = window_public_pages.get(group_id)
+                is_public = [
+                    block < len(group_block_hashes) and (window_public is None or window_public[block])
+                    for block in candidate_blocks
+                ]
                 candidate_keys = [
                     worker._make_layerwise_full_key(
                         group_id,
                         block_hash_to_str(group_block_hashes[block_idx]),
                     )
-                    if block_idx < len(group_block_hashes)
+                    if public
                     else worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
-                    for block_idx in candidate_blocks
+                    for block_idx, public in zip(candidate_blocks, is_public, strict=True)
                 ]
                 partial_key = None
                 if (
@@ -201,13 +211,15 @@ class GvaDataPlane(LayerwiseDataPlane):
                     and partial_block_index is not None
                     and partial_block_index < len(block_ids_by_group)
                 ):
+                    if window_public is not None and block_ids_by_group[partial_block_index] == 0:
+                        raise ValueError("DeepSeek-V4 partial window snapshot has no physical block")
                     partial_key = worker._make_layerwise_partial_key(
                         request, group_id, partial_block_index, request.target_token_len
                     )
                 if worker.layerwise_offload:
                     pages = worker._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
-                    for block_idx, key in zip(candidate_blocks, candidate_keys):
-                        if block_idx < len(group_block_hashes):
+                    for block_idx, key, public in zip(candidate_blocks, candidate_keys, is_public, strict=True):
+                        if public:
                             pages.pop(block_idx, None)
                         else:
                             pages[block_idx] = key
@@ -255,7 +267,9 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for block_idx, key, gva in zip(transfer_blocks, transfer_keys, block_gvas, strict=True):
                         if gva > 0:
                             all_group_save_keys.append(key)
-                            if block_idx < len(group_block_hashes):
+                            if block_idx < len(group_block_hashes) and (
+                                window_public is None or window_public[block_idx]
+                            ):
                                 public_allocated.add(key)
                     if worker.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
@@ -425,13 +439,16 @@ class GvaDataPlane(LayerwiseDataPlane):
             return gvas
 
         readable_keys = [keys[index] for index in readable_indices]
-        results = worker.m_store.batch_add_lease(readable_keys, LAYERWISE_READ_LEASE_TTL_MS)
-        if results is None or len(results) != len(readable_keys):
+        new_keys = [key for key in readable_keys if key not in worker._step_load_keys]
+        results = worker.m_store.batch_add_lease(new_keys, LAYERWISE_READ_LEASE_TTL_MS) if new_keys else []
+        if results is None or len(results) != len(new_keys):
             return None
-        worker._step_load_keys.update(key for key, result in zip(readable_keys, results, strict=True) if result == 0)
+        statuses = dict(zip(new_keys, results, strict=True))
+        worker._step_load_keys.update(key for key, result in statuses.items() if result == 0)
         leased_keys = []
-        for index, result in zip(readable_indices, results, strict=True):
+        for index in readable_indices:
             key = keys[index]
+            result = statuses.get(key, 0)
             if result == MEMCACHE_UNMATCHED_STATE and private:
                 for _ in range(PARTIAL_LEASE_RETRY_COUNT):
                     time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
@@ -455,9 +472,8 @@ class GvaDataPlane(LayerwiseDataPlane):
         infos = worker.m_store.batch_get_key_info(leased_keys)
         if infos is None or len(infos) != len(leased_keys):
             return None
-        key_indices: dict[str, int] = {}
-        for index, key in enumerate(keys):
-            key_indices.setdefault(key, index)
+        # Each query contains distinct keys. Fan-out to repeated pages happens in _lease_step_load_gvas.
+        key_indices = {key: index for index, key in enumerate(keys)}
         for key, info in zip(leased_keys, infos, strict=True):
             address = next((gva for gva in info.gva_list() if gva > 0), 0) if info is not None else 0
             gvas[key_indices[key]] = address
@@ -485,6 +501,10 @@ class GvaDataPlane(LayerwiseDataPlane):
         groups: list[_LoadGroup] = []
         public_keys: dict[str, None] = {}
         restore_previous_step = worker.layerwise_offload and request.load_spec.layerwise_previous_step
+        if restore_previous_step and getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None:
+            from vllm_ascend.models.deepseek_v4.cache_transfer import prompt_window_masks
+
+            prompt_window_masks(worker, request, cached_tokens, saving=False)
         for group_id in range(worker.num_kv_cache_groups):
             if group_id not in worker.cacheable_group_ids:
                 groups.append(_LoadGroup(np.zeros(0, dtype=np.int64), [], [], False))
@@ -534,7 +554,12 @@ class GvaDataPlane(LayerwiseDataPlane):
             full_len = len(block_ids_by_group)
 
             if partial_block_index is not None and (
-                partial_block_index < load_start_block or partial_block_index >= full_len
+                partial_block_index < load_start_block
+                or partial_block_index >= full_len
+                or (
+                    getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None
+                    and block_ids_by_group[partial_block_index] == 0
+                )
             ):
                 return None
 

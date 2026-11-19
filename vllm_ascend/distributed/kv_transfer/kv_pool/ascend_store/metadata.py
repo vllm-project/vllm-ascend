@@ -47,6 +47,8 @@ def infer_dcp_mismatch_info(
     extra_config: Mapping[str, Any] | object,
     local_dcp_size: int | object,
     local_pcp_size: int | object = 1,
+    *,
+    replicated_pcp: bool = False,
 ) -> bool:
     """Whether the peer P/D stage disagrees with this stage on CP layout.
 
@@ -61,6 +63,10 @@ def infer_dcp_mismatch_info(
     mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
     convention. When the key is absent the single-group path is assumed and
     the local layout is authoritative.
+
+    A backend may declare that PCP replicas each hold the complete logical
+    cache. Those replicas share the same wire layout when both sides use
+    DCP=1, even if their PCP counts differ. DCP shards remain incompatible.
     """
     local_dcp_size = _as_positive_int(local_dcp_size, 1)
     local_pcp_size = _as_positive_int(local_pcp_size, 1)
@@ -76,7 +82,9 @@ def infer_dcp_mismatch_info(
         return False
     peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
     peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
-    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
+    if peer_dcp_size != local_dcp_size:
+        return True
+    return peer_pcp_size != local_pcp_size and not (replicated_pcp and local_dcp_size == 1)
 
 
 def infer_tp_mismatch_info(

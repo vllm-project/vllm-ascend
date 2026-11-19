@@ -310,6 +310,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
 class MooncakeConnectorV2(MooncakeBaseConnector):
     """Select pull by default, or layerwise push via extra configuration."""
 
+    @staticmethod
+    def is_push_config(name: str, extra: dict) -> bool:
+        return name == "MooncakePushConnector" or (name == "MooncakeConnectorV2" and bool(extra.get("use_layerwise")))
+
     def __new__(
         cls,
         vllm_config: VllmConfig,
@@ -318,7 +322,9 @@ class MooncakeConnectorV2(MooncakeBaseConnector):
     ) -> MooncakeBaseConnector:
         assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        connector_cls = MooncakePushConnector if extra_config.get("use_layerwise", False) else MooncakePullConnector
+        connector_cls = (
+            MooncakePushConnector if cls.is_push_config("MooncakeConnectorV2", extra_config) else MooncakePullConnector
+        )
         return connector_cls(vllm_config, role, kv_cache_config)
 
 

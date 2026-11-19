@@ -26,14 +26,21 @@ from .layerwise_cache_layout import (
 )
 
 SPEC_REUSE_RULES = MappingProxyType(
-    {"glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES"}
+    {
+        "glm5_next_text": "vllm_ascend.models.glm5next.cache_reuse.GLM5_NEXT_SPEC_REUSE_RULES",
+        "deepseek_v4": "vllm_ascend.models.deepseek_v4.cache_reuse.get_spec_reuse_rules",
+    }
 )
 
 
 def get_spec_reuse_rules(vllm_config: VllmConfig) -> SpecReuseRules | None:
     text_config = getattr(vllm_config.model_config, "hf_text_config", None)
     path = SPEC_REUSE_RULES.get(getattr(text_config, "model_type", None))
-    return resolve_obj_by_qualname(path) if path is not None else None
+    if path is None:
+        return None
+    rules = resolve_obj_by_qualname(path)
+    # A factory keeps model-specific rules local to each planning invocation.
+    return rules() if callable(rules) else rules
 
 
 def get_layerwise_ascend_store_config(kv_transfer_config: Any) -> dict[str, Any] | None:

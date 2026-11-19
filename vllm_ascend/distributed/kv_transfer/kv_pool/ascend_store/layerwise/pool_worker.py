@@ -173,7 +173,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
         # Both PD sides must derive the same GVA shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
-            self.kv_role, self._extra_config, self.dcp_size, self.pcp_size
+            self.kv_role,
+            self._extra_config,
+            self.dcp_size,
+            self.pcp_size,
+            replicated_pcp=getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None,
         ):
             peer_role = "prefill" if self.kv_role == "kv_consumer" else "decode"
             raise ValueError(
@@ -233,11 +237,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
                 if (
                     draft_names
-                    and self._layerwise_reuse_layout is None
+                    and (
+                        self._layerwise_reuse_layout is None
+                        or getattr(self.kv_cache_config, "dsv4_dspark_push", False) is True
+                    )
                     and getattr(self, "_dspark_prefix_keys", None) is None
                 ):
-                    # Without scratch reuse, retain the original target+draft
-                    # pool for prefix storage and load/save addressing.
+                    # Ordinary pooling owns draft context in the native layout and on DSV4 Push producers.
+                    # A dedicated DSpark prefix provider retains its own registration.
                     self._dspark_draft_layer_names = draft_names = set()
                     target_specs = layer_specs
             physical_layers = {
@@ -573,6 +580,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         target_caches = (
             {name: cache for name, cache in kv_caches.items() if name not in draft_names} if draft_names else kv_caches
         )
+        if self.use_layerwise_transfer and getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None:
+            from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
+
+            target_caches = transfer_cache_views(target_caches)
         self._set_num_blocks(target_caches)
         self._register_dspark_prefix_cache(draft_caches)
         auxiliary_caches = draft_caches if getattr(self, "dspark_prefix_cache", None) is not None else None
@@ -618,6 +629,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self._snapshot_keys:
             for req_id in finished_req_ids | meta.preempted_req_ids:
                 self._snapshot_keys.pop(req_id, None)
+        if getattr(getattr(self, "kv_cache_config", None), "dsv4_dspark_push", False) is not True:
+            self.release_step_load_leases()
+        if self.use_block_key_layerwise:
+            self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
+        return super().get_finished(finished_req_ids, meta)
+
+    def release_step_load_leases(self) -> None:
         if self._step_load_keys:
             if self.kv_recv_thread is not None:
                 self._drain_attention_transfers(full=True)
@@ -625,9 +643,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             result = self.m_store.batch_remove_lease(keys)
             if result != 0:
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
-        if self.use_block_key_layerwise:
-            self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
-        return super().get_finished(finished_req_ids, meta)
 
     def _build_lookup_keys(
         self,
@@ -794,6 +809,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
+            if getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None and block_idx in snapshot:
+                return snapshot[block_idx], False
             if block_idx < full_blocks and block_idx < len(block_hashes):
                 block_hash = block_hash_to_str(block_hashes[block_idx])
                 return self._make_layerwise_full_key(group_id, block_hash), True

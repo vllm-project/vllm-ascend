@@ -2702,19 +2702,19 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_layerwise_lease_refresh_refreshes_all_duplicate_key_indices(self):
         worker = self._make_gva_worker()
         request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
-        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
-        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302)]
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
         worker.m_store.batch_add_lease.return_value = [0, 0]
 
         self.assertIsNone(worker._data_plane._prepare_load_gvas([request]))
 
         # Every occurrence must use the pinned GVA, never the pre-lease address.
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 303])
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 301])
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
-        self.assertEqual(queried[0], queried[2])
+        self.assertEqual(len(queried), 2)
         self.assertEqual(worker.m_store.batch_add_lease.call_args.args[0], queried[:2])
-        self.assertEqual(request.load_keys, queried)
+        self.assertEqual(request.load_keys, [*queried, queried[0]])
         self.assertEqual(worker._step_load_keys, set(queried))
 
     def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
@@ -3005,9 +3005,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         missing_info.size.return_value = 0
         missing_info.gva_list.return_value = []
         worker.m_store.batch_get_key_info.side_effect = [
+            [valid_info, missing_info],
             [valid_info],
-            [valid_info],
-            [missing_info],
         ]
         worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
