@@ -75,3 +75,6 @@
             -v "$MODEL_CACHE:/root/.cache" \
             -it "$IMAGE" bash
         ```
+
+    !!! note
+        On some 950DT hosts, `/usr/local/Ascend/driver/lib64/driver/urma` is an absolute symlink to `/usr/lib64/urma`. Mounting only the driver directory preserves the link but not its target, so `npu-smi info` can hang inside the container even when it succeeds on the host. Check the link with `readlink /usr/local/Ascend/driver/lib64/driver/urma`; if the target directory exists on the host, add `-v /usr/lib64/urma:/usr/lib64/urma:ro` to the command above, or mount all of `/usr/lib64`. See the [FAQ](../faqs.md) for diagnosis details.

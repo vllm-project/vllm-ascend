@@ -319,3 +319,22 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. Why does `npu-smi info` hang inside a 950DT container?
+
+On some 950DT hosts, `/usr/local/Ascend/driver/lib64/driver/urma` is an absolute symlink to `/usr/lib64/urma`. Mounting only `/usr/local/Ascend/driver/lib64/` preserves the symlink but does not bring its target into the container, so `npu-smi info` can hang while the host command succeeds.
+
+Check the link on the host and the target inside the container:
+
+```bash
+readlink /usr/local/Ascend/driver/lib64/driver/urma
+docker exec <container> ls -l /usr/lib64/urma/
+```
+
+If the target directory exists on the host but is missing in the container, add the read-only mount:
+
+```bash
+-v /usr/lib64/urma:/usr/lib64/urma:ro
+```
+
+or mount all of `/usr/lib64`. Ascend logs may contain `urma_get_device_by_eid failed`, `dms_get_ub_dev_info failed`, or `Init UB context failed` when this mount is missing. Adding the mount restores `npu-smi info` device discovery; it does not by itself prove that inference works.
