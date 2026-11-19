@@ -444,8 +444,11 @@ def test_active_finegrained_tp_check_precedes_input_preparation():
 @pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("runtime_idle", [False, True])
 @pytest.mark.parametrize("requires_graph", [False, True])
+@pytest.mark.parametrize("embedding_tp_size", [1, 2])
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-def test_idle_graph_contract_at_real_model_state_entry(monkeypatch, hybrid, runtime_idle, requires_graph, mode):
+def test_idle_graph_contract_at_real_model_state_entry(
+    monkeypatch, hybrid, runtime_idle, requires_graph, embedding_tp_size, mode
+):
     from vllm_ascend.ascend_config import FinegrainedTPConfig
     from vllm_ascend.worker.v2.attn_utils import skip_ring_state_update
     from vllm_ascend.worker.v2.model_states import default, mamba_hybrid
@@ -454,7 +457,10 @@ def test_idle_graph_contract_at_real_model_state_entry(monkeypatch, hybrid, runt
     state = object.__new__(state_cls)
     state.vllm_config = SimpleNamespace(model_config=None)
     config = SimpleNamespace(
-        finegrained_tp_config=FinegrainedTPConfig(shared_expert_tensor_parallel_size=2 if requires_graph else 1)
+        finegrained_tp_config=FinegrainedTPConfig(
+            embedding_tensor_parallel_size=embedding_tp_size,
+            shared_expert_tensor_parallel_size=2 if requires_graph else 1,
+        )
     )
     monkeypatch.setattr(default, "get_ascend_config", lambda: config)
     rejects = runtime_idle and requires_graph and mode == CUDAGraphMode.NONE
