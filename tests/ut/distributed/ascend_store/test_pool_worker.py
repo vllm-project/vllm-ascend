@@ -210,21 +210,21 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
     worker.use_hybrid = True
     worker.use_layerwise = False
     worker.enable_partial_hash_hits = partial_hits
-    worker.use_eagle = False
+    worker.use_eagle = True
     worker.cache_transfer_granularity = 16
     worker.hash_block_size = 16
     worker.grouped_block_size = [16]
     worker.kv_cache_group_families = ["mamba"]
-    config = SimpleNamespace(speculative_config=None)
     with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
-        coordinator = worker._build_cache_coordinator(config)
+        coordinator = worker._build_cache_coordinator()
     assert coordinator is coordinator_cls.return_value
     assert coordinator_cls.call_args.args[0] is worker.kv_cache_config.kv_cache_groups
     assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
+    assert coordinator_cls.call_args.kwargs["use_eagle"] is True
 
 
 class TestPCPPoolWorker(unittest.TestCase):
-    def test_partial_chunk_policy_is_checked_by_worker(self):
+    def test_discard_partial_chunks_false_is_accepted_by_scheduler_and_worker(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 
         for alignment in (4, 16):
@@ -242,18 +242,10 @@ class TestPCPPoolWorker(unittest.TestCase):
                     cache_hit_alignment_tokens=alignment,
                     prefix_cache_retention_interval=None,
                 )
-                worker = make_worker(self, kv_cache_config=cache)
-                worker.vllm_config.kv_transfer_config.kv_connector_extra_config["discard_partial_chunks"] = False
+                worker = make_worker(self, kv_cache_config=cache, extra_config={"discard_partial_chunks": False})
                 scheduler = KVPoolScheduler(worker.vllm_config, False, worker.kv_cache_config)
                 self.assertEqual(scheduler.enable_partial_hash_hits, alignment == 4)
-                if alignment == 4:
-                    with self.assertRaisesRegex(ValueError, "discard_partial_chunks"):
-                        make_worker(self, kv_cache_config=cache, extra_config={"discard_partial_chunks": False})
-                else:
-                    scheduler = KVPoolScheduler(worker.vllm_config, False, worker.kv_cache_config)
-                    self.assertFalse(scheduler.enable_partial_hash_hits)
-                    worker = make_worker(self, kv_cache_config=cache, extra_config={"discard_partial_chunks": False})
-                    self.assertFalse(worker.enable_partial_hash_hits)
+                self.assertEqual(worker.enable_partial_hash_hits, scheduler.enable_partial_hash_hits)
 
     def test_scheduler_and_worker_share_resolved_cache_policy(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
@@ -285,7 +277,7 @@ class TestPCPPoolWorker(unittest.TestCase):
                     self.assertEqual(getattr(scheduler, field), getattr(worker, field), field)
 
     def test_partial_hits_follow_core_alignment(self):
-        for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, False)):
+        for alignment, layerwise, expected in ((32, False, True), (640, False, False), (32, True, True)):
             with self.subTest(alignment=alignment, layerwise=layerwise):
                 spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
                 cache = SimpleNamespace(

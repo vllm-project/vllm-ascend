@@ -215,33 +215,14 @@ class BaseKVPoolWorker(ABC):
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
+        self.block_size = self.grouped_block_size[0]
         self.hash_block_size = kv_cache_config.hash_block_size
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        hit_alignment = kv_cache_config.cache_hit_alignment_tokens
-        self.enable_partial_hash_hits = not use_layerwise and hit_alignment < self.lcm_block_size
+        # TODO: Adapt layerwise save/load paths to support partial hash hits.
+        self.enable_partial_hash_hits = kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
-        if self.enable_partial_hash_hits and extra_config.get("discard_partial_chunks", True) is not True:
-            raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
-        if self.enable_partial_hash_hits:
-            use_eagle_block_drop = getattr(speculative_config, "use_eagle_block_drop", None)
-            transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
-            producer_only = bool(transfer and transfer.is_kv_producer and not transfer.is_kv_consumer)
-            self.use_eagle = bool(
-                callable(use_eagle_block_drop) and use_eagle_block_drop() is True and not producer_only
-            )
-        logger.info(
-            "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
-            "pool_transfer_alignment=%d mode=%s group_pages=%s",
-            vllm_config.cache_config.prefix_match_unit,
-            self.hash_block_size,
-            hit_alignment,
-            self.lcm_block_size,
-            "hash" if self.enable_partial_hash_hits else "existing",
-            tuple(self.grouped_block_size),
-        )
-        self.block_size = self.grouped_block_size[0]
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
@@ -375,7 +356,7 @@ class BaseKVPoolWorker(ABC):
         self.token_database = ChunkedTokenDatabase(
             self.metadata, self.grouped_block_size, partitions, hash_block_size=self.hash_block_size
         )
-        self.cache_coordinator = self._build_cache_coordinator(vllm_config)
+        self.cache_coordinator = self._build_cache_coordinator()
         self.token_database.cache_coordinator = self.cache_coordinator
 
     def _init_backend(self, parallel_config, extra_config) -> None:
@@ -428,12 +409,9 @@ class BaseKVPoolWorker(ABC):
         self.m_store.close()
         self._closed = True
 
-    def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
+    def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         if self.kv_cache_config is None or not self.use_hybrid:
             return None
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        use_eagle_fn = getattr(speculative_config, "use_eagle", None)
-        use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
         retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
@@ -441,7 +419,7 @@ class BaseKVPoolWorker(ABC):
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
-            use_eagle=self.use_eagle if self.enable_partial_hash_hits else use_eagle,
+            use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
