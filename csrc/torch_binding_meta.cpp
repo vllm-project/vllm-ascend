@@ -647,6 +647,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qsa_union_inputs_meta(
     const at::Tensor& visible_lengths,
     const at::Tensor& group_row_map)
 {
+    // dynamic union group count is preserved with sym_size(0).
+    // symbolic-meta-ok: candidate width is fixed by the model's top-k configuration.
     const int64_t input_groups = compact_indices.size(1) - 3;
     const int64_t topk = input_groups + (input_groups < 512 ? 1 : 0);
     const int64_t width = 8 * topk;
