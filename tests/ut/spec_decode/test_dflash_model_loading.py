@@ -42,8 +42,12 @@ def megamoe_target(tmp_path, monkeypatch):
         ascend_forward_context, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
     )
     monkeypatch.setattr(ascend_forward_context, "get_ep_group", lambda: SimpleNamespace(world_size=8))
-    for module in (spec_utils, eagle_utils, patch_dspark):
-        monkeypatch.setattr(module, "get_pp_group", lambda: SimpleNamespace(world_size=2))
+    monkeypatch.setattr(patch_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=2))
+    # v0.33.0 queries PP through these imported getters; main no longer does.
+    # Only replace an existing getter so the fixture follows the real loader.
+    for module in (spec_utils, eagle_utils):
+        if hasattr(module, "get_pp_group"):
+            monkeypatch.setattr(module, "get_pp_group", lambda: SimpleNamespace(world_size=2))
 
     # On CPU, wire the real factory into the platform hook used by VllmConfig.
     # Keep each returned config so the test can inspect the draft's own derivation.
