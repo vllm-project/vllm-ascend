@@ -126,7 +126,7 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config.profiler import ProfilerConfig
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
-    from vllm.distributed.parallel_state import Handle
+    from vllm.distributed.parallel_state import GroupCoordinator, Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
@@ -1033,6 +1033,14 @@ class NPUWorker(GPUWorker):
             self.torch_allocated / GiB_bytes,
         )
 
+    def _pp_all_gather_group(self) -> "GroupCoordinator | None":
+        if self.use_v2_model_runner and enable_sp(self.vllm_config):
+            return None
+        return get_tp_group()
+
+    def _pp_send_tensor_dict(self, tensors: dict[str, torch.Tensor]) -> "list[Handle]":
+        return get_pp_group().isend_tensor_dict(tensors, all_gather_group=self._pp_all_gather_group())
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1050,12 +1058,8 @@ class NPUWorker(GPUWorker):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if self.use_v2_model_runner and enable_sp(self.vllm_config):
-                all_gather_group = None
-            else:
-                all_gather_group = get_tp_group()
             tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
+                all_gather_group=self._pp_all_gather_group()
             )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
@@ -1076,14 +1080,7 @@ class NPUWorker(GPUWorker):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if self.use_v2_model_runner and enable_sp(self.vllm_config):
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        self._pp_send_work = self._pp_send_tensor_dict(output.tensors)
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner

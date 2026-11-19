@@ -184,19 +184,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
                 set_offloader(create_offloader(offload_config))
         if self.use_pp:
-            assert self.pp_handler is not None
-            old_broadcast_group = self.pp_handler.broadcast_group
-            if torch.distributed.get_backend(old_broadcast_group) == "hccl":
-                broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                    get_pp_group().group_ranks,
-                    timeout=get_distributed_timeout_or_none(),
-                    backend="hccl",
-                    pg_options=create_hccl_pg_options("pp_broadcast"),
-                    group_desc="pp_broadcast",
-                )
-                assert broadcast_group is not None
-                self.pp_handler.broadcast_group = broadcast_group
-                torch.distributed.destroy_process_group(old_broadcast_group)
+            self._configure_pp_handler()
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -324,6 +312,21 @@ class NPUModelRunner(GPUModelRunner):
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
         self._kv_trace = install_trace(self)
+
+    def _configure_pp_handler(self) -> None:
+        assert self.pp_handler is not None
+        old_broadcast_group = self.pp_handler.broadcast_group
+        if torch.distributed.get_backend(old_broadcast_group) == "hccl":
+            broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                get_pp_group().group_ranks,
+                timeout=get_distributed_timeout_or_none(),
+                backend="hccl",
+                pg_options=create_hccl_pg_options("pp_broadcast"),
+                group_desc="pp_broadcast",
+            )
+            assert broadcast_group is not None
+            self.pp_handler.broadcast_group = broadcast_group
+            torch.distributed.destroy_process_group(old_broadcast_group)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:

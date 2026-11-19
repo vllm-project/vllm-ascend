@@ -515,7 +515,7 @@ def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
 def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
-    runner.is_last_pp_rank = False
+    runner.is_last_pp_rank = True
     runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
     runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
     runner.req_states = SimpleNamespace(
@@ -570,6 +570,7 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
 def test_sample_without_drafts_updates_cpu_history(has_rejection_sampler, needs_cpu_history):
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = True
     runner.rejection_sampler = MagicMock() if has_rejection_sampler else None
     runner.speculator = None
     runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
@@ -643,16 +644,34 @@ def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, s
 @pytest.mark.parametrize(
     "setting",
     [
-        "pipeline_parallel_size",
         "data_parallel_size",
         "decode_context_parallel_size",
         "prefill_context_parallel_size",
     ],
 )
-def test_config_rejects_non_tp_parallelism(setting: str) -> None:
+def test_config_rejects_unsupported_parallelism(setting: str) -> None:
     config = _make_vllm_config()
     setattr(config.parallel_config, setting, 2)
-    with pytest.raises(NotImplementedError, match="only supports tensor parallelism"):
+    with pytest.raises(NotImplementedError, match="does not support these parallel settings"):
+        NPUModelRunner310V2._validate_config(config)
+
+
+def test_config_accepts_pp_without_speculation() -> None:
+    config = _make_vllm_config()
+    config.parallel_config.pipeline_parallel_size = 2
+    config.parallel_config.nnodes = 1
+    NPUModelRunner310V2._validate_config(config)
+    config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+    with pytest.raises(NotImplementedError, match="pipeline parallelism does not support speculative decoding"):
+        NPUModelRunner310V2._validate_config(config)
+
+
+@pytest.mark.parametrize(("pp_size", "nnodes"), [(4, 1), (2, 2)])
+def test_config_rejects_unvalidated_pp_topologies(pp_size, nnodes) -> None:
+    config = _make_vllm_config()
+    config.parallel_config.pipeline_parallel_size = pp_size
+    config.parallel_config.nnodes = nnodes
+    with pytest.raises(NotImplementedError, match="two stages on one node"):
         NPUModelRunner310V2._validate_config(config)
 
 

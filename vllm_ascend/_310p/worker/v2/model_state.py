@@ -454,6 +454,10 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
+        if not idx_mapping.is_cpu and num_computed_tokens is None:
+            # The generic PP prefill fallback follows the runner's host update,
+            # which has already committed this step's Mamba state.
+            return
         num_reqs = idx_mapping.shape[0]
         if num_reqs:
             idx_mapping_np = idx_mapping.numpy()

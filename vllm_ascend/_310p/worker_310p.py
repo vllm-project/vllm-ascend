@@ -19,6 +19,7 @@ import gc
 import psutil
 import torch
 import torch_npu
+from vllm.distributed.parallel_state import Handle, get_pp_group
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
@@ -33,6 +34,15 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
+    def _pp_all_gather_group(self) -> None:
+        # Send complete CPU tensors to the next stage. Its runner copies them
+        # directly into the persistent NPU inputs (also used by ACLGraph).
+        return None
+
+    def _pp_send_tensor_dict(self, tensors: dict[str, torch.Tensor]) -> list[Handle]:
+        host_tensors = {name: tensor.to("cpu").contiguous() for name, tensor in tensors.items()}
+        return get_pp_group().isend_tensor_dict(host_tensors)
+
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
