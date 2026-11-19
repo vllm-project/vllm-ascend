@@ -2,14 +2,11 @@
 """CPU contracts for Mooncake pull layout selection, without the NPU runtime."""
 
 import ast
-import logging
 import math
-import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
-import msgspec
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake"
@@ -92,93 +89,64 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
         cp_kv_cache_interleave_size=16,
         indexer_replication_sizes=[0, 0],
         dcp_sharded=[False, True],
-        quant_flashmla_layers=("z",),
     )
     merged = scheduler._merge_metadata_by_pp_rank({0: first, 1: first})[0]
     assert merged.layer_names == ["a", "z"]
     assert merged.dcp_sharded == [True, False]
-    assert merged.quant_flashmla_layers == ("z",)
     with pytest.raises(ValueError, match="mismatch in.*dcp_sharded"):
         scheduler._merge_metadata_by_pp_rank({0: first, 1: replace(first, dcp_sharded=[True, True])})
 
-    with pytest.raises(ValueError, match="mismatch in.*quant_flashmla_layout"):
-        scheduler._merge_metadata_by_pp_rank({0: first, 1: replace(first, quant_flashmla_layers=())})
 
-
-@pytest.mark.parametrize("producer_quant,consumer_quant", [(False, False), (True, True), (True, False), (False, True)])
-def test_pull_rejects_mismatched_flashmla_layout_before_building_transfer(producer_quant, consumer_quant):
-    cls = load_class("pull_worker.py", "MooncakePullRecvingThread", {"_build_remote_transfer_layout"})
+@pytest.mark.parametrize(
+    "local_shape,remote_shape,page_bytes",
+    [
+        ((128, 1, 576), (128, 1, 576), 73728),
+        ((73728,), (73728,), 73728),
+        ((128, 1, 576), (73728,), 73728),
+        ((73728,), (128, 1, 576), 73728),
+        ((128, 1, 576), (128, 1, 576), 147456),
+    ],
+)
+def test_mla_pull_checks_registered_page_layout_before_transfer(local_shape, remote_shape, page_bytes):
+    cls = load_class(
+        "pull_worker.py",
+        "MooncakePullRecvingThread",
+        {"_append_spec_transfer_addresses", "_append_block_transfer_addresses"},
+        {"group_concurrent_contiguous": lambda local, remote: ([local], [remote])},
+    )
     receiver = cls()
     receiver.layer_names = ["draft"]
-    receiver.local_metadata = SimpleNamespace(quant_flashmla_layers=("draft",) if consumer_quant else ())
-    receiver.spec_indices = [0]
     receiver.kv_cache_specs = [MLAAttentionSpec()]
-    calls = []
-
-    def layer_ranks(*args):
-        calls.append(args)
-        return [[0]]
-
-    receiver._get_layer_remote_tp_rank_groups = layer_ranks
+    receiver.kv_caches_base_addr = [[2048]]
+    receiver.block_shapes = [[local_shape]]
+    receiver.block_strides = [[page_bytes + 512]]
+    receiver.block_lens = [[page_bytes]]
     producer = SimpleNamespace(
-        layer_names=["draft"],
-        quant_flashmla_layers=("draft",) if producer_quant else (),
-        dcp_sharded=[False],
-        block_size_scales=[[1]],
-    )
-    metadata = SimpleNamespace(
-        use_kv_pp=False,
-        dcp_size=1,
-        pcp_size=1,
-        tp_size=1,
-        metadata_by_pp_rank={0: producer},
-    )
-    if producer_quant != consumer_quant:
-        with pytest.raises(ValueError, match="QuantFlashMLA page layout mismatch.*draft"):
-            receiver._build_remote_transfer_layout(metadata)
-        assert calls == []
-    else:
-        assert receiver._build_remote_transfer_layout(metadata) == ({0: {(0, 0): [[0]]}}, {0: [(0, 0)]})
-        assert len(calls) == 1
-
-
-@pytest.mark.parametrize("producer_quant,consumer_capable", [(False, False), (True, False), (True, True)])
-def test_pull_handshake_does_not_serve_quant_pages_to_an_old_consumer(producer_quant, consumer_capable):
-    metadata_source = ast.parse((SOURCE / "metadata.py").read_text())
-    capability = next(
-        ast.literal_eval(node.value)
-        for node in metadata_source.body
-        if isinstance(node, ast.Assign)
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "QUANT_FLASHMLA_LAYOUT_CAPABILITY"
-    )
-    metadata_request = b"get_meta_msg"
-    cls = load_class(
-        "pull_scheduler.py",
-        "MooncakeSchedulerSendingThread",
-        {"_run_busy_loop"},
-        {
-            "msgspec": msgspec,
-            "zmq": SimpleNamespace(Again=TimeoutError),
-            "logger": logging.getLogger(__name__),
-            "GET_META_MSG": metadata_request,
-            "QUANT_FLASHMLA_LAYOUT_CAPABILITY": capability,
+        metadata_by_pcp_rank={
+            0: SimpleNamespace(metadata_by_tp_rank={0: SimpleNamespace(kv_caches_base_addr=[[4096]])})
         },
+        block_shapes=[[remote_shape]],
+        block_strides=[[page_bytes]],
+        block_lens=[[page_bytes]],
     )
-    producer = cls()
-    producer.has_quant_flashmla_layout = producer_quant
-    producer.encoded_metadata = b"metadata"
-    producer.stop_event = threading.Event()
-    message = (metadata_request, capability) if consumer_capable else (metadata_request,)
+    src: list[int] = []
+    dst: list[int] = []
+    sizes: list[int] = []
 
-    def receive():
-        producer.stop_event.set()
-        return [b"peer", b"", msgspec.msgpack.encode(message)]
+    def append_addresses():
+        receiver._append_spec_transfer_addresses(
+            0, 0, 0, 1, 1, 2, {(0, 0): [("r", [1], [2])]}, producer, src, dst, sizes
+        )
 
-    replies: list[tuple[bytes, bytes, bytes]] = []
-    producer._run_busy_loop(SimpleNamespace(recv_multipart=receive, send_multipart=replies.append))
-    expected = b"" if producer_quant and not consumer_capable else producer.encoded_metadata
-    assert replies == [(b"peer", b"", expected)]
+    if local_shape != remote_shape:
+        with pytest.raises(ValueError, match="Mooncake MLA page layout mismatch.*draft"):
+            append_addresses()
+        assert not src and not dst and not sizes
+    else:
+        append_addresses()
+        assert src == [2048 + page_bytes + 512]
+        assert dst == [4096 + page_bytes * 2]
+        assert sizes == [page_bytes]
 
 
 @pytest.fixture
