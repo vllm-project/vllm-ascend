@@ -81,7 +81,7 @@ configuration rather than the runner input or sampling interface.
 | [build_window_indices.py](build_window_indices.py) | Model/attention primitive or shared utility |
 | [c2_ring_metadata.py](c2_ring_metadata.py) | Model/attention primitive or shared utility |
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
-| [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
+| [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention and [packed DCP output combine](docs/fused_dcp_lse_combine.md#head-scatter-implementation) |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
