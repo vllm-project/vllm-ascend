@@ -1,0 +1,5 @@
+pr: 21183
+entries:
+  - category: performance
+    text: Reduces DeepSeek V4.1 sliding-window KV-cache preparation work on Ascend A2 and A3 by fusing normalization, rotary embedding, and cache writes without materializing intermediate KV tensors. Eligible BF16 workloads use the fused path automatically.
+    hardware: [A2, A3]

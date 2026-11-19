@@ -10,7 +10,7 @@ moving cache or scheduler knowledge back into the model.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -54,9 +54,6 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     wait_for_device_metadata,
 )
-
-if TYPE_CHECKING:
-    from vllm_ascend.ops.triton.dsv41_swa_cache import DSV41SWACacheLayout
 
 V41_METADATA_BUFFER_SIZE = 1024
 MAX_FUSED_DSV41_SWA_TOKENS = 8192
@@ -352,7 +349,6 @@ class AscendDSAV41Impl:
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
-        self._swa_fused_layout: DSV41SWACacheLayout | None = None
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -417,8 +413,10 @@ class AscendDSAV41Impl:
         if (
             not _SWA_CACHE_FUSION_AVAILABLE
             or metadata.global_metadata is not None
-            or projected_kv.ndim == 0
+            or getattr(attn, "packed_cache_ops", None) is not None
+            or projected_kv.ndim != 2
             or projected_kv.shape[0] > MAX_FUSED_DSV41_SWA_TOKENS
+            or projected_kv.shape[1] != attn.head_dim
         ):
             return False
         norm = attn.kv_norm
@@ -426,23 +424,15 @@ class AscendDSAV41Impl:
             return False
         weight = getattr(norm, "weight", None)
         eps = getattr(norm, "variance_epsilon", None)
-        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
-        if weight is None or eps is None or cache is None:
+        if weight is None or eps is None:
             return False
 
-        layout = self._swa_fused_layout
-        if layout is None or layout.cache_ref() is not cache or layout.weight_ref() is not weight:
-            if getattr(attn, "packed_cache_ops", None) is not None:
-                return False
-            # Prepare after weights and cache buffers are available, and
-            # validate again if a subsequent binding replaces either tensor.
-            from vllm_ascend.ops.triton.dsv41_swa_cache import DSV41SWACacheLayout
+        from vllm_ascend.ops.triton.dsv41_swa_cache import dsv41_rmsnorm_rope_cache
 
-            layout = DSV41SWACacheLayout.prepare(cache, weight, attn.head_dim, attn.nope_head_dim)
-            self._swa_fused_layout = layout
-            if layout is None:
-                return False
-        return layout.try_store(projected_kv, weight, cos, sin, cache, metadata.slot_mapping, eps)
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        return dsv41_rmsnorm_rope_cache(
+            projected_kv, weight, cos, sin, cache, metadata.slot_mapping, eps, attn.nope_head_dim
+        )
 
     def _write_projected_swa_cache(self, attn, metadata, projected_kv, cos, sin):
         """Publish raw WKV output through the fused path or its baseline."""

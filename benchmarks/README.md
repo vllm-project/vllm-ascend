@@ -33,6 +33,118 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 ## Quick Use
 
+### Eager-only DeepSeek V4.1 SWA comparison
+
+On an Ascend 910B server, run:
+
+```bash
+python benchmark_dsv41_swa_triton.py --quick --json swa-quick.json
+```
+
+This compares only the three fused versions at 1024 and 4096 rows, plus the
+original RMSNorm → in-place interleaved partial RoPE → SK scatter path as the
+correctness and latency reference. The frozen #21183 version uses one program
+per row. The single-layer #21581 adaptation keeps its partial RoPE `gather64`,
+bounded slot check and split store, with one cyclic program per vector core.
+This is not a timing of #21581's multi-layer DSpark launch. The benchmark's
+current candidate mirrors the production persistent kernel: it slices the
+BF16 RoPE tail, uses `gather64` and split stores, and reuses weights across rows.
+Both cyclic candidates launch one program per vector core (40 at both sizes
+on the target device). The script reads the selected device's `num_vectorcore`
+by default; `--vector-cores` is an optional override.
+
+The script does not import vLLM or vLLM Ascend. For the original path it needs
+`vllm_ascend_C*.so` and the matching CANN custom operators. It finds the binary
+in an installed vLLM Ascend package or accepts `--native-library /path/to/.so`.
+It discovers the vendor directory if packaged next to that binary; otherwise
+the CANN environment must already expose the operators. It does not substitute
+a CPU or PyTorch approximation for the original path.
+
+Each row reports median event/wall latency per invocation and NoPE/RoPE exact
+match rates and maximum absolute errors against the original cache write.
+`PASS` allows numerical error within `atol=0.035, rtol=0.01`; untouched cache
+rows must match exactly. `--check-only` skips timing. No graphs are captured.
+
+### Standalone DeepSeek V4.1 SWA Triton benchmark
+
+Copy `benchmark_dsv41_swa_triton.py` to an Ascend 910B server with CANN, PyTorch,
+`torch-npu`, and a compatible Triton-Ascend. It does not import vLLM or vLLM
+Ascend and does not load a model. It benchmarks the full post-WKV RMSNorm →
+partial interleaved RoPE → paged store. The default focuses on 1024 and 4096
+rows in the page-local (`paged`) layout. It tests 25 configurations per size:
+the frozen baseline and four variants (`masked512`, `gather64-bounded`,
+`slice-gather64-split`, `slice-pair64`) across two schedules and three grids.
+
+```bash
+python benchmark_dsv41_swa_triton.py --vector-cores 40
+```
+
+Copy the four `RESULT` lines to share a run; no JSON file is needed. Each line
+shows the timed count, the baseline, the fastest `masked512` scheduling control,
+and the best candidate from each of the two fastest other variant families
+(ranked by event median). Values are event/wall medians in microseconds,
+followed by paired event speedup p50/p10. Use `--verbose` for the ranked tables
+or `--json` for all samples.
+
+- `pr21183-masked512/direct` is the frozen PR #21183 fused kernel. `masked512`
+  reuses its approach in the configurable scheduler, so it can also be compared
+  with a capped grid. `gather64` adapts the partial RoPE path from PR #21581 to
+  a single layer. `gather64-bounded` and `gather512-bounded` add #21581's
+  upper-bound checks and branch around the store for partial and full-width
+  paths, respectively. All variants use the same two-column physical mapping;
+  the DSpark-specific layer dispatch, flat slot format and 2D grid are excluded.
+- `gather512`, `gather64`, `load64` and `slice-gather64-split` compare ways to
+  obtain the adjacent RoPE values. The two `slice-gather64` variants compare
+  split versus merged stores; `slice-pair64` replaces gather with even/odd
+  split and join, while `pair512` uses even/odd split and join over the full row
+  with masked cos/sin. `slice-pair64-skip` tests skipping the row on a negative
+  slot; `tile2`, `tile4`, and `tile8` test batched row reductions and stores.
+  `tile4` and `tile8` are opt-in via `--variants` because larger tiles can hit
+  Ascend UB capacity and alignment constraints. A candidate compilation
+  failure is shown as `SKIP` and recorded in `--json`; it is not timed. A
+  baseline failure or incorrect cache contents still result in a nonzero exit.
+- `direct` uses one program per row/tile. `cyclic` strides by the program count;
+  `blocked` assigns each single-row program a contiguous range. Both scan
+  `--programs 20 40 80` by default, capped by the number of work items. On 40
+  vector cores, 40 programs give one program per core on average; 80 programs
+  do not add cores. An optional one-layer grid of 13 probes #21581's per-layer
+  token fan-out, not its 39 total programs.
+- Layouts include page-local token order, shuffled slots with padded strides,
+  and trailing negative slots for graph padding. The script checks cache holes
+  and padding as well as both feature slices against a BF16-rounded CPU
+  reference. Captured graphs replay with changed KV and slot contents before
+  being timed. Use `--layouts shuffled-padded` for a padded-stride follow-up
+  or `--layouts graph-tail --modes graph` for a graph-padding regression check.
+  `--slot-dtype int64` and `--row-padding 32` can stress additional stride and
+  slot cases. The default cache block size is 128.
+- The default compares fused implementations. Optionally pass `--native-library`
+  with a trusted local shared library that registers `inplace_partial_rotary_mul`
+  and `npu_scatter_nd_update_sk` and whose matching CANN kernels are installed.
+  This adds the native three-operator comparison; it is not needed to run the
+  benchmark or choose among Triton variants.
+
+`eager` measures a burst of Python launches; its event interval can include
+stream gaps from host submission. `graph` repeatedly replays a one-call graph.
+`graph-batch` puts all repeats in one graph replay to amortize submission.
+Compile, warm up, validate and capture outside the timed samples. The JSON
+contains interleaved raw samples, median/p90, and speedup paired by sample round
+against PR #21183. These are microbenchmarks on reused buffers, not serving
+latency or isolated device task durations.
+
+Compare the 1024- and 4096-row eager and graph-batch medians and paired p10
+speedups. Use `--tokens`, `--variants`, `--schedules`, and `--programs` to
+retest finalists or check specific crossover points.
+If variants are close or eager timing is dominated by
+dispatch, profile a reduced case on the target CANN version, for example:
+
+```bash
+msprof --output=./swa-profile --task-time=on --application="python benchmark_dsv41_swa_triton.py --tokens 4096 --layouts paged --variants slice-pair64 --schedules cyclic --programs 40 --modes eager"
+```
+
+Use the exported `op_summary` task durations and timeline to separate device
+execution from launch gaps. Confirm any selected production kernel with the
+operator's NPU tests and the real serving workload, including stream overlap.
+
 ### Prerequisites
 
 Before running the benchmarks, ensure the following:

@@ -27,10 +27,10 @@ def _reference(projected, weight, cos, sin):
 
 def _require_fusion_hardware():
     if not get_current_hardware_profile().supports(HardwareCapability.DSV41_SWA_CACHE_FUSION):
-        pytest.skip("The DSV4.1 Triton fusion targets A2 (910B) standard SWA caches")
+        pytest.skip("The DSV4.1 Triton fusion targets A2/A3 standard SWA caches")
 
 
-@pytest.mark.parametrize("tokens", [1, 8, 192, 1024, 8192])
+@pytest.mark.parametrize("tokens", [1, 8, 192, 1023, 1024, 4095, 4096, 4097, 8192])
 @torch.inference_mode()
 def test_dsv41_rmsnorm_rope_cache_matches_interleaved_baseline(tokens):
     _require_fusion_hardware()
@@ -56,15 +56,17 @@ def test_dsv41_rmsnorm_rope_cache_matches_interleaved_baseline(tokens):
     cache = backing[:, :block_size]
     flat_slots = torch.randperm(blocks * block_size)[:tokens]
     coordinates = torch.stack((flat_slots // block_size, flat_slots % block_size), -1).to(torch.int32)
-    coordinates[::7] = -1
+    if tokens > 1:
+        coordinates[::7, 0] = -1
+        coordinates[1::7, 1] = -1
 
-    dsv41_rmsnorm_rope_cache(projected, weight, cos, sin, cache, coordinates.npu(), EPS, NOPE_DIM)
+    assert dsv41_rmsnorm_rope_cache(projected, weight, cos, sin, cache, coordinates.npu(), EPS, NOPE_DIM)
     torch.npu.synchronize()
 
     actual = cache.cpu()
     expected_cache = torch.full(cache.shape, -7.0, dtype=torch.bfloat16)
     for token, (block, offset) in enumerate(coordinates.tolist()):
-        if block >= 0:
+        if block >= 0 and offset >= 0:
             expected_cache[block, offset, 0] = expected[token]
     torch.testing.assert_close(actual.float(), expected_cache.float(), atol=0.035, rtol=0.01)
     # Rows outside the sliced physical page must remain untouched as well.
@@ -72,19 +74,35 @@ def test_dsv41_rmsnorm_rope_cache_matches_interleaved_baseline(tokens):
 
 
 @torch.inference_mode()
-def test_dsv41_rmsnorm_rope_cache_graph_replay_uses_updated_inputs_and_slots():
+def test_dsv41_rmsnorm_rope_cache_rejects_other_rotary_widths():
+    _require_fusion_hardware()
+    other_rope_dim = ROPE_DIM // 2
+    projected = torch.zeros(1, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    weight = torch.ones(HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    cos = torch.ones(1, 1, 1, other_rope_dim, device="npu")
+    sin = torch.zeros_like(cos)
+    cache = torch.empty(1, 1, 1, HEAD_DIM, dtype=torch.bfloat16, device="npu")
+    slots = torch.zeros(1, 2, dtype=torch.int32, device="npu")
+
+    assert not dsv41_rmsnorm_rope_cache(projected, weight, cos, sin, cache, slots, EPS, HEAD_DIM - other_rope_dim)
+
+
+@pytest.mark.parametrize("tokens", [8, 1024, 4096])
+@torch.inference_mode()
+def test_dsv41_rmsnorm_rope_cache_graph_replay_uses_updated_inputs_and_slots(tokens):
     _require_fusion_hardware()
     torch.manual_seed(73)
-    tokens, block_size = 8, 16
+    block_size = 128
+    num_blocks = (tokens + block_size - 1) // block_size
     projected = torch.randn(tokens, HEAD_DIM, dtype=torch.bfloat16, device="npu")
     weight = torch.randn(HEAD_DIM, dtype=torch.bfloat16, device="npu")
     angles = torch.randn(tokens, 1, 1, ROPE_DIM, device="npu")
     cos, sin = angles.cos(), angles.sin()
-    cache = torch.zeros(2, block_size + 1, 1, HEAD_DIM, dtype=torch.bfloat16, device="npu")[:, :block_size]
-    slots = torch.full((tokens, 2), -1, dtype=torch.int32, device="npu")
+    cache = torch.zeros(num_blocks, block_size + 1, 1, HEAD_DIM, dtype=torch.bfloat16, device="npu")[:, :block_size]
+    slots = torch.full((tokens, 2), -1, dtype=torch.int64, device="npu")
 
     def run():
-        dsv41_rmsnorm_rope_cache(projected, weight, cos, sin, cache, slots, EPS, NOPE_DIM)
+        assert dsv41_rmsnorm_rope_cache(projected, weight, cos, sin, cache, slots, EPS, NOPE_DIM)
 
     run()
     torch.npu.synchronize()
@@ -96,14 +114,16 @@ def test_dsv41_rmsnorm_rope_cache_graph_replay_uses_updated_inputs_and_slots():
     angles.copy_(torch.randn_like(angles))
     cos.copy_(angles.cos())
     sin.copy_(angles.sin())
-    slots.copy_(torch.tensor([[0, 3], [1, 2], [-1, -1], [0, 8], [1, 5], [-1, -1], [0, 1], [1, 9]]))
+    flat_slots = torch.arange(tokens - 1, -1, -1)
+    replay_slots = torch.stack((flat_slots // block_size, flat_slots % block_size), -1)
+    replay_slots[::7] = -1
+    slots.copy_(replay_slots)
     cache.zero_()
     graph.replay()
     torch.npu.synchronize()
 
     expected_rows = _reference(projected.cpu(), weight.cpu(), cos.cpu(), sin.cpu())
     expected_cache = torch.zeros_like(cache.cpu())
-    for token, (block, offset) in enumerate(slots.cpu().tolist()):
-        if block >= 0:
-            expected_cache[block, offset, 0] = expected_rows[token]
+    valid = replay_slots[:, 0] >= 0
+    expected_cache[replay_slots[valid, 0], replay_slots[valid, 1], 0] = expected_rows[valid]
     torch.testing.assert_close(cache.cpu().float(), expected_cache.float(), atol=0.035, rtol=0.01)
