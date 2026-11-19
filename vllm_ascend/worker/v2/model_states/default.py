@@ -383,7 +383,11 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+    def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if input_ids is not None:
+            # Upstream performs the lookup, including any embedding TP exchange.
+            return super().dummy_inputs_embeds(num_tokens, input_ids)
+
         if embedding_tp_enable():
             if not hasattr(self, "_embedding_tp_dummy_join"):
                 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
@@ -404,6 +408,7 @@ class AscendModelState(DefaultModelState):
                 module, token_ids = self._embedding_tp_dummy_join
                 module(token_ids)
 
+        # Keep the one-argument call compatible with the v0.33.0 model state.
         return super().dummy_inputs_embeds(num_tokens)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
