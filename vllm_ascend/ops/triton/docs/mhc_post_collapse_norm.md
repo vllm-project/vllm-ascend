@@ -12,27 +12,39 @@
 - **Supported modes**: Atlas A2 with Model Runner V2 and `FULL_DECODE_ONLY`. During full graph capture, the model can
   record coefficient computation on an auxiliary stream. Outside that capture, eligible boundaries launch it on
   the main stream.
+- **Production callers**: DeepSeek V4.1's `_prepare_attention` and `_prepare_moe` in `models/deepseek_v41/mhc.py`
+  call the model-specific `mhc_post_collapse_norm` Python wrapper.
 
 ## Parameters
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `sublayer_out` | Input | Previous Attention or MoE result | BF16 | `[rows, 5120]` |
-| `residual`, `updated` | Input, output | Incoming and updated residual streams | BF16 | `[rows, 4, 5120]` |
+| `residual` | Input | Incoming residual streams | BF16 | `[rows, 4, 5120]` |
 | `post`, `pre_mix` | Input | Writeback and collapse weights | FP32 | `[rows, 4]` |
 | `comb` | Input | Residual mixing weights | FP32 | `[rows, 4, 4]` |
-| `weight` | Input | RMSNorm weight | Model norm weight dtype | `[5120]` |
+| `weight` | Input | Loaded RMSNorm weight | BF16 in the supported model configuration | `[5120]` |
+| `updated` | Output | Updated residual streams | BF16 | `[rows, 4, 5120]` |
 | `normalized` | Output | Next sublayer input | BF16 | `[rows, 5120]` |
-| `normalized_fp32` | Output | MoE routing input when `write_fp32` is true | FP32 | `[rows, 5120]` |
+| `routing_input` | Output | MoE routing input when `write_fp32` is true, otherwise aliases `normalized` | FP32 for MoE, BF16 for Attention | `[rows, 5120]` |
 | `epsilon`, `write_fp32` | Attribute | RMSNorm epsilon and routing output selector | float, bool | Scalar |
 
 ## Constraints
 
-The Triton kernel takes contiguous tensors with four residual streams, a hidden width of 5120, and bias-free RMSNorm.
-The model dispatches to this path at up to 72 rows. For Attention, `write_fp32` is false and the caller passes
-`normalized` as the unused `normalized_fp32` argument. The model's weight post-processing hook registers the
-Attention and MoE variants for JIT warmup using their RMSNorm weight dtypes. Standard graph-capture warmup executes
-the selected boundaries before recording each graph. Disabling JIT precompilation keeps this execution path enabled.
+Inputs are on the same NPU. The wrapper makes `sublayer_out` contiguous if necessary; all other inputs must
+already be contiguous. The wrapper preserves input contents and allocates the outputs. Attention uses the
+BF16 `normalized` output as the unused routing slot, with no extra allocation or write.
+
+The model selects fusion when Triton is available and there are 1–72 rows per rank after graph padding.
+It requires BF16 activations, four residual streams, width 5120, bias-free RMSNorm, pipeline parallel
+size one, and sequence parallelism and ubatching disabled. Unsupported devices, configurations, weight
+layouts or row counts keep the existing model path. Cross-layer fusion stops before an Engram layer
+and at the end of each execution segment. The model schedules coefficients on a cached stream per device
+during capture and waits on the main stream at the next coefficient consumer.
+
+The weight post-processing hook registers warmup keys by loaded RMSNorm weight dtype and `write_fp32`.
+One row is sufficient for compile-only warmup because row count changes only the launch grid.
+`kernel_config.enable_jit_warmup` controls precompilation; fusion remains enabled when it is disabled.
 
 ## Origin and Differences
 

@@ -111,7 +111,11 @@ def test_v41_mhc_waits_only_at_coefficient_consumers_during_capture(monkeypatch,
         events.append(source)
         return post, comb, pre
 
-    monkeypatch.setattr(mhc, "MHC_POST_COLLAPSE_NORM", lambda *args: events.append("fuse"))
+    def fuse(x, residual, *args, write_fp32):
+        events.append("fuse")
+        return residual, x, x.float() if write_fp32 else x
+
+    monkeypatch.setattr(mhc, "mhc_post_collapse_norm", fuse)
     monkeypatch.setattr(mhc, "_wait_for_coefficients", lambda _: events.append("wait"))
     monkeypatch.setattr(mhc, "_coefficients_on_aux", lambda *args: coefficients("aux"))
     monkeypatch.setattr(mhc, "_native_post", lambda *args: events.append("post"))

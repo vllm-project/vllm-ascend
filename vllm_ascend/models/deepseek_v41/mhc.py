@@ -6,7 +6,7 @@ from functools import cache
 import torch
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.mhc_post_collapse_norm import MHC_POST_COLLAPSE_NORM
+from vllm_ascend.ops.triton.mhc_post_collapse_norm import mhc_post_collapse_norm
 
 MHC_MAX_ROWS = 72
 
@@ -53,11 +53,7 @@ def _prepare_attention(
         _wait_for_coefficients(residual)
         coefficients = _coefficients_on_aux
 
-    updated = torch.empty_like(residual)
-    normalized = torch.empty_like(x, memory_format=torch.contiguous_format)
-    MHC_POST_COLLAPSE_NORM(
-        x.contiguous(), residual, post, comb, pre, weight, updated, normalized, normalized, norm_eps, False
-    )
+    updated, normalized, _ = mhc_post_collapse_norm(x, residual, post, comb, pre, weight, norm_eps, write_fp32=False)
     return updated, normalized, *coefficients(updated, fn, scale, base, iters, norm_eps, hc_eps)
 
 
@@ -82,11 +78,8 @@ def _prepare_moe(
             _wait_for_coefficients(residual)
         coefficients = _coefficients_on_aux
 
-    updated = torch.empty_like(residual)
-    normalized = torch.empty_like(x, memory_format=torch.contiguous_format)
-    routing_input = normalized.new_empty(normalized.shape, dtype=torch.float32)
-    MHC_POST_COLLAPSE_NORM(
-        x.contiguous(), residual, post, comb, pre, weight, updated, normalized, routing_input, norm_eps, True
+    updated, normalized, routing_input = mhc_post_collapse_norm(
+        x, residual, post, comb, pre, weight, norm_eps, write_fp32=True
     )
     return updated, normalized, routing_input, *coefficients(updated, fn, scale, base, iters, norm_eps, hc_eps)
 
