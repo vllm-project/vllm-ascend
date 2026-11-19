@@ -85,13 +85,13 @@ class TestStairLoadStatistics(unittest.TestCase):
             config=StairConfig(load_window_bins=2),
             _load_bin_boundaries=StairEplbPolicy._load_bin_boundaries,
         )
-        samples = torch.arange(20).reshape(5, 2, 2)
+        samples = torch.arange(20, dtype=torch.int32).reshape(5, 2, 2)
 
         prepared = StairEplbPolicy.prepare_local_load_stats(policy, samples)
 
         np.testing.assert_array_equal(prepared.sample_counts, [2, 3])
-        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0))
-        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0))
+        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0, dtype=samples.dtype))
+        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0, dtype=samples.dtype))
 
     @patch.object(StairEplbPolicy, "gated_layer_imbalance", return_value=None)
     def test_prepared_bin_sums_are_converted_to_weighted_means(self, gated_layer_imbalance):

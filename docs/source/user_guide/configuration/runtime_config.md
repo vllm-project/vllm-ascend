@@ -1,4 +1,4 @@
-# runtime_config
+# Runtime Configuration
 
 JSON schema for Runtime Guard. Default path: `<cwd>/runtime/config/runtime_config.json`.
 
@@ -15,6 +15,7 @@ Startup keys (`runtime_config_path`, `runtime_config_hot_reload`, overlay dict) 
 | `actions` | object | see below | Default incident actions |
 | `dump` | object | see below | Auto dump quota and manual dump controls |
 | `ascend_log` | object | see below | Ascend logger level overrides |
+| `metrics` | object | see below | Ascend-owned MS Service Metric level |
 | `report` | object | see below | Report content and truncation |
 | `detector` | object | see below | Detector sections + shared flags |
 
@@ -62,6 +63,14 @@ GPU `block_ids` are always included in report detail. Decoding token ids to text
 | `debug` | list[str] | `[]` | Module path prefixes forced to DEBUG under `vllm_ascend` |
 | `modules` | object | `{}` | Per-logger overrides, e.g. `{"vllm.worker": "WARNING"}` |
 
+## metrics
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `level` | str \| int | `"basic"` | Active level for Ascend-owned MS Service Metric handlers: `basic` or `detail` (also `0`–`1`). `basic` keeps only low-overhead metrics on; `detail` additionally enables per-step and other more expensive metrics. Applied in this process on startup and on each accepted hot-reload, same moments as `ascend_log`. See [ms_service_metric.md](../ms_service_metric.md) for the level-picking rule and the file/endpoint channel warning. |
+
+Handlers record a metric when its declared level is less than or equal to this value. Metrics emitted by `ms_service_metric.provider_handlers` are not gated here.
+
 ## detector (shared)
 
 Stop-detect is controlled by ``report.max_per_req`` (write-full), not a shared detector flag.
@@ -77,7 +86,7 @@ Each nested detector section supports:
 |-----|------|-------------|
 | `enabled` | bool | Master switch (default `false`) |
 | `on_trigger` | list[str] | Override actions for this incident type |
-| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). |
+| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_cp*` (`cp` from PCP×DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [Runtime Guard — Feature compatibility](../feature_guide/runtime_guard.md#feature-compatibility). |
 
 ### spec_acceptance
 

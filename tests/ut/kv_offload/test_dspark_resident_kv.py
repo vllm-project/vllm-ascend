@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -62,6 +62,8 @@ def _prefill_runner(
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.debugger = None
+    runner.model_state = SimpleNamespace()
+    runner.prompt_logprobs_worker = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE if eager else CUDAGraphMode.FULL)
     extra = {} if ids is None else {"dspark_aux_hidden_state_layer_ids": ids}
     runner.vllm_config = SimpleNamespace(
@@ -208,7 +210,7 @@ def test_worker_registers_draft_ownership_before_sfa_or_layerwise_connector_cons
     worker.vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(method=method),
         kv_transfer_config=transfer,
-        model_config=SimpleNamespace(enable_sleep_mode=False),
+        model_config=SimpleNamespace(enable_sleep_mode=False, hf_config=SimpleNamespace()),
     )
     worker.model_runner = SimpleNamespace(
         speculator=SimpleNamespace(draft_attn_layer_names={"draft.attn"}), initialize_kv_cache=Mock()
@@ -463,12 +465,11 @@ def test_real_allocator_separates_host_target_and_persistent_mla_draft(monkeypat
         )
         for name, spec in specs.items()
     ]
-    runtime = SimpleNamespace(kv_transfer_config=None)
+    runtime = SimpleNamespace(kv_transfer_config=None, compilation_config=SimpleNamespace(static_forward_context={}))
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
     monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
-    monkeypatch.setattr(attn_utils, "is_deepseek_v41_cache", lambda _: False)
-    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _: None)
+    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_config", lambda _, *, vllm_config: None)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
@@ -515,7 +516,7 @@ def test_layerwise_reuse_retains_independent_draft_descriptors():
         ],
     )
     runtime = SimpleNamespace(
-        model_config=SimpleNamespace(get_num_layers=lambda _: 5),
+        model_config=SimpleNamespace(get_num_layers=lambda _: 5, hf_config=SimpleNamespace()),
         parallel_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",

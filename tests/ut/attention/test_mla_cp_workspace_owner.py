@@ -100,13 +100,14 @@ def test_fia_workspace_is_owned_and_reused_by_selected_graph(draft, prefill):
         patch.object(mla_cp.torch.npu, "graph_task_group_end", return_value=Mock()),
         patch.object(
             mla_cp.torch_npu,
-            "npu_fused_infer_attention_score",
+            "npu_fused_infer_attention_score_v2",
             SimpleNamespace(out=fill_output),
         ),
         patch.object(
             mla_cp.torch_npu,
-            "_npu_fused_infer_attention_score_get_max_workspace",
+            "_npu_fused_infer_attention_score_v2_get_max_workspace",
             return_value=workspace,
+            create=True,
         ) as allocate,
     ):
         impl._forward_decode(inputs, 2, metadata)

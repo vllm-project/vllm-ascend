@@ -22,7 +22,6 @@ from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCor
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
 from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
-from vllm_ascend.patch.platform.patch_profiling_chunk import _apply_profiling_patches
 
 _PATCHED = False
 
@@ -44,12 +43,7 @@ def _patch_dp_engine_core_proc(vllm_config, dp_rank: int):
 
 def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     vllm_config = kwargs.get("vllm_config")
-    ascend_config = init_ascend_config(vllm_config)
-
-    # Call _apply_profiling_patches to patch EngineCore.__init__
-    # when the child unpickles the patch.
-    if ascend_config.scheduler_config.profiling_chunk_config.enabled:
-        _apply_profiling_patches()
+    init_ascend_config(vllm_config)
 
     _patch_dp_engine_core_proc(vllm_config, dp_rank)
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
+from functools import lru_cache, partial
 from importlib import import_module
 from typing import Any, cast
+from weakref import proxy
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -26,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
+_REACHABLE_MASK_CACHE_SIZE = 32
 
 # kwargs every reachable_block_mask implementation must accept. Used when the
 # manager's signature cannot be introspected.
@@ -38,6 +41,38 @@ _REACHABLE_MASK_KWARGS_CACHE: dict[type[SingleTypeKVCacheManager], frozenset[str
 # subset of ``group_block_hashes`` present in the pool (all replicas valid).
 # A None ``lookup_mask`` means the group has no reachability limits.
 GroupHitQuery = Callable[[int, Sequence[BlockHash | str], Sequence[bool] | None], Iterable[BlockHash | str]]
+
+
+class _HBMBlockHash(bytes):
+    """A hash whose complete hash block is already computed locally."""
+
+
+class _HBMPrefixBlockHashes(Sequence[BlockHash]):
+    """Mark local hashes on access, without expanding per-group hit sets.
+
+    Managers select each group's terminal hash without copying it. That hash
+    is local exactly when the complete group block ends within the HBM prefix;
+    an interior hash cannot make a larger, partially local block hit.
+    """
+
+    def __init__(self, block_hashes: Sequence[BlockHash], num_hbm_hashes: int) -> None:
+        self._block_hashes = block_hashes
+        self._num_hbm_hashes = num_hbm_hashes
+
+    def __len__(self) -> int:
+        return len(self._block_hashes)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        block_hash = self._block_hashes[index]
+        if index < self._num_hbm_hashes:
+            return cast(BlockHash, _HBMBlockHash(block_hash_to_bytes(block_hash)))
+        return block_hash
 
 
 class ExternalCachedBlockPool:
@@ -60,7 +95,7 @@ class ExternalCachedBlockPool:
         block_hash: BlockHash,
         group_ids: list[int],
     ) -> list[KVCacheBlock] | None:
-        if self._exists is None:
+        if self._exists is None or isinstance(block_hash, _HBMBlockHash):
             return [self._present_block] * len(group_ids)
         h = block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
@@ -113,6 +148,10 @@ class AscendStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
+        # Do not keep the coordinator alive through its cache while GC is frozen.
+        self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
+            partial(type(self)._reachable_masks, proxy(self))
+        )
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
@@ -151,7 +190,7 @@ class AscendStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -225,8 +264,8 @@ class AscendStoreCoordinator:
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool], ...]:
-        masks = self._reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
-        return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
+        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        return tuple([True] * num_chunks if mask is None else mask.copy() for num_chunks, mask in masks)
 
     def lookup_mask(
         self,
@@ -234,11 +273,11 @@ class AscendStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         # Probe candidate replay boundaries as well as segment boundaries;
         # find_longest_cache_hit still requires all necessary states to exist.
-        masks = self._reachable_masks(aligned_token_len, self.retention_interval, None)
+        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, None)
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks
-        return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
+        return tuple(None if mask is None or all(mask) else mask.copy() for _, mask in masks)
 
     def find_reachable_hit_tokens(
         self,
@@ -247,6 +286,7 @@ class AscendStoreCoordinator:
         query_group_hits: GroupHitQuery,
         *,
         log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
     ) -> int:
         """Reachability-aware external hit lookup shared by both transfer paths.
 
@@ -260,7 +300,9 @@ class AscendStoreCoordinator:
         ``query_group_hits(group_id, group_block_hashes, lookup_mask)`` must
         return the subset of ``group_block_hashes`` present in the pool for
         that group, using whichever key layout and query backend the caller
-        owns.
+        owns. When ``hbm_hit_tokens`` is provided, the callback only returns
+        external hits; locally computed complete blocks are marked lazily for
+        the existing managers, including each group's terminal-hash selection.
         """
         aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
         lookup_masks = self.lookup_mask(aligned_len)
@@ -273,11 +315,15 @@ class AscendStoreCoordinator:
             hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
 
-        if not exists:
+        if not exists and hbm_hit_tokens <= 0:
             logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
             return 0
+        hit_hashes: Sequence[BlockHash] = block_hashes
+        if hbm_hit_tokens > 0:
+            num_hbm_hashes = min(hbm_hit_tokens // self.hash_block_size, token_len // self.hash_block_size)
+            hit_hashes = _HBMPrefixBlockHashes(block_hashes, num_hbm_hashes)
         _, hit_length = self.find_longest_cache_hit(
-            block_hashes,
+            hit_hashes,
             token_len,
             ExternalCachedBlockPool(self.hash_block_size, exists),
             apply_eagle=False,
@@ -285,12 +331,14 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
-    def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        return block_hashes
+    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        # Managers accept lazy sequences and preserve their terminal hashes
+        # when resolving each group's block-size view.
+        return cast(BlockHashList, block_hashes)
 
     def _find_hit_blocks(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,

@@ -1,0 +1,4 @@
+pr: 17147
+entries:
+  - category: feature
+    text: Added LiLiCorr speculative decoding support for DFlash drafts on Ascend with Model Runner V2 and eager draft execution.

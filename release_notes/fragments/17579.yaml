@@ -1,4 +1,4 @@
 pr: 17579
 entries:
   - category: performance
-    text: Used flat assignment tiles for EPLB expert mapping and precompiled its mapping tiles during V2 EPLB startup warmup.
+    text: Reduced expert-mapping latency for MoE inference with EPLB enabled on Atlas A3 and 950DT.

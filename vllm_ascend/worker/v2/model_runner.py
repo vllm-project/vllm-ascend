@@ -18,9 +18,10 @@
 #
 
 import inspect
+import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -29,7 +30,10 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -44,12 +48,14 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu.kv_connector import KVConnector
 from vllm.v1.worker.gpu.model_runner import (
     BatchReqState,
     ExecuteModelState,
     GPUModelRunner,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -65,12 +71,11 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     fill_mxfp_v_scale_cache,
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _finish_profiling_chunk_timing,
-    _start_profiling_chunk_timing,
-)
+from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -83,14 +88,18 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     apply_dspark_resident_kv_specs,
     get_resident_dspark_layer_names,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -98,11 +107,15 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    create_hccl_pg_options,
+    enable_sfa_dcp_sharded_indexer,
+    get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
+    requires_lmhead_dp_sync,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
@@ -116,11 +129,11 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     AscendV2KVBlockZeroer,
@@ -141,7 +154,9 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    kv_connector: KVConnector
     max_num_reqs: int
+    max_num_tokens: int
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -151,6 +166,9 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
+        self._target_uses_flashmla = False
+        # #56492: inherited dummy runs inspect this even on non-VMM platforms.
+        self.extensible_kv_cache = None
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -159,6 +177,26 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+            offload_config = vllm_config.offload_config
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
+        if self.use_pp:
+            assert self.pp_handler is not None
+            old_broadcast_group = self.pp_handler.broadcast_group
+            if torch.distributed.get_backend(old_broadcast_group) == "hccl":
+                broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                    get_pp_group().group_ranks,
+                    timeout=get_distributed_timeout_or_none(),
+                    backend="hccl",
+                    pg_options=create_hccl_pg_options("pp_broadcast"),
+                    group_desc="pp_broadcast",
+                )
+                assert broadcast_group is not None
+                self.pp_handler.broadcast_group = broadcast_group
+                torch.distributed.destroy_process_group(old_broadcast_group)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -187,7 +225,11 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+                or (
+                    breakable_cudagraph.is_breakable_cudagraph_enabled()
+                    if vllm_version_is("0.33.0")
+                    else breakable_cudagraph.is_breakable_cudagraph_enabled(self.compilation_config)
+                )
             )
             and not self.model_config.enforce_eager
         )
@@ -207,17 +249,8 @@ class NPUModelRunner(GPUModelRunner):
         del self.input_buffers
         del self.speculator
 
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
-        # init_speculator will return AscendEagleSpeculator when eagle is used.
-        # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
         self.pd_dspark_aux_layer_ids: tuple[int, ...] = ()
         self._dspark_prefill_progress: dict[str, tuple[str, int]] = {}
-        if self.speculative_config is not None and self.is_last_pp_rank:
-            self.speculator = init_speculator(self.vllm_config, self.device)
-            # Shared update_stream: main model (ModelAclGraphManager) and draft
-            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
-            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -228,7 +261,19 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            use_dense_all_token_ids=(
+                self.speculative_config is not None and self.speculative_config.method in ("ngram", "ngram_gpu")
+            ),
         )
+        # The upstream speculator was constructed with the discarded upstream
+        # request state. This construction does not use that speculator: it
+        # binds n-gram to the new state and selects Ascend implementations for
+        # model-based methods through the Ascend factory.
+        self.speculator: Any = None
+        if self.speculative_config is not None and self.is_last_pp_rank:
+            self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
+            # Share the update stream between the target and draft graph managers.
+            self.speculator.update_stream = self.update_stream
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -278,62 +323,54 @@ class NPUModelRunner(GPUModelRunner):
 
                 self.debugger = AclGraphDumper(dump_cfg)
         self.runtime_guard = RuntimeGuardProcessor.bind(self)
+        self._kv_trace = install_trace(self)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
-        aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
-        self.pd_dspark_aux_layer_ids = aux_layers
+        expert_offload.validate_loading(self, load_dummy_weights)
+        from vllm_ascend.model_executor.warmup.nz_warmup import (
+            join_nz_warm_thread,
+            start_nz_warm_thread,
+        )
+
+        # Overlap the one-off NZ cast with weight I/O. Every model goes
+        # through here.
+        start_nz_warm_thread("thread")
+        try:
+            aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
+            with track_host_offload_owners() as owners:
+                try:
+                    super().load_model(load_dummy_weights, *args, **kwargs)
+                except BaseException:
+                    # self.model may not exist yet. Close every recorded owner
+                    # without collectives and retain failures for shutdown retry.
+                    pending = getattr(self, "_shared_engram_shutdown_pending", [])
+                    for owner in owners:
+                        try:
+                            owner.close_host_offload()
+                        except Exception:
+                            pending.append(owner)
+                            logger.exception("Failed to release host offload after model loading failed")
+                    self._shared_engram_shutdown_pending = pending
+                    raise
+            self.pd_dspark_aux_layer_ids = aux_layers
+        finally:
+            # Join even when weight loading fails: these threads touch the NPU
+            # device and must not outlive this call. Joining here is also before
+            # memory profiling.
+            join_nz_warm_thread()
+
+        expert_offload.initialize(self)
+
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
         # the dumper at the end of load_model).
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
-
-    def _restore_replicated_draft_target_states(self) -> None:
-        """Restore target states consumed by a replicated PCP draft."""
-        state = self.execute_model_state
-        pcp_manager = self.pcp_manager
-        if (
-            state is None
-            or pcp_manager is None
-            or not self.is_last_pp_rank
-            or not getattr(self.speculator, "replicated_pcp", False)
-        ):
-            return
-
-        get_hidden_states = getattr(
-            self.model,
-            "get_mtp_target_hidden_states",
-            None,
-        )
-        if get_hidden_states is not None:
-            mtp_target_hidden_states = get_hidden_states()
-            if mtp_target_hidden_states is not None:
-                pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
-
-        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
-        # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front.
-        if state.hidden_states is not None:
-            replacements: dict[str, Any] = {"hidden_states": pcp_manager.restore_hidden_states(state.hidden_states)}
-            # vLLM #57980 folded the aux-hidden restore into
-            # restore_for_sampling. The replicated-PCP fast path below bypasses
-            # that call, so restore aux here too.
-            if state.aux_hidden_states is not None:
-                replacements["aux_hidden_states"] = [
-                    pcp_manager.restore_hidden_states(aux) for aux in state.aux_hidden_states
-                ]
-            state = state._replace(**replacements)
-            # Tell restore_for_sampling to skip its second all-gather for this
-            # step. The layout is tracked explicitly because a length match is
-            # ambiguous under piecewise/FULL graphs: every rank pads its local
-            # batch to the same global padded length.
-            pcp_manager._sampling_hidden_restored = True
-        self.execute_model_state = state
+        self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
@@ -353,26 +390,15 @@ class NPUModelRunner(GPUModelRunner):
                 "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
             )
 
-        pcp_manager = self.pcp_manager
-        if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
-            assert isinstance(pcp_manager, AscendPCPManager)
-            # The last PP stage restores PCP outputs to the global request
-            # layout before sampling. Non-last stages do not own final hidden
-            # states, but their PP receive/postprocess path must use that same
-            # global request layout rather than PCP-local segment rows.
-            self.execute_model_state = self.execute_model_state._replace(
-                input_batch=pcp_manager.global_batch,
-            )
-
-        # The pre-restore marker is scoped to this sampling step; stale state
-        # from a previous step must not suppress the upstream all-gather.
-        if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
-            pcp_manager._sampling_hidden_restored = False
-        self._restore_replicated_draft_target_states()
+        state = self.execute_model_state
+        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
+        self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.join_pending()
         return output
 
     def pool(self):
@@ -386,8 +412,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        kv_cache_spec = super().get_kv_cache_spec()
+
         return apply_dspark_resident_kv_specs(
-            super().get_kv_cache_spec(),
+            kv_cache_spec,
             self.vllm_config,
             self.speculator,
             sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
@@ -397,6 +425,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+        offload_manager = getattr(self, "sparse_kv_offload_manager", None)
+        excluded_cache_components = (
+            offload_manager.get_topk_cache_components() if offload_manager is not None else set()
+        )
         self.kv_block_zeroer = AscendV2KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
@@ -404,6 +436,7 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
             cache_dtype=self.cache_config.cache_dtype,
+            excluded_cache_components=excluded_cache_components,
         )
         if is_c8_mxfp_kv_quant(self.vllm_config):
             # The zeroer skips the static V scales (4th tuple component); the
@@ -411,6 +444,37 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_block_zeroer = C8KVBlockZeroer(  # type: ignore[assignment]
                 self.kv_block_zeroer, self._c8_mxfp_v_scale_caches, fill_mxfp_v_scale_cache
             )
+
+    def _initialize_kv_cache_upstream(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None,
+    ) -> None:
+        # Upstream initialize_kv_cache builds the attention metadata builders
+        # via init_attn_backend; the DSA builder registers its fused Q-RMS
+        # JIT kernel during construction, so hold a registry window open
+        # around the super() call (v1 parity; the v1 runner wraps its
+        # initialize_metadata_builders instead). Runners built without the
+        # upstream __init__ (tests, partial mocks) have no registry; the
+        # window is optional for them.
+        registry = getattr(self, "jit_warmup_registry", None)
+        window = registry.activate() if registry is not None else nullcontext()
+        with window:
+            super().initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
+
+    def _has_target_flashmla_attention(self) -> bool:
+        # Draft attention has its own graph dispatch. Only target layers may
+        # restrict target batches containing decode-like PD prompt tails.
+        draft_layer_names = getattr(self.speculator, "draft_attn_layer_names", ())
+        return any(
+            any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+            for groups in self.attn_groups
+            for group in groups
+        )
 
     def initialize_kv_cache(
         self,
@@ -434,6 +498,7 @@ class NPUModelRunner(GPUModelRunner):
         # P also needs persistent prompt draft KV until D acknowledges its
         # transfer. It must never alias target layerwise scratch buffers.
         persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+        persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
@@ -446,18 +511,14 @@ class NPUModelRunner(GPUModelRunner):
                 else set()
             )
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-            )
+            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
-                self.pcp_manager.kv_cache_config = kv_cache_config
-                self.pcp_manager.global_input_buffers = self.input_buffers
+                self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
-                if self.speculator is not None:
-                    self.speculator.pcp_manager = self.pcp_manager
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
@@ -480,18 +541,40 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if uses_a5_packed_cache()
+            and (
+                self.model_config.architecture == "DeepseekV41ForCausalLM"
+                or (
+                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                )
+            )
             else None
         )
 
-        # Upstream has bound every local cache; publish sealed plans before
-        # the worker can warm up, capture graphs or execute prefill requests.
+        # Register the exact bound state-copy layouts; kernel_warmup owns
+        # compilation before model dummy runs and graph capture.
         from vllm_ascend.ops.kda_state_copy_plan import initialize_kda_state_copy
 
-        initialize_kda_state_copy(
-            self.vllm_config.compilation_config.static_forward_context,
-            self.vllm_config.scheduler_config.max_num_seqs,
-        )
+        registry = getattr(self, "jit_warmup_registry", None)
+        with registry.activate() if registry is not None else nullcontext():
+            initialize_kda_state_copy(
+                self.vllm_config.compilation_config.static_forward_context,
+                self.vllm_config.scheduler_config.max_num_seqs,
+            )
+
+        copy_mamba_state = getattr(self.model_state, "copy_state_after_kv_load", None)
+        if (
+            callable(copy_mamba_state)
+            and has_kv_transfer_group()
+            and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False)
+        ):
+            self.kv_connector = MambaCopyKVConnector(self.kv_connector, copy_mamba_state)
+
+        initialize_cpu_lengths = getattr(self.model_state, "initialize_spec_cpu_length_sync", None)
+        if callable(initialize_cpu_lengths):
+            initialize_cpu_lengths(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -503,11 +586,6 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        # Legacy (pre-AuxOutput) R3 path; the getattr keeps MRv2 startable on a
-        # vLLM lane where ModelConfig no longer exposes the flag.
-        if getattr(self.model_config, "enable_return_routed_experts", False):
-            self.init_routed_experts_capturer()
-
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
             kv_cache_config=self.kv_cache_config,
@@ -516,6 +594,11 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = overlap_target_host_mirror(self)
+        guard = getattr(self, "_kv_trace", None)
+        if guard is not None:
+            guard.configure(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -532,6 +615,20 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+
+        expert_offload.shutdown(self)
+
+        model = getattr(self, "model", None)
+        # Include private/shared UVA owners, which have no MemFabric client.
+        shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        if model is not None:
+            owner_ids = {id(owner) for owner in shared_embeddings}
+            shared_embeddings.extend(
+                module
+                for module in model.modules()
+                if id(module) not in owner_ids and callable(getattr(module, "close_host_offload", None))
+            )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -541,7 +638,36 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
-        super().shutdown()
+        self._shared_engram_shutdown_pending = shared_embeddings
+        if not getattr(self, "_shared_engram_parent_stopped", False):
+            super().shutdown()
+            self._shared_engram_parent_stopped = True
+        first_error = None
+        for embedding in shared_embeddings:
+            if getattr(embedding, "local_vmm", False) is True:
+                continue
+            try:
+                embedding.close_host_offload()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
+        self._shared_engram_shutdown_pending = pending
+        if pending:
+            from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+            errors = []
+            for index in range(len(pending) - 1, -1, -1):
+                try:
+                    pending[index].close_host_offload()
+                except EngramSharedReleaseError as exc:
+                    errors.append(str(exc))
+                else:
+                    del pending[index]
+            if errors:
+                raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
@@ -607,12 +733,8 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
-        self._cpp_execution_time_ms = None
-        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        execution_start_time = _start_profiling_chunk_timing(
-            profiling_config,
-            scheduler_output,
-        )
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.begin_execution(not dummy_run and not is_profile)
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
@@ -629,11 +751,16 @@ class NPUModelRunner(GPUModelRunner):
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        dp_coordination_context = (
-            skip_dp_coordination() if should_skip_allreduce_across_dp_group(self.vllm_config) else nullcontext()
+        # Reduced LMHead padding needs synchronized token buckets for V2,
+        # DCP=1. Share the MC2 dispatcher's policy so active masks agree;
+        # DCP>1 retains full capacity and the original coordination policy.
+        # TODO: Merge the requires_lmhead_dp_sync interface into
+        # should_skip_allreduce_across_dp_group in a future refactor.
+        skip_dp_metadata_sync = should_skip_allreduce_across_dp_group(self.vllm_config) and not requires_lmhead_dp_sync(
+            self.vllm_config
         )
-        # Randomized profiling was added on the release branch after the verified main pin.
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
             try:
@@ -656,14 +783,13 @@ class NPUModelRunner(GPUModelRunner):
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
-            # lmhead TP: idle ranks never call sample(); join the target head
-            # here at capacity, before _dummy_run replays the dummy propose.
+            # Idle ranks join the same LMHead collective size as active ranks.
             if self.execute_model_state is None:
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
             dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
+                self._get_lmhead_pad_size(self.execute_model_state),
                 dtype=torch.int64,
                 device=self.device,
             )
@@ -678,26 +804,6 @@ class NPUModelRunner(GPUModelRunner):
                 # finalize after sample_tokens(), including non-last PP ranks.
                 self._finalize_dump_data()
 
-        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
-            profiling_config,
-            execution_start_time,
-        )
-
-        # TODO: Remove this workaround once upstream vLLM restores idle DP ranks'
-        # logical request counts before draft DP synchronization.
-        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
-        # Restore their request counts before draft DP sync to avoid inflating all ranks.
-        if (
-            dummy_run
-            and not is_profile
-            and context_len == 0
-            and self.adaptive_verification is not None
-            and self.execute_model_state is not None
-        ):
-            state = self.execute_model_state
-            self.execute_model_state = state._replace(
-                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
-            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -738,17 +844,14 @@ class NPUModelRunner(GPUModelRunner):
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
-        profile_kwargs = {"randomize_inputs": randomize_inputs} if vllm_version_is("0.31.0") else {}
+        profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        # The initial dummy profile bypasses PCP batch partitioning. Profile
-        # rank-local tokens; the existing MoE preparation still handles TP.
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        global_max_num_tokens: int = self.max_num_tokens
-        profile_max_num_tokens = (global_max_num_tokens + pcp_size - 1) // pcp_size
+        global_tokens = self.max_num_tokens
+        profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
-                and profile_max_num_tokens > mc2_tokens_capacity
+                and profile_tokens > mc2_tokens_capacity
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
@@ -761,46 +864,18 @@ class NPUModelRunner(GPUModelRunner):
                         is_profile=True,
                         **profile_kwargs,
                     )
-            self.max_num_tokens: int = profile_max_num_tokens
+            self.max_num_tokens = profile_tokens
             try:
                 super().profile_run(**profile_kwargs)
             finally:
-                self.max_num_tokens = global_max_num_tokens
+                self.max_num_tokens = global_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        kv_cfg = self.vllm_config.kv_transfer_config
-        is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
-        # TODO: has_prefill describes prompt progress, not decode-graph eligibility.
-        # Decode-like prompt tails can therefore incorrectly disable FULL graphs
-        # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
-        # This PD-only reclassification is a temporary workaround. Replace it with
-        # a dedicated graph-eligibility check once the upstream semantics are aligned.
-        if batch_state is not None and is_pd_decode_node:
-            pd_decode_recompute = (
-                batch_state.is_prefilling_np
-                & (batch_state.num_computed_prefill_tokens_np > 0)
-                & (batch_state.num_scheduled_tokens == self.decode_query_len)
-                & (
-                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
-                    >= batch_state.prefill_len_np
-                )
-            )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                has_prefill = bool(batch_state.is_prefilling_np.any())
-                decode_graph_eligible = not has_prefill
-                if batch_state.prefill_runs_as_decode_np is not None:
-                    decode_graph_eligible = bool(
-                        (batch_state.prefill_runs_as_decode_np | ~batch_state.is_prefilling_np).all()
-                    )
-                batch_state = batch_state._replace(has_prefill=has_prefill, decode_graph_eligible=decode_graph_eligible)
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.decode_graph_eligible,
-                )
+        if self._target_uses_flashmla and batch_state is not None:
+            # The backend order must precede derived inputs and graph dispatch.
+            batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -812,6 +887,13 @@ class NPUModelRunner(GPUModelRunner):
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."
             )
+
+    def prepare_padding_mask(self, num_tokens: int, num_tokens_after_padding: int) -> torch.Tensor:
+        # EPLB and decoder replay also consume validity when MoE padding skipping is off.
+        mask = self.input_buffers.is_padding[:num_tokens_after_padding]
+        mask[:num_tokens].fill_(False)
+        mask[num_tokens:].fill_(True)
+        return mask
 
     def _prepare_inputs_impl(
         self,
@@ -894,6 +976,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        admitted_draft_kwargs = {}
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -926,15 +1009,32 @@ class NPUModelRunner(GPUModelRunner):
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification_active:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
-                req_ids, idx_mapping
-            )
+            num_scheduled_draft_tokens = total_num_draft_tokens
+            self._log_adaptive_verification_costs(adaptive_verification_manager)
+            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
+            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
+            if len(allocation) == 4:
+                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            logger.debug(
+                "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
+                "padded_tokens=%d, graph_mode=%s",
+                num_reqs,
+                num_scheduled_draft_tokens,
+                total_num_draft_tokens,
+                num_tokens_after_padding,
+                batch_desc.cg_mode,
+            )
 
             # Non-fia backends skip padding query boundary when using adaptive verification
             if self.use_fia:
-                query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
-                query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+                self._sync_adaptive_fia_query_start_loc(
+                    query_start_loc_np,
+                    query_start_loc,
+                    num_reqs,
+                    num_scheduled_draft_tokens,
+                    total_num_draft_tokens,
+                )
 
         if self.use_fia and adaptive_verification_manager:
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1022,8 +1122,8 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        # The PP sampling length field exists only in v0.31.0.
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np} if vllm_version_is("0.31.0") else {}
+        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
+        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1052,7 +1152,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -1106,6 +1206,15 @@ class NPUModelRunner(GPUModelRunner):
         ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
+    def _get_lmhead_pad_size(self, execute_model_state) -> int:
+        pad_size = self._lmhead_tp_max_num_logits()
+        if self.dcp_size == 1 and execute_model_state is not None:
+            # vLLM #60754 renamed the stored DP-sync state on main.
+            dp_sync = execute_model_state.dp_sync if vllm_version_is("0.31.0") else execute_model_state.dp_sync_state
+            if dp_sync is not None:
+                pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
+        return pad_size
+
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
@@ -1114,7 +1223,7 @@ class NPUModelRunner(GPUModelRunner):
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = self._lmhead_tp_max_num_logits()
+        capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
         # V1-style index pad: pad a private copy of the indices (input_batch keeps
         # the real ones; the V2 sampler gathers penalties by them) so one gather
         # feeds compute_logits the capacity rows; zero entries gather row 0.
@@ -1127,7 +1236,9 @@ class NPUModelRunner(GPUModelRunner):
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
-        if grammar_output is not None:
+        invalid_drafts = None
+        # A diffusion prefill has no logit rows even when a bitmask row arrived.
+        if grammar_output is not None and logits.shape[0] > 0:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
             self.structured_outputs_worker.apply_grammar_bitmask(
@@ -1136,6 +1247,17 @@ class NPUModelRunner(GPUModelRunner):
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
+            if vllm_version_is("0.33.0"):
+                # 0.33.0 rejects drafts verified against a permissive grammar
+                # row; main moved that bookkeeping into the scheduler and the
+                # draft-token handler.
+                import vllm.v1.worker.gpu.structured_outputs as structured_outputs  # type: ignore[import-not-found]
+
+                invalid_drafts = structured_outputs.grammar_invalid_drafts(  # type: ignore[attr-defined]
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.num_acceptable_drafts,  # type: ignore[attr-defined]
+                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
@@ -1144,39 +1266,33 @@ class NPUModelRunner(GPUModelRunner):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
-                input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
-            )
+            if vllm_version_is("0.33.0"):
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    # Draft logits are needed for probabilistic rejection sampling.
+                    self.speculator.draft_logits,
+                    invalid_drafts,
+                )
+            else:
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    self.speculator.draft_logits,
+                )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     @contextmanager
-    def _cap_parallel_draft_dummy_reqs(self, uniform_decode: bool):
-        # Profiling can exceed the speculator's query buffer.
-        original_max_num_reqs = self.max_num_reqs
-        if self.speculator is not None and not uniform_decode:
-            # Speculators without num_query_per_req use one query row per request.
-            query_width = getattr(self.speculator, "num_query_per_req", 1)
-            self.max_num_reqs = min(original_max_num_reqs, self.max_num_tokens // query_width)
-        try:
-            yield
-        finally:
-            self.max_num_reqs = original_max_num_reqs
-
-    @contextmanager
     def _preserve_dummy_query_tokens(self, num_tokens: int, uniform_decode: bool):
+        # TODO: Remove this workaround once upstream dummy-batch preparation
+        # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         if (
             # FULL modes can also pad requests; only change token-only PIECEWISE padding.
             self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
             # PCP prepares and partitions its own dummy input layout.
             and self.pcp_manager is None
-            # Hybrid models also need recurrent-state metadata to stay aligned.
-            # TODO: Verify whether this hybrid-model guard can be removed.
-            and not self.model_config.is_hybrid
         ):
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
@@ -1188,28 +1304,6 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
-    @contextmanager
-    def _cpp_profile_dummy(self, enabled: bool):
-        """Scope the target-only prefill semantics used by CPP profiling."""
-        if not enabled:
-            yield
-            return
-
-        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
-        previous_speculator = self.speculator
-        previous_max_num_reqs = self.max_num_reqs
-        try:
-            self.input_buffers.profile_cpp = True
-            # CPP profiles the target prefill. This also matches MRV1, where the
-            # drafter dummy run is explicitly skipped for profile_cpp.
-            self.speculator = None
-            self.max_num_reqs = 1
-            yield
-        finally:
-            self.input_buffers.profile_cpp = previous_profile_cpp
-            self.speculator = previous_speculator
-            self.max_num_reqs = previous_max_num_reqs
-
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
@@ -1220,7 +1314,6 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
-        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1239,13 +1332,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
-            # Disable the CPP drafter before entering contexts that inspect it.
-            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
-            # TODO: Remove this context and its use after the next main2main
-            # includes https://github.com/vllm-project/vllm/pull/56448.
-            self._cap_parallel_draft_dummy_reqs(uniform_decode),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
         ):
@@ -1266,6 +1354,93 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data(dump=False)
         return output
 
+    def _can_skip_spec_cpu_length_sync(self) -> bool:
+        """Allow device lengths for supported speculative-decoding paths."""
+        if self.sync_spec_pp_cpu_counts:
+            return False
+
+        if is_deepseek_v41(self.model_config.hf_config):
+            return True
+
+        model_can_skip = getattr(getattr(self, "model_state", None), "can_skip_spec_cpu_length_sync", None)
+        if callable(model_can_skip) and model_can_skip() is True:
+            return True
+
+        spec = self.speculative_config
+        if (  # noqa: SIM103
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dflash"
+            and self.model_config.hf_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
+            and spec.draft_model_config is not None
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
+        ):
+            return True
+
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dspark"
+            and spec.draft_model_config is not None
+            and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
+                spec.draft_model_config.architectures or ()
+            )
+            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+        ):
+            # Flash's sparse target uses device lengths, but a mixed target
+            # GQA backend still consumes the shared CPU length mirror.
+            backends = [group.backend for groups in self.attn_groups for group in groups]
+            return AscendFlashAttentionBackend in backends and all(
+                backend is AscendFlashAttentionBackend
+                or backend.get_name() in ("ASCEND_MINIMAX_M3_SPARSE", "ASCEND_MINIMAX_M3_SPARSE_INDEXER")
+                for backend in backends
+            )
+
+        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
+            return False
+
+        draft_architectures = spec.draft_model_config.architectures or ()
+        use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # The initialized target producer also covers sharded SFA DCP metadata.
+        kimi_k31_device_lengths = (
+            self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and "K3DSparkModel" in draft_architectures
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
+        )
+        if not kimi_k31_device_lengths and (
+            self.model_config.architecture
+            not in (
+                "MiniMaxM3SparseForCausalLM",
+                "MiniMaxM3SparseForConditionalGeneration",
+                "GlmMoeDsaForCausalLM",
+            )
+            or (
+                "Qwen3DSparkModel" not in draft_architectures
+                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
+            )
+        ):
+            return False
+
+        # Inspect the initialized draft backends instead of repeating selection
+        # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
+        draft_backends = getattr(self.speculator, "attn_backends", {})
+        parallel_config = self.parallel_config
+        # Keep unverified parallel, offload and adaptive paths on host counts.
+        return (
+            bool(draft_backends)
+            and (
+                all(backend is AscendFlashAttentionBackend for backend in draft_backends.values())
+                or getattr(self.speculator, "use_flashmla", False)
+            )
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
+            and not self.ascend_config.sparse_kv_offload_config.enabled
+            and not spec.enable_adaptive_verification
+        )
+
     def postprocess_sampled(
         self,
         idx_mapping,
@@ -1273,11 +1448,9 @@ class NPUModelRunner(GPUModelRunner):
         num_sampled,
         num_rejected,
         query_start_loc=None,
+        draft_tokens=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
+        """Update device state and refresh exact CPU counts when required."""
         if (
             self.use_pp
             and not self.is_last_pp_rank
@@ -1288,21 +1461,27 @@ class NPUModelRunner(GPUModelRunner):
             # Restore its rows before Mamba aligns the accepted recurrent state.
             # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
             self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
-        super().postprocess_sampled(
-            idx_mapping,
-            sampled_tokens,
-            num_sampled,
-            num_rejected,
-            query_start_loc,
-        )
+        if draft_tokens is None:
+            super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+            )
+        else:
+            # Non-last PP ranks receive drafts from the last rank on both versions.
+            super().postprocess_sampled(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+                draft_tokens,  # type: ignore[call-arg]
+            )
 
-        # TODO: Gate CPU length synchronization by backend requirements, not
-        # speculative decoding alone. V4.1 uses device lengths; extend this
-        # exemption to other backends that do not need exact CPU seq_lens.
         # Non-last PP stages receive rejections without owning a speculator.
-        if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
-        ) or self.sync_spec_pp_cpu_counts:
+        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -1312,9 +1491,10 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        # Attention metadata still needs exact CPU lengths. This non-blocking
-        # D2H is waited on in _update_seq_lens_cpu, introducing a host/device
-        # sync point that can break asynchronous scheduling overlap.
+        if self._can_skip_spec_cpu_length_sync():
+            return
+
+        # Match this D2H and event with the consumer in _update_seq_lens_cpu.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
@@ -1333,12 +1513,9 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # Speculative decoding needs corrected num_computed_tokens after rejection.
-        # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
-        # so this update also corrects the num_computed_tokens_np used by PCP.
-        if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
-        ) or self.sync_spec_pp_cpu_counts:
+        # Wait for and consume the snapshot only when its producer runs.
+        # req_states.num_computed_tokens_cpu also backs the NumPy view used by PCP.
+        if (self.speculator is not None or self.sync_spec_pp_cpu_counts) and not self._can_skip_spec_cpu_length_sync():
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
@@ -1422,6 +1599,51 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
+    @staticmethod
+    def _log_adaptive_verification_costs(manager: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        scheduled, non_draft, budget = manager._batch_budget
+        req_ids = list(scheduled)
+        slots = [manager.req_states.req_id_to_index[req_id] for req_id in req_ids]
+        confidence = manager._stale_confidences[manager._stale_idx].np[slots].astype(np.float64)
+        capacities = np.array(list(scheduled.values()))
+        valid = np.arange(manager.num_speculative_steps)[None, :] < capacities[:, None]
+        scores = np.sort(np.cumprod(confidence, axis=1)[valid])[::-1]
+        max_budget = min(len(scores), max(0, manager._max_total_logits - len(req_ids) * manager.num_bonus_tokens))
+        accepted = np.concatenate(([0.0], np.cumsum(scores[:max_budget])))
+        base_tokens = sum(non_draft.values())
+        draft_cost, verify_cost = manager.cost_tables
+        confidence_by_step = [
+            float(confidence[valid[:, i], i].mean()) for i in range(confidence.shape[1]) if valid[:, i].any()
+        ]
+        logger.debug(
+            "Adaptive verification costs: budget=%d/%d, base_tokens=%d, draft_ms=%.6f, "
+            "verify_ms(zero/chosen/full)=%s, expected_accepted_drafts(chosen/full)=%s, "
+            "mean_confidence_by_step=%s",
+            budget,
+            max_budget,
+            base_tokens,
+            float(draft_cost[len(req_ids)]),
+            [float(verify_cost[base_tokens + n]) for n in (0, budget, max_budget)],
+            [float(accepted[n]) for n in (budget, max_budget)],
+            confidence_by_step,
+        )
+
+    @staticmethod
+    def _sync_adaptive_fia_query_start_loc(
+        query_start_loc_np: np.ndarray,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+        num_scheduled_draft_tokens: int,
+        num_admitted_draft_tokens: int,
+    ) -> None:
+        # compact_batch already gives exact host boundaries for full and zero
+        # budgets. Partial budgets may redistribute them on device.
+        if 0 < num_admitted_draft_tokens < num_scheduled_draft_tokens:
+            query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
+        query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+
     def _pad_adaptive_query_start_loc_for_fia(
         self,
         num_tokens_padded: int,
@@ -1455,16 +1677,20 @@ def graph_manager_wrapper(model_runner):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | None = None,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
-        ubatch_runner: Any = None,  # vLLM main (#51700)
+        ubatch_runner: Any = None,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
     ):
+        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
+        assert query_shapes is not None
         return ModelAclGraphManager(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,

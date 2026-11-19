@@ -20,6 +20,13 @@ stages:
 The individual kernels are described in [pack_dcp_output_lse](pack_dcp_output_lse.md)
 and [fused_dcp_lse_combine](fused_dcp_lse_combine.md).
 
+The small native BF16/D512 head-scatter route uses the bit-preserving
+[SFA DCP exchange](sfa_dcp_exchange.md) and [local merge](sfa_dcp_merge.md).
+It derives the payload from the input and actual group rather than assuming
+DCP8/H64. Query layout preparation is described in [query gather preparation](query_gather_prep.md).
+The public operator has no scheduler-budget parameter; the backend owns
+scheduling and each layout route owns its kernel-specific selection policy.
+
 ## Inputs and output
 
 | Argument | Shape or type | Description |
@@ -72,7 +79,7 @@ The scalar combine kernel keeps one FP32 output accumulator and scalar LSE state
 It first finds the maximum valid LSE, then accumulates
 `exp(lse - lse_max) * partial_output`. Invalid LSE rows contribute zero; when
 all ranks are invalid, the output row is zero.
-The eligible A5 BF16 path batches eight rows per program and masks partial
+The eligible BF16 path batches eight rows per program and masks partial
 tiles; other valid shapes use the scalar-row kernels.
 
 ## Custom-op registration and graph tracing
@@ -117,3 +124,61 @@ The default custom-op path still returns the merged output. Deferred mode and
 local contributions at DCP sizes 1/2/8, D=96/256/512, both scatter dimensions,
 FP32/BF16/FP16 local output, strided inputs and invalid rows. The MLA unit test
 checks stream ordering, one final combine, and current-KV multiplicity.
+
+## JIT warmup
+
+`model_executor/warmup/kernel_warmup.py` registers actual
+`AscendSFADCPImpl` and `AscendMlaDCPImpl` owners from the runner's static
+forward context, including draft layers. Registration runs after cache/group
+setup and model dummy runs, inside the shared `JitWarmupRegistry` window and
+before registry compilation and ACLGraph capture. Owners supply their own
+model dtype, local heads, latent dimension and token capacity. Physical PCP
+and TP groups determine scatter/receive geometry, including replicated MTP
+whose logical PCP config is disabled. Repeated layer layouts register once.
+
+The compile-only owners in `dcp/dcp_jit.py` and `dcp/dcp_warmup.py` use the same
+JITFunction objects and launch-construction functions as runtime. They cover
+scalar/batched pack and combine, T1/full-vector/tiled exchange packing, and
+fast merge. SFA uses its contiguous native/QSFA output and FP32 max/sum views;
+TurboQuant supplies already-computed LSE. MLA additionally covers FIA output,
+single-batch BSND LSE views, transposed FlashMLA output/LSE, and deferred history
+combine with or without one local contribution. Only the owner's dtype and
+geometry are registered. `FROM_STATS`, block sizes, rank unroll and compiler
+options follow the production launcher.
+
+Representative token counts cover each dispatch interval and its modulo-16
+scalar/alignment classes, including exact-one and integer-width boundaries.
+The sampling uses owner capacity, not graph capture sizes, and deduplicates
+Triton's scalar-specialization representatives. Received LSE pointer alignment
+includes its offset inside the exchange payload. No device payload is allocated
+or read, no collective runs, and native `kernel.warmup(grid=(1,))` only compiles.
+`enable_jit_warmup=False` retains lazy compilation. Runtime grid, tiles,
+communication, payload format and reduction math remain unchanged.
+
+Fast merge's rank stride is now a non-specialized runtime scalar: it is used
+only in address arithmetic and still receives the exact `lse_recv.stride(0)`.
+Previously it was constexpr and produced one key per token count. This is the
+only kernel specialization-policy change in this warmup integration.
+
+The registration contract covers these SFA/MLA head-scatter owners. It does not
+claim precompilation for unrelated GQA owners or direct public-operator calls
+using token scatter, `return_lse=True`, arbitrary external tensor views or
+unregistered dtypes. Those calls retain their existing runtime behavior.
+
+`tests/ut/model_executor/warmup/test_kernel_warmup.py` contains finite-domain
+versus exhaustive-token coverage, owner/draft registration and deduplication,
+compile-only behavior and alignment checks. The existing
+`test_dcp_pre_post.py` single-NPU suite also adds a cold in-memory JIT / registry
+warmup / forbidden-recompile regression over new token counts and layouts,
+followed by changed-input replay of retained graphs. These tests were added
+without execution for this change; NPU compilation, graph replay,
+precision and performance validation remain outstanding.
+
+## Follow-up optimization
+
+The existing `head_dim == 512` / `tokens >= 128` pack routing, 8/32-row pack
+tiles, eight-row combine tiles, rank-unroll bound, and full-vector versus tiled
+exchange thresholds are deliberately retained. Optimizing those implementation
+choices requires separate shape-range measurements on A3/A5. In particular,
+measure the dynamic merge rank-stride change against the former specialization;
+this change does not claim a measured kernel-speed improvement.

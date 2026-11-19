@@ -1,0 +1,11 @@
+pr: 19801
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DSpark drafting with prefill context parallelism to negotiate draft
+      data-parallel capacity independently and keep draft tokens and probabilities
+      synchronized across replicas, including on older vLLM versions.
+      Restored independent MTP draft data-parallel synchronization when PCP
+      changes the draft prefill batch.
+      Fixed MTP MLA draft prefill with PCP decode graphs when uneven rank-local
+      batches require padded query rows.

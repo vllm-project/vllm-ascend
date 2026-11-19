@@ -17,11 +17,11 @@
 from collections.abc import Callable
 
 import torch
+import torch_npu
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 
@@ -224,7 +224,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
             self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)
-        topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
+        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
             k=self.top_k,
             k_group=topk_group,
@@ -235,7 +235,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             out_flag=False,
             routed_scaling_factor=self.routed_scaling_factor,
             eps=1e-20,
-            bias_opt=self.e_score_correction_bias,
+            bias=self.e_score_correction_bias,
         )
 
         return topk_weights, topk_ids

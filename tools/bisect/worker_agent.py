@@ -34,14 +34,15 @@ from tools.bisect import git_ops, runner
 from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
 from tools.bisect.config import BisectInput, BisectOptions
 from tools.bisect.coordinator import Coordinator
-from tools.bisect.version_compat import VersionAdapter
 
 logger = logging.getLogger("bisect.worker")
 
 
-def _launch_pytest(inp: BisectInput, opt: BisectOptions, log_path: Path) -> int:
+def _launch_pytest(
+    inp: BisectInput, opt: BisectOptions, log_path: Path, test_environment: dict[str, str] | None = None
+) -> int:
     """Run the non-master multi-node pytest (same env recipe as the master)."""
-    env = dict(os.environ)
+    env = dict(test_environment or os.environ)
     env["CONFIG_YAML_PATH"] = inp.config_yaml
     if inp.config_base_path:
         env["CONFIG_BASE_PATH"] = inp.config_base_path
@@ -88,7 +89,6 @@ def _await_start(coord: Coordinator, rnd: int, opt: BisectOptions) -> bool:
 def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     coord = Coordinator(opt.coord_dir, opt.num_nodes, opt.node_index)
     builder = BuildManager(opt)
-    version_adapter = VersionAdapter(opt)
     log_dir = Path(opt.work_dir) / "worker_logs" / f"node{opt.node_index}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -119,13 +119,11 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
         log_path = log_dir / f"round{rnd}_{commit[:12]}.log"
         logger.info("[worker] round %d: deploying %s", rnd, commit[:12])
         try:
-            builder.prepare(commit, log_path)
-            version_adapter.ensure_targets(
-                cmd.get("version_targets", {}),
-                tuple(cmd.get("version_checks", ())),
-                log_path,
-            )
+            resolved_commit = git_ops.resolve_commit(opt.repo_dir, commit)
+            builder.decide(resolved_commit)
+            builder.prepare(resolved_commit, log_path)
         except DEPLOY_ERRORS as exc:
+            builder.invalidate_baseline()
             # Publish a deliberately inconsistent ready marker so the master
             # aborts the round if it managed to deploy successfully. The worker
             # waits for the master's start/abort decision and never launches a
@@ -143,6 +141,7 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
             logger.info("[worker] round %d aborted before test execution", rnd)
             continue
         # Launch the worker test; it returns when the master's trial completes.
-        rc = _launch_pytest(inp, opt, log_path)
+        rc = _launch_pytest(inp, opt, log_path, builder.test_environment)
         logger.info("[worker] round %d pytest finished rc=%d", rnd, rc)
         runner.kill_stray_servers()
+        coord.signal_finished(rnd)

@@ -1,0 +1,6 @@
+pr: 18742
+entries:
+  - category: feature
+    text: >-
+      Added external FlashMLA decode support for eligible MLA configurations on
+      Ascend Model Runner V2, including DCP and DSpark. Prefill continues to use FIA.

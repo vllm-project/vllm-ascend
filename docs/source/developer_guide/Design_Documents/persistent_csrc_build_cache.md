@@ -184,6 +184,21 @@ recipe values after the same root normalization contract. `--set-env` compiler
 overrides also participate, using their exact values: an override may point to
 an input not otherwise covered by the prepared-input identity.
 
+The custom-operator command sets its generated `ASCEND_CUSTOM_OPP_PATH` through
+`env`, so the existing command normalization handles its declared OPP root.
+Operator host/tiling sources, including the definitions that generate OPP
+configuration, remain in the operator namespace. The rebuilt tiling library is not
+hashed again: its log strings can embed a different checkout path even when
+the sources are identical. With matching source and toolchain inputs, moving
+the entire `csrc/build_cache` to another checkout can restore kernel artifacts
+into an empty build directory. Host libraries still follow the normal build.
+
+Custom-operator callers exclude README, Markdown/reStructuredText and `docs/`
+from both prepared inputs and the operator namespace. They also exclude
+`tests/` when `ENABLE_TEST` and `BENCHMARK` are both off. Test builds retain
+their test-source identity; kernel, host/tiling and shared compiler sources
+remain identity-sensitive.
+
 The compiler-environment identity covers the host platform, selected compiler
 profile, tool version output, CANN metadata, and explicit environment values.
 Absolute compiler installation paths are not semantic when the reported tool
@@ -203,6 +218,8 @@ update the matching identity group in the same change:
   compiler/toolkit environment; and
 - `NORMALIZE_PATH` removes only a physical location whose referenced semantic
   content is already covered by one of those identity groups.
+
+`EXCLUDE` applies consistently to prepared inputs and the operator namespace.
 
 Removing or omitting an identity argument can cause a false HIT. Adding a
 non-semantic physical path can cause avoidable cross-workspace misses. Changes
@@ -376,6 +393,29 @@ default. CI uses the same workspace-relative `csrc/build_cache` transport
 path, which the restore helper resolves to an absolute directory for builds.
 Deleting the local directory causes a cold build;
 it does not change the compiled source or CI's persistent snapshot.
+
+`csrc/build.sh` keeps two `operator_text_hash` versions per SOC/operator after
+a successful csrc build, retaining all actions inside each version. Configure
+the script-local `BUILD_CACHE_MAX_OPERATOR_VERSIONS` beside `BUILD_CACHE_DIR`;
+nonpositive values disable cleanup. No project-level setting is introduced.
+HITs and saves refresh recency without deleting versions, so a third version
+can coexist until the entire csrc build succeeds. Failed builds do not prune.
+
+Cleanup runs at the end of `build.sh`, after its foreground build commands
+(including their parallel compilation tasks) have succeeded. No cleanup lock
+is added; the cache directory must not be used by another concurrent build or
+prune operation. Cleanup errors never fail the successful build.
+`.updated` marks compaction for the next trusted snapshot save.
+Published outputs are never removed. Schema 4 and action identity are unchanged.
+
+Standalone action or CMake users can explicitly run
+`python3 csrc/scripts/build_cache.py prune --cache-root csrc/build_cache` after a
+successful complete build. `--max-operator-versions N` changes the default of 2.
+
+This bounds operator source-version history, not disk bytes, third-party
+entries, action-key variants within a retained version, or historical OBS
+snapshot counts. Separate concurrent builds must use separate cache directories,
+or the caller must arrange a maintenance window after all builds finish.
 
 ### Central producer
 

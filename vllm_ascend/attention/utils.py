@@ -1,18 +1,20 @@
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from math import prod
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
@@ -29,18 +31,46 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.ops.triton.attention_update import prepare_attention_update
 from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+# Native npu_attention_update accepts at most 16 output/LSE pairs.
+ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(
@@ -69,9 +99,9 @@ def supports_strided_mla_cache(
     ):
         return False
     impl = getattr(attn_module, "impl", None)
-    if getattr(impl, "pcp_enabled", False) or getattr(impl, "is_pcp_decode_sharded", False):
+    if getattr(impl, "use_pcp", False) or getattr(impl, "is_pcp_decode_sharded", False):
         return False
-    if getattr(impl, "dcp_enabled", False):
+    if getattr(impl, "use_dcp", False):
         buffers_are_sufficient = getattr(impl, "_dcp_current_kv_buffers_are_sufficient", None)
         if buffers_are_sufficient is None or getattr(impl, "_dcp_current_kv_buffers", None) is None:
             return False
@@ -79,8 +109,9 @@ def supports_strided_mla_cache(
             return False
     if getattr(impl, "fa_quant_layer", False) or getattr(impl, "enable_kv_nz", False):
         return False
-    supports_prolog_writer = getattr(impl, "supports_prolog_v3_writer", None)
-    return supports_prolog_writer is not None and supports_prolog_writer()
+    # Wide A5 draft inputs use the prepared scatter adapter instead of PROLOG_V3.
+    supports_strided_writer = getattr(impl, "supports_strided_mla_writer", None)
+    return supports_strided_writer is not None and supports_strided_writer()
 
 
 @lru_cache(maxsize=1)
@@ -106,8 +137,8 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
             return None
         raise
 
-    attention_op = getattr(ops, "flash_mla_with_kvcache", None)
-    metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
+    attention_op = getattr(ops, "flash_mla", None)
+    metadata_op = getattr(ops, "flash_mla_metadata", None)
     if callable(attention_op) and callable(metadata_op):
         return attention_op, metadata_op
     return None
@@ -250,31 +281,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-    scheduler_config = vllm_config.scheduler_config
-    cache_config = vllm_config.cache_config
-    model_config = vllm_config.model_config
-
-    chunked_prefill_workspace_size = min(
-        # Make sure there is enough for 8 full length request or at least
-        # 4 pages of cache per request
-        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
-        # For long-context models try not to over-allocate limiting
-        # kv-cache space, limiting it to 128k tokens,
-        # which would result in the workspace being:
-        #   2*(576)*(128*1024) = 288mb
-        # (assuming 576 MLA head dim, and fp16)
-        # which would result in up-projected context being
-        #   2*(192*128)*(128*1024) = 6gb
-        # (assuming 192 QK head dim, 128 heads, and fp16)
-        128 * 1024,
-    )
-
-    chunked_prefill_workspace_size = max(
-        chunked_prefill_workspace_size,
-        scheduler_config.max_num_seqs * cache_config.block_size,
-    )
-
-    return chunked_prefill_workspace_size
+    return MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
 
 
 def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
@@ -313,27 +320,31 @@ def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAt
     )
 
 
-@lru_cache(maxsize=1)
-def enable_dcp():
+def is_dcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
 
 
-def enable_pcp():
+def is_pcp_enabled():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1
 
 
-@dataclass
-class AscendDCPMetadata:
-    """Per-batch metadata required by decode context parallelism."""
+def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:
+    """Return whether this step should use the PCP-sharded layout.
 
-    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
-    query_lens_cpu: torch.Tensor = None
-    max_query_len: int = 0
-    dcp_mtp_attn_mask: torch.Tensor = None
-    draft_cp_seq_len: torch.Tensor | None = None
-    draft_base_seq_lens: torch.Tensor | None = None
+    Under PCP, metadata built without a PCP context (e.g. a replicated draft
+    decode) runs replicated on every rank, so its slot mapping must not be
+    expanded to every rank's tokens.
+    """
+    if not use_pcp:
+        return False
+    if common_attn_metadata.pcp_context is None:
+        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
+            "PCP metadata without a PCP context must keep a rank-local slot mapping."
+        )
+        return False
+    return True
 
 
 @dataclass
@@ -377,10 +388,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Decode Context Parallelism (DCP) operations.
-    context_parallel_metadata: AscendDCPMetadata | None = None
     # Per-request / per-token request identity used by the Sparse KV offload
-    # resident LRU (adler32-hashed request ids and token->request mapping).
+    # resident LRU (request incarnation owners and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
@@ -406,6 +415,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # cacheable groups -- and only the shared prefix is there. ``None`` means
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
+
+    # Global PCP view of the current target step and this cache group's index
+    # into its per-group tensors. ``None`` when the step is not PCP-partitioned.
+    pcp_context: "AscendPCPAttentionContext | None" = None
+    pcp_cache_group_idx: int | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -436,7 +450,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -502,8 +515,6 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
-    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -526,10 +537,7 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    dcp_metadata = common_attn_metadata.context_parallel_metadata
-    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
-    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
+    max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -549,8 +557,7 @@ def split_decodes_and_prefills(
     ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 
@@ -584,6 +591,27 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def _kv_layer_transfer_connectors(
+    connector: Any,
+    layer: Any,
+    *,
+    for_save: bool = False,
+) -> Iterator[Any]:
+    """Route model boundaries only to children that understand their layout."""
+    if getattr(layer, "kv_transfer_cache_names", None) is None:
+        yield connector
+        return
+    accepts_boundary = (not for_save and getattr(connector, "supports_composite_kv_loads", False) is True) or (
+        for_save and getattr(connector, "supports_composite_kv_saves", False) is True
+    )
+    if accepts_boundary:
+        if connector.has_connector_metadata():
+            yield connector
+        return
+    for child in getattr(connector, "sub_connectors", ()):
+        yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -595,7 +623,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.wait_for_layer_load(layer_name)
+    for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
+        layer_connector.wait_for_layer_load(layer_name)
 
 
 def maybe_save_kv_layer_to_connector(
@@ -612,7 +641,10 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    for layer_connector in _kv_layer_transfer_connectors(
+        connector, forward_context.no_compile_layers.get(layer_name), for_save=True
+    ):
+        layer_connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 def notify_kv_cache_written(layer_name: str = ""):
@@ -709,9 +741,38 @@ def _select_seq_lens(
 
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
-    if speculative_config is not None and speculative_config.parallel_drafting:
+    if speculative_config is not None:
+        # vLLM #63373 moved this capability off the deprecated legacy field.
+        parallel_drafting = (
+            speculative_config.parallel_drafting
+            if vllm_version_is("0.33.0")
+            else speculative_config.speculator_config.parallel_drafting
+        )
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+        if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
+
+
+def merge_prefill_chunks(
+    out_list: list[torch.Tensor],
+    lse_list: list[torch.Tensor],
+    lse_anchor: torch.Tensor | None,
+    *,
+    return_lse: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Merge bounded FP32 pairs with a separate anchor for relative LSEs.
+
+    Adding the anchor to an intermediate LSE would round away small relative
+    weights at large common offsets. Fused preparation retains this split
+    representation without synchronizing the host. The first group contains
+    current causal attention, so every real query has a finite prefix LSE.
+    """
+    assert 1 < len(out_list) == len(lse_list) <= ATTENTION_UPDATE_MAX_INPUTS
+    if lse_anchor is None and not return_lse:
+        output, lse = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
+        return output, lse, None
+    relative_lse, anchor = prepare_attention_update(lse_list, lse_anchor)
+    output, lse = torch_npu.npu_attention_update(relative_lse, tuple(out_list), int(return_lse))
+    return output, lse, anchor

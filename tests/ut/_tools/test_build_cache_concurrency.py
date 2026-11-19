@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from .build_cache_test_utils import build_cache_command, run_command
 
 
@@ -150,21 +152,30 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
     assert elapsed < 2.0
     assert counter.read_text() == "2"
     events = _read_events(event_log)
-    assert any(e["event"] == "lock_timeout" and e["lock"] == "entry" for e in events)
+    timeouts = [e for e in events if e["event"] == "lock_timeout" and e["lock"] == "entry"]
+    assert len(timeouts) == 1
+    assert timeouts[0]["path"] == str(lock_path)
     assert any(e["event"] == "cache_result" and e["status"] == "BYPASS" for e in events)
 
 
-def test_publish_lock_timeout_fails_fast(tmp_path: Path):
+@pytest.mark.parametrize("lock_kind", ["publish", "action"])
+def test_publication_lock_timeout_fails_fast(tmp_path: Path, lock_kind: str):
     _, _, _, _, _, state, _, counter, command = _seed_one(tmp_path)
     event_log = tmp_path / "events.jsonl"
-    lock = _hold_lock(state / ".publish.lock")
+    if lock_kind == "publish":
+        lock_path = state / ".publish.lock"
+    else:
+        action_identity = "test_unit/TestOperator-0"
+        action_hash = hashlib.sha256(action_identity.encode("utf-8")).hexdigest()
+        lock_path = state / ".action_locks" / f"{action_hash}.lock"
+    lock = _hold_lock(lock_path)
     try:
         start = time.monotonic()
         failed = run_command(
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": "0.2",
+                f"VLLM_ASCEND_BUILD_CACHE_{lock_kind.upper()}_LOCK_TIMEOUT_SECONDS": "0.2",
             },
         )
         elapsed = time.monotonic() - start
@@ -172,33 +183,7 @@ def test_publish_lock_timeout_fails_fast(tmp_path: Path):
         lock.close()
 
     assert failed.returncode == 75, failed.stdout + failed.stderr
-    assert "[build-cache] ERROR lock timeout kind=publish" in failed.stdout
-    assert elapsed < 2.0
-    assert counter.read_text() == "1"
-
-
-def test_action_lock_timeout_fails_fast(tmp_path: Path):
-    _, _, _, _, _, state, _, counter, command = _seed_one(tmp_path)
-    action_identity = "test_unit/TestOperator-0"
-    action_hash = hashlib.sha256(action_identity.encode("utf-8")).hexdigest()
-    action_lock = state / ".action_locks" / f"{action_hash}.lock"
-    event_log = tmp_path / "events.jsonl"
-    lock = _hold_lock(action_lock)
-    try:
-        start = time.monotonic()
-        failed = run_command(
-            command,
-            {
-                "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
-                "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": "0.2",
-            },
-        )
-        elapsed = time.monotonic() - start
-    finally:
-        lock.close()
-
-    assert failed.returncode == 75, failed.stdout + failed.stderr
-    assert "[build-cache] ERROR lock timeout kind=action" in failed.stdout
+    assert f"[build-cache] ERROR lock timeout kind={lock_kind}" in failed.stdout
     assert elapsed < 2.0
     assert counter.read_text() == "1"
 
@@ -245,32 +230,48 @@ def test_many_parallel_hits_complete_without_hang(tmp_path: Path):
     shutil.rmtree(state, ignore_errors=True)
     shutil.rmtree(tmp_path / "seed-stages", ignore_errors=True)
 
+    # All 32 hits serialize publication. Allow contention on shared CI
+    # runners; the dedicated lock-timeout tests above cover fail-fast behavior.
+    lock_timeout_seconds = 30
+    batch_timeout_seconds = 60
     env = os.environ.copy()
     env.update(
         {
-            "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": "5",
-            "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": "5",
+            "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS": str(lock_timeout_seconds),
+            "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS": str(lock_timeout_seconds),
         }
     )
 
     processes = []
-    for command, _ in commands:
-        processes.append(
-            subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-        )
-
     outputs = []
-    for proc in processes:
-        stdout, stderr = proc.communicate(timeout=20)
-        outputs.append((proc.returncode, stdout, stderr))
+    deadline = time.monotonic() + batch_timeout_seconds
+    try:
+        for command, _ in commands:
+            processes.append(
+                subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+            )
 
-    assert all(code == 0 for code, _, _ in outputs), outputs
+        # Bound the whole wave, rather than giving each child a fresh timeout.
+        for proc in processes:
+            stdout, stderr = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+            outputs.append((proc.returncode, stdout, stderr))
+    finally:
+        # A timeout or spawn failure must not leave publishers running after
+        # pytest starts cleaning up the temporary build tree.
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+        for proc in processes:
+            proc.communicate()
+
+    failures = [output for output in outputs if output[0] != 0]
+    assert not failures, failures
     assert all("[build-cache] HIT" in stdout for _, stdout, _ in outputs)
     assert all(counter.read_text() == "1" for _, counter in commands)
     assert len(list(publish.glob("*.o"))) == action_count

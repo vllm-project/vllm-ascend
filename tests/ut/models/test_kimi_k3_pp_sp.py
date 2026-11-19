@@ -5,6 +5,7 @@
 import __future__
 
 import ast
+import logging
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -223,6 +224,9 @@ def runtime(monkeypatch):
         "get_pp_group": lambda: context.pp,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
+        # BaseModel above models the release's cumulative aux protocol.
+        # Native main's centralized relay is covered separately with its real mixin/PPHandler.
+        "vllm_version_is": lambda _: True,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
@@ -268,7 +272,7 @@ def runtime(monkeypatch):
         monkeypatch.setattr(torch.ops.vllm, name, namespace[f"_{name}"], raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
-        "vllm_ascend/models/kimi_k3.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3.py",
         {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
         namespace,
         bases={
@@ -329,6 +333,90 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model.output_attn_res_proj = SimpleNamespace(weight=torch.ones(1, 3) * 0.1)
     model.output_attn_res_norm = SimpleNamespace(weight=torch.ones(3), variance_epsilon=1e-5)
     return model
+
+
+@pytest.fixture
+def native_aux_runtime(runtime, monkeypatch):
+    # Keep the standalone CPU fixture importable without a vLLM installation;
+    # this additional fixture explicitly exercises the installed native ABI.
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.model_executor.models.interfaces import EagleModelMixin
+    from vllm.v1.worker.gpu.pp_utils import PPHandler
+
+    from vllm_ascend.utils import vllm_version_is
+
+    namespace, context = runtime
+    release = vllm_version_is("0.33.0")
+
+    class NativeBase(BaseModel, EagleModelMixin):
+        _cache_aux_pp_layout = EagleModelMixin._cache_aux_pp_layout
+        _set_aux_hidden_state_layers = EagleModelMixin._set_aux_hidden_state_layers
+        pack_local_aux_hidden_states = EagleModelMixin.pack_local_aux_hidden_states
+        AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+
+    if not release:
+        NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
+        # Alias the original test's legacy diagnostic to native receive slots.
+        # Production main no longer has or needs this attribute.
+        setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
+            NativeBase,
+            "_aux_upstream_total_cached",
+            property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
+        )
+    namespace.update(BaseModel=NativeBase, vllm_version_is=vllm_version_is)
+    load_definitions(
+        "vllm_ascend/models/kimi_k3/kimi_k3.py",
+        {"AscendKimiLinearModel"},
+        namespace,
+        bases={"AscendKimiLinearModel": "BaseModel"},
+        methods={
+            "AscendKimiLinearModel": {
+                "__init__",
+                "forward",
+                "_cache_aux_pp_layout",
+                "make_empty_intermediate_tensors",
+                "aux_hidden_state_slot_keys",
+            }
+        },
+    )
+
+    def pp_group():
+        if not hasattr(context.pp, "world_size"):
+            context.pp.world_size = 3
+        return context.pp
+
+    namespace["get_pp_group"] = pp_group
+    monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state, "get_pp_group", pp_group)
+    model_cls = namespace["AscendKimiLinearModel"]
+    forward = model_cls.forward
+
+    def forward_with_runner(self, input_ids, positions, intermediate_tensors, inputs_embeds=None):
+        self._cache_aux_pp_layout()
+        handler = SimpleNamespace()
+        if release:
+            handler.aux_hidden_state_relay_keys = tuple(
+                f"{self.AUX_HIDDEN_STATE_KEY}{i}" for i in range(self._aux_slot_base_cached)
+            )
+        else:
+            PPHandler.configure_aux_hidden_state_relay(handler, SimpleNamespace(model=self))
+        output = forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
+        if not context.pp.is_last_rank:
+            return PPHandler.relay_aux_hidden_states(handler, intermediate_tensors, output)
+        if not release:
+            return PPHandler.add_upstream_aux_hidden_states(handler, intermediate_tensors, output)
+        return output
+
+    model_cls.forward = forward_with_runner
+    return namespace, context
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("sp", [False, True])
+@pytest.mark.parametrize("tp,num_tokens", [(2, 3), (16, 8)])
+@pytest.mark.parametrize("cuts", [(0, 1, 3, 5), (0, 0, 3, 5), (0, 2, 2, 5), (0, 2, 5, 5)])
+def test_native_aux_relay_preserves_pipeline_shards(native_aux_runtime, materialized, sp, tp, num_tokens, cuts):
+    test_pipeline_shards_match_unsplit_model(native_aux_runtime, materialized, sp, tp, num_tokens, cuts)
 
 
 @pytest.mark.parametrize("materialized", [False, True])
@@ -467,15 +555,19 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
         {".gate_proj": (".gate_up_proj", 0)},
     )
     captured = []
+
+    def load_weights(weights, *, mapper):
+        captured.append(mapper)
+        return {name for name, _ in weights}
+
     namespace = {
         "BaseModel": nn.Module,
         "replace": replace,
-        "AutoWeightsLoader": lambda model: SimpleNamespace(
-            load_weights=lambda weights, mapper: captured.append(mapper)
-        ),
+        "logger": logging.getLogger(__name__),
+        "AutoWeightsLoader": lambda model: SimpleNamespace(load_weights=load_weights),
     }
     load_definitions(
-        "vllm_ascend/models/kimi_k3_dspark.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3_dspark.py",
         {"AscendK3DSparkForCausalLM"},
         namespace,
         bases={"AscendK3DSparkForCausalLM": "BaseModel"},
@@ -484,7 +576,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     model = namespace["AscendK3DSparkForCausalLM"]()
     model.hf_to_vllm_mapper = mapper
     model._owns_embed_tokens = owns_embed
-    model.load_weights([])
+    assert model.load_weights([]) == set()
     selected = captured[0]
     expected = dict(mapper.orig_to_new_substr)
     if owns_embed:
@@ -577,9 +669,17 @@ def test_host_positions_after_rejection_or_chunk(
         {"NPUModelRunner"},
         namespace,
         bases={"NPUModelRunner": "BaseStateRunner"},
-        methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
+        methods={
+            "NPUModelRunner": {
+                "_can_skip_spec_cpu_length_sync",
+                "postprocess_sampled",
+                "postprocess_num_computed_tokens",
+                "_update_seq_lens_cpu",
+            }
+        },
     )
     runner = namespace["NPUModelRunner"]()
+    runner.speculative_config = None
     runner.speculator = object() if owns_speculator else None
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp

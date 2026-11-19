@@ -21,8 +21,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.ops import rope_dsv4, rotary_embedding
 
@@ -64,16 +64,18 @@ def _make_vllm_indexer() -> MagicMock:
     mock_indexer.softmax_scale = 0.123
     mock_indexer.k_cache = MagicMock()
     mock_indexer.k_cache.prefix = "model.layers.0.indexer"
+    mock_indexer.k_cache.head_dim = 132
+    mock_indexer.k_cache.get_kv_cache_spec.return_value = MLAAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8
+    )
     return mock_indexer
 
 
-@patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
 @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 def _make_indexer(
     mock_get_ascend_config: MagicMock,
     mock_get_vllm_config: MagicMock,
-    _mock_enable_dsa_cp: MagicMock,
 ) -> AscendSFAIndexerBackend:
     mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
     mock_get_ascend_config.return_value.is_sparse_li_c4_layer.return_value = False
@@ -82,8 +84,12 @@ def _make_indexer(
     # resolve without every level having to be spelled out.
     mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
     mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+    mock_get_vllm_config.return_value.parallel_config.decode_context_parallel_size = 1
+    mock_get_vllm_config.return_value.cache_config.cache_dtype = "auto"
+    mock_get_vllm_config.return_value.model_config.dtype = torch.bfloat16
     mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
-    indexer = AscendSFAIndexerBackend(_make_vllm_indexer(), qk_rope_head_dim=64)
+    with patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False):
+        indexer = AscendSFAIndexerBackend(_make_vllm_indexer(), qk_rope_head_dim=64)
     assert indexer.enable_sparse_li_c8
     return indexer
 
@@ -158,69 +164,6 @@ def test_sfa_indexer_hadamard_survives_level2_sleep() -> None:
     _level2_restore(model, saved)
     assert torch.equal(indexer.q_hadamard, expected_q)
     assert torch.equal(indexer.k_hadamard, expected_k)
-
-
-# ---------------------------------------------------------------------------
-# DCP SFA sparse-index remap constants
-# ---------------------------------------------------------------------------
-
-
-def _make_dcp_impl(owner: nn.Module | None) -> AscendSFADCPImpl:
-    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
-    impl.layer_name = "model.layers.0.self_attn.attn"
-    impl.dcp_size = 2
-    impl.dcp_rank = 0
-    impl._dcp_interleave_size = 2
-    impl._dcp_index_topk = 8
-    impl._remap_order = torch.arange(8, dtype=torch.float32)
-    impl._remap_invalid_index = torch.tensor(-1.0)
-    impl.o_proj = nn.Linear(4, 4)
-    static_forward_context = {} if owner is None else {impl.layer_name: owner}
-    compilation_config = SimpleNamespace(static_forward_context=static_forward_context)
-    impl.vllm_config = SimpleNamespace(compilation_config=compilation_config)
-    return impl
-
-
-def test_dcp_remap_constants_are_owned_by_the_attention_layer() -> None:
-    layer = nn.Module()
-    impl = _make_dcp_impl(layer)
-
-    impl._register_remap_buffers()
-
-    assert layer._buffers["_dcp_sfa_remap_order"] is impl._remap_order
-    assert layer._buffers["_dcp_sfa_remap_invalid_index"] is impl._remap_invalid_index
-    assert "_dcp_sfa_remap_order" not in layer.state_dict()
-    assert _buffer_is_visible(layer, impl._remap_order)
-    assert _buffer_is_visible(layer, impl._remap_invalid_index)
-
-    # Registration is idempotent across weight reloads.
-    impl._register_remap_buffers()
-    assert layer._buffers["_dcp_sfa_remap_order"] is impl._remap_order
-
-
-def test_dcp_remap_constants_fall_back_to_the_projection_owner() -> None:
-    impl = _make_dcp_impl(owner=None)
-
-    impl._register_remap_buffers()
-
-    assert impl.o_proj._buffers["_dcp_sfa_remap_order"] is impl._remap_order
-    assert impl.o_proj._buffers["_dcp_sfa_remap_invalid_index"] is impl._remap_invalid_index
-
-
-def test_dcp_remap_constants_survive_level2_sleep() -> None:
-    layer = nn.Module()
-    impl = _make_dcp_impl(layer)
-    impl._register_remap_buffers()
-
-    replicated_indices = torch.tensor([[0, 2, 1, 3, 4, 6, -1, 5]], dtype=torch.int32)
-    expected = impl._remap_sparse_indices(replicated_indices.clone())
-
-    saved = _level2_save(layer)
-    assert saved
-    _level2_discard(layer)
-    _level2_restore(layer, saved)
-
-    torch.testing.assert_close(impl._remap_sparse_indices(replicated_indices.clone()), expected)
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,17 @@ spec:
       metadata:
         labels:
           role: leader
+          ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
+          ascend-ci.com/npu-resource-domain: "huawei.com"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
+        annotations:
+          karpenter.sh/do-not-disrupt: "true"
+          liqo.io/api-server-support: "remote"
       spec:
+        serviceAccountName: runner-service-account
+{% if scheduler_name | default('') %}
+        schedulerName: {{ scheduler_name }}
+{% endif %}
         tolerations:
           - key: "dedicated"
             operator: "Equal"
@@ -31,6 +41,12 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -41,6 +57,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
@@ -132,7 +150,19 @@ spec:
           hostPath:
             path: /usr/local/Ascend/driver
     workerTemplate:
+      metadata:
+        labels:
+          ascend-ci.com/required-npu-count: "{{ npu_per_node | default('16') }}"
+          ascend-ci.com/npu-resource-domain: "huawei.com"
+          ascend-ci.com/npu-resource-model: "{{ 'npu' if (soc_version | default('a3') | lower) == 'a5' else 'ascend-1980' }}"
+        annotations:
+          karpenter.sh/do-not-disrupt: "true"
+          liqo.io/api-server-support: "remote"
       spec:
+        serviceAccountName: runner-service-account
+{% if scheduler_name | default('') %}
+        schedulerName: {{ scheduler_name }}
+{% endif %}
         tolerations:
           - key: "dedicated"
             operator: "Equal"
@@ -153,6 +183,12 @@ spec:
                 value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: DOWNLOAD_SPEC
                 value: {{ download_spec | default("") | tojson }}
+              - name: ASCEND_PROFILE_ROOT
+                value: {{ (log_prefix ~ "/profile_artifact") | tojson }}
+{% for name, value in profile_env.items() %}
+              - name: {{ name }}
+                value: {{ value | tojson }}
+{% endfor %}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -163,6 +199,8 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: VLLM_REF
+                value: "{{ vllm_ref | default("") }}"
               - name: BENCHMARK_JOB_NAME
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER

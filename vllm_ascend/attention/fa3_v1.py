@@ -16,6 +16,12 @@ class AscendFABackend(AttentionBackend):
     def get_name() -> str:
         return "CUSTOM"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added the batch-invariance support check in
+        # `init_attn_backend` in both supported vLLM revisions.
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
         return AscendFAImpl

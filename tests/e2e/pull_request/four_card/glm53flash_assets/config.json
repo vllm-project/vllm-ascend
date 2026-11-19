@@ -49,7 +49,7 @@
   ],
   "linear_attn_config": {
     "num_heads": 64,
-    "gate_lower_bound": -5,
+    "gate_lower_bound": -5.0,
     "head_dim": 128,
     "short_conv_kernel_size": 4,
     "kda_layers": [
@@ -102,7 +102,7 @@
   "routed_scaling_factor": 2.5,
   "router_aux_loss_coef": 0.001,
   "scoring_func": "sigmoid",
-  "swiglu_limit": 10,
+  "swiglu_limit": 10.0,
   "tie_word_embeddings": false,
   "topk_group": 1,
   "topk_method": "noaux_tc",

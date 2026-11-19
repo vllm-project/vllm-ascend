@@ -25,10 +25,10 @@ import torch
 import torch_npu
 
 from tests.ut.base import TestBase
-from vllm_ascend import utils
+from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import REGISTERED_ASCEND_OPS
+from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
@@ -86,8 +86,6 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_dsa_cp.cache_clear()
-        utils.enable_dsa_cp_full_o_proj.cache_clear()
         utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -194,18 +192,6 @@ class TestUtils(TestBase):
             self.assertIs(utils.current_stream(), mock_stream)
             mock_current_stream.assert_called_once()
 
-    def test_enable_dsa_cp_full_o_proj_is_independent_of_pcp_switch(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-            mock.patch("vllm_ascend.utils.enable_pcp_o_proj_weight_sharding", return_value=False) as pcp_switch,
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-        pcp_switch.assert_not_called()
-
     def test_enable_sp_uses_upstream_parallel_config(self):
         # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
         mock.patch.stopall()
@@ -213,7 +199,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertTrue(utils.enable_sp(sequence_parallel_config))
 
@@ -221,7 +211,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=True,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(shared_expert_dp_config))
 
@@ -229,69 +223,30 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
-    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
-        ascend_config = SimpleNamespace(enable_dsa_cp=True)
+    def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
+        with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
+            padded = utils.pad_sequence_parallel_tokens(torch.zeros(6, 3))
+        self.assertEqual(padded.shape, (8, 3))
 
+        aligned = torch.zeros(8, 3)
         with (
-            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
-            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+            mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
+            mock.patch("torch.nn.functional.pad", wraps=torch.nn.functional.pad) as mock_pad,
         ):
-            self.assertTrue(utils.enable_dsa_cp())
+            padded = utils.pad_sequence_parallel_tokens(aligned)
 
-        mock_enable_sp.assert_not_called()
-
-    def test_enable_dsa_cp_reads_validated_ascend_config(self):
-        ascend_config = mock.MagicMock(enable_dsa_cp=False)
-
-        with (
-            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
-            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp())
-
-    def test_enable_dsa_cp_full_o_proj_accepts_kv_both(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_accepts_kv_producer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_rejects_kv_consumer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
-
-    def test_enable_dsa_cp_full_o_proj_rejects_when_dsa_cp_disabled(self):
-        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
+        # An aligned tracing input must still record the pad, otherwise the
+        # replayed graph drops padding for non-aligned token counts.
+        mock_pad.assert_called_once_with(aligned, (0, 0, 0, 0))
+        self.assertEqual(padded.shape, (8, 3))
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)
@@ -412,12 +367,12 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(utils.REGISTERED_ASCEND_OPS))
 
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
@@ -963,3 +918,61 @@ def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, phys
 def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
     utils.setup_ascend_local_comm_res(0, config)
     physical_device_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+def test_oproj_tp_enable_requires_weight_sharding(size, enabled):
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=size))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert utils.oproj_tp_enable() is enabled
+
+
+@pytest.mark.parametrize("size,enabled", [(0, False), (1, False), (2, True), (8, True)])
+@pytest.mark.parametrize(
+    "knob,enable_fn",
+    [
+        ("lmhead_tensor_parallel_size", "lmhead_tp_enable"),
+        ("embedding_tensor_parallel_size", "embedding_tp_enable"),
+        ("mlp_tensor_parallel_size", "mlp_tp_enable"),
+    ],
+)
+def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, enabled):
+    """All four knobs share one convention: 0 and 1 both mean disabled."""
+    config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{knob: size}))
+    with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=config):
+        assert getattr(utils, enable_fn)() is enabled
+
+
+@pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
+    )
+    ascend = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "fullmesh",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
+    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("lmhead", [False, True])
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+    config = SimpleNamespace(
+        use_v2_model_runner=v2,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
+    )
+    monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
+    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)

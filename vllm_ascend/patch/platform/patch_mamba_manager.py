@@ -13,17 +13,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheBlock,
     KVCacheSpec,
     MambaManager,
-    MambaSpec,
 )
-
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMambaManager(MambaManager):
-    def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.block_size = kv_cache_spec.block_size
-
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -37,8 +30,8 @@ class AscendMambaManager(MambaManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Mamba recurrent states are replicated across DCP ranks (see
-        # __init__), so their prefix-cache lookup keeps the ordinary logical
+        # Mamba recurrent states are replicated across DCP ranks, so
+        # their prefix-cache lookup keeps the ordinary logical
         # block layout. Only attention groups shard their KV cache for DCP.
         return super().find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -66,8 +59,14 @@ class AscendMambaManager(MambaManager):
         if num_tokens_main_model is None:
             assert num_local_computed_tokens is not None
             num_tokens_main_model = num_local_computed_tokens
-        local_hit_tokens = len(new_computed_blocks) * self.block_size
-        checkpoint_kwargs = {"prefill_end": prefill_end} if vllm_version_is("0.31.0") else {}
+        # Include tokens this request already computed locally. New hit blocks
+        # alone omit running-request state and round partial hits up to a full
+        # block, either inventing an external load or hiding a real one.
+        local_hit_tokens = (
+            num_local_computed_tokens
+            if num_local_computed_tokens is not None
+            else len(new_computed_blocks) * self.block_size
+        )
         num_new_blocks = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -76,7 +75,7 @@ class AscendMambaManager(MambaManager):
             num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
-            **checkpoint_kwargs,
+            prefill_end=prefill_end,
         )
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one

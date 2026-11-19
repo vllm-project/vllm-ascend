@@ -142,25 +142,48 @@ def _host_library() -> ctypes.CDLL:
     return lib
 
 
+class HostUvaBufferCleanupError(RuntimeError):
+    """Keep a partially constructed host buffer available for cleanup retry."""
+
+    def __init__(self, host_buffer, initialization_error, cleanup_error):
+        super().__init__(
+            f"Host buffer initialization failed: {initialization_error}; "
+            f"cleanup failed: {cleanup_error}. Retry host_buffer.close()."
+        )
+        self.host_buffer = host_buffer
+
+
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
-    def __init__(self, shape, dtype, device):
+    def __init__(self, shape, dtype, device, buffer_name, module):
         self.lib = _host_library()
+        self._registered = False
+        self.ptrs = None
+        self.tensor = None
+        self.buffer = None
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
         self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
         size = rows * self.row_bytes
-        self.pointer = ctypes.c_void_p()
-        rc = self.lib.aclrtMallocHost(ctypes.byref(self.pointer), size, 0)
+        # Align the payload to avoid incorrect device reads observed on A3/CANN 9.2;
+        # retain the original allocation for free.
+        alignment = 64 * 1024
+        self._allocation_pointer = ctypes.c_void_p()
+        rc = self.lib.aclrtMallocHost(ctypes.byref(self._allocation_pointer), size + alignment - 1, 0)
         if rc:
             raise RuntimeError(f"aclrtMallocHost failed: rc={rc} size={size}")
-        self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
-        self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
+        allocation_address = self._allocation_pointer.value
+        if allocation_address is None:
+            raise RuntimeError("aclrtMallocHost returned a NULL pointer")
+        self.pointer = ctypes.c_void_p((allocation_address + alignment - 1) // alignment * alignment)
         try:
+            self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
+            self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
             rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
+            self._registered = True
             address = ctypes.c_void_p()
             rc = self.lib.aclrtHostGetDevicePointer(self.pointer, ctypes.byref(address), 0)
             if rc:
@@ -170,14 +193,22 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
-        except Exception:
-            # A half-built buffer must not leave the host range registered: the
-            # caller only sees the exception, so nothing else can release it.
-            self.lib.aclrtHostUnregister(self.pointer)
-            self.lib.aclrtFreeHost(self.pointer)
-            self.tensor = None
-            self.buffer = None
-            self.pointer = ctypes.c_void_p()
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
+        except Exception as initialization_error:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                # Assignment to the caller's owner has not completed. Retain
+                # this allocation on the exception rather than lose the only
+                # handle capable of retrying unregister/free.
+                raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
+            raise
             raise
 
     def close(self):
@@ -191,15 +222,18 @@ class HostUvaBuffer:
             return
         if self.ptrs is not None and self.ptrs.device.type == "npu":
             torch.npu.synchronize()
-        rc = self.lib.aclrtHostUnregister(self.pointer)
+        if self._registered:
+            rc = self.lib.aclrtHostUnregister(self.pointer)
+            if rc:
+                raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+            self._registered = False
+        # A failed free must remain retryable without unregistering twice.
+        rc = self.lib.aclrtFreeHost(self._allocation_pointer)
         if rc:
-            raise RuntimeError(f"aclrtHostUnregister failed: rc={rc}")
+            raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.tensor = None
         self.buffer = None
         self.ptrs = None
-        rc = self.lib.aclrtFreeHost(self.pointer)
-        if rc:
-            raise RuntimeError(f"aclrtFreeHost failed: rc={rc}")
         self.pointer = ctypes.c_void_p()
 
 
@@ -224,6 +258,7 @@ def gather_dequantize_host_uva(
     from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
     pad_heads = local_heads if pad_heads is None else pad_heads
+    assert codes.tensor is not None
     width = codes.tensor.shape[-1]
     vocab_end = codes.tensor.shape[0] if vocab_end is None else vocab_end
     tokens = ids.shape[0]
@@ -265,7 +300,7 @@ class SharedUvaBuffer:
     mapping with CANN. The leader unlinks it after all ranks have attached.
     """
 
-    def __init__(self, shape, dtype, device, group):
+    def __init__(self, shape, dtype, device, group, buffer_name, module):
         self.lib = _host_library()
         self.group = group
         rows = int(shape[0])
@@ -322,6 +357,9 @@ class SharedUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Registered here for the same reason as in HostUvaBuffer.__init__:
+            # a level-2 wake restores ``named_buffers()`` only.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"
 
@@ -330,16 +368,19 @@ class SharedUvaBuffer:
         failures = "; ".join(f"rank {rank}: {failure}" for rank, failure in enumerate(errors) if failure is not None)
         # Fence every mapping (or every failure) before the leader unlinks.
         dist.barrier(group=cpu_group)
-        if failures:
-            try:
-                self.close()
-            except RuntimeError as exc:  # a rank that did register still owes it
-                failures = f"{failures}; release failed: {exc}"
-            if group.rank_in_group == 0:
-                self._unlink()
-            raise RuntimeError(f"Engram shared-memory initialization failed: {failures}")
+        # Unlink while the leader still owns the SharedMemory handle: close()
+        # clears it. Existing mappings remain valid until each rank closes them.
         if group.rank_in_group == 0:
             self._unlink()
+        if failures:
+            initialization_error = RuntimeError(f"Engram shared-memory initialization failed: {failures}")
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                # Construction has not returned an owner to the caller yet.
+                # Keep the mapping alive until unregister/close can be retried.
+                raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
+            raise initialization_error
 
     def _unlink(self) -> None:
         try:
