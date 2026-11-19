@@ -126,7 +126,7 @@ configuration rather than the runner input or sampling interface.
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
-| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion |
+| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion; [interface and modes](docs/split_qkv_rmsnorm_mrope.md) |
 | [linearnorm/split_qkv_rmsnorm_rope.py](linearnorm/split_qkv_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_simt.py](linearnorm/split_qkv_rmsnorm_rope_simt.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_vnorm.py](linearnorm/split_qkv_rmsnorm_rope_vnorm.py) | Normalization/rotary fusion |
@@ -153,7 +153,8 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
+| [qwen4_exp/lightning_v2_prepare.py](qwen4_exp/lightning_v2_prepare.py) | Native QSA LightningIndexerV2 input preparation; [operator documentation](docs/prepare_qsa_lightning_v2_inputs.md) |
+| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [compressed-key preparation](docs/qsa_compress_groups_with_ratio.md) |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
