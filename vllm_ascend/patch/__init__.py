@@ -298,9 +298,13 @@
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
 #       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       planning functions. They record the reuse plan's backing size before
+#       spec collapse so Core can budget and the scheduler can enable offload.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Remove when vLLM supports these layouts through the builder API.
+#
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:

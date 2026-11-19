@@ -78,12 +78,17 @@ class GvaDataPlane(LayerwiseDataPlane):
             return
         if worker.kv_role == "kv_consumer" and not worker.consumer_is_to_put:
             return
+        public_allocated: set[str] = set()
         for request in requests:
             if worker._save_disabled.is_set():
                 break
             if not request.can_save:
                 continue
-            if self._alloc_gvas_for_save_for_request([request]) is False:
+            if worker.layerwise_offload and (
+                request.load_spec is None or not request.load_spec.layerwise_previous_step
+            ):
+                worker._snapshot_keys.pop(request.req_id, None)
+            if self._alloc_gvas_for_save_for_request([request], public_allocated=public_allocated) is False:
                 logger.error("Memcache save preparation failed for %s", request.req_id)
                 worker._save_disabled.set()
         if worker._save_disabled.is_set():
@@ -92,10 +97,13 @@ class GvaDataPlane(LayerwiseDataPlane):
             for request in requests:
                 if worker.layerwise_offload and request.can_save:
                     worker._record_failed_request(request)
+                    worker._snapshot_keys.pop(request.req_id, None)
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _alloc_gvas_for_save_for_request(
+        self, requests: list[ReqMeta], public_allocated: set[str] | None = None
+    ) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -113,6 +121,8 @@ class GvaDataPlane(LayerwiseDataPlane):
             return None
         if not worker.can_put:
             return None
+        if public_allocated is None:
+            public_allocated = set()
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -122,6 +132,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * worker.num_kv_cache_groups
+            request.public_save_blocks = {}
             for group_id in range(worker.num_kv_cache_groups):
                 block_ids_by_group = (
                     request.block_ids_by_group_np[group_id]
@@ -130,7 +141,9 @@ class GvaDataPlane(LayerwiseDataPlane):
                 )
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
-                if group_id not in worker.cacheable_group_ids or not worker._is_layerwise_save_owner(group_id):
+                save_owner = worker._is_layerwise_save_owner(group_id)
+                keep_snapshot = worker.layerwise_offload and request.needs_private_snapshot
+                if group_id not in worker.cacheable_group_ids or (not save_owner and not keep_snapshot):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
@@ -155,7 +168,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 end_limit = min(save_end_block, len(block_ids_by_group))
                 if not (
                     worker.layerwise_offload
-                    and worker.num_kv_cache_groups == 1
+                    and request.needs_private_snapshot
                     and not worker.group_uses_align_state[group_id]
                 ):
                     end_limit = min(end_limit, len(group_block_hashes))
@@ -164,20 +177,54 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for block_idx in range(save_start_block, end_limit)
                     if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
                 ]
-                candidate_keys = [
-                    worker._make_layerwise_full_key(
-                        group_id,
-                        block_hash_to_str(group_block_hashes[block_idx]),
+                candidate_keys: list[str] = []
+                candidate_public_keys: set[str] = set()
+                publication_keys: dict[int, str] = {}
+                for block_idx in candidate_blocks:
+                    if block_idx >= len(group_block_hashes):
+                        key = worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
+                    else:
+                        block_hash = block_hash_to_str(group_block_hashes[block_idx])
+                        key = worker._make_layerwise_full_key(group_id, block_hash)
+                        if keep_snapshot and (
+                            worker.group_uses_align_state[group_id]
+                            or worker._uses_execution_full_key(request, group_id, block_idx)
+                        ):
+                            publication_keys[block_idx] = key
+                            key = worker._layerwise_execution_full_key(request, group_id, block_idx, block_hash)
+                        else:
+                            candidate_public_keys.add(key)
+                    candidate_keys.append(key)
+                partial_key = None
+                if keep_snapshot and partial_block_index is not None and partial_block_index < len(block_ids_by_group):
+                    partial_key = worker._make_layerwise_partial_key(
+                        request, group_id, partial_block_index, request.target_token_len
                     )
-                    if block_idx < len(group_block_hashes)
-                    else worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
-                    for block_idx in candidate_blocks
-                ]
+                if keep_snapshot:
+                    pages = worker._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
+                    if worker.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
+                        pages.clear()
+                    pages.update(
+                        (index, (min((index + 1) * effective_block_size, request.target_token_len), key))
+                        for index, key in zip(candidate_blocks, candidate_keys)
+                    )
+                    if partial_key is not None:
+                        pages[partial_block_index] = (request.target_token_len, partial_key)
+                if not save_owner:
+                    all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
+                    all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+                    continue
                 # Skip blocks already committed in the pool. The exists check
                 # is medium-agnostic on purpose: a committed block (DRAM or
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
-                missing_keys = worker._pool_keys_missing(candidate_keys)
+                if worker.layerwise_offload:
+                    private_keys = [key for key in candidate_keys if key not in candidate_public_keys]
+                    missing_keys = worker._pool_keys_missing(private_keys)
+                    missing_keys.update(worker._pool_keys_missing(list(candidate_public_keys), fail_open=False))
+                else:
+                    missing_keys = worker._pool_keys_missing(candidate_keys)
+                missing_keys.difference_update(public_allocated)
                 transfer_blocks = [
                     block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
@@ -210,22 +257,37 @@ class GvaDataPlane(LayerwiseDataPlane):
                     for key, gva in zip(transfer_keys, block_gvas):
                         if gva > 0:
                             all_group_save_keys.append(key)
+                            if key in candidate_public_keys:
+                                public_allocated.add(key)
                     if worker.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
 
-                partial_block_index = get_partial_block_index(
-                    request.target_token_len,
-                    effective_block_size,
-                    len(group_block_hashes),
-                    worker.layerwise_offload,
-                )
-                if partial_block_index is not None and partial_block_index < len(block_ids_by_group):
-                    partial_key = worker._make_layerwise_partial_key(
-                        request,
-                        group_id,
-                        partial_block_index,
-                        request.target_token_len,
+                # An immutable public key may contain a different execution's
+                # rounding. Keep our exact pages for intra-request restore,
+                # while publishing missing public pages through the same queue.
+                public_blocks = list(publication_keys)
+                public_keys = list(publication_keys.values())
+                missing_public = worker._pool_keys_missing(public_keys, fail_open=False) - public_allocated
+                public_blocks = [idx for idx, key in zip(public_blocks, public_keys) if key in missing_public]
+                public_keys = [key for key in public_keys if key in missing_public]
+                if public_blocks:
+                    allocated = worker.m_store.batch_alloc(
+                        public_keys, [alloc_size] * len(public_keys), LAYERWISE_READ_LEASE_TTL_MS
                     )
+                    if (
+                        allocated is None
+                        or len(allocated) != len(public_keys)
+                        or any(not 0 < gva < MEMCACHE_SSD_HIT_GVA for gva in allocated)
+                    ):
+                        return False
+                    request.public_save_blocks[group_id] = (
+                        block_ids_by_group[public_blocks],
+                        np.asarray(allocated, dtype=np.int64),
+                    )
+                    all_group_save_keys.extend(public_keys)
+                    public_allocated.update(public_keys)
+
+                if partial_key is not None:
                     # Partial keys are request-scoped: allocate fresh each step.
                     allocated = worker.m_store.batch_alloc(
                         [partial_key],
@@ -341,9 +403,13 @@ class GvaDataPlane(LayerwiseDataPlane):
                 )
                 cached_full_blocks = cached_tokens // effective_block_size
                 full_blocks = min(cached_full_blocks, len(group_block_hashes))
-                snapshot_start = worker._layerwise_load_snapshot_start(request, group_id, cached_tokens)
-                if snapshot_start is not None:
-                    full_blocks = cached_full_blocks
+                get_saved_key = None
+                if worker.layerwise_offload and request.load_spec.layerwise_previous_step:
+                    snapshot = worker._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
+                    if snapshot is None:
+                        all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                        continue
+                    full_blocks, get_saved_key = snapshot
 
                 block_ids_by_group = (
                     request.block_ids_by_group_np[group_id]
@@ -351,6 +417,8 @@ class GvaDataPlane(LayerwiseDataPlane):
                     else request.block_ids_np
                 )
                 if block_ids_by_group is None:
+                    if get_saved_key is not None:
+                        return False
                     all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
                     continue
                 full_len = len(block_ids_by_group)
@@ -365,6 +433,8 @@ class GvaDataPlane(LayerwiseDataPlane):
                 if partial_block_index is not None and (
                     partial_block_index < load_start_block or partial_block_index >= full_len
                 ):
+                    if get_saved_key is not None:
+                        return False
                     partial_block_index = None
 
                 if load_start_block >= full_blocks and partial_block_index is None:
@@ -382,18 +452,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                     if block_idx != partial_block_index
                     and (group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx])
                 ]
-                keys = []
-                for block_idx in block_indices:
-                    if snapshot_start is None or block_idx < snapshot_start:
-                        key = worker._make_layerwise_full_key(
-                            group_id, block_hash_to_str(group_block_hashes[block_idx])
-                        )
-                    else:
-                        snapshot_end_token = request.load_spec.layerwise_snapshot_end_token
-                        assert snapshot_end_token is not None
-                        key = worker._make_layerwise_partial_key(request, group_id, block_idx, snapshot_end_token)
-                    keys.append(key)
-                has_partial_key = False
+                has_partial_key = partial_block_index is not None
                 if any(block_idx >= full_len for block_idx in block_indices):
                     logger.error(
                         "Memcache load range exceeds allocated blocks: req=%s group=%d "
@@ -406,16 +465,22 @@ class GvaDataPlane(LayerwiseDataPlane):
                     )
                     return False
                 if partial_block_index is not None:
-                    keys.append(
-                        worker._make_layerwise_partial_key(
-                            request,
-                            group_id,
-                            partial_block_index,
-                            partial_end_token,
-                        )
-                    )
                     block_indices.append(partial_block_index)
-                    has_partial_key = True
+                keys = []
+                for block_idx in block_indices:
+                    is_partial = block_idx == partial_block_index
+                    if get_saved_key is not None:
+                        saved_key = get_saved_key(block_idx, is_partial)
+                        if saved_key is None:
+                            return False
+                        key, _ = saved_key
+                    elif is_partial:
+                        key = worker._make_layerwise_partial_key(request, group_id, block_idx, partial_end_token)
+                    else:
+                        key = worker._make_layerwise_full_key(
+                            group_id, block_hash_to_str(group_block_hashes[block_idx])
+                        )
+                    keys.append(key)
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue

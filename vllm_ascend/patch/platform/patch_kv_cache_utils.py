@@ -23,6 +23,12 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    plan_layerwise_cache_reuse,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LAYERWISE_REUSE_BACKING_BYTES,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -34,7 +40,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
@@ -519,7 +524,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
+        return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
     if qwen_bytes is not None:
         return qwen_bytes
@@ -574,6 +579,7 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
@@ -629,7 +635,7 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
-    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
         from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
@@ -642,6 +648,16 @@ def _ascend_get_kv_cache_config_from_groups(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
+    if reuse_layout is not None:
+        # The scheduler keeps this cost when it collapses the per-entry specs.
+        kv_cache_config.kv_transfer_config = replace(
+            kv_transfer_config,
+            kv_connector_extra_config={
+                **kv_transfer_config.kv_connector_extra_config,
+                LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
+            },
+        )
     return kv_cache_config
 
 

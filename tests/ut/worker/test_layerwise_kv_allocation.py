@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+from tests.ut.distributed.ascend_store.cache_layout_utils import make_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import plan_layerwise_cache_reuse
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -18,7 +19,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 def test_layerwise_plan_shares_each_physical_slot(reuse, indexer_c8):
     main_names = [f"model.layers.{i}.self_attn.attn" for i in range(4)] + ["model.mtp.0.self_attn.attn"]
     indexer_names = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 2, 3)]
-    main_spec = AscendMLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=12, dtype=torch.bfloat16)
+    main_spec = AscendMLAAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=12, dtype=torch.bfloat16, model_version="glm5_next"
+    )
     indexer_spec = AscendSFAIndexerCacheSpec(
         block_size=2,
         num_kv_heads=1,
@@ -48,37 +51,25 @@ def test_layerwise_plan_shares_each_physical_slot(reuse, indexer_c8):
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
     )
-    connector = (
-        SimpleNamespace(
-            kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 2},
-        )
-        if reuse
-        else None
-    )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        kv_transfer_config=connector,
-        model_config=SimpleNamespace(get_num_layers=lambda _: 4, hf_config=SimpleNamespace()),
-        parallel_config=None,
-    )
+    vllm_config = make_vllm_config(4, 2 if reuse else None)
     original_tensors = list(config.kv_cache_tensors)
-
-    apply_layerwise_kv_cache_plan(config, vllm_config)
+    layout = plan_layerwise_cache_reuse(config, vllm_config)
+    if layout is not None:
+        config = apply_layerwise_kv_cache_plan(config, vllm_config.kv_transfer_config, layout)
 
     if not reuse:
         assert config.kv_cache_tensors == original_tensors
         return
 
-    # Every descriptor owns one physical slot, so its layers alias that slot
-    # through a zero layer stride instead of occupying contiguous regions.
+    # Descriptors select slots within one common physical backing.
     descriptors = config.kv_cache_tensors
+    assert len({d.size for d in descriptors}) == 1
     assert descriptors != original_tensors
     for descriptor in descriptors:
         assert descriptor.layer_stride == 0
-        assert descriptor.offset == 0
+        assert descriptor.offset >= 0
         assert descriptor.block_stride > 0
-        assert descriptor.size == config.num_blocks * descriptor.block_stride
+        assert descriptor.offset + config.num_blocks * descriptor.block_stride <= descriptor.size
         assert descriptor.layers
     covered = [name for descriptor in descriptors for name in descriptor.layers]
     assert sorted(covered) == sorted(main_names + indexer_names)

@@ -33,6 +33,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalcu
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.ut.distributed.ascend_store.cache_layout_utils import make_cache_config, make_vllm_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     create_kv_pool_worker,
@@ -40,7 +41,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreSendingThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
     LayerTransferTask,
@@ -335,25 +340,34 @@ class TestPCPPoolWorker(unittest.TestCase):
         ]
         for use_layerwise, extra_config, reuse in cases:
             with self.subTest(use_layerwise=use_layerwise, extra_config=extra_config):
+                worker_config = config
+                if reuse:
+                    native = make_cache_config(
+                        [(g.layer_names, g.kv_cache_spec) for g in config.kv_cache_groups], num_blocks=2
+                    )
+                    config.kv_cache_tensors = native.kv_cache_tensors
+                    runtime = make_vllm_config(4, 1)
+                    layout = LayerwiseCachePlanner(
+                        config,
+                        runtime,
+                        runtime.kv_transfer_config.kv_connector_extra_config,
+                        spec_reuse_rules={FullAttentionSpec: True},
+                    ).build()
+                    worker_config = apply_layerwise_kv_cache_plan(config, runtime.kv_transfer_config, layout)
                 worker = make_worker(
                     self,
                     num_layers=4,
                     num_hidden_layers=4,
                     use_layerwise=use_layerwise,
                     extra_config=extra_config,
-                    kv_cache_config=config,
+                    kv_cache_config=worker_config,
                 )
                 self.assertEqual(worker.cacheable_group_ids, [0])
                 self.assertEqual(getattr(worker, "layerwise_offload", False), reuse)
-                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: 1, 3: 2} if reuse else {})
+                self.assertEqual(getattr(worker, "prefetch_layer_map", {}), {2: (1,), 3: (2,)} if reuse else {})
                 if reuse:
-                    self.assertEqual(set(worker._layerwise_reuse_layout.layer_cache_specs), set(range(4)))
-                    self.assertTrue(
-                        all(
-                            item.main.spec is target
-                            for item in worker._layerwise_reuse_layout.layer_cache_specs.values()
-                        )
-                    )
+                    self.assertEqual(set(worker._layerwise_reuse_layout.layers), set(range(4)))
+                    self.assertEqual(worker._layerwise_reuse_layout.draft_entry_names, frozenset(draft_names))
                 worker._transfer_threads_started = True
                 worker.register_kv_caches(caches)
                 self.assertEqual(set(worker.kv_caches), set(target_names) if reuse else set(caches))
@@ -1021,7 +1035,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(hit, 256)
         worker.m_store.exists.assert_called_once_with(["key1"])
 
-    def test_layerwise_multi_group_layout_includes_mtp(self):
+    def test_layerwise_multi_group_layout_keeps_mtp_without_plan(self):
         import torch
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -1067,7 +1081,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         self.assertEqual(worker.num_layers, 5)
         self.assertEqual(worker.physical_layer_to_group_layers[4], [(0, 4)])
-        self.assertTrue(worker.layerwise_offload)
+        self.assertFalse(worker.layerwise_offload)
         self.assertEqual(worker.independent_layers, [0])
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
@@ -1797,6 +1811,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def _make_gva_worker(self, num_groups=1):
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {0: {1}}
         worker.num_kv_cache_groups = num_groups
         worker.cacheable_group_ids = list(range(num_groups))
         worker.group_uses_align_state = [False] * num_groups
@@ -2037,7 +2052,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker.prepare_layerwise_step(AscendConnectorMetadata(set(), set()))
 
-        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers, worker.kv_send_thread)
+        worker._wait_for_final_layer_save.assert_called_once_with(worker.num_layers)
         self.assertFalse(worker._pending_last_save_drain)
 
     def test_bound_layerwise_state_survives_deferred_start_and_mtp(self):
@@ -2244,6 +2259,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_reused_layer_loads_full_cached_prefix(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {0: {1}}
         worker.independent_layers = [0]
         request = ReqMeta(
             req_id="r1",
@@ -2276,6 +2292,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             with self.subTest(case=case):
                 worker = self._make_worker()
                 worker.layerwise_offload = True
+                worker._reused_layers_by_group = {0: {1}}
                 worker.num_layers = 3
                 worker.num_kv_cache_groups = 2
                 request = ReqMeta(
@@ -2398,6 +2415,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker = self._make_worker()
         worker.use_eagle = True
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {}
         worker.independent_layers = [0, 1]
         request = ReqMeta(
             req_id="r1",
@@ -2711,6 +2729,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertIsNotNone(_pool_worker)
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {0: {1}}
         worker.independent_layers = [0]
         worker.num_kv_cache_groups = 1
         worker.grouped_block_size = [16]
@@ -2951,6 +2970,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
 
         worker = self._make_gva_worker()
+        worker.layerwise_offload = False
         key0 = worker._make_layerwise_full_key(0, "h0")
         key1 = worker._make_layerwise_full_key(0, "h1")
         worker.m_store.batch_is_exist.side_effect = RuntimeError("store unreachable")
@@ -3061,6 +3081,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {0: {1}}
         worker.independent_layers = [0]
         request = ReqMeta(
             req_id="r1",
@@ -3529,6 +3550,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
     def _make_worker(self):
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
+        worker._reused_layers_by_group = {0: {1}}
         worker.num_kv_cache_groups = 1
         worker.grouped_block_size = [16]
         worker.kv_cache_group_families = ["default"]
@@ -3582,6 +3604,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
 
     def test_aligned_prefill_chunk_preserves_real_recurrent_checkpoint(self):
         worker = self._make_worker()
+        worker._reused_layers_by_group = {}
         worker.block_key_hybrid = False
         worker.cache_coordinator = object()
         worker.cache_transfer_granularity = 4352
