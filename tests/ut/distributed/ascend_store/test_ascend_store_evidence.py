@@ -541,6 +541,27 @@ class TestSyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
         self.assertEqual(worker.get_load_failure_reports(), [])
         self.assertEqual(worker.get_load_attestations(), [])
 
+    def test_memcache_backend_forced_none_certification(self):
+        # [2] the memcache store exposes no service-side write-once
+        # binding (client-side exists-filter only; no atomic-visibility
+        # contract on the blockwise put), so it can never claim "content"
+        # -- underclaim rather than overclaim.
+        worker = self._make_evidence_worker(extra_config={"backend": "memcache", "evidence_certification": "content"})
+        self.assertIsNotNone(worker.evidence_buffer)
+        self.assertEqual(worker._evidence_certification, "none")
+
+    def test_yuanrong_backend_forced_none_certification(self):
+        # [2] yuanrong re-PUTs unconditionally: binding not write-once.
+        worker = self._make_evidence_worker(extra_config={"backend": "yuanrong", "evidence_certification": "content"})
+        self.assertIsNotNone(worker.evidence_buffer)
+        self.assertEqual(worker._evidence_certification, "none")
+
+    def test_mooncake_backend_keeps_configured_content(self):
+        # [2] the mooncake store carries the documented store-trust
+        # assumption (same wrapper and claim as the upstream producer).
+        worker = self._make_evidence_worker()  # backend: mooncake
+        self.assertEqual(worker._evidence_certification, "content")
+
 
 class TestAsyncLoadEvidence(unittest.TestCase):
     """KVCacheStoreRecvingThread (async blockwise path) with an active
