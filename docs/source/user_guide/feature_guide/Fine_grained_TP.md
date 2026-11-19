@@ -36,7 +36,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 
 ```{note}
 - o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1`; embedding / LM head TP can — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
-- LM head TP can be combined with speculative decoding (EAGLE, DFlash, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
+- LM head TP can be combined with speculative decoding (EAGLE, DFlash, DFlash2, and DSpark draft models); see [LM Head TP and Speculative Decoding](#lm-head-tp-and-speculative-decoding).
 ```
 
 ### Constraints and Limitations
@@ -82,12 +82,12 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 
 #### LM Head TP and Speculative Decoding
 
-LM head TP works with EAGLE, DFlash, and DSpark draft models. A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason — these are current scope decisions rather than defects:
+LM head TP works with EAGLE, DFlash, DFlash2, and DSpark draft models. DFlash2 aligns hidden-state rows across the LM-head group before scoring vocabulary shards, then exchanges only TopK candidates back to each request's DP rank. This also handles idle ranks and unequal request counts. For QuaRot targets, DFlash2 and Qwen3/K3 DSpark retain configured fine-grained LM-head sharding when rebuilding unrotated weights. Draft-owned LM heads are preserved, and unrotated targets keep the existing LM-head sharing behavior. The draft embedding is unchanged.
 
-- DFlash2 draft models;
-- `draft_sample_method = "probabilistic"`;
-- `use_local_argmax_reduction`;
-- `enable_adaptive_verification`.
+A few combinations are not aligned with the group-row padding yet and fail fast at construction with an explicit error stating the reason:
+
+- LiLiCorr draft models;
+- `use_local_argmax_reduction`.
 
 Prompt logprobs is also not supported with LM head TP: a request asking for prompt logprobs fails with an explicit error at sampling time.
 

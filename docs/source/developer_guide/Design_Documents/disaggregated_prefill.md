@@ -188,7 +188,7 @@ settings consistent with the deployment and reserve enough host memory on D
 for staging.
 
 For startup scripts and a proxy example, see
-[D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
+[D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe).
 
 ### 3. Interface Design
 

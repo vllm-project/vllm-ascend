@@ -13,6 +13,7 @@ from vllm.config import CUDAGraphMode
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.models import quarot_utils
 from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
@@ -800,7 +801,9 @@ def test_projector_applies_optional_modelslim_rotation():
         torch.testing.assert_close(projector(image_features), image_features)
 
 
-def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch, lmhead_tp):
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
     model._owns_embed_tokens = False
@@ -839,7 +842,10 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
 
     torch.testing.assert_close(model.model.context_proj.weight, projection)
 
-    def vocab_layer(vocab_size, hidden_size, params_dtype):
+    prefixes = []
+
+    def vocab_layer(vocab_size, hidden_size, params_dtype, *, prefix):
+        prefixes.append(prefix)
         layer = nn.Linear(hidden_size, vocab_size, bias=False, dtype=params_dtype)
         layer.quant_method = SimpleNamespace(process_weights_after_loading=lambda layer: None)
         return layer
@@ -853,6 +859,7 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
         ),
     )
     model.post_process(config)
+    assert prefixes == ["", "lm_head" if lmhead_tp else ""]
 
     torch.testing.assert_close(
         model.model.context_proj.weight,
