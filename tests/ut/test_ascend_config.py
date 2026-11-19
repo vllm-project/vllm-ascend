@@ -1989,6 +1989,8 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             (2, [0, 4], None, (0, True, False)),
             (2, [0, None], [0, 4], (0, True, False)),
             (2, [0, None], None, (1, False, True)),
+            (2, None, None, (1, False, True)),
+            (2, [], None, (1, False, True)),
             (3, [0, 4], None, (0, True, False)),
         ):
             with self.subTest(fused_mc2=fused_mc2, target_limits=target_limits, draft_limits=draft_limits):

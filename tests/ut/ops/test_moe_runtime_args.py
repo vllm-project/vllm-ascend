@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT = 7.0
 
 
 def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
@@ -104,9 +105,9 @@ class TestMoERuntimeArgs(unittest.TestCase):
         shared_config = SimpleNamespace(swiglu_limit=4.0, activation_situ_beta=None, activation_situ_linear_beta=None)
         for layer, expected in (
             (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=5.0)), (5.0, 5.0)),
-            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=None)), (0.0, 7.0)),
+            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=None)), (0.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
             (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=0.0)), (0.0, 0.0)),
-            (None, (4.0, 7.0)),
+            (None, (4.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
         ):
             with self.subTest(layer=layer):
                 fused_experts_input = build_fused_experts_input(
