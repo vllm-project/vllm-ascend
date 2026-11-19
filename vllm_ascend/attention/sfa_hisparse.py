@@ -620,13 +620,34 @@ class AscendHiSparseImpl(AscendSFAImpl):
                     self.index_group_index, host, metadata
                 )
                 selected = logical[num_decode:]
-                nonnegative = selected.clamp_min(0)
-                block_ids = nonnegative.to(torch.int64) // metadata.block_size
-                request_tables = staged_table[req_ids.to(torch.int64)]
-                physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
-                physical = physical + nonnegative % metadata.block_size
-                physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
-                prefill_output = self._attention_physical(query, query_rope, staged, physical)
+                if (
+                    not self.enable_sparse_sfa_c8
+                    and self.qk_rope_head_dim
+                    and not metadata.hisparse_for_capture
+                    and query.shape[0] == selected.shape[0] == metadata.num_actual_tokens - num_decode
+                ):
+                    # SFA can read the staged page table directly when the
+                    # indexer supplies the ordinary causal prefill lengths.
+                    # Split each page once, even when many queries select it.
+                    latent, rope = staged.unsqueeze(2).split((self.kv_lora_rank, self.qk_rope_head_dim), dim=-1)
+                    prefill_output = super()._execute_sparse_flash_attention_process(
+                        query,
+                        query_rope,
+                        (latent.contiguous(), rope.contiguous()),
+                        selected.unsqueeze(1),
+                        metadata,
+                        actual_seq_lengths_query[metadata.num_decodes :] - num_decode,
+                        actual_seq_lengths_key[metadata.num_decodes :],
+                        block_table=staged_table,
+                    )
+                else:
+                    nonnegative = selected.clamp_min(0)
+                    block_ids = nonnegative.to(torch.int64) // metadata.block_size
+                    request_tables = staged_table[req_ids.to(torch.int64)]
+                    physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
+                    physical = physical + nonnegative % metadata.block_size
+                    physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
+                    prefill_output = self._attention_physical(query, query_rope, staged, physical)
             outputs.append(prefill_output)
         if not outputs:
             return torch.zeros_like(ql_nope)
