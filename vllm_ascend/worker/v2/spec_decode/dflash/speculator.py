@@ -65,7 +65,7 @@ def prepare_dflash_inputs_factory(
         else {}
     )
 
-    def prepare_with_block_size(
+    def prepare_with_block_stride(
         input_buffers: InputBuffers,
         query_slot_mapping: torch.Tensor,
         context_positions: torch.Tensor,
@@ -84,6 +84,7 @@ def prepare_dflash_inputs_factory(
         input_seeds: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
+        block_stride: int | None,
         cp_rank: int,
         cp_size: int,
         cp_interleave: int,
@@ -96,6 +97,9 @@ def prepare_dflash_inputs_factory(
         sample_from_anchor: bool = False,
         num_reqs_override: int | None = None,
     ) -> None:
+        # vLLM #66604 adds manager-block stride after block_size. Ascend's
+        # table already contains expanded kernel-page IDs, so block_stride is
+        # unused here; keep restoring the per-table kernel block size instead.
         kernel_block_size = kernel_block_size_by_table.get(id(block_table))
         if kernel_block_size is None:
             if kernel_block_size_by_table:
@@ -135,7 +139,75 @@ def prepare_dflash_inputs_factory(
             kv_cache_block_size=kv_cache_block_size,
         )
 
-    return prepare_with_block_size
+    if vllm_version_is("0.33.0"):
+
+        def prepare_with_block_size(
+            input_buffers: InputBuffers,
+            query_slot_mapping: torch.Tensor,
+            context_positions: torch.Tensor,
+            context_slot_mapping: torch.Tensor,
+            sample_indices: torch.Tensor,
+            sample_pos: torch.Tensor,
+            sample_idx_mapping: torch.Tensor,
+            temperature: torch.Tensor,
+            seeds: torch.Tensor,
+            input_batch: InputBatch,
+            num_sampled: torch.Tensor,
+            num_rejected: torch.Tensor,
+            last_sampled: torch.Tensor,
+            next_prefill_tokens: torch.Tensor,
+            input_temperature: torch.Tensor,
+            input_seeds: torch.Tensor,
+            block_table: torch.Tensor,
+            block_size: int,
+            cp_rank: int,
+            cp_size: int,
+            cp_interleave: int,
+            parallel_drafting_token_id: int,
+            num_query_per_req: int,
+            num_speculative_steps: int,
+            max_num_reqs: int,
+            max_num_tokens: int,
+            max_model_len: int,
+            sample_from_anchor: bool = False,
+            num_reqs_override: int | None = None,
+        ) -> None:
+            prepare_with_block_stride(
+                input_buffers=input_buffers,
+                query_slot_mapping=query_slot_mapping,
+                context_positions=context_positions,
+                context_slot_mapping=context_slot_mapping,
+                sample_indices=sample_indices,
+                sample_pos=sample_pos,
+                sample_idx_mapping=sample_idx_mapping,
+                temperature=temperature,
+                seeds=seeds,
+                input_batch=input_batch,
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+                last_sampled=last_sampled,
+                next_prefill_tokens=next_prefill_tokens,
+                input_temperature=input_temperature,
+                input_seeds=input_seeds,
+                block_table=block_table,
+                block_size=block_size,
+                block_stride=None,
+                cp_rank=cp_rank,
+                cp_size=cp_size,
+                cp_interleave=cp_interleave,
+                parallel_drafting_token_id=parallel_drafting_token_id,
+                num_query_per_req=num_query_per_req,
+                num_speculative_steps=num_speculative_steps,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                max_model_len=max_model_len,
+                sample_from_anchor=sample_from_anchor,
+                num_reqs_override=num_reqs_override,
+            )
+
+        return prepare_with_block_size
+
+    return prepare_with_block_stride
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
