@@ -3,6 +3,8 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
+    ascend_910c: supported
+    ascend_950dt_8x: supported
 hardware_overrides:
   npu:
     extra_args:
@@ -41,6 +43,8 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910c: supported
+    ascend_950dt_8x: supported
 variants:
   default:
     hardware_overrides:
@@ -48,3 +52,458 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
         install:
           pip: false
+  ascend_w8a8:
+    model_id: Eco-Tech/GLM-5.3-Flash-w8a8
+    label: W8A8 (ASCEND A3)
+    precision: int8
+    vram_minimum_gb: 386
+    description: Quantized ModelScope checkpoint for the release-branch PD preset; 386 GB is a capacity estimate,
+      not measured HBM usage.
+    supported_hardware:
+    - ascend_910c
+    supported_frontends:
+    - python
+    supported_features:
+    - tool_calling
+    - reasoning
+    - spec_decoding
+    min_vllm_version: 0.32.0
+    nightly_required: true
+    extra_args:
+    - --quantization
+    - ascend
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a3
+        docker_serve_command: vllm serve
+        docker_shm_size: 100g
+        install:
+          pip: false
+  ascend_w8a8_mxfp8:
+    model_id: Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8
+    label: W8A8 MXFP8 (ASCEND 950DT)
+    precision: mxfp8
+    vram_minimum_gb: 386
+    description: Quantized ModelScope checkpoint for the release-branch PD preset; 386 GB is a capacity estimate,
+      not measured HBM usage.
+    supported_hardware:
+    - ascend_950dt_8x
+    supported_frontends:
+    - python
+    supported_features:
+    - tool_calling
+    - reasoning
+    - spec_decoding
+    min_vllm_version: 0.32.0
+    nightly_required: true
+    extra_args:
+    - --quantization
+    - ascend
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+    hardware_overrides:
+      ascend_950dt_8x:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a5
+        docker_serve_command: vllm serve
+        docker_shm_size: 1g
+        install:
+          pip: false
+# PCP is intentionally retained as a pending renderer dependency (Draft).
+presets:
+  ascend_a3_pd:
+    label: A3 W8A8 PD (v0.32.0rc, PCP pending)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants:
+    - ascend_w8a8
+    image: quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a3
+    description: Direct MooncakeConnectorV2 transfer with PCP8 Prefill. Pending PCP-aware renderer and native DP
+      device placement; not a runnable baseline.
+    select:
+      frontend: python
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: 'off'
+      features:
+        tool_calling: true
+        reasoning: true
+        spec_decoding: mtp
+    remove_args:
+    - --block-size
+    - --tokenizer-mode
+    - --data-parallel-hybrid-lb
+    env:
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+      ASCEND_GLOBAL_RESOURCE_CONFIG: $ASCEND_GLOBAL_RESOURCE_CONFIG
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        pcp: 8
+        remove_args:
+        - --compilation-config
+        args:
+        - --host
+        - 0.0.0.0
+        - --enable-eplb
+        - --seed
+        - '1024'
+        - --safetensors-load-strategy
+        - prefetch
+        - --max-num-seqs
+        - '32'
+        - --max-model-len
+        - '1048576'
+        - --max-num-batched-tokens
+        - '16384'
+        - --trust-remote-code
+        - --limit-mm-per-prompt
+        - '{"image":1}'
+        - --gpu-memory-utilization
+        - '0.92'
+        - --kv-cache-dtype
+        - int8
+        - --attention-config.indexer_kv_dtype
+        - int8
+        - --prefix-cache-retention-interval
+        - None
+        - --enforce-eager
+        - --use-replayssm
+        - --mamba-ssm-cache-dtype
+        - bfloat16
+        - --port
+        - '9081'
+        - --data-parallel-rpc-port
+        - '12325'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '1024'
+        json_args:
+          --eplb-config:
+            window_size: 3000
+            step_interval: 3000
+            num_redundant_experts: 0
+            use_async: true
+            policy: stair
+            communicator: hixl
+          --speculative-config:
+            num_speculative_tokens: 3
+            method: deepseek_mtp
+            enforce_eager: false
+          --additional-config:
+            enable_shared_expert_dp: true
+            enable_fused_mc2: 2
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            engine_id: '0'
+            kv_port: '36680'
+            kv_connector_extra_config: null
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 2
+        pp: 1
+        args:
+        - --host
+        - 0.0.0.0
+        - --seed
+        - '1024'
+        - --safetensors-load-strategy
+        - prefetch
+        - --max-num-seqs
+        - '40'
+        - --max-model-len
+        - '1048576'
+        - --max-num-batched-tokens
+        - '240'
+        - --trust-remote-code
+        - --limit-mm-per-prompt
+        - '{"image":1}'
+        - --gpu-memory-utilization
+        - '0.92'
+        - --kv-cache-dtype
+        - int8
+        - --attention-config.indexer_kv_dtype
+        - int8
+        - --use-replayssm
+        - --mamba-ssm-cache-dtype
+        - bfloat16
+        - --port
+        - '9900'
+        - --data-parallel-rpc-port
+        - '12325'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '1024'
+        json_args:
+          --compilation-config:
+            cudagraph_mode: FULL_DECODE_ONLY
+          --speculative-config:
+            num_speculative_tokens: 3
+            method: deepseek_mtp
+            enforce_eager: false
+          --additional-config:
+            multistream_overlap_shared_expert: true
+            scheduler_config:
+              recompute_scheduler_enable: true
+            enable_shared_expert_dp: true
+            enable_flashcomm1: true
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            engine_id: '1'
+            kv_port: '36580'
+            kv_connector_extra_config: null
+    source:
+      label: GLM-5.3-Flash v0.32.0rc ordinary PD tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/GLM5.3-Flash.md#glm53-flash-5-3-a3
+      key: ascend_a3_pd
+      revision: 49007fd8cbcf597d9a1a4e2ebc968c69257045ed
+    runbook: Requires PCP-aware role sizing in recipes and PCP-aware device slicing in the native vLLM external-DP
+      supervisor. The tutorial uses one process per DP rank via launch_online_dp.py; this preset describes the native
+      supervisor migration and has not been NPU-validated. Start Decode, then Prefill, wait for every backend /health,
+      then start the Ascend proxy. The proxy routes requests; it does not launch workers. Use the generated endpoint
+      and port lists together. Baseline, other routers, KV pooling and altered topologies are outside this preset.
+  ascend_950dt_pd:
+    label: 950DT W8A8 MXFP8 PD (v0.32.0rc, PCP pending)
+    hardware: ascend_950dt_8x
+    strategy: pd_cluster
+    variants:
+    - ascend_w8a8_mxfp8
+    image: quay.io/ascend/vllm-ascend:nightly-releases-v0.32.0rc-a5
+    description: Direct MooncakeConnectorV2 transfer with PCP8 Prefill. Pending PCP-aware renderer and native DP
+      device placement; not a runnable baseline.
+    select:
+      frontend: python
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: 'off'
+      features:
+        tool_calling: true
+        reasoning: true
+        spec_decoding: mtp
+    remove_args:
+    - --block-size
+    - --tokenizer-mode
+    - --data-parallel-hybrid-lb
+    env:
+      GLOO_SOCKET_IFNAME: $IFACE_NAME
+      TP_SOCKET_IFNAME: $IFACE_NAME
+      HCCL_SOCKET_IFNAME: $IFACE_NAME
+      ASCEND_LOCAL_COMM_RES: $ASCEND_LOCAL_COMM_RES
+      PYTHONHASHSEED: '0'
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        pcp: 8
+        remove_args:
+        - --compilation-config
+        args:
+        - --allowed-local-media-path
+        - /
+        - --host
+        - 0.0.0.0
+        - --seed
+        - '1024'
+        - --safetensors-load-strategy
+        - prefetch
+        - --kv-cache-dtype
+        - fp8
+        - --attention-config.indexer_kv_dtype
+        - fp8
+        - --max-num-seqs
+        - '128'
+        - --max-model-len
+        - '1048576'
+        - --max-num-batched-tokens
+        - '32768'
+        - --trust-remote-code
+        - --enable-prefix-caching
+        - --limit-mm-per-prompt
+        - '{"video": 0}'
+        - --gpu-memory-utilization
+        - '0.95'
+        - --enforce-eager
+        - --port
+        - '8000'
+        - --data-parallel-rpc-port
+        - '12325'
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '2048'
+        json_args:
+          --speculative-config:
+            num_speculative_tokens: 5
+            method: deepseek_mtp
+          --additional-config:
+            enable_cpu_binding: true
+            enable_flashcomm1: false
+            enable_fused_mc2: 0
+            enable_shared_expert_dp: false
+            multistream_overlap_shared_expert: false
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            engine_id: '0'
+            kv_port: '30000'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 1
+                pcp_size: 8
+                pp_size: null
+              decode:
+                dp_size: 8
+                tp_size: 1
+                pcp_size: 1
+                pp_size: null
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        args:
+        - --allowed-local-media-path
+        - /
+        - --host
+        - 0.0.0.0
+        - --seed
+        - '1024'
+        - --safetensors-load-strategy
+        - prefetch
+        - --kv-cache-dtype
+        - fp8
+        - --attention-config.indexer_kv_dtype
+        - fp8
+        - --max-num-seqs
+        - '60'
+        - --max-model-len
+        - '1048576'
+        - --max-num-batched-tokens
+        - '360'
+        - --trust-remote-code
+        - --enable-prefix-caching
+        - --limit-mm-per-prompt
+        - '{"video": 0}'
+        - --gpu-memory-utilization
+        - '0.95'
+        - --port
+        - '8000'
+        - --data-parallel-rpc-port
+        - '12325'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '1024'
+        json_args:
+          --compilation-config:
+            cudagraph_mode: FULL_DECODE_ONLY
+          --speculative-config:
+            num_speculative_tokens: 5
+            method: deepseek_mtp
+          --additional-config:
+            enable_fused_mc2: 2
+            multistream_overlap_shared_expert: true
+            scheduler_config:
+              recompute_scheduler_enable: true
+            ascend_compilation_config:
+              enable_npugraph_ex: true
+              enable_static_kernel: false
+              enable_super_kernel: false
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            engine_id: '1'
+            kv_port: '30800'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 1
+                pcp_size: 8
+                pp_size: null
+              decode:
+                dp_size: 8
+                tp_size: 1
+                pcp_size: 1
+                pp_size: null
+              use_ascend_direct: true
+    source:
+      label: GLM-5.3-Flash v0.32.0rc ordinary PD tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/GLM5.3-Flash.md#53-1p1d-pd-disaggregated-deployment
+      key: ascend_950dt_pd
+      revision: 49007fd8cbcf597d9a1a4e2ebc968c69257045ed
+    runbook: Requires PCP-aware role sizing in recipes and PCP-aware device slicing in the native vLLM external-DP
+      supervisor. The tutorial uses one process per DP rank via launch_online_dp.py; this preset describes the native
+      supervisor migration and has not been NPU-validated. Start Decode, then Prefill, wait for every backend /health,
+      then start the Ascend proxy. The proxy routes requests; it does not launch workers. Use the generated endpoint
+      and port lists together. Baseline, other routers, KV pooling and altered topologies are outside this preset.
+guide_sections:
+  ascend_pd: |
+    ## Ascend release-branch PD reference
+
+    The A3 and 950DT presets migrate ordinary PD from the
+    [v0.32.0rc branch tutorial](https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/GLM5.3-Flash.md#53-1p1d-pd-disaggregated-deployment).
+    They are reference designs, not production recommendations. PCP8 requires
+    renderer support and PCP-aware native external-DP device placement before
+    these presets can be rendered and used. Do not replace PCP8 with TP8 or drop
+    PCP to make validation pass. The original tutorial launcher remains the
+    reference until those dependencies are available.
+
+    | Preset | Checkpoint | Physical topology |
+    | --- | --- | --- |
+    | A3 W8A8 PD | [Eco-Tech/GLM-5.3-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8) | Two 16-device, 64 GB/device A3 nodes: P DP2/TP1/PCP8, D DP8/TP2 |
+    | 950DT W8A8 MXFP8 PD | [Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8) | Two 8-device, 96 GB/device 950DT nodes: P DP1/TP1/PCP8, D DP8/TP1 |
+
+    The two weight formats are not interchangeable. Both configurations use
+    MRV2, 1M context and MooncakeConnectorV2 without KV pooling. A3 uses INT8
+    main/indexer KV caches, ReplaySSM, BF16 SSM state and MTP3; 950DT uses FP8
+    main/indexer KV caches and MTP5. Cache quantization needs no separate C8
+    checkpoint. The 386 GB weight budget is the base model's 321B x 1 byte x 1.2
+    capacity estimate; it does not establish KV capacity or measured peak memory.
+
+    Use matching release-branch images on both nodes: the source tutorial names
+    `nightly-releases-v0.32.0rc-a3` and `nightly-releases-v0.32.0rc-a5`.
+    These are mutable tags, not immutable release validation records. Record the
+    resolved image digest and checkpoint revision for a deployment. ModelScope
+    download is enabled for the quantized IDs; predownload and mount the exact
+    checkpoint if the serving nodes cannot access ModelScope.
+
+    Follow the linked tutorial's container prerequisites: A3 uses 100 GB shared
+    memory and HCCS device communication with device RoCE ports down; 950DT uses
+    1 GB shared memory and its URMA/HIXL devices and resource-file mounts.
+    Before using the commands, export `ASCEND_GLOBAL_RESOURCE_CONFIG` on A3
+    with the tutorial's `{"comm_resource_config.protocol_desc":["hccs:device"]}`
+    value, or `ASCEND_LOCAL_COMM_RES` on 950DT with `{"version":"1.3"}`.
+    These variables must be set in every role's shell (and in the invoking
+    host shell for Docker). The preset references the prepared variables so
+    shell copying preserves the JSON quotes; resolve them when using argv
+    exports without a shell, just like the node-IP and interface placeholders.
+    The generic Docker command does not supply all of the 950DT-specific mounts;
+    prepare its container using the source Installation section before running
+    the generated in-container commands. Set each node's IP and network interface
+    and permit the API, DP RPC, HCCL and Mooncake ports.
+
+    Native vLLM supervises external-DP workers; the Ascend proxy only routes
+    requests. The expected endpoint counts are P2/D8 on A3 and P1/D8 on 950DT.
+    Check every endpoint before starting the proxy. On 950DT, use a separate
+    proxy host because the backend and proxy both use port 8000. Client requests
+    must use the generated proxy endpoint and quantized model ID; the tutorial's
+    `glm` alias is intentionally omitted so Serve, Verify and Bench stay aligned.
+
+    Only the matching hardware, quantized variant and named PD preset describe
+    these scenarios. Baseline and inherited variants/features remain reachable
+    under the current renderer and are not qualified by this migration. No
+    NPU smoke, accuracy or performance measurement was rerun for the native
+    supervisor adaptation; the tutorial's older TP8 accuracy results are not
+    evidence for this PCP8 deployment.
