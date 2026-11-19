@@ -69,5 +69,5 @@ and graph replay. These cases target direct-position mode and do not validate
 every shared caller.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope_positions.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope.py
 ```

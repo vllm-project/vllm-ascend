@@ -76,7 +76,7 @@ reads current position contents, not captured Python values.
 
 ## Test Cases
 
-[test_qsa_rmsnorm_mrope_positions.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_positions.py)
+[test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py)
 compares direct-position lookup with legacy gathered-cache inputs using
 `rtol=0, atol=0`. Cases cover 0/1/32/129 tokens, 1/3 position axes,
 non-contiguous query rows, strided positions, position clamping and NPUGraph
@@ -84,5 +84,5 @@ replay after updating positions. These tests select A3 only; execution on the
 final PR revision and compatibility on other applicable devices remain pending.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope_positions.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py
 ```
