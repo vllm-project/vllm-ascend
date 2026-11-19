@@ -19,18 +19,12 @@
 Unlike a ModelSlim / LLM-Compressor checkpoint, an online-quantized layer has no
 ``weight_scale`` in the checkpoint at all: only the full-precision weight
 exists, and the scale has to be derived from it while the weights are being
-loaded. The schemes here therefore differ from their offline counterparts in
-exactly three places:
-
-* ``get_weight`` allocates the full-precision weight (on the meta device when
-  vLLM's layerwise loading is enabled) instead of a pre-quantized one.
-* ``get_perchannel_param`` / ``get_dynamic_quant_param`` return nothing: the
-  scale and offset parameters do not exist until they are computed, which keeps
-  the layerwise "all weights loaded" accounting correct (see
-  ``vllm.model_executor.model_loader.reload.layerwise``).
-* ``process_weights_after_loading`` quantizes the loaded weight, installs the
-  scale/offset parameters, and then runs the offline scheme's layout pass so
-  the runtime tensors are byte-identical to a checkpoint-quantized layer.
+loaded. vLLM owns that staging -- ``OnlineLinearBase`` / ``OnlineMoEMethodBase``
+allocate the checkpoint-dtype weight on the meta device and wrap the loaders --
+so the schemes here add exactly one thing: ``process_weights_after_loading``,
+which quantizes the loaded weight, installs the scale/offset parameters, and
+then runs the offline scheme's layout pass so the runtime tensors are
+byte-identical to a checkpoint-quantized layer.
 
 Everything from that point on -- kernel dispatch, gmm hooks, EPLB views, MC2
 weights -- is inherited unchanged from the offline scheme.
@@ -43,8 +37,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.utils import replace_parameter
 
-import vllm_ascend.envs as ascend_envs
-from vllm_ascend.quantization.methods.registry import register_scheme
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
@@ -52,17 +44,10 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 __all__ = [
-    "ONLINE_INT8_W8A8_SCHEME",
     "AscendOnlineInt8W8A8FusedMoEMethod",
     "AscendOnlineInt8W8A8LinearMethod",
-    "online_quant_layerwise_enabled",
     "quantize_last_dim_to_int8",
 ]
-
-# Scheme name registered in the Ascend scheme registry. Distinct from
-# "W8A8_DYNAMIC" because the weight source differs, even though the runtime
-# layout and kernels are shared.
-ONLINE_INT8_W8A8_SCHEME = "ONLINE_INT8_W8A8_DYNAMIC"
 
 # Symmetric INT8: the representable magnitudes are -127..127 and the dequant
 # scale is ``amax / 127``, matching ModelSlim and llm-compressor's
@@ -75,24 +60,6 @@ _QUANT_CHUNK_ELEMS = 32 * 1024 * 1024
 # Same contract as upstream online quantization: a layer's process pass is
 # idempotent and may be re-entered by vLLM's post-load hook.
 _PROCESSED_FLAG = "_already_called_process_weights_after_loading"
-
-
-def online_quant_layerwise_enabled() -> bool:
-    """Whether full-precision staging weights are created on the meta device."""
-    return bool(ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE)
-
-
-def _new_weight_buffer(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-    """Allocate a full-precision staging weight for an online-quantized layer.
-
-    With layerwise loading the buffer lives on the meta device and is
-    materialized one layer at a time, so only a single layer's checkpoint-dtype
-    weight is ever resident. Otherwise it is allocated on the default device,
-    which keeps the classic "load everything, then quantize" behaviour.
-    """
-    if online_quant_layerwise_enabled():
-        return torch.empty(shape, dtype=dtype, device="meta")
-    return torch.empty(shape, dtype=dtype)
 
 
 def _reduce_amax(amax: torch.Tensor, reduce_group) -> torch.Tensor:
@@ -249,7 +216,6 @@ def _params_on(device: torch.device, params: dict[str, torch.Tensor]) -> dict[st
     return {name: tensor.to(device) for name, tensor in params.items()}
 
 
-@register_scheme(ONLINE_INT8_W8A8_SCHEME, "linear")
 class AscendOnlineInt8W8A8LinearMethod(AscendW8A8DynamicLinearMethod):
     """Load bf16/fp16 weights and quantize them to INT8 W8A8 while loading.
 
@@ -258,18 +224,15 @@ class AscendOnlineInt8W8A8LinearMethod(AscendW8A8DynamicLinearMethod):
     indistinguishable from one loaded from a ModelSlim W8A8_DYNAMIC checkpoint.
     """
 
-    # Online quantized weights are produced after loading, so the gather/scatter
-    # based weight-switch path is not wired up for them yet.
-    supports_weight_switch = False
-
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict:
-        return {"weight": _new_weight_buffer((output_size, input_size), params_dtype)}
-
-    def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict:
-        # Derived from the loaded weight in ``process_weights_after_loading``.
-        # Creating them here would break the layerwise "layer is fully loaded"
-        # accounting, because the checkpoint never contains them.
-        return {}
+        # vLLM's OnlineLinearBase.create_weights allocates the checkpoint-dtype
+        # staging weight; the scheme only adds the post-load quantization. Fail
+        # loudly if an offline wrapper tries to stage a pre-quantized weight here.
+        raise NotImplementedError(
+            f"{type(self).__name__} creates no weights: vLLM's OnlineLinearBase stages the "
+            "checkpoint-dtype weight and this scheme only installs the INT8 parameters in "
+            "process_weights_after_loading()."
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, _PROCESSED_FLAG, False):
@@ -346,7 +309,6 @@ def _zero_expert_padding(moe_config, layer: torch.nn.Module) -> None:
         w2_weight[:, :, intermediate_size:] = 0
 
 
-@register_scheme(ONLINE_INT8_W8A8_SCHEME, "moe")
 class AscendOnlineInt8W8A8FusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     """Load bf16/fp16 expert weights and quantize them to INT8 W8A8 in place.
 
@@ -358,20 +320,21 @@ class AscendOnlineInt8W8A8FusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict:
-        # ``2 * intermediate_size_per_partition`` mirrors the fused gate/up
-        # layout produced by the offline scheme this class inherits from.
-        return {
-            "w13_weight": _new_weight_buffer(
-                (num_experts, 2 * intermediate_size_per_partition, hidden_sizes), params_dtype
-            ),
-            "w2_weight": _new_weight_buffer((num_experts, hidden_sizes, intermediate_size_per_partition), params_dtype),
-        }
+        # vLLM's OnlineMoEMethodBase.create_weights allocates the checkpoint-dtype
+        # staging weights; the scheme only adds the post-load quantization.
+        raise NotImplementedError(
+            f"{type(self).__name__} creates no weights: vLLM's OnlineMoEMethodBase stages the "
+            "checkpoint-dtype expert weights and this scheme only installs the INT8 parameters in "
+            "process_weights_after_loading()."
+        )
 
     def get_dynamic_quant_param(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict:
-        # Derived from the loaded weights in ``process_weights_after_loading``.
-        return {}
+        raise NotImplementedError(
+            f"{type(self).__name__} allocates no parameters up front: the INT8 expert scales are "
+            "derived from the loaded weights in process_weights_after_loading()."
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, _PROCESSED_FLAG, False):

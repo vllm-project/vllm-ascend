@@ -46,7 +46,6 @@ from .base import (
 )
 from .kv_cache import AscendFAQuantAttentionMethod
 from .online import (
-    ONLINE_INT8_W8A8_SCHEME,
     AscendOnlineInt8W8A8FusedMoEMethod,
     AscendOnlineInt8W8A8LinearMethod,
 )
@@ -137,7 +136,6 @@ __all__ = [
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
     "AscendFp8BlockLinearMethod",
     "AscendFp8BlockFusedMoEMethod",
-    "ONLINE_INT8_W8A8_SCHEME",
     "AscendOnlineInt8W8A8LinearMethod",
     "AscendOnlineInt8W8A8FusedMoEMethod",
 ]

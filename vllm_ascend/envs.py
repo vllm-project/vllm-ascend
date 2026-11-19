@@ -92,15 +92,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # Whether online quantization creates its bf16 staging weights on the meta
-    # device and materializes them layer by layer through vLLM's layerwise
-    # processing. Enabled by default: only one layer's full-precision weight is
-    # resident at a time, which is the point of quantizing at load time. Set to
-    # 0 to allocate the checkpoint dtype directly, which loads the whole bf16
-    # model before quantizing but does not depend on the layerwise machinery.
-    "VLLM_ASCEND_ONLINE_QUANT_LAYERWISE": lambda: (
-        os.getenv("VLLM_ASCEND_ONLINE_QUANT_LAYERWISE", "1").lower() not in ("0", "false")
-    ),
 }
 
 # end-env-vars-definition

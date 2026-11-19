@@ -17,17 +17,13 @@
 """Ascend online (load-time) quantization schemes."""
 
 from .int8 import (
-    ONLINE_INT8_W8A8_SCHEME,
     AscendOnlineInt8W8A8FusedMoEMethod,
     AscendOnlineInt8W8A8LinearMethod,
-    online_quant_layerwise_enabled,
     quantize_last_dim_to_int8,
 )
 
 __all__ = [
-    "ONLINE_INT8_W8A8_SCHEME",
     "AscendOnlineInt8W8A8FusedMoEMethod",
     "AscendOnlineInt8W8A8LinearMethod",
-    "online_quant_layerwise_enabled",
     "quantize_last_dim_to_int8",
 ]

@@ -149,30 +149,11 @@ class TestOnlineInt8LinearMethod(TestBase):
         )
         return layer
 
-    def test_get_weight_is_meta_when_layerwise_enabled(self):
-        scheme = AscendOnlineInt8W8A8LinearMethod()
-        with patch(f"{MODULE}.ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE", True):
-            params = scheme.get_weight(64, 32, torch.bfloat16)
-
-        self.assertEqual(list(params), ["weight"])
-        self.assertTrue(params["weight"].is_meta)
-        self.assertEqual(tuple(params["weight"].shape), (32, 64))
-        self.assertEqual(params["weight"].dtype, torch.bfloat16)
-
-    def test_get_weight_is_materialized_when_layerwise_disabled(self):
-        scheme = AscendOnlineInt8W8A8LinearMethod()
-        with patch(f"{MODULE}.ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE", False):
-            params = scheme.get_weight(64, 32, torch.bfloat16)
-
-        self.assertFalse(params["weight"].is_meta)
-
-    def test_no_scale_parameters_are_created_up_front(self):
-        """Scale parameters must be absent while loading or the layerwise
-        "is this layer fully loaded" accounting never completes."""
-        scheme = AscendOnlineInt8W8A8LinearMethod()
-        self.assertEqual(scheme.get_perchannel_param(32, torch.bfloat16), {})
-        self.assertEqual(scheme.get_pertensor_param(torch.bfloat16), {})
-        self.assertEqual(scheme.get_pergroup_param(64, 32, torch.bfloat16), {})
+    def test_weight_staging_is_owned_by_vllm(self):
+        """vLLM's OnlineLinearBase.create_weights stages the checkpoint-dtype
+        weight, so the offline create_weights path must not stage one here."""
+        with self.assertRaises(NotImplementedError):
+            AscendOnlineInt8W8A8LinearMethod().get_weight(64, 32, torch.bfloat16)
 
     def test_process_weights_installs_scale_and_delegates_the_layout(self):
         scheme = AscendOnlineInt8W8A8LinearMethod()
@@ -221,16 +202,14 @@ class TestOnlineInt8MoeMethod(TestBase):
         # exist in a unit-test process.
         return AscendOnlineInt8W8A8FusedMoEMethod.__new__(AscendOnlineInt8W8A8FusedMoEMethod)
 
-    def test_no_scale_parameters_are_created_up_front(self):
-        self.assertEqual(self._scheme().get_dynamic_quant_param(2, 16, 32, torch.bfloat16), {})
+    def test_weight_staging_is_owned_by_vllm(self):
+        """vLLM's OnlineMoEMethodBase.create_weights stages the expert weights."""
+        with self.assertRaises(NotImplementedError):
+            self._scheme().get_weight(4, 16, 32, torch.bfloat16)
 
-    def test_get_weight_uses_the_fused_gate_up_layout(self):
-        with patch(f"{MODULE}.ascend_envs.VLLM_ASCEND_ONLINE_QUANT_LAYERWISE", True):
-            params = self._scheme().get_weight(4, 16, 32, torch.bfloat16)
-
-        self.assertEqual(tuple(params["w13_weight"].shape), (4, 32, 32))
-        self.assertEqual(tuple(params["w2_weight"].shape), (4, 32, 16))
-        self.assertTrue(params["w13_weight"].is_meta)
+    def test_scale_parameters_are_derived_after_loading(self):
+        with self.assertRaises(NotImplementedError):
+            self._scheme().get_dynamic_quant_param(2, 16, 32, torch.bfloat16)
 
     def test_process_weights_quantizes_both_projections_and_delegates_the_layout(self):
         scheme = self._scheme()

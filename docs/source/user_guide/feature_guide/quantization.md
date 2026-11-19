@@ -163,11 +163,10 @@ vllm serve /path/to/Qwen3-30B-A3B --quantization online \
 
 Notes:
 
-- Layers are quantized one at a time. By default each layer's full-precision
-  weight is staged on the meta device and materialized just before it is
-  quantized, so the peak weight footprint is roughly one BF16 layer plus the
-  already-quantized INT8 prefix. Set `VLLM_ASCEND_ONLINE_QUANT_LAYERWISE=0` to
-  fall back to materializing the whole checkpoint-dtype model first.
+- Layers are quantized one at a time. Each layer's full-precision weight is
+  staged on the meta device by vLLM's online quantization base and materialized
+  just before it is quantized, so the peak weight footprint is roughly one BF16
+  layer plus the already-quantized INT8 prefix.
 - FP8, MXFP8 and MXFP4 online recipes are rejected with an explanatory error:
   they need an FP8 matmul path that Ascend A2/A3 does not provide.
 - Reloading weights into an online-quantized model is not supported yet.
