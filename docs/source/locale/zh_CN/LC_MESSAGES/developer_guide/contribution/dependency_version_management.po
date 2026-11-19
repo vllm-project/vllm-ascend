@@ -102,11 +102,11 @@ msgstr ""
 " wheel，从不写入 `requirements.txt` |"
 
 msgid ""
-"| cannbotdsl / cannbot-arena-net-ops | 0.8.2 / 0.8.2 | Image build "
+"| cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | Image build "
 "—<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) "
 "<https://mirrors.huaweicloud.com/ascend/repos/pypi>, aarch64 only |"
 msgstr ""
-"| cannbotdsl / cannbot-arena-net-ops | 0.8.2 / 0.8.2 | 镜像构建 "
+"| cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | 镜像构建 "
 "—<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend "
 "镜像源（稳定版）<https://mirrors.huaweicloud.com/ascend/repos/pypi>，仅 aarch64 |"
 
