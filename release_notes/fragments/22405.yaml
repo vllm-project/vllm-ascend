@@ -1,0 +1,7 @@
+pr: 22405
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect outputs from Ling routed experts on Ascend when per-layer
+      SwiGLU limits are configured. Fused MC2, including CANN MegaMoe, now falls
+      back to regular MoE when the target model or MTP draft uses these limits.

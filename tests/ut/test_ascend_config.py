@@ -1980,14 +1980,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_falls_back_for_per_layer_swiglu_limit(self, mock_fix, mock_find_spec, mock_megamoe_config):
-        # The local dispatch_ffn_combine kernel clamps before SiLU with one shared
-        # limit, so a target or draft model with per-layer limits takes the regular
-        # path and keeps the overlap. The external MegaMoe keeps its own path.
+        # A target or draft model with per-layer limits takes the regular path
+        # and keeps the requested overlap, including when MegaMoe is available.
         for fused_mc2, target_limits, draft_limits, expected in (
             (1, [0, 4], None, (0, True, False)),
             (1, [0, None], [0, 4], (0, True, False)),
             (1, [0, None], None, (1, False, False)),
-            (2, [0, 4], None, (1, False, True)),
+            (2, [0, 4], None, (0, True, False)),
+            (2, [0, None], [0, 4], (0, True, False)),
+            (2, [0, None], None, (1, False, True)),
+            (3, [0, 4], None, (0, True, False)),
         ):
             with self.subTest(fused_mc2=fused_mc2, target_limits=target_limits, draft_limits=draft_limits):
                 clear_ascend_config()
@@ -2002,10 +2004,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
                         draft_model_config=SimpleNamespace(hf_text_config=draft_text_config),
                     )
 
-                config = init_ascend_config(vc)
+                device_type = AscendDeviceType.A5 if fused_mc2 == 3 else AscendDeviceType.A3
+                with patch(
+                    "vllm_ascend.ascend_config.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ):
+                    config = init_ascend_config(vc)
 
                 actual = (config.enable_fused_mc2, config.multistream_overlap_shared_expert, is_mega_moe_supported())
                 self.assertEqual(actual, expected)
+                self.assertFalse(config.megamoe_shared_expert_fusion)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
