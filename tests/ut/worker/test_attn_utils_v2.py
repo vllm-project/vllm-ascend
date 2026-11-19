@@ -56,6 +56,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
@@ -1224,7 +1225,7 @@ def test_k3_unified_allocator_preserves_runtime_views(
     page_bytes = mla_spec.page_size_bytes
     kda_spec = MambaSpec(
         block_size=mla_spec.block_size,
-        shapes=((4,), (2,)),
+        shapes=((2, 2), (2,)),
         dtypes=(torch.bfloat16, torch.float32),
         page_size_padded=page_bytes,
     )
@@ -1250,8 +1251,7 @@ def test_k3_unified_allocator_preserves_runtime_views(
         ],
     )
     layers = dict.fromkeys(mla_names, SimpleNamespace(get_attn_backend=lambda: AscendMLABackend))
-    kda_backend = SimpleNamespace(full_cls_name=lambda: "KdaBackend")
-    layers[kda_name] = SimpleNamespace(get_attn_backend=lambda: kda_backend)
+    layers[kda_name] = SimpleNamespace(get_attn_backend=lambda: KimiKDAHostMetadataBackend)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")),
         kv_transfer_config=None,
@@ -1293,9 +1293,10 @@ def test_k3_unified_allocator_preserves_runtime_views(
     for tensor, shape, dtype in zip(states, kda_spec.shapes, kda_spec.dtypes, strict=True):
         assert tensor.shape == (num_blocks, *shape)
         assert tensor.dtype == dtype
-        assert tensor.stride() == (block_stride // tensor.element_size(), 1)
+        assert tensor.stride(0) * tensor.element_size() == block_stride
+        assert tensor[0].is_contiguous()
         assert tensor.storage_offset() * tensor.element_size() == state_offset
-        state_offset += shape[0] * tensor.element_size()
+        state_offset += tensor[0].nbytes
         backing_addresses.add(tensor.untyped_storage().data_ptr())
     assert len(backing_addresses) == 1
 

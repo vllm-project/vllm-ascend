@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.attention.utils import (
+    KVCacheRuntimeComponents,
     KVCacheRuntimeShapes,
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -1778,6 +1779,15 @@ class DeepseekV41CacheBackend(AttentionBackend):
     ) -> KVCacheRuntimeShapes:
         """Expose NHD data/scale pages, including packed A5 byte widths."""
         return AscendDSABackend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+
+    @staticmethod
+    def get_runtime_components(
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeComponents:
+        return AscendDSABackend.get_runtime_components(spec, num_blocks, layout, kernel_block_size)
 
     @staticmethod
     def format_runtime_views(

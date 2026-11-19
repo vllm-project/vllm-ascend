@@ -50,9 +50,11 @@ from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeComponents,
     KVCacheRuntimeShapes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
+    attention_runtime_components,
     enabling_mlapo,
     is_dcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -164,6 +166,17 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_runtime_dtypes(spec: AscendMLAAttentionSpec) -> tuple[torch.dtype, ...]:
         return (spec.dtype,) if spec.mla_cache_layout == "token_interleaved" else (spec.dtype, spec.dtype)
+
+    @classmethod
+    def get_runtime_components(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeComponents:
+        shapes = cls.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+        return attention_runtime_components(shapes, cls.get_runtime_dtypes(spec))
 
     @staticmethod
     def format_runtime_views(

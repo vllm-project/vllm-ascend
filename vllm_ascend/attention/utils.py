@@ -1,5 +1,5 @@
 import enum
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
@@ -53,6 +53,17 @@ MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 RuntimeComponentShape = tuple[int, int, int, int]
 KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+KVCacheRuntimeComponents = tuple[tuple[tuple[int, ...], torch.dtype], ...]
+
+
+def attention_runtime_components(
+    shapes: KVCacheRuntimeShapes, dtypes: Sequence[torch.dtype]
+) -> KVCacheRuntimeComponents:
+    # Convert attention byte shapes from BHNC to element shapes in BNHC.
+    return tuple(
+        ((blocks, tokens, heads, content_bytes // get_dtype_size(dtype)), dtype)
+        for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True)
+    )
 
 
 def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

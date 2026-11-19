@@ -1481,29 +1481,17 @@ def create_kv_cache_runtime_views(
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             raw_cache = backing[start : start + span]
             block_stride = descriptor.block_stride
-            if isinstance(spec, MambaSpec):
-                # KDA states are indexed by manager block.
-                caches[name] = create_cache_component_views(
-                    raw_cache, [(num_blocks, *shape) for shape in spec.shapes], spec.dtypes, block_stride
-                )
-                continue
-
-            shapes = group.backend.get_runtime_shapes(
+            component_specs = group.backend.get_runtime_components(
                 spec,
                 num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            get_runtime_dtypes = getattr(group.backend, "get_runtime_dtypes", None)
-            if get_runtime_dtypes is not None:
-                dtypes = get_runtime_dtypes(spec)
-            else:
-                dtypes = (spec.dtype,)
-                if getattr(spec, "scale_dim", 0):
-                    dtypes += (spec.scale_dtype,)
+            cache_shapes = [shape for shape, _ in component_specs]
+            dtypes = [dtype for _, dtype in component_specs]
 
-            if shapes and shapes[0][0] != num_blocks:
-                runtime_blocks = shapes[0][0]
+            if cache_shapes and cache_shapes[0][0] != num_blocks:
+                runtime_blocks = cache_shapes[0][0]
                 if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
                     raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
                 kernel_blocks_per_manager = runtime_blocks // num_blocks
@@ -1512,12 +1500,6 @@ def create_kv_cache_runtime_views(
                 if block_stride % kernel_blocks_per_manager:
                     raise ValueError("Physical pages must split into whole kernel slots.")
                 block_stride //= kernel_blocks_per_manager
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
-            cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True)
-            ]
             components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
             format_views = getattr(group.backend, "format_runtime_views", None)
             caches[name] = format_views(spec, components) if format_views is not None else components

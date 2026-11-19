@@ -39,7 +39,9 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeComponents,
     KVCacheRuntimeShapes,
+    attention_runtime_components,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -342,6 +344,18 @@ class AscendDSABackend(AttentionBackend):
         if getattr(spec, "scale_dim", 0):
             shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
         return tuple(shapes)
+
+    @classmethod
+    def get_runtime_components(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeComponents:
+        shapes = cls.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+        dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,)
+        return attention_runtime_components(shapes, dtypes)
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
