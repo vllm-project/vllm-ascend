@@ -1169,14 +1169,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
-                # DSA retains an independent G projection. Newer upstream
-                # loaders otherwise map it to shard 2 of the two-shard Q/KV
-                # projection. Match registered parameters, including scales
-                # and offsets, and preserve their own TP/quantization loaders.
-                # Missing PP layers and fused MLA/KDA gates stay upstream.
-                if name in params_dict and any(
-                    token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.", ".f_b_proj.")
-                ):
+                # Load standalone G, B and F_a before upstream can map them into packed projections.
+                # Upstream loads standalone F_b by name. Only fused F_b needs the mapping below.
+                if name in params_dict and any(token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.")):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     kwargs = args[2] if len(args) > 2 else {}
