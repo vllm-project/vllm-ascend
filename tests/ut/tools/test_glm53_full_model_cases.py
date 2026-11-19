@@ -6,7 +6,6 @@ import base64
 import json
 import math
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -95,7 +94,7 @@ class FullModelConfigTests(unittest.TestCase):
                 benchmarks = {
                     name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
                 }
-                expected_counts = {"COMBINED": 8}
+                expected_counts = {"COMBINED": 6}
                 self.assertEqual(len(benchmarks), 24 if a5 else expected_counts[path.stem.rsplit("-", 1)[-1]])
                 for name, bench in benchmarks.items():
                     prefill_case = name.startswith("prefill_")
@@ -145,7 +144,7 @@ class FullModelConfigTests(unittest.TestCase):
                 elif name.startswith("decode_") and not name.endswith("_warmup"):
                     self.assertEqual(names[index - 1], name + "_warmup")
                     self.assertEqual(names[index - 2], "reset_before_" + name)
-                    for key in ("dataset_path_local", "max_out_len", "request_rate"):
+                    for key in ("dataset_path", "max_out_len", "request_rate"):
                         self.assertEqual(cases[index - 1][key], case[key])
 
     def test_matrix_entries_resolve_to_correct_hardware(self):
@@ -237,7 +236,7 @@ class FullModelConfigTests(unittest.TestCase):
                     self.assertGreaterEqual(tokens, seqs)
                     continue
                 self.assertGreaterEqual(seqs, balanced_peak)
-                self.assertLessEqual(seqs, 2 * balanced_peak)
+                self.assertEqual(seqs, 32)  # Retain the validated serving budget when removing D50.
                 spec = json.loads(args[args.index("--speculative-config") + 1])
                 query_length = spec["num_speculative_tokens"] + 1
                 compilation = json.loads(args[args.index("--compilation-config") + 1])
@@ -247,7 +246,7 @@ class FullModelConfigTests(unittest.TestCase):
                 self.assertTrue(all(size % query_length == 0 for size in sizes))
                 self.assertEqual(max(sizes), seqs * query_length)
                 self.assertEqual(compilation["max_cudagraph_capture_size"], max(sizes))
-                for clients in (7, 32, 40, 80, 340):
+                for clients in (7, 32, 40, 80):
                     self.assertGreaterEqual(max(sizes), math.ceil(clients / global_dp) * query_length)
                 self.assertEqual(sizes, [6, 12, 30, 48, 132, 192])
 
@@ -282,7 +281,7 @@ class FullModelConfigTests(unittest.TestCase):
     def test_decode_profiles_and_uncalibrated_gates(self):
         config = yaml.safe_load(next(CONFIG_DIR.glob("*.yaml")).read_text(encoding="utf-8"))
         benches = config["benchmarks"]
-        for latency, clients, requests in ((20, 80, 320), (50, 340, 1360)):
+        for latency, clients, requests in ((20, 80, 320),):
             name = f"decode_perf_16k_{latency}ms"
             case = benches[name]
             self.assertEqual((case["batch_size"], case["num_prompts"]), (clients, requests))
@@ -312,27 +311,19 @@ class FullModelConfigTests(unittest.TestCase):
                 self.assertIn("192.0.2.3:7100/reset_prefix_cache", benchmark["cmds"][0])
                 self.assertIn("json.load(sys.stdin).get('success') is True", benchmark["cmds"][0])
 
-    def test_shared_prefix_preparation_preserves_one_prompt(self):
+    def test_decode_uses_existing_shared_prefix_dataset(self):
         config = yaml.safe_load(next(CONFIG_DIR.glob("*.yaml")).read_text(encoding="utf-8"))
-        command = config["benchmarks"]["prepare_shared_prefix"]["cmds"][0]
-        tokens = shlex.split(command)
-        self.assertEqual(tokens[:2], ["python", "-c"])
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "source"
-            target = Path(temp) / "target"
-            source.mkdir()
-            prompt = json.dumps({"question": "first prompt", "answer": "answer"}) + "\n"
-            (source / "test.jsonl").write_text(prompt + '{"question":"unused"}\n', encoding="utf-8")
-            setup = (
-                "import sys, types; "
-                "module=types.ModuleType('tools.aisbench'); "
-                f"module.maybe_download_from_modelscope=lambda *a, **k: {str(source)!r}; "
-                "sys.modules['tools.aisbench']=module; "
+        benches = config["benchmarks"]
+        self.assertNotIn("prepare_shared_prefix", benches)
+        self.assertFalse(any("50ms" in name for name in benches))
+        self.assertEqual(sum(name.startswith("reset_before_") for name in benches), 4)
+        for name in ("decode_perf_16k_20ms_warmup", "decode_perf_16k_20ms"):
+            self.assertEqual(
+                benches[name]["dataset_path"],
+                "vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8",
             )
-            script = tokens[2].replace("/tmp/glm53_decode_prefix100", target.as_posix())
-            subprocess.run([sys.executable, "-c", setup + script], check=True, capture_output=True)
-            self.assertEqual((target / "test.jsonl").read_text(encoding="utf-8"), prompt * 1360)
-            self.assertEqual((target / "train.jsonl").read_text(encoding="utf-8"), "")
+            self.assertNotIn("dataset_path_local", benches[name])
+            self.assertLessEqual(benches[name]["num_prompts"], 1000)
 
 
 if __name__ == "__main__":

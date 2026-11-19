@@ -2,7 +2,7 @@
 
 This is a **hardware calibration candidate**, not a validated replacement for
 run43574755884. One full-checkpoint deployment on four A3 hosts (16 logical
-NPUs each) runs P, PD E2E, two Decode latency profiles, and GPQA once.
+NPUs each) runs P, PD E2E, the Decode20ms profile, and GPQA once.
 The previous concurrency16 throughput baselines are deliberately removed.
 
 ## Serving and capture budgets
@@ -13,7 +13,7 @@ MooncakeConnectorV2, P eager MTP1 and D MTP5 with eager draft.
 This redesign retains the existing serving recipe, not a v0.30.0 port.
 
 P uses maxseq64/batched16384. P can queue incoming requests; it does not
-need to schedule all340 Decode clients simultaneously. Check that cached
+need to schedule all80 Decode clients simultaneously. Check that cached
 prefill and KV transfer do not bottleneck Decode measurements.
 D uses maxseq32/batched192 with Static/Super Kernel and npugraph_ex.
 For concurrency C, the sizing average is ceil(C/16) sequences, with six
@@ -25,15 +25,16 @@ query tokens per sequence (one target plus five draft tokens).
 | 32 | 2 | 12 |
 | 40 | 3 | 30 (padded from 18) |
 | 80 | 5 | 30 |
-| 340 | 22 | 132 |
 
 Capture candidates are [6,12,30,48,132,192], maximum192.
-The32-sequence budget leaves skew margin above22; this does not guarantee
+The32-sequence budget and six capture tiers are retained from the previous
+configuration while removing D50; they are not retuned for this smaller load.
+The sizing average of five sequences at concurrency80 does not guarantee
 uniform routing. Intermediate loads can pad to the next capture size.
 Verify actual runner capture sizes, padding, per-rank running/waiting and
 startup duration on hardware. Do not equate a CPU loader test with capture
 success or claim that fewer configured sizes guarantees faster startup.
-The six tiers retain the two formal Decode sizing points and skew margin.
+The six tiers retain capture headroom for uneven routing.
 Intermediate loads, especially between48 and132, incur padding and must be
 checked for performance impact. Run44286450331 completed only3/11 captures
 in38 minutes before the old3600-second readiness budget expired.
@@ -46,7 +47,7 @@ Keep max-model-len131072 for GPQA output65536 and its original prompts.
 
 ## Workloads and boundaries
 
-All performance input comes from
+P and PD performance input comes from
 `vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8`.
 Check raw token lengths; the dataset name is a nominal16K profile.
 
@@ -55,20 +56,24 @@ Check raw token lengths; the dataset name is a nominal16K profile.
 | Prefill | 28 | 7 | 1 | 0 | 14/7 |
 | PD E2E | 160 | 40 | 1024 | 1.8 | 80/40 |
 | Decode20ms | 320 | 80 | 1024 | 0 | 64/32 |
-| Decode50ms | 1360 | 340 | 1024 | 0 | 64/32 |
 
 Rate0 means no configured rate limit. These are historical RP3 search seeds,
 not new measured capacity points. Historical concurrency80 averaged20.2ms,
 so it does not establish compliance with a20ms ceiling.
 
-P and PD warm up, reset P prefix cache, then run formally. Prepare a local
-Decode dataset by repeating the first16K prompt1360 times. Each Decode
-profile independently resets, warms this shared prefix, then runs formally.
+P and PD warm up, reset P prefix cache, then run formally. Decode uses
+`vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8` directly.
+The downloaded dataset contains1000 identical prompts, enough for the320
+formal requests. CPU validation with the full GLM-5.3 tokenizer found16378
+raw tokens and16390 tokens with its default chat template and generation
+prompt. Verify actual server input lengths on hardware; the Flash dataset
+name does not establish full-model performance or accuracy.
+D20 resets, warms this shared prefix, then runs formally.
 Cache hits must be measured, not assumed100%; Decode is not device-only.
 After performance, reset once more and run GPQA at concurrency32, output65536,
 temperature1, top-p0.95, accuracy floor86.92%. Do not pad GPQA to16K.
 
-All five resets POST node2:7100/reset_prefix_cache and assert JSON success=true.
+All four resets POST node2:7100/reset_prefix_cache and assert JSON success=true.
 Development mode is enabled only for this controlled CI service. Reset does
 not restart servers or change graphs. Inspect AISBench internal warmups too.
 
@@ -76,7 +81,7 @@ not restart servers or change graphs. Inspect AISBench internal warmups too.
 
 1. Record actual Ascend/vLLM revisions, driver/CANN/torch_npu, ready time,
    capture duration and all actual runtime flags.
-2. Search P concurrency near the4s mean TTFT target, D concurrency near20/50ms
+2. Search P concurrency near the4s mean TTFT target, D concurrency near20ms
    mean TPOT, and E2E request rate near4s TTFT/20ms TPOT. Check client saturation,
    per-D skew, scheduler caps, cache hits and KV transfer. If32 sequences caps
    a D instance, reassess routing/budgets rather than calling it model capacity.
@@ -91,7 +96,7 @@ not restart servers or change graphs. Inspect AISBench internal warmups too.
 
 Throughput baseline/threshold fields are absent during calibration, so a
 passing candidate is **not a throughput regression pass**. Current runner
-supports mean TPOT ceilings (20ms PD/D20,50ms D50); the4s TTFT target requires
+supports mean TPOT ceilings (20ms PD/D20); the4s TTFT target requires
 raw-result review and is not an automated gate. GPQA retains its accuracy gate.
 No startup/runtime estimate is promised before measuring this larger graph.
 
