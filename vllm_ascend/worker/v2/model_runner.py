@@ -358,7 +358,9 @@ class NPUModelRunner(GPUModelRunner):
 
         expert_offload.initialize(self)
 
-        pool_config = getattr(self.ascend_config, "dspark_expert_pool", None)
+        pool_config = (
+            getattr(self.ascend_config, "dspark_expert_pool", None) if expert_offload_manager is not None else None
+        )
         if pool_config is not None and pool_config.enabled:
             assert pool_config.protected_positions is not None and pool_config.suffix_experts is not None
             assert self.speculative_config is not None and self.speculative_config.num_speculative_tokens is not None
