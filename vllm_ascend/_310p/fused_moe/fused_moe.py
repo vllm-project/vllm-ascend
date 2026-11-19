@@ -46,6 +46,11 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
+        self.lora_context = None
+        self._lora_routing = None
+
+    def set_lora_context(self, lora_context) -> None:
+        self.lora_context = lora_context
 
     @property
     def is_monolithic(self) -> bool:
@@ -80,17 +85,53 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         layer = mlp_compute_input.layer
         assert layer is not None
         w1, _ = self.get_mlp_weights(layer)
+        hidden_states = mlp_compute_input.hidden_states
         # 310P weights are pre-transposed to (E, hidden, inter) + NZ in
         # ``process_weights_after_loading``, so no ``need_trans`` handling is
         # required here (310P never sets ``need_trans``).
         gate_up_out = torch_npu.npu_grouped_matmul(
-            x=[mlp_compute_input.hidden_states],
+            x=[hidden_states],
             weight=[w1],
             split_item=2,
             group_list_type=mlp_compute_input.group_list_type,
             group_type=0,
             group_list=mlp_compute_input.group_list,
         )[0]
+
+        self._lora_routing = None
+        lora_context = mlp_compute_input.lora_context
+        if lora_context is not None:
+            from vllm_ascend.lora.fused_moe import (
+                _recover_moe_lora_routing_all2all,
+                _recover_moe_lora_routing_allgather,
+                moe_lora_apply_w13,
+            )
+
+            if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
+                self._lora_routing = _recover_moe_lora_routing_allgather(
+                    lora_context,
+                    mlp_compute_input.expanded_row_idx,
+                    mlp_compute_input.topk_ids,
+                )
+            elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
+                self._lora_routing = _recover_moe_lora_routing_all2all(
+                    lora_context,
+                    group_list=mlp_compute_input.group_list,
+                )
+            else:
+                raise AssertionError(
+                    "MoE LoRA requires either expanded_row_idx+topk_ids "
+                    "(AllGather) or lora_context.exchanged_lora_indices "
+                    "(AlltoAll). Neither was provided."
+                )
+
+            moe_lora_apply_w13(
+                lora_context,
+                gate_up_out=gate_up_out,
+                hidden_states=hidden_states,
+                lora_routing=self._lora_routing,
+            )
+
         return torch_npu.npu_swiglu(gate_up_out), None
 
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
@@ -98,7 +139,8 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         layer = mlp_compute_input.layer
         assert layer is not None
         _, w2 = self.get_mlp_weights(layer)
-        return torch_npu.npu_grouped_matmul(
+        silu_out = hidden_states
+        hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=[w2],
             split_item=2,
@@ -106,6 +148,20 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
             group_type=0,
             group_list=mlp_compute_input.group_list,
         )[0]
+
+        lora_routing = getattr(self, "_lora_routing", None)
+        if lora_routing is not None:
+            from vllm_ascend.lora.fused_moe import moe_lora_apply_w2
+
+            lora_context = mlp_compute_input.lora_context or getattr(self, "lora_context", None)
+            moe_lora_apply_w2(
+                lora_context,
+                down_out=hidden_states,
+                silu_out=silu_out,
+                lora_routing=lora_routing,
+            )
+            self._lora_routing = None
+        return hidden_states
 
     def apply(
         self,
@@ -133,6 +189,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
+                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
             ),
             quant_method=self,
         )
