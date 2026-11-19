@@ -1,0 +1,8 @@
+pr: 22085
+entries:
+  - category: config
+    text: "quantized_all_reduce_config.min_numel now defaults to null. On the int8 backend this selects a payload gate measured per tensor-parallel degree on A2: 16 MiB at TP=2, 32 MiB at TP=4 and 50 MiB at TP=8; the MXFP8 backend keeps its own 32 MiB default, and an explicit min_numel still overrides either."
+    hardware: [A2]
+  - category: performance
+    text: Int8 quantized all-reduce no longer triggers below each tensor-parallel degree's measured break-even, so TP=8 no longer loses throughput on 32-49 MiB collectives.
+    hardware: [A2]
