@@ -20,3 +20,8 @@ entries:
     text: Initialized loaded_shard_ids on AscendColumnParallelLinear so
       stacked-shard weight validation from upstream vLLM #63752 finds the
       tracking dict on the plain column-parallel path used by the MLA draft.
+  - category: bugfix
+    text: DFlash2 draft checkpoints whose layers mix causal and non-causal
+      attention now fail fast at startup when those layers would share one KV
+      cache group, instead of silently applying the last layer's causality to
+      the whole group and corrupting draft attention.
