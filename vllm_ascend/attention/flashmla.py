@@ -360,14 +360,17 @@ class FlashMLAMetadataBuilder:
         self.attn_mask = attn_mask
 
     def _metadata_bounds(self, tokens: int, *, current: bool = False) -> dict[str, int]:
-        if self.quant_max_cache_len is None:
+        max_cache_len = self.quant_max_cache_len
+        if max_cache_len is None:
             return {}
+        max_query_len = self.quant_max_query_len
+        assert max_query_len is not None
         # With inferred maxima an entirely empty DCP shard produces a zero
         # tiling extent in QuantFlashMlaMetadata. These are capacity bounds;
         # cache_lens/used_q still carry the actual lengths, including zero.
         return {
-            "max_seqlen_q": self.quant_max_query_len,
-            "max_seqlen_kv": self.quant_max_query_len if current else self.quant_max_cache_len,
+            "max_seqlen_q": max_query_len,
+            "max_seqlen_kv": max_query_len if current else max_cache_len,
         }
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
