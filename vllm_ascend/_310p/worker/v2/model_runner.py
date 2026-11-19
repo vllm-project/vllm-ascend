@@ -210,8 +210,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         if enabled:
             raise NotImplementedError(f"310P model runner v2 does not support: {', '.join(enabled)}.")
         if getattr(parallel_config, "enable_expert_parallel", False):
-            # 310P's MoeInitRoutingV2 rejects partial global expert ranges.
-            raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
+            if vllm_config.lora_config is not None:
+                raise NotImplementedError("310P expert parallelism does not support LoRA.")
+            if getattr(parallel_config, "enable_eplb", False):
+                raise NotImplementedError("310P expert parallelism does not support EPLB.")
+            if getattr(parallel_config, "use_sequence_parallel_moe", False):
+                raise NotImplementedError("310P expert parallelism does not support sequence parallelism.")
         if vllm_config.speculative_config is not None:
             spec = vllm_config.speculative_config
             # Bare objects (UT fixtures) and non-MTP methods are out of scope.

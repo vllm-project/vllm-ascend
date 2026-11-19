@@ -661,11 +661,28 @@ def test_config_rejects_unsupported_parallelism(setting: str) -> None:
         NPUModelRunner310V2._validate_config(config)
 
 
-def test_config_rejects_expert_parallelism_with_data_parallelism() -> None:
+def test_config_accepts_expert_parallelism_with_data_parallelism() -> None:
     config = _make_vllm_config()
     config.parallel_config.data_parallel_size = 2
     config.parallel_config.enable_expert_parallel = True
-    with pytest.raises(NotImplementedError, match="Expert parallelism is not supported"):
+    NPUModelRunner310V2._validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"), [("enable_eplb", "EPLB"), ("use_sequence_parallel_moe", "sequence parallelism")]
+)
+def test_config_rejects_unsupported_expert_parallelism_settings(setting: str, message: str) -> None:
+    config = _make_vllm_config()
+    config.parallel_config.enable_expert_parallel = True
+    setattr(config.parallel_config, setting, True)
+    with pytest.raises(NotImplementedError, match=message):
+        NPUModelRunner310V2._validate_config(config)
+
+
+def test_config_rejects_expert_parallelism_with_lora() -> None:
+    config = _make_vllm_config(lora_config=object())
+    config.parallel_config.enable_expert_parallel = True
+    with pytest.raises(NotImplementedError, match="LoRA"):
         NPUModelRunner310V2._validate_config(config)
 
 
