@@ -134,7 +134,7 @@ def test_embedding_tp_disabled_preserves_dummy_buffer(monkeypatch, supports_mm_i
 @pytest.mark.parametrize("supports_mm_inputs", [False, True])
 def test_explicit_none_keeps_idle_embedding_exchange(monkeypatch, supports_mm_inputs):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
-    events = []
+    events: list[tuple[int, str, tuple[int, ...]]] = []
     layer, _ = _make_embedding(1, events)
     state = _make_state(supports_mm_inputs, layer)
 
