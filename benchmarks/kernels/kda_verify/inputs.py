@@ -18,13 +18,13 @@ class Config:
 
 def make_inputs(c, device="cpu", seed=7):
     torch.manual_seed(seed)
-    b, l, h, d, k = c.batch, c.tokens, c.heads, c.dim, c.hidden
+    b, tokens, h, d, k = c.batch, c.tokens, c.heads, c.dim, c.hidden
 
     def rand(shape, scale=1.0, dtype=torch.bfloat16):
         return (torch.randn(shape, device=device) * scale).to(dtype)
 
     return {
-        "x": rand((b, l, k), 0.3),
+        "x": rand((b, tokens, k), 0.3),
         "w_in": rand((3 * h * d + h + 2 * d, k), k**-0.5),
         "w_f": rand((h * d, d), d**-0.5),
         "w_g": rand((h * d, d), d**-0.5),

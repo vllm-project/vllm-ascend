@@ -8,9 +8,12 @@ read-only; correction/KG records match the original Replay SSM contract.
 
 import tilelang
 import tilelang.ascend.language as T
+import torch.nn.functional as F
+from small_batch import small_batch_program
 
 
-def program(c):
+def program(c, unroll_taps=False):
+    taps = T.Unroll if unroll_taps else T.Serial
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
     stages = 6 if c.batch == 1 else 4
     PITCH = 3 * H * D + H + 2 * D
@@ -110,7 +113,7 @@ def program(c):
                     cv = T.alloc_fragment((3, L, D), "float32")
                     for q, t, j in T.Parallel(3, L, D):
                         cv[q, t, j] = 0
-                    for tap in T.Serial(4):
+                    for tap in taps(4):
                         for q, t, j in T.Parallel(3, L, D):
                             if t + tap < 3:
                                 cv[q, t, j] += T.cast(hist[q, t + tap, j], "float32") * T.cast(cw[q, j, tap], "float32")
@@ -263,18 +266,22 @@ def program(c):
 
 
 class FusedMiddle:
-    def __init__(self, baseline):
+    def __init__(self, baseline, *, tuned=False):
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
         self.wf = i["w_f"].reshape(h // 2, 2 * d, d)
         self.wg = i["w_g"].reshape(h // 2, 2 * d, d)
-        self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
-        self.kernel = tilelang.compile(program(c), target="ascend", execution_backend="cython")
+        if tuned and c.batch <= 10:
+            # The sliding window reads all channels of each tap contiguously.
+            self.cw = i["conv_w"].permute(1, 0, 3, 2).contiguous()
+            kernel = small_batch_program(c)
+        else:
+            self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
+            kernel = program(c, unroll_taps=tuned and c.batch >= 41)
+        self.kernel = tilelang.compile(kernel, target="ascend", execution_backend="cython")
 
     def __call__(self):
-        import torch.nn.functional as F
-
         n = self.n
         c = n.c
         i = n.i
