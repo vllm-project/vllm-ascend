@@ -28,6 +28,7 @@ from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
     _pack_conv_weights,
     initialize_packed_conv_weight,
+    qwen_gdn_attention_core_norm_with_output,
 )
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
@@ -49,6 +50,11 @@ class _Norm(nn.Module):
     def forward(self, hidden_states: torch.Tensor, z: torch.Tensor):
         del z
         return hidden_states
+
+    def forward_oot(self, hidden_states: torch.Tensor, z: torch.Tensor, out: torch.Tensor):
+        del z
+        out.copy_(hidden_states)
+        return out
 
 
 class _OutputProjection(nn.Module):
@@ -327,6 +333,7 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     # registration alive for this test so Inductor sees the same custom op.
     cpu_impl = torch.library.Library("vllm", "IMPL", "CPU")
     cpu_impl.impl("qwen_gdn_attention_core", qwen_gdn_attention_core)
+    cpu_impl.impl("qwen_gdn_attention_core_norm_with_output", qwen_gdn_attention_core_norm_with_output)
     model = _GDNForwardWrapper()
     hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     output = torch.empty_like(hidden_states)
