@@ -37,6 +37,10 @@ Decode keeps PCP1.
 The [A3 series PD example](#glm53-flash-5-3-a3) use Prefill Context
 Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
+With native KDA, enabling PCP shards the KDA attention heads and recurrent
+state across the product of tensor parallel size and prefill context parallel
+size. The KDA head count must be divisible by that product.
+
 ### INT8 KPool indexer cache on A3
 
 Set `--attention-config.indexer_kv_dtype int8` to quantize the KPool indexer's
@@ -50,9 +54,6 @@ and requests with no completed pools. The 2026-10-31 A3 CANN 9.3.0
 ops-transformer build provides this interface. Keys and scales share managed
 cache pages so cache transport includes both. No separate indexer environment
 variable is required.
-With native KDA, enabling PCP shards the KDA attention heads and recurrent
-state across the product of tensor parallel size and prefill context parallel
-size. The KDA head count must be divisible by that product.
 
 ## 3 Prerequisites
 
