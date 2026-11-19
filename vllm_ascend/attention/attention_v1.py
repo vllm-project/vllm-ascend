@@ -1572,6 +1572,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize."""
+        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
         # Both cached-prefill callers consume packed dense K/V in FIA. The
         # launcher returns None when the existing gather path is required.
         if HAS_TRITON and key.device.type == "npu":
@@ -1582,7 +1583,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 value,
                 block_table,
                 seq_lens,
-                self.key_cache.shape[1],
+                block_size,
                 self.num_kv_heads,
                 self.head_size,
                 target_dtype,
@@ -1596,7 +1597,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         max_blocks_per_seq = block_table.shape[1]
 
         # NZ 5D view: (num_blocks, num_kv_heads, head_size//nz, block_size, nz)
-        block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
         max_tokens_padded = max_blocks_per_seq * block_size
 
         flat_ids = block_table.reshape(-1)
