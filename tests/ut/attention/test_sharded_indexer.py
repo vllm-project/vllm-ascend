@@ -57,10 +57,10 @@ def test_shared_index_coordinate_contract(sharded, pcp, dsa_cp, turboquant, expe
 
 
 @pytest.mark.parametrize(
-    "world,rows,parallel",
-    [(1, 41, False), (2, 1, True), (8, 41, True)],
+    "world,rows,parallel,tile",
+    [(1, 41, False, 2048), (2, 1, True, 1024), (3, 41, True, 512), (8, 41, True, 256)],
 )
-def test_owner_prefix_peer_strategy(monkeypatch, world, rows, parallel):
+def test_owner_prefix_peer_strategy(monkeypatch, world, rows, parallel, tile):
     cores = 40
     monkeypatch.setattr(kernels, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(kernels, "get_vectorcore_num", lambda: cores)
@@ -73,3 +73,4 @@ def test_owner_prefix_peer_strategy(monkeypatch, world, rows, parallel):
     launch = owner_kernel.__getitem__.return_value
     launch.assert_called_once()
     assert launch.call_args.kwargs["PARALLEL_PEERS"] is parallel
+    assert launch.call_args.args[7] == tile

@@ -618,8 +618,9 @@ def merge_packed_candidates(
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
         if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
             parallel_peers = world_size > 1
-            entries = block if parallel_peers else 2 * block
-            tile = min(block, triton.next_power_of_2(max(1, entries // world_size)))
+            rank_lanes = triton.next_power_of_2(world_size)
+            # Padded rank lanes also occupy UB. Bound the parallel tile across all lanes.
+            tile = max(1, block // rank_lanes) if parallel_peers else block
             _merge_owner_prefix[(programs,)](
                 packed,
                 output,
@@ -629,7 +630,7 @@ def merge_packed_candidates(
                 interleave,
                 block.bit_length() - 1,
                 tile,
-                triton.next_power_of_2(world_size),
+                rank_lanes,
                 PARALLEL_PEERS=parallel_peers,
                 multibuffer=False,
             )

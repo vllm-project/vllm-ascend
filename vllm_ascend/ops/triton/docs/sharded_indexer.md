@@ -78,7 +78,8 @@ the first owner candidate, finding K better entries proves that the owner has
 no winners and the scan can skip the remaining peers.
 
 The public wrapper derives the compile-time peer strategy and tile from the
-group size. The kernel accepts a dynamic row count and uses lazy compilation.
+group size. The parallel tile width accounts for padded rank lanes so that
+non-power-of-two groups fit the on-chip buffer. The kernel accepts a dynamic row count and uses lazy compilation.
 
 The owner test compares exact local IDs and padding with an independent CPU
 global Top-K followed by owner compaction. It also checks output guards and
