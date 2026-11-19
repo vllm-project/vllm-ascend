@@ -337,6 +337,8 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         impl.local_num_heads = impl.num_heads = 12
         impl.kv_lora_rank = 512
     target.enable_sparse_sfa_turboquant = False
+    target.qk_rope_head_dim = 0
+    target.enable_sparse_sfa_c8 = True
     worker.vllm_config.compilation_config.static_forward_context = {
         "target": SimpleNamespace(impl=target),
         "same_target_layout": SimpleNamespace(impl=target),
@@ -363,3 +365,4 @@ def test_dcp_target_and_draft_owners_register_before_compilation():
         (torch.float16, True, False),
     ]
     assert all(case["scatter_size"] == 4 and case["pcp_size"] == 2 for case in registered)
+    assert [case["row_mask"] for case in registered] == [True, False]

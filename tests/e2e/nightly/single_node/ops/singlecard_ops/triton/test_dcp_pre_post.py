@@ -278,6 +278,46 @@ def test_exchange_statistics_with_identity_transport(monkeypatch, tokens, local_
     graph.reset()
 
 
+@pytest.mark.parametrize(
+    "tokens,local_heads,fast",
+    [(1, 2, False), (48, 48, False), (1, 2, True), (48, 2, True), (48, 64, True)],
+)
+def test_dcp_pack_skips_padded_rows_on_replay(monkeypatch, tokens, local_heads, fast):
+    from vllm_ascend.ops.triton.dcp import sfa_dcp_exchange
+
+    # Run the production pack kernels. Identity transport avoids needing a
+    # distributed group; compare against the previous pre-masked inputs.
+    monkeypatch.setattr(sfa_dcp_exchange.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(sfa_dcp_exchange.dist, "all_to_all_single", lambda dst, src, group: dst.copy_(src))
+    group = object()
+    partial = torch.randn(tokens, 2 * local_heads, 512, dtype=torch.bfloat16, device="npu")
+    maxima = torch.randn(tokens, 2 * local_heads, 1, device="npu")
+    sums = torch.rand_like(maxima) + 0.25
+    valid_rows = torch.tensor([tokens], dtype=torch.int32, device="npu")
+    originals = tuple(t.clone() for t in (partial, maxima, sums))
+
+    def run(output, max_values, sum_values, length=None):
+        if fast:
+            return sfa_dcp_exchange.exchange(output, max_values, group, softmax_sum=sum_values, valid_rows=length)
+        return pack_dcp_output_lse(output, max_values, 2, 1, softmax_sum=sum_values, valid_rows=length)
+
+    run(partial, maxima, sums, valid_rows)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = run(partial, maxima, sums, valid_rows)
+    for live_rows in (max(0, tokens - 3), 0, tokens):
+        valid_rows.fill_(live_rows)
+        baseline = tuple(t.clone() for t in originals)
+        for source, original, clean, default in zip((partial, maxima, sums), originals, baseline, (0, 0, 1)):
+            source.copy_(original)
+            source[live_rows:].fill_(torch.nan)
+            clean[live_rows:].fill_(default)
+        graph.replay()
+        expected = run(*baseline)
+        torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+    graph.reset()
+
+
 @pytest.mark.parametrize("mla", [False, True])
 def test_dcp_registry_warmup_prevents_runtime_compile_and_replays(monkeypatch, mla):
     from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry

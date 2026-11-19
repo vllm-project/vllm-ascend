@@ -934,7 +934,16 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
                 raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
-            pack_visible_lengths = None
+            pack_visible_lengths = indexer_metadata.local_visible_lengths
+            if pack_visible_lengths is not None and (
+                pack_visible_lengths.numel() < q_li_shape_ori[0]
+                or pack_visible_lengths.dtype != torch.int32
+                or pack_visible_lengths.device != q_li.device
+                or not pack_visible_lengths.is_contiguous()
+            ):
+                pack_visible_lengths = None
+            elif pack_visible_lengths is not None:
+                pack_visible_lengths = pack_visible_lengths[: q_li_shape_ori[0]]
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
@@ -947,12 +956,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     q_li_scale,
                     qli_metadata=qli_metadata,
                     topk=self.topk_tokens,
+                    initialize_outputs=pack_visible_lengths is None,
                     **indexer_metadata.qli_dcp_args,
                 )
             elif get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                pack_visible_lengths = indexer_metadata.local_visible_lengths
-                if pack_visible_lengths is not None and pack_visible_lengths.numel() < q_li_shape_ori[0]:
-                    pack_visible_lengths = None
+                # With no usable row metadata, QLI prefills rows it may leave
+                # untouched; pack still rejects negative IDs/nonfinite scores.
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
                     q_li.view(*q_li_shape_ori),
                     weights,
@@ -1598,8 +1607,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             else:
                 visible_rows = num_input_tokens
                 if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
-                    # A captured pack can retain a longer view than the next live
-                    # batch. Refresh its padding in the same metadata kernel.
+                    # Captured packs can retain a longer view across graph replays.
                     max_capture = self.vllm_config.compilation_config.max_cudagraph_capture_size or 0
                     visible_rows = max(visible_rows, max_capture)
                 local_visible = visible_buffer[:visible_rows]

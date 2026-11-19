@@ -1,4 +1,4 @@
 pr: 22346
 entries:
   - category: performance
-    text: Reduced redundant candidate processing in Kimi K3.1 decode on A3. Eligible BF16 output projections now write directly into the attention output buffer.
+    text: Kimi K3.1 decode on A3 skips padded and empty rank-local indexer rows during DCP packing, avoiding redundant initialization and candidate normalization. Quantized DCP attention handles padding during output packing. Eligible BF16 output projections write directly into the attention output buffer.

@@ -39,6 +39,7 @@ def _pack_dcp_output_lse_batched_kernel(
     lse_ptr,
     sum_ptr,
     send_ptr,
+    valid_rows_ptr,
     output_stride_t,
     output_stride_h,
     output_stride_d,
@@ -64,6 +65,8 @@ def _pack_dcp_output_lse_batched_kernel(
     program_idx = tl.program_id(0)
     num_programs = tl.num_programs(0)
     d_offsets = tl.arange(0, BLOCK_D)[None, :]
+    if valid_rows_ptr is not None:
+        valid_rows = tl.load(valid_rows_ptr)
 
     if OUTPUT_HEAD_MAJOR:
         num_tokens = total_rows // num_heads
@@ -102,14 +105,17 @@ def _pack_dcp_output_lse_batched_kernel(
             )
         output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
         d_mask = (d_offsets < head_dim) & row_mask
-        output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
+        active = row_mask
+        if valid_rows_ptr is not None:
+            active = active & (token_idx < valid_rows)
+        output = tl.load(output_ptr + output_offsets, mask=(d_offsets < head_dim) & active, other=0.0)
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
-        lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h, mask=row_mask, other=0.0).to(
+        lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h, mask=active, other=0.0).to(
             tl.float32
         )
         if FROM_STATS:
-            total = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h, mask=row_mask, other=1.0).to(
+            total = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h, mask=active, other=1.0).to(
                 tl.float32
             )
             lse = lse + tl.log(total)
