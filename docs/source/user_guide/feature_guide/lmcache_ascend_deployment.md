@@ -43,6 +43,7 @@ docker run -it \
     -v /var/log/npu:/var/log/npu \
     -v /dev/davinci_manager:/dev/davinci_manager \
     -v /dev/devmm_svm:/dev/devmm_svm \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
     lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler \
     /bin/bash
