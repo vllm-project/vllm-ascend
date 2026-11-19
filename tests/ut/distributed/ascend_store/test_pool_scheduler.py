@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.serial_utils import MsgpackEncoder
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
@@ -1314,7 +1315,7 @@ class TestLookupKeyClient(unittest.TestCase):
 
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
-        mock_socket.recv.return_value = (32).to_bytes(4, "big")
+        mock_socket.recv_multipart.return_value = MsgpackEncoder().encode((32, ()))
         mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
 
         client = LookupKeyClient(config)
@@ -1339,7 +1340,7 @@ class TestLookupKeyClient(unittest.TestCase):
 
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
-        mock_socket.recv.side_effect = ZMQError("timeout")
+        mock_socket.recv_multipart.side_effect = ZMQError("timeout")
         mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
 
         client = LookupKeyClient(config)
@@ -2242,9 +2243,7 @@ def test_lookup_returns_length_and_tail_boundaries(mock_context_cls, mock_make_s
     config.parallel_config.data_parallel_index = 0
     config.kv_transfer_config.kv_connector_extra_config = {}
     socket = mock_make_socket.return_value
-    socket.recv.return_value = (32).to_bytes(4, "big") + b"".join(
-        boundary.group_id.to_bytes(4, "big") + boundary.num_tokens.to_bytes(4, "big") for boundary in boundaries
-    )
+    socket.recv_multipart.return_value = MsgpackEncoder().encode((32, boundaries))
     client = LookupKeyClient(config)
     try:
         assert client.lookup(48, [b"hash"], [0, 1], hbm_hit_tokens=16) == StoreLookupResult(32, boundaries)

@@ -23,10 +23,8 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
-# Wire integers are unsigned 32-bit values. Each tail boundary contains
-# a cache-group ID and a token count; both RPC ends share these sizes.
+# Request token counts are unsigned 32-bit values.
 _LOOKUP_INT_BYTES_LEN = 4
-_TAIL_KEY_BOUNDARY_BYTES_LEN = 2 * _LOOKUP_INT_BYTES_LEN
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
@@ -52,6 +50,8 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
 
 class LookupKeyClient:
     def __init__(self, vllm_config: VllmConfig):
+        self.encoder = MsgpackEncoder()
+        self.decoder = MsgpackDecoder()
         self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
@@ -88,24 +88,16 @@ class LookupKeyClient:
         ]
         try:
             self.socket.send_multipart(all_frames, copy=False)
-            resp = self.socket.recv()
+            resp = self.socket.recv_multipart()
         except zmq.ZMQError:  # type: ignore[attr-defined]
             logger.exception("KV pool lookup failed; reporting 0 hit tokens")
             self.close()
             return StoreLookupResult(0)
 
-        if len(resp) < _LOOKUP_INT_BYTES_LEN or (len(resp) - _LOOKUP_INT_BYTES_LEN) % _TAIL_KEY_BOUNDARY_BYTES_LEN:
-            raise ValueError("Invalid AscendStore lookup reply")
-        return StoreLookupResult(
-            int.from_bytes(resp[:_LOOKUP_INT_BYTES_LEN], "big"),
-            tuple(
-                TailKeyBoundary(
-                    int.from_bytes(resp[i : i + _LOOKUP_INT_BYTES_LEN], "big"),
-                    int.from_bytes(resp[i + _LOOKUP_INT_BYTES_LEN : i + _TAIL_KEY_BOUNDARY_BYTES_LEN], "big"),
-                )
-                for i in range(_LOOKUP_INT_BYTES_LEN, len(resp), _TAIL_KEY_BOUNDARY_BYTES_LEN)
-            ),
-        )
+        if resp == [RESP_ERR]:
+            raise ValueError("AscendStore lookup failed on server")
+        hit_length, boundaries = self.decoder.decode(resp)
+        return StoreLookupResult(hit_length, tuple(TailKeyBoundary(*boundary) for boundary in boundaries))
 
     def reset(self) -> bool:
         """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
@@ -136,6 +128,7 @@ class LookupKeyServer:
         vllm_config: VllmConfig,
     ):
         self.decoder = MsgpackDecoder()
+        self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -186,24 +179,20 @@ class LookupKeyServer:
                                 kv_group_ids,
                                 result.hit_length,
                             )
-                            response = result.hit_length.to_bytes(_LOOKUP_INT_BYTES_LEN, "big") + b"".join(
-                                boundary.group_id.to_bytes(_LOOKUP_INT_BYTES_LEN, "big")
-                                + boundary.num_tokens.to_bytes(_LOOKUP_INT_BYTES_LEN, "big")
-                                for boundary in result.tail_key_boundaries
-                            )
+                            response = self.encoder.encode((result.hit_length, result.tail_key_boundaries))
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")
-                            response = RESP_OK
+                            response = [RESP_OK]
                         else:
                             logger.warning("LookupKeyServer received unknown msg_type: %r", msg_type)
-                            response = RESP_ERR
+                            response = [RESP_ERR]
                     except Exception as e:
                         logger.error("Error handling lookup request: %s", e)
-                        response = RESP_ERR
+                        response = [RESP_ERR]
 
                     try:
-                        self.socket.send(response)
+                        self.socket.send_multipart(response)
                     except zmq.ZMQError:  # type: ignore[attr-defined]
                         if self.running:
                             logger.exception("Failed to send KV pool lookup response")
