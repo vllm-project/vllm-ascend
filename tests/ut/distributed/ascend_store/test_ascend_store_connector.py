@@ -215,23 +215,29 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
-    def test_sharded_mamba_rejects_joint_tp_pcp_before_pool_initialization(self):
+    def test_sharded_mamba_allows_joint_tp_pcp_pool_initialization(self):
         spec = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
         cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["state"], spec)])
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
         for role, layerwise in product((KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER), (False, True)):
             with self.subTest(role=role, layerwise=layerwise):
                 config = self._make_vllm_config(extra_config={"use_layerwise": layerwise})
+                config.parallel_config.rank = 1
                 config.parallel_config.tensor_parallel_size = 2
                 config.parallel_config.prefill_context_parallel_size = 2
                 with (
                     patch(f"{module}.create_kv_pool_scheduler") as scheduler,
                     patch(f"{module}.create_kv_pool_worker") as worker,
                 ):
-                    with self.assertRaisesRegex(ValueError, "sharded Mamba.*PCP=1 or TP=1"):
-                        AscendStoreConnector(config, role, cache)
-                    scheduler.assert_not_called()
-                    worker.assert_not_called()
+                    connector = AscendStoreConnector(config, role, cache)
+                    if role == KVConnectorRole.SCHEDULER:
+                        scheduler.assert_called_once_with(config, layerwise, cache)
+                        worker.assert_not_called()
+                        self.assertIs(connector.connector_scheduler, scheduler.return_value)
+                    else:
+                        worker.assert_called_once_with(config, layerwise, cache)
+                        scheduler.assert_not_called()
+                        self.assertIs(connector.connector_worker, worker.return_value)
 
     def test_parallel_validation_allows_replicas_and_single_axis_state_shards(self):
         attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
