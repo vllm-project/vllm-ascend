@@ -129,43 +129,37 @@ or flow.
 
 ## Staging settings
 
-These environment variables control the bounded NPU staging path for Host KV.
-They do not contain sensitive values. Integer settings must parse as integers;
-the two switches accept exactly `0` or `1`.
+Set `mooncake_staging_config` through `--additional-config` on the decode node.
+The two typed integer settings are parsed once at startup; they do not use
+environment variables. Existing sparse-offload options remain in the same JSON:
 
-| Environment variable | Default | Meaning and bounds |
+```bash
+--additional-config '{"sparse_kv_offload_config":{"enabled":true,"topk_buffer_size":2048,"dram_size_per_dp_GB":16,"use_fused_overlap":false},"mooncake_staging_config":{"window_chunks":16,"bank_count":4}}'
+```
+
+| Setting | Default | Meaning and bounds |
 | --- | --- | --- |
-| `VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW` | `16` | Total reusable 2 MiB-aligned staging chunks; values below 1 are clamped to 1. |
-| `VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE` | `0` | Enable bank pipelining with `1`; `0` uses synchronous landing. |
-| `VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS` | `4` | Pipeline banks; values below 1 are clamped to 1, and the effective count is capped by the staging window. |
-| `VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK` | `1` | Landing streams per bank; must be at least 1, with the effective count capped by slots per bank. |
-| `VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE` | `0` | Enable diagnostic device synchronization after successful staged READs with `1`. |
+| `window_chunks` | `16` | Total reusable 2 MiB-aligned staging chunks. Integer values below 1 become 1. Chunk byte size depends on the KV layout. |
+| `bank_count` | `4` | Number of banks sharing the window. Integer values below 1 become 1; the effective count is capped by `window_chunks`. One effective bank uses serial READ/landing; multiple banks enable pipelining. |
 
-Pipelining requires a staging window of at least two chunks. It divides the
-existing allocation into banks without increasing total staging capacity.
-Each bank has `floor(window / effective_banks)` contiguous slots; any remainder
-is unused. Consecutive READ batches are assigned to banks round-robin, reducing
-the maximum chunks per batch to that bank's slot count. A completion event must
-finish before a bank's slots can be reused, and all pending landing copies drain
-before receive completion.
+Defaults use 16 chunks split into four banks of four chunks. Each bank uses one
+copy stream and, when there are multiple banks, one Host worker. Set
+`bank_count=1` to use the entire window on the caller thread with synchronous
+landing. No separate pipeline switch, per-bank copy-stream setting or READ probe
+is exposed. Previously used staging environment variables are ignored; replace
+them with the two additional-config fields when updating deployment scripts.
 
-With pipelining enabled and the probe disabled, each effective bank has one
-Host worker processing its queue in READ-then-landing order. A single bank uses
-the caller thread. Workers join and landing copies drain before the request
-releases the shared staging lock. Turning pipelining off or enabling the probe
-keeps Host submission on the caller and uses one landing stream per bank.
+Banks share the existing allocation without increasing total staging capacity.
+Each bank has `floor(window_chunks / effective_banks)` contiguous slots; any
+remainder is unused. Consecutive READ batches rotate between banks, reducing
+maximum chunks per batch to that bank's slot count. A completion event must finish
+before a bank's slots can be reused. Workers join and all pending landing copies
+drain before receive completion and release of the shared staging lock.
 
-The copy-stream setting is read at receive boundaries. Extra streams distribute
-independent landing copies within each bank; they do not add Host workers or
-change READ batch sizes, staging capacity or view-cache capacity. Auxiliary
-stream events join the bank's primary stream before its reusable completion
-event is recorded. Overlapping Host destination ranges are rejected during
-planning, before any READ in that receive, including direct HBM READs in a mixed
-receive.
-
-The probe calls `torch.npu.synchronize()` after a successful staged READ and
-reports the wait as `read_settle_s` in receive timing. This device-wide wait
-changes pipeline timing; use it for diagnosis rather than performance runs.
+Overlapping Host destination ranges are rejected during planning before any READ
+in that receive, including direct HBM READs in a mixed receive. Failed waits retain
+the pending buffer owners until draining succeeds. Removing the READ diagnostic
+probe does not remove these completion and failure-lifetime guarantees.
 
 ## Common extension boundaries
 

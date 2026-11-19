@@ -69,7 +69,7 @@ class DelayedLanding:
         def submit(*args):
             assert threading.get_ident() == self.caller
             if self.current is None:
-                assert reader._get_dsa_pd_mooncake_staging_window() < 2
+                assert min(reader._staging_config.bank_count, reader._staging_config.window_chunks) == 1
                 self.original_copy(*args)
                 return
             bank = next(bank for bank in reader._dsa_pd_mooncake_staging_banks if bank.stream is self.current)
@@ -103,7 +103,7 @@ def test_serial_bank_batches_preserve_bytes_with_delayed_events(monkeypatch, ban
     direct = torch.zeros(8, dtype=torch.uint8)
     registry.register_offloaded_tensor(host)
     reader = make_reader(MagicMock(), pipeline=True, window=window, kv_registry=registry)
-    reader._pipeline_banks = banks
+    reader._staging_config = type(reader._staging_config)(window_chunks=window, bank_count=banks)
     reader._landing_streams = [MagicMock() for _ in range(banks)]
     reader._landing_stream = reader._landing_streams[0]
     runtime = DelayedLanding(monkeypatch, reader)

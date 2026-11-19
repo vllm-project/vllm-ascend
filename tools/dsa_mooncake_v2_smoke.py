@@ -20,6 +20,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -73,7 +74,14 @@ def consumer(args: argparse.Namespace, engine: Any) -> None:
     hbm_region = hbm_storage[offset : offset + alignment]
     hbm = hbm_region[: 128 * 1024]
     global_te.register_buffer([hbm_region.data_ptr()], [hbm_region.nbytes])
-    reader = MooncakeSFAStagingReader(engine, host_kv, [[block], [block]])
+    reader = MooncakeSFAStagingReader(
+        engine,
+        host_kv,
+        [[block], [block]],
+        staging_config=MooncakeStagingConfig(
+            window_chunks=args.staging_window_chunks, bank_count=args.staging_bank_count
+        ),
+    )
     thread = MooncakeSFAPullRecvingThread.__new__(MooncakeSFAPullRecvingThread)
     thread.engine, thread.staging_reader = engine, reader
     thread._sfa_host_kv = host_kv
@@ -167,9 +175,8 @@ def consumer(args: argparse.Namespace, engine: Any) -> None:
         "host_bytes": host.nbytes,
         "hbm_bytes": hbm.nbytes,
         "staging_bytes": reader._dsa_pd_mooncake_staging_bytes,
-        "pipeline": reader._pipeline_landing_enabled,
-        "banks": reader._pipeline_banks,
-        "copy_streams_per_bank": len(reader._dsa_pd_mooncake_staging_banks[0].copy_streams),
+        "pipeline": len(reader._dsa_pd_mooncake_staging_banks) > 1,
+        "banks": len(reader._dsa_pd_mooncake_staging_banks),
         "transfer_seconds": elapsed,
     }
     print(json.dumps(result), flush=True)
@@ -189,6 +196,8 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--device-name", default=None)
     parser.add_argument("--offload-port", type=int, default=8500)
+    parser.add_argument("--staging-window-chunks", type=int, default=16)
+    parser.add_argument("--staging-bank-count", type=int, default=4)
     args = parser.parse_args()
     torch.npu.set_device(args.device)
     engine = global_te.get_transfer_engine(args.hostname, args.device_name)

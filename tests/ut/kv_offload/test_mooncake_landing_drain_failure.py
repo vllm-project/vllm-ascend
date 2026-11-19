@@ -32,11 +32,9 @@ class PendingReceiveState(TypedDict):
 
 
 def pending_receive(monkeypatch, *, pipeline, land_raises):
-    monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK", "1")
     monkeypatch.setattr(torch.npu, "stream", lambda _stream: nullcontext())
     monkeypatch.setattr(torch.npu, "Event", MagicMock())
     reader = make_reader(MagicMock(), pipeline=pipeline, window=2)
-    reader._pipeline_banks = 1
     destination = torch.zeros(64, dtype=torch.int8)
     source = torch.arange(64, dtype=torch.int8)
     reader.kv_registry.register_offloaded_tensor(destination)

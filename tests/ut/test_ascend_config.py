@@ -425,6 +425,15 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_mooncake_staging(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"mooncake_staging_config": {"window_chunks": 8, "bank_count": 2}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.mooncake_staging_config.window_chunks, 8)
+        self.assertEqual(ascend_config.mooncake_staging_config.bank_count, 2)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_rejects_bad_quantized_all_reduce(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}

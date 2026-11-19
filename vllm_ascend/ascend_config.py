@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, StrictInt, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -490,6 +490,19 @@ class SharedEngramConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class MooncakeStagingConfig:
+    """Startup settings for the Mooncake Host-KV staging window."""
+
+    window_chunks: StrictInt = 16
+    bank_count: StrictInt = 4
+
+    @field_validator("window_chunks", "bank_count")
+    @classmethod
+    def _normalize_counts(cls, value: int) -> int:
+        return max(1, value)
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -725,6 +738,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    mooncake_staging_config: MooncakeStagingConfig = dataclasses.field(default_factory=MooncakeStagingConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.

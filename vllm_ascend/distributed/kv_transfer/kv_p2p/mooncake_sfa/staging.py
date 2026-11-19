@@ -11,7 +11,7 @@ from typing import Any, NamedTuple
 import torch
 from vllm.logger import logger
 
-from vllm_ascend import envs as ascend_envs
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.transfer_targets import (
     DSAPDMooncakeTransferTarget,
     MooncakeKVRegistry,
@@ -31,8 +31,6 @@ class _DSAPDMooncakeStagingBank:
     slot_base: int
     slot_count: int
     stream: Any
-    copy_streams: tuple[Any, ...] = ()
-    copy_events: tuple[Any, ...] = ()
     completion_event: Any = None
     completion_pending: bool = False
     inflight_owners: list[tuple[torch.Tensor, ...]] = field(default_factory=list)
@@ -64,7 +62,6 @@ class _DSAPDMooncakeBankBatch(NamedTuple):
 class _DSAPDMooncakeBankBatchResult:
     return_code: int
     read_secs: float
-    read_settle_secs: float
     land_exposed_secs: float
 
 
@@ -76,12 +73,20 @@ class MooncakeSFAStagingReader:
     block_len_per_addr: list[list[int]]
     kv_registry: MooncakeKVRegistry
 
-    def __init__(self, engine: Any, host_kv: Any, block_lens: list[list[int]]) -> None:
+    def __init__(
+        self,
+        engine: Any,
+        host_kv: Any,
+        block_lens: list[list[int]],
+        *,
+        staging_config: MooncakeStagingConfig | None = None,
+    ) -> None:
         self.engine = engine
         self.host_kv = host_kv
         self.kv_registry = host_kv.registry
         self.kv_caches = host_kv.transfer_caches
         self.block_len_per_addr = block_lens
+        self._staging_config = staging_config if staging_config is not None else MooncakeStagingConfig()
         self._init_dsa_pd_mooncake_staging()
 
     def _init_dsa_pd_mooncake_staging(self) -> None:
@@ -90,10 +95,9 @@ class MooncakeSFAStagingReader:
         self._dsa_pd_mooncake_staging_bytes = 0
         self._dsa_pd_mooncake_staging_lock = threading.Lock()
         self._dsa_pd_mooncake_staging_banks: tuple[_DSAPDMooncakeStagingBank, ...] = ()
-        self._pipeline_banks = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
-        self._landing_streams = [torch.npu.Stream() for _ in range(max(1, self._pipeline_banks))]
+        bank_count = min(self._staging_config.bank_count, self._staging_config.window_chunks)
+        self._landing_streams = [torch.npu.Stream() for _ in range(bank_count)]
         self._landing_stream = self._landing_streams[0]
-        self._pipeline_landing_enabled = ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE
         # Host-only KV still needs a registered HBM region before ADXL connects.
         self._ensure_dsa_pd_mooncake_staging_tensor()
 
@@ -126,7 +130,7 @@ class MooncakeSFAStagingReader:
         return ((chunk_bytes + alignment - 1) // alignment) * alignment
 
     def _get_dsa_pd_mooncake_staging_window(self) -> int:
-        return ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW
+        return self._staging_config.window_chunks
 
     def _ensure_dsa_pd_mooncake_staging_tensor(self) -> torch.Tensor:
         chunk_bytes = self._get_dsa_pd_mooncake_staging_chunk_bytes()
@@ -168,16 +172,9 @@ class MooncakeSFAStagingReader:
         # A failed event wait can leave an old context pending. Finish it before
         # starting another request or dropping the stream ownership.
         self._drain_dsa_pd_mooncake_staging_banks(previous)
-        copy_stream_count = (
-            min(ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK, bank_window)
-            if pipeline_active and not ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE
-            else 1
-        )
         if len(previous) == bank_count and all(
             bank.slot_count == bank_window and bank.stream is stream for bank, stream in zip(previous, streams)
         ):
-            for bank in previous:
-                self._configure_dsa_pd_mooncake_copy_streams(bank, copy_stream_count)
             return previous
         banks = []
         for index, stream in enumerate(streams):
@@ -189,19 +186,7 @@ class MooncakeSFAStagingReader:
                 )
             )
         self._dsa_pd_mooncake_staging_banks = tuple(banks)
-        for bank in banks:
-            self._configure_dsa_pd_mooncake_copy_streams(bank, copy_stream_count)
         return self._dsa_pd_mooncake_staging_banks
-
-    @staticmethod
-    def _configure_dsa_pd_mooncake_copy_streams(bank: _DSAPDMooncakeStagingBank, count: int) -> None:
-        # The caller drained the old layout before changing its stream owners.
-        streams = bank.copy_streams or (bank.stream,)
-        bank.copy_streams = streams[:count] + tuple(torch.npu.Stream() for _ in range(max(0, count - len(streams))))
-        events = bank.copy_events
-        bank.copy_events = events[: count - 1] + tuple(
-            torch.npu.Event() for _ in range(max(0, count - 1 - len(events)))
-        )
 
     def _prepare_dsa_pd_mooncake_bank_plan(
         self,
@@ -302,34 +287,24 @@ class MooncakeSFAStagingReader:
                 bank.completion_pending = False
             bank.inflight_owners.clear()
             land_exposed_secs += time.perf_counter() - reclaim_started
-        ret, read_secs, read_settle_secs = self._read_staging_batch(session_id, batch, remote_request_id)
+        ret, read_secs = self._read_staging_batch(session_id, batch, remote_request_id)
         if ret < 0:
-            return _DSAPDMooncakeBankBatchResult(ret, read_secs, read_settle_secs, land_exposed_secs)
+            return _DSAPDMooncakeBankBatchResult(ret, read_secs, land_exposed_secs)
         if pipeline_active:
             bank.inflight_owners.append((staging, *(copy.target_bytes for copy in batch.copies)))
             bank.needs_stream_drain = True
             try:
-                streams = bank.copy_streams or (bank.stream,)
-                count = min(len(streams), max(1, len(batch.copies)))
-                for index, stream in enumerate(streams[:count]):
-                    with torch.npu.stream(stream):
-                        self.host_kv.land(batch.copies[index::count], staging, bank.inflight_owners)
-                        if index:
-                            bank.copy_events[index - 1].record(stream)
-                # Join auxiliary streams without blocking this Host worker.
-                # The bank event then protects every source slice and target.
-                for event in bank.copy_events[: count - 1]:
-                    bank.stream.wait_event(event)
+                with torch.npu.stream(bank.stream):
+                    self.host_kv.land(batch.copies, staging, bank.inflight_owners)
                 if bank.completion_event is None:
                     bank.completion_event = torch.npu.Event()
                 bank.completion_event.record(bank.stream)
                 bank.completion_pending = True
                 bank.needs_stream_drain = False
             except Exception:
-                self._synchronize_dsa_pd_mooncake_bank_streams(bank)
+                bank.stream.synchronize()
                 bank.completion_pending = False
                 bank.completion_event = None
-                bank.copy_events = tuple(torch.npu.Event() for _ in bank.copy_events)
                 bank.needs_stream_drain = False
                 raise
         else:
@@ -346,19 +321,7 @@ class MooncakeSFAStagingReader:
                 bank.pending_device = None
                 bank.inflight_owners.clear()
             land_exposed_secs += time.perf_counter() - land_started
-        return _DSAPDMooncakeBankBatchResult(ret, read_secs, read_settle_secs, land_exposed_secs)
-
-    @staticmethod
-    def _synchronize_dsa_pd_mooncake_bank_streams(bank: _DSAPDMooncakeStagingBank) -> None:
-        first_error = None
-        for stream in bank.copy_streams or (bank.stream,):
-            try:
-                stream.synchronize()
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+        return _DSAPDMooncakeBankBatchResult(ret, read_secs, land_exposed_secs)
 
     def _drain_dsa_pd_mooncake_staging_banks(self, banks: tuple[_DSAPDMooncakeStagingBank, ...]) -> None:
         first_error = None
@@ -372,12 +335,11 @@ class MooncakeSFAStagingReader:
                 bank_error = error
             if bank_error is not None or bank.needs_stream_drain:
                 try:
-                    self._synchronize_dsa_pd_mooncake_bank_streams(bank)
+                    bank.stream.synchronize()
                     bank.completion_pending = False
                     # A failed record/wait may leave the event unusable. Drop
                     # it only after the stream confirms its copies are done.
                     bank.completion_event = None
-                    bank.copy_events = tuple(torch.npu.Event() for _ in bank.copy_events)
                     bank.needs_stream_drain = False
                 except Exception as error:
                     if bank_error is None:
@@ -600,22 +562,16 @@ class MooncakeSFAStagingReader:
         # BANKS reads later is guarded by a just-in-time bank-event wait. The
         # final drain keeps the external contract: returning 0 means every
         # window has landed and is visible.
-        pipeline_active = self._pipeline_landing_enabled and staging_window >= 2
-        if self._pipeline_landing_enabled and not pipeline_active:
+        banks = self._staging_config.bank_count
+        if banks > staging_window:
             logger.warning(
-                "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE needs a staging window >= 2 "
-                "(got %s); falling back to the synchronous landing path.",
-                staging_window,
-            )
-        banks = self._pipeline_banks if pipeline_active else 1
-        if pipeline_active and banks > staging_window:
-            logger.warning(
-                "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS=%s exceeds the staging window (%s); clamping banks to %s.",
+                "mooncake_staging_config.bank_count=%s exceeds window_chunks (%s); using %s banks.",
                 banks,
                 staging_window,
                 staging_window,
             )
             banks = staging_window
+        pipeline_active = banks > 1
         # Trailing slots stay idle when the window is not divisible by the
         # bank count; every bank keeps bank_window contiguous slots.
         bank_window = (staging_window // banks) if pipeline_active else staging_window
@@ -633,7 +589,7 @@ class MooncakeSFAStagingReader:
                 )
                 if ret < 0:
                     return ret
-            if pipeline_active and not ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE:
+            if pipeline_active:
                 workers = self._get_dsa_pd_mooncake_bank_workers(bank_contexts)
             batch_results: Iterable[tuple[_DSAPDMooncakeBankBatch, _DSAPDMooncakeBankBatchResult]]
             if workers:
@@ -641,7 +597,7 @@ class MooncakeSFAStagingReader:
                     session_id, plan, bank_contexts, staging, remote_request_id, workers
                 )
             else:
-                # Keep the synchronous control and device-wide probe on the caller.
+                # A single bank executes READ and synchronous landing on the caller.
                 def serial_batches() -> Iterator[tuple[_DSAPDMooncakeBankBatch, _DSAPDMooncakeBankBatchResult]]:
                     for batch in plan:
                         yield (
@@ -676,18 +632,13 @@ class MooncakeSFAStagingReader:
 
     def _read_staging_batch(
         self, session_id: str, batch: _DSAPDMooncakeBankBatch, remote_request_id: str
-    ) -> tuple[int, float, float]:
-        """Measure READ and its optional debug probe before any landing starts."""
+    ) -> tuple[int, float]:
+        """Measure the READ call before submitting Host landing copies."""
         read_started = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(
             session_id, batch.local_staging_ptrs, batch.remote_src_ptrs, batch.transfer_lengths
         )
         read_secs = time.perf_counter() - read_started
-        read_settle_secs = 0.0
-        if ret >= 0 and ascend_envs.VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE:
-            settle_started = time.perf_counter()
-            torch.npu.synchronize()
-            read_settle_secs = time.perf_counter() - settle_started
         if ret < 0:
             logger.error(
                 "Staged Mooncake batch read failed: request=%s "
@@ -700,7 +651,7 @@ class MooncakeSFAStagingReader:
                 batch.transfer_lengths[0],
                 ret,
             )
-        return ret, read_secs, read_settle_secs
+        return ret, read_secs
 
     @staticmethod
     def _start_staging_receive_timing() -> dict[str, float | int]:
@@ -708,7 +659,6 @@ class MooncakeSFAStagingReader:
         return {
             "total_started": time.perf_counter(),
             "read_secs": 0.0,
-            "read_settle_secs": 0.0,
             "land_exposed_secs": 0.0,
             "batches": 0,
             "plan_entries": 0,
@@ -720,7 +670,6 @@ class MooncakeSFAStagingReader:
         timing: dict[str, float | int], batch: _DSAPDMooncakeBankBatch, result: _DSAPDMooncakeBankBatchResult
     ) -> None:
         timing["read_secs"] += result.read_secs
-        timing["read_settle_secs"] += result.read_settle_secs
         timing["land_exposed_secs"] += result.land_exposed_secs
         if result.return_code >= 0:
             timing["plan_entries"] += len(batch.transfer_lengths)
@@ -748,8 +697,7 @@ class MooncakeSFAStagingReader:
         # Plan entries count raw chunks; copies count coalesced descriptors.
         logger.info(
             "Staged DSA PD mooncake receive timing: request=%s mode=%s batches=%s chunks=%s "
-            "copies=%s plan=%s total_s=%.3f read_s=%.3f read_settle_s=%.3f land_exposed_s=%.3f bank_workers=%s "
-            "copy_streams_per_bank=%s",
+            "copies=%s plan=%s total_s=%.3f read_s=%.3f land_exposed_s=%.3f bank_workers=%s banks=%s",
             request_id,
             "pipeline" if pipeline_active else "sync",
             timing["batches"],
@@ -758,10 +706,9 @@ class MooncakeSFAStagingReader:
             timing["plan_entries"],
             time.perf_counter() - timing["total_started"],
             timing["read_secs"],
-            timing["read_settle_secs"],
             timing["land_exposed_secs"],
             workers,
-            len(banks[0].copy_streams),
+            len(banks),
         )
 
     def get_transfer_targets(

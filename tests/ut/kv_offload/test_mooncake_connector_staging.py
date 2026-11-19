@@ -9,7 +9,6 @@ combined-engine facade were rewritten against the main-tree GlobalTE
 (ptr, size) dedup in mooncake_transfer_engine.py.
 """
 
-import os
 import threading
 import unittest
 from types import SimpleNamespace
@@ -17,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging import MooncakeSFAStagingReader
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.transfer_targets import MooncakeKVRegistry
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
@@ -39,8 +39,7 @@ def _make_fake_recv_thread(staging_chunk_bytes: int) -> MooncakeSFAStagingReader
     thread._dsa_pd_mooncake_staging_lock = threading.Lock()
     thread._landing_stream = MagicMock()
     thread._landing_streams = [thread._landing_stream, MagicMock()]
-    thread._pipeline_banks = 2
-    thread._pipeline_landing_enabled = False
+    thread._staging_config = MooncakeStagingConfig(bank_count=1)
     return thread
 
 
@@ -144,9 +143,9 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.assertEqual(ret, 0)
         self.assertFalse(self.thread._dsa_pd_mooncake_staging_lock.locked())
 
-    def test_staging_window_uses_central_ascend_env(self):
-        with patch.dict(os.environ, {"VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": "3"}):
-            self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 3)
+    def test_staging_window_uses_typed_startup_config(self):
+        self.thread._staging_config = MooncakeStagingConfig(window_chunks=3, bank_count=1)
+        self.assertEqual(self.thread._get_dsa_pd_mooncake_staging_window(), 3)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.stream")
@@ -168,8 +167,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
-        self.thread._pipeline_landing_enabled = True
-        self.thread._pipeline_banks = 4
+        self.thread._staging_config = MooncakeStagingConfig(window_chunks=4, bank_count=4)
         streams = [MagicMock() for _ in range(4)]
         self.thread._landing_streams = streams
 
@@ -244,7 +242,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         host = torch.empty(5 * chunk, dtype=torch.int8)
         staging = torch.empty(3 * chunk, dtype=torch.int8)
         base = host.data_ptr()
-        banks = (SimpleNamespace(slot_base=0, slot_count=3, copy_streams=()),)
+        banks = (SimpleNamespace(slot_base=0, slot_count=3),)
 
         def copies(transfers):
             targets = {dst: (host, dst - base) for dst, _, _ in transfers}
@@ -277,7 +275,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         storage = torch.empty(2 * chunk, dtype=torch.int8)
         first, second = storage[:chunk], storage[chunk:]
         staging = torch.empty(2 * chunk, dtype=torch.int8)
-        banks = (SimpleNamespace(slot_base=0, slot_count=2, copy_streams=()),)
+        banks = (SimpleNamespace(slot_base=0, slot_count=2),)
         with self.assertRaisesRegex(RuntimeError, "Host KV tensor boundary"):
             self.thread._prepare_dsa_pd_mooncake_bank_plan(
                 [(first.data_ptr(), 10 * chunk, chunk), (second.data_ptr(), 11 * chunk, chunk)],
@@ -292,11 +290,10 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.stream")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.synchronize")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.global_te.register_buffer")
-    def test_read_probe_disabled_keeps_no_extra_sync(
+    def test_multibank_landing_has_no_device_wide_sync(
         self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
     ):
-        # With the probe off (default) the fast path stays probe-free: the
-        # only sync sites are the landing modes themselves.
+        # Multiple banks wait on their completion events, without a device-wide wait.
         offloaded_kv = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
         self.thread.kv_registry.register_offloaded_tensor(offloaded_kv)
         staging = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
@@ -305,7 +302,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
-        self.thread._pipeline_landing_enabled = True
+        self.thread._staging_config = MooncakeStagingConfig(bank_count=2)
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
         ret = self.thread.batch_transfer_sync_read(
@@ -326,10 +323,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
     def test_pipeline_single_bank_degenerates_to_per_window_waits(
         self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
     ):
-        # BANKS=1 keeps the whole window as one bank: each window's copies are
-        # recorded on the (single) landing stream and awaited just before the
-        # next window's read reuses the same slots, plus a final drain — the
-        # retired ASYNC_LANDING mode's behavior, now expressed as K=1.
+        # One bank uses the entire window and waits for landing after each READ.
         offloaded_kv = torch.empty((3 * self.staging_chunk_bytes,), dtype=torch.int8)
         self.thread.kv_registry.register_offloaded_tensor(offloaded_kv)
         staging = torch.empty((2 * self.staging_chunk_bytes,), dtype=torch.int8)
@@ -339,8 +333,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 2
-        self.thread._pipeline_landing_enabled = True
-        self.thread._pipeline_banks = 1
+        self.thread._staging_config = MooncakeStagingConfig(window_chunks=2, bank_count=1)
         self.thread._landing_streams = [self.thread._landing_stream]
         self.thread.engine.batch_transfer_sync_read.return_value = 0
 
@@ -358,16 +351,13 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
             "req-banks1",
         )
 
-        # 3 chunks over a window of 2 -> 2 reads; no device-wide sync at all.
+        # Three chunks over a window of two use two synchronous READ/landing batches.
         self.assertEqual(ret, 0)
         self.assertEqual(self.thread.engine.batch_transfer_sync_read.call_count, 2)
-        mock_stream.assert_called_with(self.thread._landing_stream)
-        mock_sync.assert_not_called()
+        mock_stream.assert_not_called()
+        self.assertEqual(mock_sync.call_count, 2)
         mock_register_buffer.assert_not_called()
-        # One reusable event covers each bank batch, including the partial tail.
-        mock_event_cls.assert_called_once()
-        self.assertEqual(mock_event_cls.return_value.record.call_count, 2)
-        self.assertEqual(mock_event_cls.return_value.synchronize.call_count, 2)
+        mock_event_cls.assert_not_called()
         self.assertEqual(
             copied,
             [
@@ -382,7 +372,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.stream")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.torch.npu.synchronize")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging.global_te.register_buffer")
-    def test_async_landing_disabled_keeps_global_sync(
+    def test_single_bank_waits_for_synchronous_landing(
         self, mock_register_buffer, mock_sync, mock_stream, mock_event_cls
     ):
         offloaded_kv = torch.empty((3 * self.staging_chunk_bytes,), dtype=torch.int8)
@@ -431,7 +421,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         self.thread._dsa_pd_mooncake_staging_bytes = staging.numel()
         self.thread._get_dsa_pd_mooncake_staging_chunk_bytes = lambda: self.staging_chunk_bytes
         self.thread._get_dsa_pd_mooncake_staging_window = lambda: 4
-        self.thread._pipeline_landing_enabled = True
+        self.thread._staging_config = MooncakeStagingConfig(bank_count=2)
 
         copied: list[tuple[int, int, int]] = []
 

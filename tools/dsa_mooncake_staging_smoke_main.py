@@ -19,6 +19,7 @@ import torch
 import torch_npu  # noqa: F401  (must precede mooncake import on Ascend)
 from memfabric_hybrid import offload
 
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.adapter import MooncakeSFAHostKV
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.staging import MooncakeSFAStagingReader
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -143,7 +144,14 @@ def run_client(args: argparse.Namespace) -> None:
     _set_npu_device(args.device_id)
     transfer_engine = _init_engine(args.hostname, args.protocol, args.device_name)
     host_kv, target = make_smoke_host_kv(args.nbytes, store_port=args.offload_port)
-    thread = MooncakeSFAStagingReader(transfer_engine, host_kv, [[args.staging_bytes]])
+    thread = MooncakeSFAStagingReader(
+        transfer_engine,
+        host_kv,
+        [[args.staging_bytes]],
+        staging_config=MooncakeStagingConfig(
+            window_chunks=args.staging_window_chunks, bank_count=args.staging_bank_count
+        ),
+    )
 
     ret = thread.batch_transfer_sync_read(
         args.remote_session,
@@ -191,6 +199,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staging-bytes", type=int, default=DEFAULT_STAGING_BYTES)
     parser.add_argument("--verify-bytes", type=int, default=4096)
     parser.add_argument("--offload-port", type=int, default=8500)
+    parser.add_argument("--staging-window-chunks", type=int, default=16)
+    parser.add_argument("--staging-bank-count", type=int, default=4)
     return parser.parse_args()
 
 

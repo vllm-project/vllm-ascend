@@ -240,53 +240,24 @@ the separate SFA connector retain their existing configuration.
 See [Mooncake V2 with SFA offload](../../user_guide/feature_guide/mooncake_sfa_v2.md)
 for supported layouts and failure-policy requirements.
 
-`VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW` keeps its total slot count
-(default 16), with each slot rounded to at least 2 MiB. Source page offsets
-are preserved. `VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=1` enables the existing
-landing streams and one reusable completion event per bank, and
-`VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS` sets their bank count (default 4).
-Disabling the pipeline retains the synchronous landing path. These controls
-are independent of the `MooncakeConnectorV2` and ModelRunner V2 names.
+Configure staging through `additional_config.mooncake_staging_config`:
+`window_chunks` defaults to 16 and `bank_count` defaults to 4. These typed integer
+settings replace the staging environment controls. Values below 1 become 1;
+effective banks are capped by the window. Each chunk is aligned to 2 MiB and
+sized for the KV layout, with source-page offsets preserved.
 
-With the pipeline enabled, `BANKS` also selects the Host worker count.
-One effective bank runs on the caller thread without a thread pool; multiple
-effective banks use one Host worker per bank. The count is derived after banks
-are clamped to the staging window. For example, `BANKS=1`, `2`, and `4` use
-`0`, `2`, and `4` workers respectively, with the total staging capacity and
-cache budget unchanged. Each worker sets its NPU device before executing;
-one task owns each bank's entire request queue, keeping READ then copy order
-serial within that bank without coordinator resubmission between batches.
-Each batch records its completion event once after all landing copies have
-been submitted. Before another READ overwrites that bank's staging, its worker
-waits for the previous recording to complete. The final batch is drained before
-the receive returns; events survive successful drains for reuse across receives.
+One effective bank executes serial READ/landing on the caller, waiting for each
+landing before reuse. Multiple banks pipeline READ and Host landing with one
+Host worker and one copy stream per bank. The 16/4 default uses four banks of
+four chunks without increasing total staging capacity. Each worker sets its NPU
+device before executing and owns a bank's entire request queue.
 
-`VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK` controls landing copy
-streams within each bank (default 1; positive integer, capped by slots per
-bank). For example, `BANKS=4`, `STAGING_WINDOW=16`, and 1/2/4 copy streams
-per bank use at most 4/8/16 copy streams while retaining four Host workers
-and the same READ batches, staging allocation, and total view-cache budget.
-The setting is read at receive boundaries. Independent copy ranges are
-distributed across the bank's streams; overlapping ranges in a batch retain
-their original order on its first stream. Each auxiliary stream records a
-reusable event, which the first stream waits on before recording the bank's
-completion event. Reclaiming staging and completing a receive therefore wait
-for all submitted copies. Pipeline-off and READ probes use one copy stream.
-Additional streams provide execution opportunities, not a guaranteed speedup.
-
-`VLLM_ASCEND_DSA_PD_MOONCAKE_BANK_WORKERS` has been removed and is ignored.
-With `PIPELINE=1`, the default `BANKS=4` now uses four workers instead of
-caller-thread submission. Use `BANKS=1` for caller-thread submission, or
-disable the pipeline for the synchronous landing path.
-
-The request lock remains held until every started worker has joined and
-submitted landing work has drained, including failures. Cross-bank destination
-overlap, a disabled pipeline, and `READ_PROBE=1` use serial submission.
-For overlapping bank destinations, pending landing events drain between
-batches to preserve write dependencies across streams.
-The receive timing line reports `bank_workers`; with workers enabled,
-`read_s` and `land_exposed_s` accumulate worker durations that can overlap,
-so they must not be interpreted as disjoint parts of `total_s`.
+A bank's reusable completion event protects its staging slices and destination
+tensors. Reusing a bank waits for its preceding landing; receive completion joins
+all Host workers and drains the last pending copy in every bank. Failed waits
+retain owners until a later drain succeeds. Independent copy-stream fan-out and
+the device-wide READ diagnostic probe have been removed; staging reuse, final
+drain and exception cleanup remain part of the receive contract.
 
 ### 3. Interface Design
 

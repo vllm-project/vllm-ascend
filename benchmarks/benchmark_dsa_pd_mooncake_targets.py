@@ -68,8 +68,7 @@ def _make_reader(reader_type):
     reader._dsa_pd_mooncake_staging_lock = threading.Lock()
     reader._dsa_pd_mooncake_staging_tensor = torch.empty(16 * ALIGNMENT, dtype=torch.int8)
     reader._dsa_pd_mooncake_staging_bytes = 16 * ALIGNMENT
-    reader._pipeline_landing_enabled = True
-    reader._pipeline_banks = 2
+    reader._staging_config = SimpleNamespace(window_chunks=16, bank_count=2)
     # Measure preparation on the caller, excluding executor scheduling costs.
     reader._get_dsa_pd_mooncake_bank_workers = lambda _banks: 0
     reader._landing_streams = [SimpleNamespace(synchronize=lambda: None) for _ in range(2)]

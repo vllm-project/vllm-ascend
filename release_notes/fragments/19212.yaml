@@ -43,10 +43,12 @@ entries:
       batch records while preserving target bounds and overlap validation.
   - category: config
     text: >-
-      Added VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK (default 1) to
-      distribute independent DSA Host KV landing copies across multiple streams
-      per bank without changing Host worker count or staging capacity.
-      All participating streams complete before staging reuse or receive return.
+      Configure Mooncake Host-KV staging through
+      additional_config.mooncake_staging_config.window_chunks (default 16) and
+      bank_count (default 4). Multiple banks enable pipelining; set bank_count
+      to 1 for serial landing. Previous staging environment controls are ignored.
+      Each bank uses one copy stream; per-bank multi-stream tuning and the
+      device-wide READ diagnostic probe have been removed.
   - category: performance
     text: >-
       Reused one completion event per DSA Mooncake staging bank and processed
@@ -74,14 +76,6 @@ entries:
     text: >-
       Reduced repeated address conversion and alignment calculations while
       splitting DSA Mooncake Host KV transfers into staging slots.
-  - category: breaking
-    text: >-
-      DSA Mooncake Host workers now follow VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
-      (default 4) when pipelining is enabled, with one worker per effective bank
-      and serial submission for a single bank, probes, or overlapping destinations.
-      Removed VLLM_ASCEND_DSA_PD_MOONCAKE_BANK_WORKERS and ignored its old values,
-      so the default pipelined setup now uses four workers instead of the caller
-      thread while preserving staging capacity and ownership until join and drain.
   - category: performance
     text: >-
       Assigned Manager-owned shared Host KV receives to balanced consecutive

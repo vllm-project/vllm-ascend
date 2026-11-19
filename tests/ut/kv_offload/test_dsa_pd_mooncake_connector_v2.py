@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging as staging_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import transfer_targets as registry_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.adapter import MooncakeSFAHostKV
@@ -65,8 +66,7 @@ def make_reader(engine, *, pipeline=False, window=2, bank_workers=0, kv_registry
     reader._get_dsa_pd_mooncake_staging_window = lambda: window
     reader._dsa_pd_mooncake_staging_tensor = torch.empty(window * 2 * 1024 * 1024, dtype=torch.int8)
     reader._dsa_pd_mooncake_staging_bytes = reader._dsa_pd_mooncake_staging_tensor.nbytes
-    reader._pipeline_landing_enabled = pipeline
-    reader._pipeline_banks = 2
+    reader._staging_config = MooncakeStagingConfig(window_chunks=window, bank_count=2 if pipeline else 1)
     reader._landing_streams = [MagicMock(), MagicMock()]
     reader._landing_stream = reader._landing_streams[0]
     if bank_workers is not None:
@@ -298,7 +298,7 @@ def test_receive_reuses_staging_for_every_landing(pipeline):
 
 
 @pytest.mark.parametrize("read_result", [0, -7])
-def test_read_probe_only_synchronizes_successful_reads_before_landing(monkeypatch, read_result):
+def test_read_has_no_diagnostic_device_sync_before_landing(monkeypatch, read_result):
     target = torch.empty(64, dtype=torch.int8)
     registry.register_offloaded_tensor(target)
     reader = make_reader(MagicMock(), pipeline=True, kv_registry=registry)
@@ -310,14 +310,13 @@ def test_read_probe_only_synchronizes_successful_reads_before_landing(monkeypatc
 
     reader.engine.batch_transfer_sync_read.side_effect = read
     reader.host_kv.manager.copy_sfa_kv = lambda *_args: order.append("land")
-    monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE", "1")
     monkeypatch.setattr(torch.npu, "synchronize", lambda: order.append("probe"))
     info, error = MagicMock(), MagicMock()
     monkeypatch.setattr(staging_module.logger, "info", info)
     monkeypatch.setattr(staging_module.logger, "error", error)
 
     assert reader.batch_transfer_sync_read("peer", [target.data_ptr()], [0xA00000], [64], "probe") == read_result
-    assert order == (["read", "probe", "land"] if read_result == 0 else ["read"])
+    assert order == (["read", "land"] if read_result == 0 else ["read"])
     assert not reader._dsa_pd_mooncake_staging_lock.locked()
     if read_result == 0:
         info.assert_called_once()

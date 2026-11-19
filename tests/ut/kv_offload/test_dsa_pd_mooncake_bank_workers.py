@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from vllm_ascend import envs
+from vllm_ascend.ascend_config import MooncakeStagingConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import staging as staging_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import transfer_targets as registry_module
 
@@ -120,7 +121,7 @@ class BankRuntime:
             if stream is None:
                 self.copy(*args)
                 return
-            assert stream in (bank.copy_streams or (bank.stream,))
+            assert stream is bank.stream
             for _ in range(args[0].numel()):
                 self.copy_submissions.append((bank.stream.index, stream.index, threading.get_ident()))
             self.queues[stream.index].append(lambda: self.copy(*args))
@@ -173,9 +174,7 @@ class BankRuntime:
         staging_ptr = self.reader._dsa_pd_mooncake_staging_tensor.data_ptr()
         bank_index = (local[0] - staging_ptr) // (ALIGNMENT * (self.window // self.banks))
         bank = self.reader._dsa_pd_mooncake_staging_banks[bank_index]
-        assert all(not self.queues[stream.index] for stream in bank.copy_streams), (
-            "READ overwrote staging before the previous copies completed"
-        )
+        assert not self.queues[bank.stream.index], "READ overwrote staging before the previous copies completed"
         with self.lock:
             self.reads.append((session, bank_index, tuple(local), tuple(remote), tuple(lengths)))
             ticket = len(self.reads)
@@ -204,9 +203,7 @@ class BankRuntime:
         assert not self.reader._dsa_pd_mooncake_staging_lock.locked()
 
 
-def build(monkeypatch, workers=None, count=37, metadata=True, banks=BANKS, window=WINDOW, copy_streams=1):
-    monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE", "0")
-    monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK", str(copy_streams))
+def build(monkeypatch, workers=None, count=37, metadata=True, banks=BANKS, window=WINDOW):
     storage = torch.empty(ALIGNMENT + count * PIECE_BYTES + 64, dtype=torch.uint8)
     offset = (-storage.data_ptr()) % ALIGNMENT + 64
     source = storage[offset : offset + count * PIECE_BYTES]
@@ -214,10 +211,10 @@ def build(monkeypatch, workers=None, count=37, metadata=True, banks=BANKS, windo
     host = torch.zeros(count * HOST_STRIDE, dtype=torch.uint8)
     registry.register_offloaded_tensor(host)
     reader = make_reader(MagicMock(), pipeline=True, window=window, bank_workers=workers, kv_registry=registry)
-    reader._pipeline_banks = banks
+    reader._staging_config = MooncakeStagingConfig(window_chunks=window, bank_count=banks)
     active_banks = min(banks, window) if window >= 2 else 1
     expected_workers = active_banks if active_banks > 1 else 0
-    if workers is not None:
+    if workers is not None and active_banks > 1:
         expected_workers = min(workers, active_banks)
     bank_window = window // active_banks
     batches = (count + bank_window - 1) // bank_window
@@ -468,15 +465,9 @@ def test_second_request_cannot_enter_until_failed_request_has_joined(monkeypatch
     case.runtime.assert_drained()
 
 
-@pytest.mark.parametrize("reason", ["probe", "pipeline_off"])
-def test_worker_setting_retains_serial_fallbacks(monkeypatch, reason):
-    case = build(monkeypatch, 4)
-    case.runtime.workers = 0
-    case.runtime.barrier = None
-    if reason == "probe":
-        monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE", "1")
-    else:
-        case.reader._pipeline_landing_enabled = False
+@pytest.mark.parametrize("workers", [None, 0, 4])
+def test_single_bank_retains_serial_submission(monkeypatch, workers):
+    case = build(monkeypatch, workers, banks=1)
     assert case.reader.batch_transfer_sync_read(*case.args, **case.kwargs) == 0
     assert not case.runtime.threads and case.runtime.peak_reads == 1
     assert [pointer for row in case.runtime.reads for pointer in row[3]] == case.args[2]
@@ -566,20 +557,6 @@ def test_effective_banks_select_workers_and_preserve_bytes(
     case.runtime.assert_drained()
 
 
-@pytest.mark.parametrize("reason", ["probe", "pipeline_off"])
-def test_automatic_workers_retain_serial_fallbacks(monkeypatch, reason):
-    case = build(monkeypatch)
-    case.runtime.workers = 0
-    case.runtime.barrier = None
-    if reason == "probe":
-        monkeypatch.setenv("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE", "1")
-    else:
-        case.reader._pipeline_landing_enabled = False
-    assert case.reader.batch_transfer_sync_read(*case.args, **case.kwargs) == 0
-    assert not case.runtime.threads and case.runtime.peak_reads == 1
-    case.runtime.assert_drained()
-
-
 def test_removed_worker_environment_cannot_override_automatic_policy(monkeypatch):
     name = "VLLM_ASCEND_DSA_PD_MOONCAKE_BANK_WORKERS"
     monkeypatch.setenv(name, "0")
@@ -588,20 +565,3 @@ def test_removed_worker_environment_cannot_override_automatic_policy(monkeypatch
     assert case.reader.batch_transfer_sync_read(*case.args, **case.kwargs) == 0
     assert case.runtime.peak_reads == BANKS
     case.runtime.assert_drained()
-
-
-@pytest.mark.parametrize(
-    "name,value,expected",
-    [
-        ("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE", "1", True),
-        ("VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK", "3", 3),
-    ],
-)
-def test_bank_fixture_preserves_dynamic_environment_access(monkeypatch, name, value, expected):
-    # Module __getattr__ values must remain dynamic after fixture teardown.
-    monkeypatch.delitem(vars(envs), name, raising=False)
-    with monkeypatch.context() as overrides:
-        build(overrides, copy_streams=2)
-    assert name not in vars(envs)
-    monkeypatch.setenv(name, value)
-    assert getattr(envs, name) == expected
