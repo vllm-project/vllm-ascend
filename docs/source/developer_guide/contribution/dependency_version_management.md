@@ -16,7 +16,7 @@ stack.
 | flash-linear-attention-npu (FLA) | 26.10.0+feature | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`.github/workflows/_selected_tests.yaml`<br>`_selected_tests_upstream.yaml`<br>`schedule_e2e_upstream_test.yaml`<br>main2main —<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi>; the `v26.10.0-feature` release is published as `26.10.0+feature` for both x86_64 and aarch64, and pip selects the matching wheel |
 | flash_attn_npu | 0.5.0 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler` | PyPI <https://pypi.org/simple/> (sdist only) |
 | mooncake-transfer-engine-npu | 0.3.14 | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR / main2main —<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (nightly) <https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly> only; `manylinux_2_35` wheels, never in `requirements.txt` |
-| cannbotdsl / cannbot-arena-net-ops | 0.6.0+g91e7c8f / 0.1.0 | Image build —<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi>, aarch64 only |
+| cannbotdsl / cannbot-arena-net-ops | 0.8.2 / 0.8.2 | Image build —<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi>, aarch64 only |
 | CANN | 9.2.1 | Image build — `FROM` tag of:<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.310p`<br>`Dockerfile.310p.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`mkdocs.yml` | `quay.io/ascend/cann` |
 
 By default, update all files listed for a component.
@@ -91,7 +91,7 @@ file. The `-` lines use the example versions from the table; replace
 -python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
 +python3 -m pip install "mooncake-transfer-engine-npu===<new-version>" && \
 ...
--python3 -m pip install "cannbotdsl===0.6.0+g91e7c8f" "cannbot-arena-net-ops===0.1.0" && \
+-python3 -m pip install "cannbotdsl===0.8.2" "cannbot-arena-net-ops===0.8.2" && \
 +python3 -m pip install "cannbotdsl===<new-version>" "cannbot-arena-net-ops===<new-version>" && \
 ```
 
