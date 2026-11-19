@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,16 @@ class StoreLayerTask:
     io: MemcacheStoreLayoutIO
     sessions: tuple[StoreIOSession, ...]
     owners: frozenset[str]
+
+
+@dataclass(frozen=True)
+class StoreLayerLoadTask:
+    layer_id: int
+    ready: torch.npu.Event | None
+    io: MemcacheStoreLayoutIO
+    sessions: tuple[StoreIOSession, ...]
+    owners: frozenset[str]
+    copy_lock: threading.Lock
 
 
 @dataclass(order=True)

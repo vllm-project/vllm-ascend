@@ -150,6 +150,24 @@ def test_gdn_uses_upstream_component_split_with_page_padding(monkeypatch, orient
         get_conv_state_layout.cache_clear()
 
 
+def test_reused_physical_pages_share_geometry_without_reusing_keys():
+    layout, _ = attention(2, 0, source=True)
+    first = layout.objects(0, 1, "first")
+    reused = layout.objects(4, 1, "second")
+    next_chunk = layout.objects(2, 1, "first")
+    next_page = layout.objects(0, 2, "first")
+    for a, b, c, d in zip(first, reused, next_chunk, next_page, strict=True):
+        assert a.key != b.key and a.size == b.size
+        assert a.ranges is b.ranges
+        assert a.owner_bounds is b.owner_bounds
+        for owner, start, size in a.owner_bounds:
+            parts = [part for part in a.ranges if part.owner == owner]
+            assert start == min(part.address for part in parts)
+            assert start + size == max(part.address + part.size for part in parts)
+        assert a.ranges != c.ranges and a.ranges != d.ranges
+    assert layout._cached_ranges.cache_info().hits == 1
+
+
 def test_schema_and_invalid_layout_do_not_silently_alias():
     layout, caches = attention(2, 0, source=True)
     spec = next(iter(layout.specs.values()))

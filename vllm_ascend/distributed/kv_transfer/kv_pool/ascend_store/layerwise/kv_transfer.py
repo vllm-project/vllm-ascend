@@ -28,11 +28,19 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerRangeReqMeta,
     LayerTransferTask,
     SharedBlockData,
+    StoreLayerLoadTask,
     StoreLayerTask,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
 
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+
+
+def submit_layer_load_window(current, depth, layer_count, next_layer, submit):
+    stop = min(current + depth + 1, layer_count)
+    while next_layer < stop and submit(next_layer):
+        next_layer += 1
+    return next_layer
 
 
 def _build_range_debug_payload(
@@ -994,8 +1002,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         if isinstance(request, StoreLayerTask):
             try:
                 request.ready.synchronize()
-                for session in request.sessions:
-                    request.io.copy(session, request.owners)
+                request.io.copy_save_layer(request.sessions, request.owners, self._send_layer_vectors)
             except Exception as error:
                 # Publish failure before task_done wakes a draining caller.
                 self._fatal_error = error
@@ -1043,6 +1050,16 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             request.clear()
             self.request_queue.task_done()
 
+    def _send_layer_vectors(self, gvas, addresses, sizes):
+        return self._batch_copy_with_limits(
+            gvas,
+            addresses,
+            sizes,
+            0,
+            self.max_transfer_blocks,
+            self.max_transfer_bytes,
+        )
+
     def _copy_gva_layers(self, transfer_tasks: list[LayerTransferTask]) -> bool:
         if self.save_disabled.is_set():
             return False
@@ -1072,14 +1089,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-            res = self._batch_copy_with_limits(
-                gvas_array,
-                addr_array,
-                size_array,
-                0,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            )
+            res = self._send_layer_vectors(gvas_array, addr_array, size_array)
             if res != 0:
                 return False
             if self.save_disabled.is_set():
@@ -1162,9 +1172,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._active_load_indices: set[int] | None = None
         self._group_load_indices: dict[int, set[int] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
-        if group_builders is not None:
+        if group_builders:
             self.layer_batch_builder = group_builders[0]
-        else:
+        elif group_builders is None:
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
                 page_size_bytes,
@@ -1304,8 +1314,23 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             pass
 
     def _handle_request(  # type: ignore[override]
-        self, data: LayerLoadTask
+        self, data: LayerLoadTask | StoreLayerLoadTask
     ):
+        if isinstance(data, StoreLayerLoadTask):
+            try:
+                if data.ready is not None:
+                    data.ready.synchronize()
+                with data.copy_lock:
+                    for session in data.sessions:
+                        data.io.copy(session, data.owners)
+            except Exception as exc:
+                self._fatal_error = exc
+                raise
+            finally:
+                self.layer_load_finished_events[data.layer_id].set()
+                self.request_queue.task_done()
+                self.get_event.set()
+            return
         if data.transfer_tasks and data.transfer_tasks[0].use_key_major_ranges:
             self._handle_range_layer_task(data)
             return

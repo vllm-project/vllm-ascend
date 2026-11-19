@@ -535,6 +535,8 @@ class KVPoolScheduler:
         prompt_token_ids: list[int],
         skip_save: bool | None,
     ):
+        if self.shared_pool_enabled and load_spec and load_spec.can_load and not load_spec.layerwise_previous_step:
+            request_tracker.shared_pool_prefix_end = load_spec.kvpool_cached_tokens
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
         return ReqMeta.from_request_tracker(
             request_tracker,

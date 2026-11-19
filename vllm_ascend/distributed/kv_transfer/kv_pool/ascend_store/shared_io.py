@@ -3,12 +3,15 @@
 """MemCache object sessions shared by bulk and layerwise Store execution."""
 
 import time
+from bisect import bisect_right
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from heapq import merge
 
+import numpy as np
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import PoolObject
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import PoolObject, PoolRange, PoolRangeIndex
 
 
 class MemCacheReadLeaseError(RuntimeError):
@@ -25,9 +28,14 @@ class StoreIOSession:
     gvas: tuple[int, ...]
     deadline: float
     writing: bool
-    completed: set[tuple[int, int]] = field(default_factory=set)
+    completed: tuple[bytearray, ...] = ()
+    completed_ranges: int = 0
     released: bool = False
     closed: bool = False
+    ranges_by_owner: dict[str, list[tuple[int, int, PoolRange]]] | None = None
+    layer_ranges: dict[frozenset[str], list[tuple[int, int, PoolRange]]] | None = None
+    logical_read_segments: int = 0
+    submitted_read_segments: int = 0
 
 
 class MemcacheStoreLayoutIO:
@@ -49,6 +57,38 @@ class MemcacheStoreLayoutIO:
         self._references: dict[str, int] = {}
         self._deadlines: dict[str, float] = {}
         self._pending_release: set[str] = set()
+        self._read_bases: tuple[int, ...] = ()
+        self._read_ends: tuple[int, ...] = ()
+
+    def set_coalesced_read_regions(self, regions):
+        spans = sorted((base, base + size) for base, size in regions.items() if base > 0 and size > 0)
+        self._read_bases = tuple(base for base, _ in spans)
+        self._read_ends = tuple(end for _, end in spans)
+
+    def _coalesced_read_vectors(self, session, batch):
+        gvas, addresses, sizes = [], [], []
+        previous_object = -1
+        previous_owner = None
+        previous_offset_end = previous_address_end = registered_end = 0
+        for index, _, part in batch:
+            end = part.address + part.size
+            if (
+                index == previous_object
+                and part.owner == previous_owner
+                and part.offset == previous_offset_end
+                and part.address == previous_address_end
+                and end <= registered_end
+            ):
+                sizes[-1] += part.size
+            else:
+                region = bisect_right(self._read_bases, part.address) - 1
+                registered_end = self._read_ends[region] if region >= 0 else 0
+                gvas.append(session.gvas[index] + part.offset)
+                addresses.append(part.address)
+                sizes.append(part.size)
+            previous_object, previous_owner = index, part.owner
+            previous_offset_end, previous_address_end = part.offset + part.size, end
+        return gvas, addresses, sizes
 
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         # Allocation alone is not a hit: only published objects are readable.
@@ -56,6 +96,28 @@ class MemcacheStoreLayoutIO:
         if len(values) != len(keys):
             raise RuntimeError("MemCache returned an incomplete readability response")
         return [int(value) for value in values]
+
+    def hold_keys(self, keys: tuple[str, ...], lease_ttl_ms: int) -> None:
+        """Protect published keys without materializing a copy session."""
+        if len(set(keys)) != len(keys):
+            raise ValueError("One handoff must contain unique object keys")
+        if not keys:
+            return
+        results = self.backend.batch_add_lease(list(keys), lease_ttl_ms)
+        if len(results) == len(keys) and all(result == 0 for result in results):
+            return
+        self.release_keys(tuple(key for key, result in zip(keys, results, strict=False) if result == 0))
+        if len(results) != len(keys):
+            raise RuntimeError("MemCache returned an incomplete handoff lease response")
+        raise MemCacheReadLeaseError({result for result in results if result != 0})
+
+    def release_keys(self, keys: tuple[str, ...]) -> None:
+        if keys and (result := self.backend.batch_remove_lease(sorted(keys))) != 0:
+            logger.error(
+                "Shared pool lease cleanup returned %s for %d keys; backend TTL will reclaim leases",
+                result,
+                len(keys),
+            )
 
     def begin(self, plans: Sequence[PoolObject], *, writing: bool) -> StoreIOSession:
         plans = tuple(plans)
@@ -110,6 +172,7 @@ class MemcacheStoreLayoutIO:
             if len(gvas) != len(plans) or any(not 0 < int(gva) < (1 << 64) - 1 for gva in gvas):
                 raise RuntimeError("MemCache allocation/read lease failed")
             session.gvas = tuple(int(gva) for gva in gvas)
+            session.completed = tuple(bytearray(len(plan.ranges)) for plan in plans)
             return session
         except Exception as error:
             try:
@@ -118,35 +181,101 @@ class MemcacheStoreLayoutIO:
                 error.add_note(f"Lease cleanup also failed: {cleanup}")
             raise
 
-    def copy(self, session: StoreIOSession, layers: set[str] | None = None) -> None:
+    def prepare_layer_reads(self, session: StoreIOSession, bundles: tuple[frozenset[str], ...]) -> None:
+        by_owner = {owner: bundle for bundle in bundles for owner in bundle}
+        layer_ranges = {bundle: [] for bundle in bundles}
+        for object_index, plan in enumerate(session.plans):
+            index = plan.range_index or PoolRangeIndex(plan.ranges)
+            for owner, positions in index.by_owner.items():
+                if (bundle := by_owner.get(owner)) is not None:
+                    layer_ranges[bundle].extend((object_index, pos, plan.ranges[pos]) for pos in positions)
+        for bundle, ranges in layer_ranges.items():
+            if len(bundle) > 1:
+                ranges.sort()
+        session.layer_ranges = layer_ranges
+
+    def _pending_ranges(self, session, layers):
         if session.closed or session.released or time.monotonic() >= session.deadline:
             raise RuntimeError("Store session is closed or its lease deadline elapsed")
-        selected = [
+        ranges = (
             (object_index, range_index, part)
             for object_index, plan in enumerate(session.plans)
             for range_index, part in enumerate(plan.ranges)
-            if (layers is None or part.owner in layers) and (object_index, range_index) not in session.completed
-        ]
+        )
+        prepared = session.layer_ranges.get(frozenset(layers)) if layers is not None and session.layer_ranges else None
+        if prepared is not None:
+            ranges = iter(prepared)
+        elif layers is not None:
+            if session.ranges_by_owner is None:
+                session.ranges_by_owner = {}
+                for item in ranges:
+                    session.ranges_by_owner.setdefault(item[2].owner, []).append(item)
+            # Preserve object/range order when several owners have work.
+            owner_ranges = [items for owner in layers if (items := session.ranges_by_owner.get(owner))]
+            if len(owner_ranges) > 1:
+                ranges = merge(*owner_ranges)
+            else:
+                ranges = iter(owner_ranges[0]) if owner_ranges else iter(())
+        completed = session.completed
+        return [item for item in ranges if not completed[item[0]][item[1]]]
+
+    def copy_save_layer(self, sessions, owners, send):
+        """Combine writes for one physical layer. Publication stays with the step owner."""
+        entries = []
+        for session in sessions:
+            if not session.writing:
+                raise ValueError("Expected a write session on the layer send queue")
+            entries.extend((session, i, j, part) for i, j, part in self._pending_ranges(session, owners))
+        for start in range(0, len(entries), self.max_segments):
+            batch = entries[start : start + self.max_segments]
+            deadline = min(session.deadline for session, _, _, _ in batch)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Store lease deadline elapsed before native copy")
+            result = send(
+                np.fromiter(
+                    (session.gvas[i] + part.offset for session, i, _, part in batch), dtype=np.uint64, count=len(batch)
+                ),
+                np.fromiter((part.address for _, _, _, part in batch), dtype=np.uint64, count=len(batch)),
+                np.fromiter((part.size for _, _, _, part in batch), dtype=np.int64, count=len(batch)),
+            )
+            if result != 0 or time.monotonic() >= deadline:
+                raise RuntimeError(f"MemCache copy failed or expired: result={result}")
+            for session, i, j, _ in batch:
+                session.completed[i][j] = 1
+                session.completed_ranges += 1
+
+    def copy(self, session: StoreIOSession, layers: set[str] | frozenset[str] | None = None) -> None:
+        completed = session.completed
+        selected = self._pending_ranges(session, layers)
+        coalesce = self._read_bases and not session.writing and layers is not None
         for start in range(0, len(selected), self.max_segments):
             batch = selected[start : start + self.max_segments]
             if time.monotonic() >= session.deadline:
                 raise RuntimeError("Store lease deadline elapsed before native copy")
-            result = self.backend.store.batch_copy(
-                [session.gvas[i] + part.offset for i, _, part in batch],
-                [part.address for _, _, part in batch],
-                [part.size for _, _, part in batch],
-                0 if session.writing else 1,
-            )
+            if coalesce:
+                vectors = self._coalesced_read_vectors(session, batch)
+            else:
+                vectors = (
+                    [session.gvas[i] + part.offset for i, _, part in batch],
+                    [part.address for _, _, part in batch],
+                    [part.size for _, _, part in batch],
+                )
+            result = self.backend.store.batch_copy(*vectors, 0 if session.writing else 1)
             if result != 0 or time.monotonic() >= session.deadline:
                 raise RuntimeError(f"MemCache copy failed or expired: result={result}")
-            session.completed.update((i, j) for i, j, _ in batch)
+            for i, j, _ in batch:
+                completed[i][j] = 1
+            session.completed_ranges += len(batch)
+            if coalesce:
+                session.logical_read_segments += len(batch)
+                session.submitted_read_segments += len(vectors[2])
 
     def finish(self, session: StoreIOSession) -> None:
         if session.closed:
             return
         try:
             expected = sum(len(plan.ranges) for plan in session.plans)
-            if len(session.completed) != expected:
+            if session.completed_ranges != expected:
                 raise RuntimeError("Cannot finish a partially copied Store object")
             if time.monotonic() >= session.deadline:
                 raise RuntimeError("Store lease expired before publication")

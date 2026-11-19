@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import cached_property, lru_cache
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
@@ -40,6 +41,20 @@ class PoolObject:
     size: int
     block_id: int
     ranges: tuple[PoolRange, ...]
+    owner_bounds: tuple[tuple[str, int, int], ...] = field(default=(), compare=False, repr=False)
+    range_index: PoolRangeIndex | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class PoolRangeIndex:
+    ranges: tuple[PoolRange, ...]
+
+    @cached_property
+    def by_owner(self) -> Mapping[str, tuple[int, ...]]:
+        indices: dict[str, list[int]] = {}
+        for index, part in enumerate(self.ranges):
+            indices.setdefault(part.owner, []).append(index)
+        return {owner: tuple(values) for owner, values in indices.items()}
 
 
 class RequestStateLayout:
@@ -90,14 +105,17 @@ class RequestStateLayout:
             cache_role="state",
         )
 
-    def snapshot(self, block_id, digest, cache_tokens):
+    def snapshot_key(self, block_id, digest, cache_tokens):
         if not 0 < block_id < self.num_blocks or cache_tokens <= 0:
             raise ValueError("Circular snapshot requires an allocated block and computed prefix")
+        return PoolKey(self.metadata, f"pd_state_{cache_tokens}_{digest}").to_string()
+
+    def snapshot(self, block_id, digest, cache_tokens):
+        key = self.snapshot_key(block_id, digest, cache_tokens)
         ranges, offset = [], 0
         for owner, base, stride, size in self._components:
             ranges.append(PoolRange(owner, base + block_id * stride, offset, size))
             offset += size
-        key = PoolKey(self.metadata, f"pd_state_{cache_tokens}_{digest}").to_string()
         return (PoolObject(key, offset, block_id, tuple(ranges)),)
 
 
@@ -210,6 +228,9 @@ def _mla_components(spec, caches, num_blocks):
     return components
 
 
+_MAX_CACHED_RANGES_PER_LAYOUT = 262_144
+
+
 class SharedPoolLayout:
     """One group's schema and public upstream address descriptors.
 
@@ -262,7 +283,6 @@ class SharedPoolLayout:
         elif self.replicated:
             # Actual Ascend views carry split and mixed-dtype component sizes.
             self.layout_cls = HeadMajorStoreLayout
-            self.layer_layouts = {}
             self.component_views = {}
             self.num_blocks = 0
             self._refs = []
@@ -279,7 +299,6 @@ class SharedPoolLayout:
             raise ValueError("Unsupported shared cache family; use an explicit component adapter")
         self.layout_cls = layout_cls
         self._initialize_layout(layout_specs)
-        self.layer_layouts = {}
         self.component_views = {}
         self.num_blocks = 0
         self._refs = []
@@ -361,6 +380,7 @@ class SharedPoolLayout:
         if num_blocks <= 0 or self.num_blocks:
             raise ValueError("Register a positive block count exactly once")
         views = []
+        layer_layouts = {}
         for name, spec in self.specs.items():
             tensors = tuple(caches[name])
             parts = (
@@ -375,38 +395,86 @@ class SharedPoolLayout:
             layout = self._make_layout(tuple(item[0] for item in parts))
             layer_views = [item[1] for item in parts]
             layout.register_kv_caches(layer_views, num_blocks)
-            self.layer_layouts[name] = layout
+            layer_layouts[name] = layout
             self.component_views[name] = parts
             views.extend(layer_views)
             self._refs.extend(tensors)
         if self.replicated:
             self._initialize_layout(tuple(spec for parts in self.component_views.values() for spec, _ in parts))
         self.layout.register_kv_caches(views, num_blocks)
+        self._owners_by_offset = self._validate_layer_ranges(layer_layouts, num_blocks)
+        # Cache immutable addresses and sizes for this registered allocator.
+        # Bound the number of retained ranges even for a wide layer group.
+        max_ranges = max(sum(map(len, owners)) for owners in self._owners_by_offset.values())
+        cache_entries = min(
+            num_blocks * (self.block_size // self.chunk_size), _MAX_CACHED_RANGES_PER_LAYOUT // max(1, max_ranges)
+        )
+        self._cached_ranges = lru_cache(maxsize=cache_entries)(self._ranges_for_chunk)
         self.num_blocks = num_blocks
+
+    def _validate_layer_ranges(self, layer_layouts, num_blocks):
+        result = {}
+        for offset in range(0, self.block_size, self.chunk_size):
+            chunks = [(offset, offset + self.chunk_size)] * len(self.local_shards)
+            # Address templates are affine in the local block index. Check
+            # both ends of the registered range for each chunk and shard.
+            for block_id in {0, num_blocks - 1}:
+                addresses, sizes, _ = self.layout.prepare_values(chunks, [block_id], self.local_shards)
+                actual = [[] for _ in self.local_shards]
+                owners = [[] for _ in self.local_shards]
+                for name, layout in layer_layouts.items():
+                    layer_addrs, layer_sizes, _ = layout.prepare_values(chunks, [block_id], self.local_shards)
+                    for index, (addrs, lens) in enumerate(zip(layer_addrs, layer_sizes, strict=True)):
+                        actual[index].extend(zip(addrs, lens, strict=True))
+                        owners[index].extend([name] * len(addrs))
+                expected = [list(zip(addrs, lens, strict=True)) for addrs, lens in zip(addresses, sizes, strict=True)]
+                if actual != expected or (offset in result and owners != result[offset]):
+                    raise ValueError("Layer ranges disagree with the group's object byte order")
+                result[offset] = owners
+        return result
 
     def objects(self, start: int, block_id: int, digest: str) -> tuple[PoolObject, ...]:
         if not 0 <= block_id < self.num_blocks or start < 0 or start % self.chunk_size:
             raise ValueError("Invalid local block or Store chunk boundary")
-        offset = start % self.block_size
+        return tuple(
+            PoolObject(self.key(shard, digest), size, block_id, index.ranges, owner_bounds, index)
+            for shard, (size, index, owner_bounds) in zip(
+                self.local_shards, self._cached_ranges(start % self.block_size, block_id), strict=True
+            )
+        )
+
+    def _ranges_for_chunk(
+        self,
+        offset: int,
+        block_id: int,
+    ) -> tuple[tuple[int, PoolRangeIndex, tuple[tuple[str, int, int], ...]], ...]:
         chunks = [(offset, offset + self.chunk_size)] * len(self.local_shards)
         addresses, sizes, _ = self.layout.prepare_values(chunks, [block_id], self.local_shards)
-        owners = [
-            (name, layout.prepare_values(chunks, [block_id], self.local_shards))
-            for name, layout in self.layer_layouts.items()
-        ]
         result = []
-        for index, shard in enumerate(self.local_shards):
-            ranges, actual = [], []
+        for index, owners in enumerate(self._owners_by_offset[offset]):
+            ranges = []
+            bounds: dict[str, tuple[int, int]] = {}
             cursor = 0
-            for name, (layer_addrs, layer_sizes, _) in owners:
-                for address, size in zip(layer_addrs[index], layer_sizes[index], strict=True):
-                    ranges.append(PoolRange(name, int(address), cursor, int(size)))
-                    actual.append((address, size))
-                    cursor += int(size)
-            if actual != list(zip(addresses[index], sizes[index], strict=True)):
-                raise ValueError("Layer ranges disagree with the group's object byte order")
-            result.append(PoolObject(self.key(shard, digest), cursor, block_id, tuple(ranges)))
+            for name, address, size in zip(owners, addresses[index], sizes[index], strict=True):
+                address, size = int(address), int(size)
+                ranges.append(PoolRange(name, address, cursor, size))
+                cursor += size
+                end = address + size
+                first, last = bounds.get(name, (address, end))
+                bounds[name] = min(first, address), max(last, end)
+            owner_bounds = tuple((name, start, end - start) for name, (start, end) in bounds.items())
+            # Leave unusual zero-size ranges on the existing validation path.
+            if any(part.size <= 0 for part in ranges):
+                owner_bounds = ()
+            result.append((cursor, PoolRangeIndex(tuple(ranges)), owner_bounds))
         return tuple(result)
+
+    def object_keys(self, digest: str) -> tuple[str, ...]:
+        return tuple(self.key(shard, digest) for shard in self.local_shards)
+
+    @staticmethod
+    def partial_digest(digest: str, valid_tokens: int) -> str:
+        return f"partial_{valid_tokens}_{digest}"
 
     def partial_objects(self, start: int, block_id: int, digest: str, valid_tokens: int) -> tuple[PoolObject, ...]:
         """PD-only compact tail, preserving the full object's component order.
@@ -439,6 +507,6 @@ class SharedPoolLayout:
                             ranges.append(PoolRange(owner, address, cursor, size))
                             cursor += size
                             token += count
-            key = self.key(shard, f"partial_{valid_tokens}_{digest}")
+            key = self.key(shard, self.partial_digest(digest, valid_tokens))
             result.append(PoolObject(key, cursor, block_id, tuple(ranges)))
         return tuple(result)

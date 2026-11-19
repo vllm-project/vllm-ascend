@@ -12,7 +12,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import HANDOFF_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import block_hash_to_str
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import (
     MemCacheReadLeaseError,
-    MemcacheStoreLayoutIO,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import draft_block_digest
 
@@ -32,7 +31,7 @@ class PoolPDWorker:
         self.failed_handoffs: set[str] = set()
         self.results = KVConnectorTransferResults()
 
-    def _plans(self, request, *, tail_only, writing):
+    def _plans(self, request, *, tail_only, writing, keys_only=False):
         plans = []
         # Async receive reserves only the remotely computed prompt prefix.
         # The final prompt token is recomputed locally; if it is alone in a
@@ -47,7 +46,10 @@ class PoolPDWorker:
             blocks = request.block_ids[gid]
             if len(blocks) != 1:
                 raise ValueError("PD circular state requires exactly one block per request")
-            plans.extend(layout.snapshot(blocks[0], request.prompt_digest, cache_end))
+            if keys_only:
+                plans.append(layout.snapshot_key(blocks[0], request.prompt_digest, cache_end))
+            else:
+                plans.extend(layout.snapshot(blocks[0], request.prompt_digest, cache_end))
         for gid, layout, draft in self.transfer.prefix_layouts():
             if writing and layout.replicated and layout.writer_rank != 0:
                 continue
@@ -59,7 +61,8 @@ class PoolPDWorker:
                     raise ValueError("PD recurrent state has no allocated checkpoint")
                 # PD snapshots use the exact stateful P boundary, including
                 # non-aligned request tails. They are not ordinary checkpoints.
-                plans.extend(layout.objects(0, blocks[index], f"pd_state_{cache_end}_{request.prompt_digest}"))
+                digest = f"pd_state_{cache_end}_{request.prompt_digest}"
+                plans.extend(layout.object_keys(digest) if keys_only else layout.objects(0, blocks[index], digest))
                 continue
             first = request.local_tokens // layout.chunk_size
             unhashed = None
@@ -91,27 +94,34 @@ class PoolPDWorker:
                         raise ValueError("PD cannot restore a null full-attention block")
                     if unhashed is not None and block_id not in unhashed:
                         continue
-                    plans.extend(layout.objects(index * layout.chunk_size, block_id, digest))
+                    plans.extend(
+                        layout.object_keys(digest)
+                        if keys_only
+                        else layout.objects(index * layout.chunk_size, block_id, digest)
+                    )
             needs_tail = writing or receive_end > complete * layout.chunk_size
             if remainder and needs_tail and request.local_tokens < request.prompt_tokens:
                 if complete >= len(blocks) or blocks[complete] <= 0:
                     raise ValueError("PD tail has no allocated block")
                 if unhashed is not None and blocks[complete] not in unhashed:
                     raise ValueError("PD tail requires a private destination block")
-                plans.extend(
-                    layout.partial_objects(
-                        complete * layout.chunk_size, blocks[complete], request.prompt_digest, remainder
+                if keys_only:
+                    plans.extend(layout.object_keys(layout.partial_digest(request.prompt_digest, remainder)))
+                else:
+                    plans.extend(
+                        layout.partial_objects(
+                            complete * layout.chunk_size, blocks[complete], request.prompt_digest, remainder
+                        )
                     )
-                )
         return tuple(plans)
 
     def _reap_handoffs(self, *, all_holds=False):
         remaining = []
-        for expiry, io, session in self.handoff_holds:
+        for expiry, keys in self.handoff_holds:
             if all_holds or time.monotonic() >= expiry:
-                io.abort(session)
+                self.transfer.io.release_keys(keys)
             else:
-                remaining.append((expiry, io, session))
+                remaining.append((expiry, keys))
         self.handoff_holds = remaining
 
     def _protect_handoffs(self):
@@ -121,26 +131,23 @@ class PoolPDWorker:
                 self.failed_handoffs.add(request.request_id)
                 logger.warning("Pool PD handoff expired before acquisition req=%s", request.request_id)
                 continue
-            # Use an independent local owner for each handoff. The SDK tracks
-            # operation leases per client/key; no stale GVA is reused. Native
-            # TTL exceeds the bounded hold, including clock-skew allowance.
-            io = MemcacheStoreLayoutIO(
-                self.transfer.io.backend, lease_ttl_ms=int((remaining + _HANDOFF_LEASE_GRACE_S) * 1000)
-            )
-            plans = self._plans(request, tail_only=False, writing=True)
+            # The producer protects published keys. The consumer builds the
+            # copy ranges and validates the object size when it restores them.
+            ttl_ms = int((remaining + _HANDOFF_LEASE_GRACE_S) * 1000)
+            keys = self._plans(request, tail_only=False, writing=True, keys_only=True)
             try:
-                session = io.begin(plans, writing=False)
+                self.transfer.io.hold_keys(keys, ttl_ms)
             except MemCacheReadLeaseError as error:
                 self.failed_handoffs.add(request.request_id)
                 logger.warning("Pool PD handoff failed req=%s: %s", request.request_id, error)
                 continue
-            self.handoff_holds.append((time.monotonic() + remaining + _HANDOFF_RELEASE_GRACE_S, io, session))
+            self.handoff_holds.append((time.monotonic() + remaining + _HANDOFF_RELEASE_GRACE_S, keys))
             if time.time() + HANDOFF_DEADLINE_MARGIN_S >= request.handoff_deadline:
                 self.failed_handoffs.add(request.request_id)
                 logger.warning("Pool PD handoff expired during acquisition req=%s", request.request_id)
                 continue
             logger.info(
-                "Pool PD HOLD req=%s objects=%d deadline=%.3f", request.request_id, len(plans), request.handoff_deadline
+                "Pool PD HOLD req=%s objects=%d deadline=%.3f", request.request_id, len(keys), request.handoff_deadline
             )
 
     def prepare(self, metadata):

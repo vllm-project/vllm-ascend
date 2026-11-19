@@ -50,6 +50,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
     KVCacheStoreLayerSendingThread,
     KVCacheStoreLayerSendingThreadBase,
     LayerBatchBuilder,
+    submit_layer_load_window,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseReuseLayout,
@@ -2223,7 +2224,7 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
         def submit_layer_load(layer_id: int) -> bool:
             reuse_source = self.prefetch_layer_map.get(layer_id)
             if not self.layer_load_tasks[layer_id] and reuse_source is None:
-                return False
+                return True
             attention_start_gate = None
             if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
@@ -2237,11 +2238,9 @@ class LayerwiseKVPoolWorker(KVPoolWorker):
             )
             return True
 
-        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
-        while self.next_layer_to_submit <= window_end:
-            layer_id = self.next_layer_to_submit
-            self.next_layer_to_submit += 1
-            submit_layer_load(layer_id)
+        self.next_layer_to_submit = submit_layer_load_window(
+            self.current_layer, self.num_prefetch_layers, self.num_layers, self.next_layer_to_submit, submit_layer_load
+        )
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
         physical_layer = self._extract_physical_layer_index(layer_name)

@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 import torch
 from vllm.logger import logger
@@ -21,11 +24,16 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, requires_padded_page_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
+    submit_layer_load_window,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import StoreLayerTask
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    StoreLayerLoadTask,
+    StoreLayerTask,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import KeyMetadata, block_hash_to_str
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_io import MemcacheStoreLayoutIO
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_layout import RequestStateLayout, SharedPoolLayout
@@ -179,12 +187,126 @@ def validate_shared_pool(config, cache_config, *, worker=True):
                 raise ValueError("Quantized/split-scale shared content needs an explicit adapter")
 
 
+@dataclass(frozen=True)
+class _SharedSlot:
+    index: int
+    base: int
+    stride: int
+    blocks: int
+    group: int
+
+    def contains(self, block, address, size):
+        start = self.base + block * self.stride
+        return 0 < block < self.blocks and start <= address < address + size <= start + self.stride
+
+
+def _certified_shared_slots(config, caches):
+    # The padded shared-slot allocator gives different cache groups views of
+    # the same numbered physical pages. The scheduler allocates those IDs from
+    # one BlockPool. Verify the runtime views still use that exact geometry.
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT, as_kv_cache_tensors
+
+    owner_groups = {name: gid for gid, group in enumerate(config.kv_cache_groups) for name in group.layer_names}
+    slots = {}
+    for index, descriptor in enumerate(getattr(config, "kv_cache_tensors", ())):
+        names = descriptor.layers
+        groups = {owner_groups.get(name) for name in names}
+        stride, blocks = descriptor.block_stride, config.num_blocks
+        if (
+            len(names) < 2
+            or len(groups) != len(names)
+            or None in groups
+            or not all(name in caches for name in names)
+            or descriptor.layer_stride != 0
+            or descriptor.offset != 0
+            or stride <= 0
+            or blocks <= 0
+            or descriptor.size != stride * blocks
+        ):
+            continue
+        parts = [tuple(tensor for tensor in as_kv_cache_tensors(caches[name]) if tensor.numel()) for name in names]
+        if not all(parts):
+            continue
+        tensors = [tensor for owner in parts for tensor in owner]
+        storages = {(tensor.untyped_storage().data_ptr(), tensor.untyped_storage().nbytes()) for tensor in tensors}
+        if len(storages) != 1:
+            continue
+        ((storage, storage_bytes),) = storages
+        base = (storage + KV_CACHE_BUFFER_ALIGNMENT - 1) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
+        if base + descriptor.size > storage + storage_bytes:
+            continue
+        if all(_uses_slot_pages(tensor, base, stride, blocks) for tensor in tensors):
+            slots.update((name, _SharedSlot(index, base, stride, blocks, owner_groups[name])) for name in names)
+    return slots
+
+
+def _uses_slot_pages(tensor, base, page_stride, blocks):
+    if tensor.ndim < 1 or tensor.shape[0] % blocks or any(stride < 0 for stride in tensor.stride()):
+        return False
+    rows_per_page = tensor.shape[0] // blocks
+    itemsize = tensor.element_size()
+    span = 1 + sum(
+        (length - 1) * stride
+        for length, stride in zip((rows_per_page, *tensor.shape[1:]), tensor.stride(), strict=True)
+    )
+    start = tensor.data_ptr() - base
+    return (
+        tensor.stride(0) * rows_per_page * itemsize == page_stride
+        and 0 <= start < start + span * itemsize <= page_stride
+    )
+
+
+def _exclusive_group_blocks(requests):
+    owners = {}
+    for request in requests:
+        for gid, blocks in enumerate(request.block_ids_by_group):
+            for block in blocks:
+                if block > 0 and owners.setdefault(block, gid) != gid:
+                    return False
+    return True
+
+
+def _disjoint_buffer_owners(caches, shared_slots=None):
+    # Include stride gaps in the byte span. A conservative fallback keeps
+    # shared or reused cache buffers on their existing per-layer copy path.
+    intervals = []
+    shared_slots = shared_slots or {}
+    for owner, value in caches.items():
+        tensors = (value,) if isinstance(value, torch.Tensor) else value
+        for tensor in tensors:
+            if not tensor.numel():
+                continue
+            start = tensor.data_ptr()
+            strides = tensor.stride()
+            if not start or any(stride < 0 for stride in strides):
+                return set()
+            width = 1 + sum((count - 1) * stride for count, stride in zip(tensor.shape, strides, strict=True))
+            intervals.append((start, start + width * tensor.element_size(), owner))
+    intervals.sort()
+    overlapping = set()
+    for i, (_, stop, owner) in enumerate(intervals):
+        for j in range(i + 1, len(intervals)):
+            start, _, other = intervals[j]
+            if start >= stop:
+                break
+            owner_slot, other_slot = shared_slots.get(owner), shared_slots.get(other)
+            proven = owner_slot is not None and other_slot is not None and owner_slot.index == other_slot.index
+            if owner != other and not proven:
+                overlapping.update((owner, other))
+    return {owner for _, _, owner in intervals} - overlapping
+
+
 class SharedPoolTransfer:
     def __init__(self, worker):
         self.worker = worker
         extra = worker.vllm_config.kv_transfer_config.kv_connector_extra_config
         self.layerwise = shared_pool_uses_layerwise(worker.vllm_config)
         self.io = MemcacheStoreLayoutIO(worker.m_store, int(extra.get("store_lease_ttl_ms", 600000)))
+        self._coalesce_prefix_reads = (
+            extra.get("coalesce_prefix_reads", False)
+            and self.layerwise
+            and worker.vllm_config.kv_transfer_config.kv_role == "kv_producer"
+        )
         self.layouts = {}
         self.draft_layouts = {}
         self.request_states = {}
@@ -198,6 +320,32 @@ class SharedPoolTransfer:
         self._executing_owner = None
         self._registered = False
         self._sender = None
+        self._prefetch_enabled = (
+            extra.get("shared_pool_prefetch", False)
+            and self.layerwise
+            and worker.vllm_config.kv_transfer_config.kv_role == "kv_producer"
+        )
+        self._prefetch_groups = ()
+        self._prefetch_depth = 2
+        self._prefetch_order = ()
+        self._prefetch_position = {}
+        self._prefetch_work = ()
+        self._prefetch_next = 0
+        self._prefetch_tasks = ()
+        self._prefetch_sync = set()
+        self._prefetch_pending = set()
+        self._prefetch_shared_slots = {}
+        self._receiver = None
+        self._prefetch_events = {}
+        self._prefetch_copy_lock = threading.Lock()
+        self._lookup_executor = None
+        if (
+            extra.get("parallel_prefix_group_lookup", False)
+            and worker.vllm_config.kv_transfer_config.kv_role == "kv_producer"
+        ):
+            self._lookup_executor = ThreadPoolExecutor(
+                max_workers=2, initializer=worker.m_store.set_device, thread_name_prefix="pool-lookup"
+            )
 
     def register(self, caches):
         worker = self.worker
@@ -213,6 +361,8 @@ class SharedPoolTransfer:
                     gid, group.kv_cache_spec.block_size, draft, caches, self.draft_layouts, self.draft_request_states
                 )
         worker.m_store.register_buffer(list(self.regions), list(self.regions.values()))
+        if self._coalesce_prefix_reads:
+            self.io.set_coalesced_read_regions(self.regions)
         layouts = [layout for _, layout, _ in self.prefix_layouts()] + [
             layout for _, layout in self.request_state_layouts()
         ]
@@ -221,6 +371,29 @@ class SharedPoolTransfer:
 
             specs = {name: spec for layout in layouts for name, spec in layout.specs.items()}
             self.layer_bundles = build_layer_cache_bundles(specs)
+        if self._prefetch_enabled:
+            from vllm_ascend.core.kv_cache_placement import build_layer_cache_bundles
+
+            specs = {name: spec for layout in layouts for name, spec in layout.specs.items()}
+            bundles = build_layer_cache_bundles(specs, draft_names & specs.keys())
+            if requires_padded_page_layout(
+                spec for group in config.kv_cache_groups for spec in group_specs(group).values()
+            ):
+                self._prefetch_shared_slots = _certified_shared_slots(config, caches)
+            disjoint = _disjoint_buffer_owners(caches, self._prefetch_shared_slots)
+            self._prefetch_order = tuple(frozenset(owners) for owners in bundles.values())
+            self._prefetch_groups = tuple(bundle for bundle in self._prefetch_order if disjoint.issuperset(bundle))
+            if self._prefetch_groups:
+                logger.info(
+                    "Shared pool P prefix prefetch enabled for %d/%d layer groups (validated shared-slot owners=%d)"
+                    " with %d layers of lookahead",
+                    len(self._prefetch_groups),
+                    len(bundles),
+                    len(self._prefetch_shared_slots),
+                    self._prefetch_depth,
+                )
+            else:
+                logger.info("Shared pool P prefix prefetch disabled for overlapping cache buffers")
         self._registered = True
 
     def _register_group(self, gid, chunk_size, specs, caches, layouts, request_states):
@@ -289,8 +462,7 @@ class SharedPoolTransfer:
             ),
         }
 
-    def _plans(self, request, *, writing):
-        result = []
+    def _chunks(self, request, *, writing):
         load = request.load_spec
         for gid, layout, draft in self.prefix_layouts():
             if writing and layout.replicated and layout.writer_rank != 0:
@@ -332,8 +504,45 @@ class SharedPoolTransfer:
                         raise ValueError("Shared MTP prefix is missing its next-token hash")
                 else:
                     digest = block_hash_to_str(request.block_hashes[hash_index])
-                result.extend(layout.objects(index * layout.chunk_size, blocks[index], digest))
-        return tuple(result)
+                yield layout, index * layout.chunk_size, blocks[index], digest
+
+    def _plans(self, request, *, writing):
+        return tuple(
+            plan
+            for layout, start, block, digest in self._chunks(request, writing=writing)
+            for plan in layout.objects(start, block, digest)
+        )
+
+    def _write_plans(self, request, seen):
+        if request.published_prompt_end or request.shared_pool_prefix_end <= request.save_start_token:
+            plans = tuple(plan for plan in self._plans(request, writing=True) if plan.key not in seen)
+            seen.update(plan.key for plan in plans)
+            return plans
+
+        # A warm restore often makes the same prefix eligible for saving.
+        # Resolve its Store keys before building local address ranges.
+        chunks, keys = [], []
+        for layout, start, block, digest in self._chunks(request, writing=True):
+            if block >= layout.num_blocks:
+                raise ValueError("Invalid local block or Store chunk boundary")
+            chunk_keys = [key for shard in layout.local_shards if (key := layout.key(shard, digest)) not in seen]
+            if chunk_keys:
+                chunks.append((layout, start, block, digest, chunk_keys))
+                keys.extend(chunk_keys)
+        if len(set(keys)) != len(keys):
+            raise ValueError("One session must contain unique object keys")
+        if not keys:
+            return ()
+        seen.update(keys)
+        readable = self.io.batch_is_exist(keys)
+        missing = {key for key, hit in zip(keys, readable, strict=True) if not hit}
+        return tuple(
+            plan
+            for layout, start, block, digest, chunk_keys in chunks
+            if any(key in missing for key in chunk_keys)
+            for plan in layout.objects(start, block, digest)
+            if plan.key in missing
+        )
 
     def prepare_step(self, metadata):
         if self.step is metadata:
@@ -345,12 +554,12 @@ class SharedPoolTransfer:
         try:
             for request in metadata.requests:
                 if request.can_save and self.worker.can_put:
-                    plans = tuple(plan for plan in self._plans(request, writing=True) if plan.key not in seen)
+                    plans = self._write_plans(request, seen)
                     if request.published_prompt_end and not plans:
                         if request.event_id is not None:
                             self.completed_events[request.event_id] = 1
                         continue
-                    seen.update(plan.key for plan in plans)
+                    # Recheck the remaining keys immediately before allocation.
                     self.saves.append((request, self.io.begin(plans, writing=True)))
         except Exception:
             self._abort_all()
@@ -365,18 +574,153 @@ class SharedPoolTransfer:
                     if not self.layerwise:
                         self.io.copy(session)
                         self.io.finish(session)
+            if self._prefetch_groups and self.loads:
+                self._start_prefetch(metadata.requests)
         except Exception:
             self._abort_all()
             raise
+
+    def _start_prefetch(self, requests):
+        sessions = tuple(session for _, session in self.loads)
+        pending = set()
+        unsafe = set()
+        slots = self._prefetch_shared_slots
+        if slots and not _exclusive_group_blocks(requests):
+            unsafe.update(slots)
+        for request, session in self.loads:
+            blocks = tuple(set(group) for group in request.block_ids_by_group) if slots else ()
+            for plan in session.plans:
+                # Full-block geometry is cached per physical slot. A layer's
+                # ranges all fit that slot exactly when their bounds fit.
+                bounds = getattr(plan, "owner_bounds", ()) or (
+                    (part.owner, part.address, part.size) for part in plan.ranges
+                )
+                for owner, address, size in bounds:
+                    pending.add(owner)
+                    slot = slots.get(owner)
+                    if slot is not None and (
+                        slot.group >= len(blocks)
+                        or plan.block_id not in blocks[slot.group]
+                        or not slot.contains(plan.block_id, address, size)
+                    ):
+                        unsafe.add(owner)
+        eligible = set(self._prefetch_groups)
+        order = self._prefetch_order or self._prefetch_groups
+        groups = tuple((bundle, bundle & pending) for bundle in order)
+        if not any(owners and bundle in eligible and bundle.isdisjoint(unsafe) for bundle, owners in groups):
+            return
+        # Prepare each physical layer's ranges before it enters the receive queue.
+        for session in sessions:
+            self.io.prepare_layer_reads(session, tuple(bundle for bundle, _ in groups))
+        if self._receiver is None:
+            worker = self.worker
+            self._receiver = KVCacheStoreLayerRecvingThread(
+                worker.m_store,
+                worker.token_database,
+                worker.block_size,
+                worker.tp_rank,
+                worker.tp_size,
+                worker.dcp_size,
+                0,
+                threading.Event(),
+                threading.Event(),
+                [threading.Event() for _ in groups],
+                [],
+                [],
+                len(groups),
+                group_builders=[],
+            )
+            self._receiver.start()
+            while not self._receiver.ready_event.wait(timeout=0.1):
+                if not self._receiver.is_alive():
+                    raise RuntimeError("Layerwise receive thread exited before binding its NPU")
+        self._receiver.raise_if_failed()
+        events = self._receiver.layer_load_finished_events
+        for event in events:
+            event.clear()
+
+        # The first receive waits for prior writes on the model stream.
+        ready = torch.npu.Event()
+        ready.record()
+
+        self._prefetch_work = groups
+        self._prefetch_pending = pending
+        self._prefetch_sync = {
+            index
+            for index, (bundle, owners) in enumerate(groups)
+            if owners and (bundle not in eligible or not bundle.isdisjoint(unsafe))
+        }
+        self._prefetch_position = {owner: index for index, (bundle, _) in enumerate(groups) for owner in bundle}
+        self._prefetch_next = 0
+        first = next(index for index, (_, owners) in enumerate(groups) if owners and index not in self._prefetch_sync)
+        self._prefetch_tasks = tuple(
+            StoreLayerLoadTask(
+                index, ready if index == first else None, self.io, sessions, bundle, self._prefetch_copy_lock
+            )
+            for index, (bundle, _) in enumerate(groups)
+        )
+        # Start the first layer and its successors. A subsequent window opens
+        # only when an execution hook reaches that physical layer.
+        self._submit_prefetch_window(0)
+
+    def _submit_prefetch_window(self, current):
+        def submit(index):
+            # A synchronous demand load must not queue behind future layers.
+            if index in self._prefetch_sync:
+                return False
+            bundle, owners = self._prefetch_work[index]
+            if not self._prefetch_pending.isdisjoint(owners):
+                self._receiver.raise_if_failed()
+                self._receiver.add_request(self._prefetch_tasks[index])
+                self._prefetch_events.update(dict.fromkeys(bundle, self._receiver.layer_load_finished_events[index]))
+            return True
+
+        self._prefetch_next = submit_layer_load_window(
+            current, self._prefetch_depth, len(self._prefetch_work), self._prefetch_next, submit
+        )
+
+    def _drain_prefetch(self):
+        # All submitted copies must stop before releasing leases or pages.
+        # Unsubmitted work remains the model's responsibility.
+        active = bool(self._prefetch_work)
+        self._prefetch_tasks = ()
+        self._prefetch_work = ()
+        self._prefetch_position.clear()
+        self._prefetch_sync.clear()
+        self._prefetch_pending.clear()
+        self._prefetch_events.clear()
+        if active:
+            self._receiver.drain()
 
     def load_layer(self, owner, *, execution=True):
         # Some recurrent layers report readiness with an unnamed save hook.
         # Bind it to the preceding execution wait, never to a layer counter.
         # KVPP's advisory waits must not change the current execution owner.
+        current = self._prefetch_position.get(owner)
         if execution:
             self._executing_owner = owner
-        for _, session in self.loads:
-            self.io.copy(session, set(self.layer_bundles.get(owner, (owner,))))
+            if current is not None:
+                self._submit_prefetch_window(current)
+        event = self._prefetch_events.get(owner)
+        if event is not None:
+            while not event.wait(timeout=0.1):
+                self._receiver.raise_if_failed()
+                if not self._receiver.is_alive():
+                    raise RuntimeError("Layerwise receive thread exited before completing the current layer")
+            self._receiver.raise_if_failed()
+            return
+        owners = self._prefetch_work[current][0] if current is not None else self.layer_bundles.get(owner, (owner,))
+        if self._prefetch_work and self._prefetch_pending.isdisjoint(owners):
+            return
+        # Demand loads and the background worker share the read session.
+        with self._prefetch_copy_lock if self._prefetch_work else nullcontext():
+            for _, session in self.loads:
+                self.io.copy(session, frozenset(owners))
+        if current in self._prefetch_sync:
+            self._prefetch_pending.difference_update(owners)
+            self._prefetch_sync.remove(current)
+            if execution:
+                self._submit_prefetch_window(current)
 
     def resolve_save_owner(self, owner):
         if not owner:
@@ -425,10 +769,20 @@ class SharedPoolTransfer:
 
     def finish_step(self):
         try:
+            self._drain_prefetch()
             self.drain_saves()
             for request, session in self.loads:
                 self.io.finish(session)
-                logger.info("Ascend shared GET req=%s objects=%d", request.req_id, len(session.plans))
+                if session.logical_read_segments:
+                    logger.info(
+                        "Ascend shared GET req=%s objects=%d logical_segments=%d submitted_segments=%d",
+                        request.req_id,
+                        len(session.plans),
+                        session.logical_read_segments,
+                        session.submitted_read_segments,
+                    )
+                else:
+                    logger.info("Ascend shared GET req=%s objects=%d", request.req_id, len(session.plans))
             if self.saves and not self.layerwise:
                 event = torch.npu.Event()
                 event.record()
@@ -446,32 +800,61 @@ class SharedPoolTransfer:
     def lookup(self, token_len, hashes):
         if not self.layouts:
             return 0
-        common = None
-        for _, layout, draft in self.prefix_layouts():
-            hits = set()
-            for start in range(0, token_len - layout.chunk_size + 1, layout.chunk_size):
-                end = start + layout.chunk_size
-                hash_index = end // layout.hash_block_size - 1
-                if hash_index >= len(hashes):
-                    break
-                digest = draft_block_digest(hashes, hash_index) if draft else block_hash_to_str(hashes[hash_index])
-                if digest is None:
-                    break
-                keys = [layout.key(shard, digest) for shard in range(layout.store_tp)]
-                if not all(self.io.batch_is_exist(keys)):
-                    if layout.state:
-                        # State checkpoints can be sparse; unlike attention,
-                        # they do not require every historical block to exist.
-                        continue
-                    break
-                hits.add(end)
-            common = hits if common is None else common.intersection(hits)
-        alignment = self.worker.cache_transfer_granularity
-        # Rounding a checkpoint down would claim a state we never restored.
-        return max((end for end in common or () if end % alignment == 0), default=0)
+        layouts = [(layout, draft) for _, layout, draft in self.prefix_layouts()]
+        alignment = math.lcm(self.worker.cache_transfer_granularity, *(layout.chunk_size for layout, _ in layouts))
+        upper = token_len // alignment * alignment
+
+        def readable(layout, draft, end):
+            hash_index = end // layout.hash_block_size - 1
+            if hash_index >= len(hashes):
+                return False
+            digest = draft_block_digest(hashes, hash_index) if draft else block_hash_to_str(hashes[hash_index])
+            if digest is None:
+                return False
+            keys = [layout.key(shard, digest) for shard in range(layout.store_tp)]
+            return all(self.io.batch_is_exist(keys))
+
+        attention = [(layout, draft) for layout, draft in layouts if not layout.state]
+        checkpoints = [(layout, draft) for layout, draft in layouts if layout.state]
+        if self._lookup_executor is None or len(attention) < 2:
+            for layout, draft in attention:
+                for end in range(layout.chunk_size, upper + 1, layout.chunk_size):
+                    if not readable(layout, draft, end):
+                        upper = (end - 1) // alignment * alignment
+                        break
+        else:
+            bound_lock = threading.Lock()
+
+            def scan_attention(layout, draft):
+                nonlocal upper
+                # A miss in either attention group bounds the usable prefix.
+                for end in range(layout.chunk_size, token_len + 1, layout.chunk_size):
+                    with bound_lock:
+                        if end > upper:
+                            break
+                    if not readable(layout, draft, end):
+                        with bound_lock:
+                            upper = min(upper, (end - 1) // alignment * alignment)
+                        break
+
+            futures = [self._lookup_executor.submit(scan_attention, layout, draft) for layout, draft in attention]
+            wait(futures)
+            for future in futures:
+                future.result()
+
+        # Recurrent checkpoints are sparse and only the chosen boundary will
+        # be loaded. Probe candidates newest first without scanning history.
+        for end in range(upper, 0, -alignment):
+            if all(readable(layout, draft, end) for layout, draft in checkpoints):
+                return end
+        return 0
 
     def _abort_all(self):
         errors = []
+        try:
+            self._drain_prefetch()
+        except Exception as error:
+            errors.append(error)
         try:
             self.drain_saves()
         except Exception as error:
@@ -492,6 +875,8 @@ class SharedPoolTransfer:
         self._abort_all()
 
     def close(self):
+        if self._lookup_executor is not None:
+            self._lookup_executor.shutdown()
         errors = []
         try:
             self._abort_all()
@@ -501,6 +886,9 @@ class SharedPoolTransfer:
             if self._sender is not None:
                 self._sender.stop()
                 self._sender.join()
+            if self._receiver is not None:
+                self._receiver.stop()
+                self._receiver.join()
         try:
             self.io.retry_cleanup()
             if self.regions:

@@ -20,7 +20,16 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import (
 
 
 class PoolPDScheduler:
-    def __init__(self, pool, *, need_truncate=False, mtp_tokens=0, transfer_mtp=False, handoff_ttl_s=0):
+    def __init__(
+        self,
+        pool,
+        *,
+        need_truncate=False,
+        mtp_tokens=0,
+        transfer_mtp=False,
+        handoff_ttl_s=0,
+        request_hash_block_size=None,
+    ):
         if type(mtp_tokens) is not int or mtp_tokens < 0:
             raise ValueError("Pool PD requires a nonnegative speculative token count")
         self.handoff_ttl_s = handoff_ttl_s
@@ -30,6 +39,7 @@ class PoolPDScheduler:
         self.handoff_protocol = POOL_PD_MTP_PROTOCOL if transfer_mtp else POOL_PD_PROTOCOL
         self.transfer_mtp = transfer_mtp
         self.need_truncate = need_truncate
+        self.request_hash_block_size = request_hash_block_size
         self.original_prompts = {}
         self.requests = {}
         self.receives = {}
@@ -43,7 +53,7 @@ class PoolPDScheduler:
         if self.need_truncate and params.get("do_remote_decode"):
             if request.request_id not in self.original_prompts:
                 self.original_prompts[request.request_id] = (len(request.prompt_token_ids), prompt_digest(request))
-            truncate_stateful_prefill_request(request)
+            truncate_stateful_prefill_request(request, hash_block_size=self.request_hash_block_size)
 
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         self.requests[request.request_id] = request
@@ -99,9 +109,10 @@ class PoolPDScheduler:
         self.pool.update_connector_output(output)
 
     def _request(self, request, blocks, local=0):
-        length, digest = self.original_prompts.get(
-            request.request_id, (len(request.prompt_token_ids), prompt_digest(request))
-        )
+        identity = self.original_prompts.get(request.request_id)
+        if identity is None:
+            identity = (len(request.prompt_token_ids), prompt_digest(request))
+        length, digest = identity
         return PoolPDRequest(
             request.request_id,
             length,

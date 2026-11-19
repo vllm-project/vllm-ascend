@@ -7,6 +7,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.failure import install_handoff_failure_handler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.metadata import PoolPDMetadata, PoolPDWorkerMetadata
@@ -46,9 +47,11 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
             groups = pool_scheduler.shared_groups
             self.target_groups = tuple(groups["target_groups"])
             self.prefix_groups = tuple(groups["prefix_groups"])
+            _, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
             self.scheduler = PoolPDScheduler(
                 pool_scheduler,
                 need_truncate=groups["stateful"],
+                request_hash_block_size=hash_block_size,
                 handoff_ttl_s=handoff_ttl_s,
                 transfer_mtp=transfers_mtp_cache(vllm_config),
                 mtp_tokens=getattr(vllm_config.speculative_config, "num_speculative_tokens", 0),

@@ -3,6 +3,7 @@
 """Real upstream layouts and ordinary ReqMeta, with only device I/O simulated."""
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -20,6 +21,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.shared_transfer import (
     SharedPoolTransfer,
+    _certified_shared_slots,
+    _disjoint_buffer_owners,
+    _exclusive_group_blocks,
+    _SharedSlot,
     validate_shared_pool,
 )
 
@@ -160,7 +165,19 @@ def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch)
     assert writer._sender.request_queue.unfinished_tasks == 0
 
 
-def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=False, kv_role=None):
+def transfer(
+    backend,
+    tp,
+    rank,
+    layerwise,
+    source,
+    *,
+    enforce_eager=True,
+    mtp=False,
+    kv_role=None,
+    prefetch=False,
+    parallel_lookup=False,
+):
     layout, caches = attention(tp, rank, source=source, chunk=4)
     spec = next(iter(layout.specs.values()))
     if mtp:
@@ -179,7 +196,9 @@ def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=Fa
                 kv_connector_extra_config={
                     "store_tp_size": 4,
                     "use_layerwise": layerwise,
+                    "shared_pool_prefetch": prefetch,
                     "cache_prefix": "weights-v1",
+                    "parallel_prefix_group_lookup": parallel_lookup,
                 },
             ),
         ),
@@ -310,6 +329,73 @@ def test_sparse_state_lookup_requires_an_exact_common_checkpoint(kv_role):
     assert executor.lookup(12, hashes) == 0  # Do not invent an aligned state.
 
 
+def test_lookup_only_checks_sparse_checkpoints_at_common_boundaries():
+    executor, _ = transfer(MemoryBackend(), 2, 0, False, False)
+    executor.worker.cache_transfer_granularity = 4
+
+    def layout(name, chunk_size, *, state):
+        return SimpleNamespace(
+            chunk_size=chunk_size,
+            hash_block_size=4,
+            store_tp=1,
+            state=state,
+            key=lambda shard, digest: (name, digest),
+        )
+
+    executor.layouts = {
+        0: layout("state-a", 8, state=True),
+        1: layout("kv", 4, state=False),
+        2: layout("state-b", 8, state=True),
+    }
+    hashes = [bytes([i]) for i in range(6)]
+    lookup = MagicMock(side_effect=lambda keys: [key != ("state-b", block_hash_to_str(hashes[5])) for key in keys])
+    executor.io.batch_is_exist = lookup
+
+    assert executor.lookup(26, hashes) == 16
+    assert [call.args[0][0] for call in lookup.call_args_list] == [
+        *(("kv", block_hash_to_str(value)) for value in hashes),
+        ("state-a", block_hash_to_str(hashes[5])),
+        ("state-b", block_hash_to_str(hashes[5])),
+        ("state-a", block_hash_to_str(hashes[3])),
+        ("state-b", block_hash_to_str(hashes[3])),
+    ]
+
+
+def test_parallel_attention_scans_share_prefix_boundary():
+    backend = MemoryBackend()
+    initialized = set()
+    backend.set_device = lambda: initialized.add(threading.get_ident())
+    executor, _ = transfer(backend, 2, 0, False, False, kv_role="kv_producer", parallel_lookup=True)
+    executor.worker.cache_transfer_granularity = 4
+
+    def layout(name, *, state=False):
+        return SimpleNamespace(
+            chunk_size=4, hash_block_size=4, store_tp=1, state=state, key=lambda shard, digest: (name, digest)
+        )
+
+    executor.layouts = {0: layout("first"), 1: layout("second"), 2: layout("state", state=True)}
+    hashes = [b"a", b"b", b"c"]
+    overlap = threading.Barrier(2)
+    threads = set()
+    lock = threading.Lock()
+
+    def readable(keys):
+        ((name, digest),) = keys
+        if name in {"first", "second"}:
+            with lock:
+                threads.add(threading.get_ident())
+            if digest == block_hash_to_str(hashes[0]):
+                overlap.wait(timeout=3)
+        return [(name, digest) != ("second", block_hash_to_str(hashes[1]))]
+
+    executor.io.batch_is_exist = readable
+    try:
+        assert executor.lookup(12, hashes) == 4
+        assert len(threads) == 2 and threads == initialized
+    finally:
+        executor.close()
+
+
 def test_producer_lookup_checks_each_block_and_requires_every_shard():
     executor, _ = transfer(MemoryBackend(), 2, 0, False, True, kv_role="kv_producer")
     executor.layouts = {
@@ -411,6 +497,279 @@ def test_step_metadata_prefix_lookup_and_partial_hit_restore(
     assert not backend.registered
 
 
+def test_prefetch_checks_cross_owner_byte_ranges():
+    storage = torch.arange(16)
+    assert _disjoint_buffer_owners({"first": storage[:8], "second": storage[8:]})
+    assert not _disjoint_buffer_owners({"first": storage[:9], "second": storage[8:]})
+    assert _disjoint_buffer_owners({"one-owner": (storage[:9], storage[8:])}) == {"one-owner"}
+    assert _disjoint_buffer_owners({"first": storage[:9], "second": storage[8:12], "third": storage[12:]}) == {"third"}
+
+
+def test_shared_slot_prefetch_requires_distinct_groups_and_exact_page_stride():
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
+
+    alignment = KV_CACHE_BUFFER_ALIGNMENT
+    blocks, stride = 4, 32
+    backing = torch.empty(alignment + blocks * stride, dtype=torch.uint8)
+    offset = -backing.data_ptr() % alignment
+    first = backing[offset:].as_strided((blocks, 16), (stride, 1))
+    second = backing[offset + 4 :].as_strided((blocks, 16), (stride, 1))
+    config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(layer_names=["first"]), SimpleNamespace(layer_names=["second"])],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                layers=["first", "second"], block_stride=stride, layer_stride=0, offset=0, size=blocks * stride
+            )
+        ],
+        num_blocks=blocks,
+    )
+    caches = {"first": first, "second": second}
+    assert not _disjoint_buffer_owners(caches)
+    slots = _certified_shared_slots(config, caches)
+    assert set(slots) == set(caches)
+    assert [slots[name].group for name in caches] == [0, 1]
+    assert _disjoint_buffer_owners(caches, slots) == set(caches)
+    slot = slots["first"]
+    assert slot.contains(2, first[2].data_ptr(), 16)
+    assert not slot.contains(2, first[1].data_ptr(), 16)
+    assert not slot.contains(2, first[2].data_ptr(), stride + 1)
+    assert not slot.contains(0, first[0].data_ptr(), 16)
+
+    wrong_stride = backing[offset + 4 :].as_strided((blocks, 16), (stride - 1, 1))
+    assert not _certified_shared_slots(config, {"first": first, "second": wrong_stride})
+    config.kv_cache_groups = [SimpleNamespace(layer_names=["first", "second"])]
+    assert not _certified_shared_slots(config, caches)
+
+
+def test_shared_slot_prefetch_rejects_a_block_live_in_two_groups():
+    first = SimpleNamespace(block_ids_by_group=[[1, 2, 0], [3, 0]])
+    second = SimpleNamespace(block_ids_by_group=[[1, 4], [5]])
+    assert _exclusive_group_blocks([first, second])
+    second.block_ids_by_group = [[1, 4], [2, 5]]
+    assert not _exclusive_group_blocks([first, second])
+
+
+def test_shared_slot_prefetch_falls_back_when_plan_page_belongs_to_another_group():
+    reader, caches = transfer(MemoryBackend(), 4, 0, True, False, kv_role="kv_producer", prefetch=True)
+    owner = next(iter(caches))
+    reader._prefetch_groups = (frozenset({owner}),)
+    reader._prefetch_shared_slots = {owner: _SharedSlot(index=0, base=1000, stride=64, blocks=8, group=1)}
+    part = SimpleNamespace(owner=owner, address=1128, size=16)
+    plan = SimpleNamespace(block_id=2, ranges=(part,))
+    request = SimpleNamespace(block_ids_by_group=[[2], [3]])
+    reader.loads.append((request, SimpleNamespace(plans=(plan,))))
+    try:
+        reader._start_prefetch([request])
+        assert not reader._prefetch_events
+        assert reader._receiver is None
+    finally:
+        reader.loads.clear()
+        reader.close()
+
+
+@pytest.mark.parametrize("fence_failure", [False, True])
+def test_prefix_prefetch_waits_per_layer_and_drains_before_release(monkeypatch, fence_failure):
+    waiting, proceed, finished = threading.Event(), threading.Event(), threading.Event()
+
+    class DeviceEvent:
+        def record(self):
+            pass
+
+        def synchronize(self):
+            if fence_failure:
+                raise RuntimeError("device fence failed")
+
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    writer, original = transfer(backend, 4, 0, False, True)
+    writer.prepare_step(step(saved_request()))
+    writer.finish_step()
+    writer.close()
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=DeviceEvent), raising=False)
+    reader, caches = transfer(backend, 4, 0, True, False, kv_role="kv_producer", prefetch=True)
+    load = ReqMeta(
+        req_id="reader",
+        block_ids_by_group=[[2]],
+        block_hashes=[b"hash2", b"hash4"],
+        can_save=False,
+        load_spec=LoadSpec(0, 3, True),
+    )
+    calls = []
+    copy = reader.io.copy
+
+    def blocked(session, owners):
+        calls.append(set(owners))
+        if len(calls) == 2:
+            waiting.set()
+            assert proceed.wait(5)
+        return copy(session, owners)
+
+    reader.io.copy = blocked
+    first, second = list(caches)
+    hook = "layer.bundle.hook"
+    reader._prefetch_order = reader._prefetch_groups = (frozenset({first, hook}), frozenset({second}))
+    errors = []
+
+    def abort():
+        try:
+            reader.abort_step()
+        except Exception as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=abort)
+    try:
+        reader.start_load(step(load))
+        assert reader._prefetch_events
+        if fence_failure:
+            with pytest.raises(RuntimeError, match="failed during asynchronous transfer"):
+                reader.load_layer(first)
+            with pytest.raises(RuntimeError, match="Shared pool lease cleanup failed"):
+                reader.abort_step()
+            assert not calls and not backend.leases
+            return
+
+        assert waiting.wait(2)
+        assert reader._prefetch_events[hook] is reader._prefetch_events[first]
+        reader.load_layer(hook)
+        assert calls == [{first, hook}, {second}]
+        torch.testing.assert_close(caches[first][0][4:6], original[first][0][2:4], rtol=0, atol=0)
+        thread.start()
+        assert not finished.wait(0.1)
+        assert backend.leases
+    finally:
+        proceed.set()
+        if thread.ident is not None:
+            thread.join(5)
+        reader.close()
+    assert finished.is_set() and not errors
+    assert not backend.leases and not backend.registered
+
+
+def test_prefetch_window_tracks_execution_and_counts_layers_without_loads(monkeypatch):
+    class DeviceEvent:
+        def record(self):
+            pass
+
+        def synchronize(self):
+            pass
+
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=DeviceEvent), raising=False)
+    reader, _ = transfer(MemoryBackend(), 4, 0, True, False, kv_role="kv_producer", prefetch=True)
+    owners = ("first", "no-read", "third", "fourth", "fifth", "sixth")
+    reader._prefetch_order = reader._prefetch_groups = tuple(frozenset({owner}) for owner in owners)
+    request = SimpleNamespace(block_ids_by_group=[])
+    plan = SimpleNamespace(
+        range_index=None,
+        ranges=tuple(SimpleNamespace(owner=owner, address=1000, size=16) for owner in owners if owner != "no-read"),
+    )
+    reader.loads.append((request, SimpleNamespace(plans=(plan,))))
+    started, resume = threading.Event(), threading.Event()
+    calls = []
+
+    def copy(_session, bundle):
+        (owner,) = bundle
+        if owner == "third":
+            started.set()
+            assert resume.wait(5)
+        calls.append(owner)
+
+    reader.io.copy = copy
+    try:
+        reader._start_prefetch([request])
+        assert started.wait(2)
+        assert set(reader._prefetch_events) == {"first", "third"}
+        with ThreadPoolExecutor(max_workers=1) as model:
+            model.submit(reader.load_layer, "first").result(timeout=2)
+        assert calls == ["first"]
+        assert set(reader._prefetch_events) == {"first", "third"}
+        resume.set()
+        reader.load_layer("third", execution=False)
+        assert set(reader._prefetch_events) == {"first", "third"}
+        reader.load_layer("third")
+        assert set(reader._prefetch_events) == {"first", "third", "fourth", "fifth"}
+        reader._drain_prefetch()
+        assert calls == ["first", "third", "fourth", "fifth"]
+        assert not reader._prefetch_events
+    finally:
+        resume.set()
+        reader.loads.clear()
+        reader.close()
+
+
+def test_prefetch_window_stops_at_a_synchronous_demand_load(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    reader, _ = transfer(MemoryBackend(), 4, 0, True, False, kv_role="kv_producer", prefetch=True)
+    owners = ("first", "sync", "third", "fourth")
+    reader._prefetch_order = tuple(frozenset({owner}) for owner in owners)
+    reader._prefetch_groups = tuple(bundle for bundle in reader._prefetch_order if "sync" not in bundle)
+    request = SimpleNamespace(block_ids_by_group=[])
+    plan = SimpleNamespace(
+        range_index=None, ranges=tuple(SimpleNamespace(owner=owner, address=1000, size=16) for owner in owners)
+    )
+    reader.loads.append((request, SimpleNamespace(plans=(plan,))))
+    calls = []
+    reader.io.copy = lambda _session, bundle: calls.append(next(iter(bundle)))
+    try:
+        reader._start_prefetch([request])
+        reader.load_layer("first")
+        assert set(reader._prefetch_events) == {"first"}
+        reader.load_layer("sync")
+        reader.load_layer("fourth")
+        assert calls == list(owners)
+    finally:
+        reader.loads.clear()
+        reader.close()
+
+
+def test_prefetch_and_sync_fallback_serialize_the_read_session(monkeypatch):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    writer, original = transfer(backend, 4, 0, False, True)
+    writer.prepare_step(step(saved_request()))
+    writer.finish_step()
+    writer.close()
+    reader, caches = transfer(backend, 4, 0, True, False, kv_role="kv_producer", prefetch=True)
+    first, second = caches
+    reader._prefetch_groups = (frozenset({first}),)
+    load = ReqMeta(
+        req_id="reader",
+        block_ids_by_group=[[2]],
+        block_hashes=[b"hash2", b"hash4"],
+        can_save=False,
+        load_spec=LoadSpec(0, 3, True),
+    )
+    copy = reader.io.copy
+    entered, proceed, fallback = threading.Event(), threading.Event(), threading.Event()
+
+    def read(session, owners):
+        if owners == {first}:
+            entered.set()
+            assert proceed.wait(5)
+        else:
+            assert owners == {second}
+            fallback.set()
+        return copy(session, owners)
+
+    reader.io.copy = read
+    with ThreadPoolExecutor(max_workers=1) as sync:
+        try:
+            reader.start_load(step(load))
+            assert entered.wait(2)
+            result = sync.submit(reader.load_layer, second)
+            assert not fallback.wait(0.1)
+            proceed.set()
+            result.result(timeout=2)
+            reader.finish_step()
+            for owner in caches:
+                torch.testing.assert_close(caches[owner][0][4:6], original[owner][0][2:4], rtol=0, atol=0)
+        finally:
+            proceed.set()
+            reader.close()
+    assert not backend.leases and not backend.registered
+
+
 def test_graph_step_copies_and_publishes_without_layer_callbacks(monkeypatch):
     event = MagicMock()
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=lambda: event), raising=False)
@@ -460,6 +819,40 @@ def test_save_range_skips_previous_chunks_and_uncommitted_hashes():
     request.block_hashes = request.block_hashes[:3]
     with pytest.raises(ValueError, match="committed prefix hash"):
         worker._plans(request, writing=True)
+
+
+@pytest.mark.parametrize("concurrent_publish", [False, True])
+def test_warm_write_skips_address_planning_for_readable_chunks(monkeypatch, concurrent_publish):
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
+    backend = MemoryBackend()
+    writer, _ = transfer(backend, 2, 0, False, True)
+    layout = writer.layouts[0]
+    request = saved_request()
+    assert request.load_spec is None
+    request.shared_pool_prefix_end = 4
+    request.save_end_token = 8
+    request.block_ids_by_group = [[1, 2]]
+    request.block_hashes = [b"hash2", b"hash4", b"hash6", b"hash8"]
+    existing = {item.key for item in layout.objects(0, 1, block_hash_to_str(b"hash4"))}
+    expected = {item.key for item in layout.objects(4, 2, block_hash_to_str(b"hash8"))}
+    backend.readable.update(existing)
+    addresses = MagicMock(wraps=layout.objects)
+    monkeypatch.setattr(layout, "objects", addresses)
+    original_readable = backend.batch_is_readable
+
+    def readable(keys):
+        if concurrent_publish and set(keys) == expected:
+            backend.readable.update(expected)
+        return original_readable(keys)
+
+    monkeypatch.setattr(backend, "batch_is_readable", readable)
+    writer.prepare_step(step(request))
+    addresses.assert_called_once_with(4, 2, block_hash_to_str(b"hash8"))
+    assert set(backend.objects) == (set() if concurrent_publish else expected)
+    writer.finish_step()
+    assert backend.readable == existing | expected
+    writer.close()
+    assert not backend.leases
 
 
 def test_layerwise_missing_owner_cannot_publish(monkeypatch):

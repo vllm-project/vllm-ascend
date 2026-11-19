@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
-def truncate_stateful_prefill_request(request) -> None:
+def truncate_stateful_prefill_request(request, *, hash_block_size: int | None = None) -> None:
     """Leave the last prompt token to D, before P performs prefix lookup.
 
     Shared by direct-transfer and pool-backed PD. Callers decide whether the
@@ -49,8 +49,13 @@ def truncate_stateful_prefill_request(request) -> None:
     request._all_token_ids.pop()
     request.num_prompt_tokens -= 1
     request.max_tokens = 1
-    request.block_hashes.clear()
-    request.update_block_hashes()
+    if hash_block_size is None:
+        request.block_hashes.clear()
+        request.update_block_hashes()
+    else:
+        # Hashes commit to complete blocks ending before or at the new
+        # length. Removing one token cannot change those prefix hashes.
+        del request.block_hashes[request.num_tokens // hash_block_size :]
     params["_p_side_truncated"] = True
 
 

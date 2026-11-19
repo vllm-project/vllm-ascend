@@ -398,7 +398,7 @@ def test_scheduler_rejects_unpublished_or_different_handoff():
         scheduler.get_num_new_matched_tokens(req, 0)
 
 
-def test_preempted_producer_republishes_from_new_blocks_without_retruncating():
+def test_preempted_producer_republishes_from_new_blocks_without_retruncating(monkeypatch):
     pool = MagicMock()
     pool.build_connector_meta.return_value = step()
     pool._request_trackers = {"r": SimpleNamespace(allocated_block_ids_by_group=[[1]])}
@@ -407,6 +407,8 @@ def test_preempted_producer_republishes_from_new_blocks_without_retruncating():
         [1, 2, 3], num_prompt_tokens=3, _all_token_ids=[1, 2, 3], update_block_hashes=MagicMock(), max_tokens=1
     )
     digest = prompt_digest(req)
+    digest_fn = MagicMock(wraps=prompt_digest)
+    monkeypatch.setattr("vllm_ascend.distributed.kv_transfer.kv_p2p.pd_pool.scheduler.prompt_digest", digest_fn)
     scheduler.on_new_request(req)
     scheduler.get_num_new_matched_tokens(req, 0)
     output = SimpleNamespace(finished_req_ids=set(), preempted_req_ids=set(), num_scheduled_tokens={"r": 2})
@@ -427,6 +429,7 @@ def test_preempted_producer_republishes_from_new_blocks_without_retruncating():
     assert retry.block_ids == [[5]]
     assert retry.prompt_digest == first.prompt_digest == digest
     assert retry.cache_tokens == first.cache_tokens == 2
+    digest_fn.assert_called_once_with(req)
 
 
 def test_finished_decode_clears_pending_receive_and_request_identity():
@@ -470,6 +473,59 @@ def test_decode_writeback_inherits_only_validated_producer_prompt(external_token
     scheduler.update_connector_output(SimpleNamespace(failed_recving={"r"}))
     scheduler.build_connector_meta(output)
     assert pool.build_connector_meta.call_args.kwargs["writeback_starts"] == {}
+
+
+@pytest.mark.parametrize("length", [65535, 65536, 131072])
+@pytest.mark.parametrize("edge", [4294967295, -1, 4294967296])
+def test_long_prompt_digest_matches_canonical_cbor(length, edge):
+    from vllm.utils.hashing import sha256_cbor
+    from vllm.v1.core.kv_cache_utils import generate_block_hash_extra_keys
+
+    values = [0, 23, 24, 255, 256, 65535, 65536, 153599, edge]
+    tokens = (values * (1 + length // len(values)))[:length]
+    req = request(tokens, cache_salt="same-as-prefix-identity")
+    extras, _ = generate_block_hash_extra_keys(req, 0, len(tokens), 0)
+    assert prompt_digest(req) == sha256_cbor((POOL_PD_PROTOCOL, tuple(tokens), extras)).hex()
+
+
+@pytest.mark.parametrize("length", [1, 4, 5, 8, 9])
+def test_stateful_prefill_reuses_complete_chain_hashes(length, monkeypatch):
+    from hashlib import sha256
+
+    from vllm.v1.core import kv_cache_utils
+
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", b"test-empty-prefix", raising=False)
+
+    def hash_items(items):
+        return sha256(repr(items).encode()).digest()
+
+    size = 4
+    hasher = kv_cache_utils.get_request_block_hasher(size, hash_items)
+    tokens = list(range(length))
+    all_tokens = tokens.copy()
+    req = request(
+        tokens.copy(),
+        num_prompt_tokens=length,
+        _all_token_ids=all_tokens,
+        all_token_ids=all_tokens,
+        num_tokens=length,
+        block_hashes=[],
+        update_block_hashes=MagicMock(),
+        max_tokens=32,
+    )
+    req.block_hashes.extend(hasher(req))
+    scheduler = PoolPDScheduler(MagicMock(), need_truncate=True, request_hash_block_size=size)
+    # The real Request derives num_tokens from the mutable token list.
+    req.num_tokens = max(1, length - 1)
+    scheduler.on_new_request(req)
+    scheduler.on_new_request(req)
+    req.update_block_hashes.assert_not_called()
+    full_recompute = request(
+        req.prompt_token_ids,
+        num_tokens=req.num_tokens,
+        block_hashes=[],
+    )
+    assert req.block_hashes == hasher(full_recompute)
 
 
 @pytest.mark.parametrize("length", [1, 4, 5, 8, 9])
@@ -603,9 +659,11 @@ def test_protected_handoff_holds_full_blocks_and_tail_until_deadline(monkeypatch
     meta = PoolPDMetadata(step(full), tails=[req])
     worker.prepare(meta)
     worker.start_load(meta)
+    monkeypatch.setattr(backend, "batch_get_key_info", lambda *a, **k: pytest.fail("handoff queried copy addresses"))
     worker.finish()
     assert worker.handoff_holds
     keys = {p.key for p in worker._plans(req, tail_only=False, writing=True)}
+    assert keys == set(worker._plans(req, tail_only=False, writing=True, keys_only=True))
     assert keys and keys <= backend.leases
     worker._reap_handoffs()
     assert keys <= backend.leases

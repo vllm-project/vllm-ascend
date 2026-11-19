@@ -106,6 +106,106 @@ def test_interoperable_modes_and_publication(layerwise_write, layerwise_read):
     assert not backend.leases
 
 
+@pytest.mark.parametrize(
+    "registration_split, bulk, sizes", [(False, False, [8]), (True, False, [4, 4]), (False, True, [4, 4])]
+)
+def test_read_copy_coalesces_only_contiguous_ranges_inside_one_registration(
+    monkeypatch, registration_split, bulk, sizes
+):
+    backend = MemoryBackend()
+    io = MemcacheStoreLayoutIO(backend)
+    source = ctypes.create_string_buffer(b"abcdefgh", 8)
+    target = ctypes.create_string_buffer(8)
+    address = ctypes.addressof(target)
+    io.set_coalesced_read_regions({address: 4, address + 4: 4} if registration_split else {address: 8})
+    source_plan = plan(source)
+    target_plan = replace(
+        plan(target), ranges=(PoolRange("layer.0", address, 0, 4), PoolRange("layer.0", address + 4, 4, 4))
+    )
+    submit = backend.batch_copy
+    native_sizes = []
+
+    def record(gvas, local, lengths, direction):
+        native_sizes.append(lengths)
+        return submit(gvas, local, lengths, direction)
+
+    monkeypatch.setattr(backend, "batch_copy", record)
+    session = io.begin([source_plan], writing=True)
+    io.copy(session)
+    io.finish(session)
+    session = io.begin([target_plan], writing=False)
+    if not bulk:
+        io.prepare_layer_reads(session, (frozenset({"layer.0"}),))
+    io.copy(session, None if bulk else {"layer.0"})
+    io.finish(session)
+    assert native_sizes == [[4, 4], sizes]
+    assert (session.logical_read_segments, session.submitted_read_segments) == ((0, 0) if bulk else (2, len(sizes)))
+    assert target.raw == source.raw
+    assert not backend.leases
+
+
+def test_prepared_bundle_matches_original_native_vectors(monkeypatch):
+    backend = MemoryBackend()
+    io = MemcacheStoreLayoutIO(backend)
+    source = ctypes.create_string_buffer(b"abcdefgh", 8)
+    target = ctypes.create_string_buffer(8)
+    address = ctypes.addressof(target)
+    io.set_coalesced_read_regions({address: 8})
+    writer = io.begin([plan(source)], writing=True)
+    io.copy(writer)
+    io.finish(writer)
+
+    native = backend.batch_copy
+    calls = []
+
+    def record(*args):
+        calls.append(args)
+        return native(*args)
+
+    monkeypatch.setattr(backend, "batch_copy", record)
+    bundle = frozenset({"layer.0", "layer.1"})
+    for prepare in (False, True):
+        session = io.begin([plan(target)], writing=False)
+        if prepare:
+            io.prepare_layer_reads(session, (bundle,))
+            assert session.ranges_by_owner is None
+        io.copy(session, bundle)
+        io.finish(session)
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert target.raw == source.raw
+
+
+def test_range_completion_survives_partial_copy_and_skips_repeated_hooks(monkeypatch):
+    backend = MemoryBackend()
+    io = MemcacheStoreLayoutIO(backend, max_segments=1)
+    source = ctypes.create_string_buffer(b"abcdefgh", 8)
+    target = ctypes.create_string_buffer(8)
+    write = io.begin([plan(source)], writing=True)
+    io.copy(write)
+    io.finish(write)
+    read = io.begin([plan(target)], writing=False)
+    native_copy = backend.batch_copy
+    calls = []
+
+    def fail_second(gvas, addresses, sizes, direction):
+        calls.append(addresses[0])
+        if len(calls) == 2:
+            return -1
+        return native_copy(gvas, addresses, sizes, direction)
+
+    monkeypatch.setattr(backend, "batch_copy", fail_second)
+    with pytest.raises(RuntimeError, match="copy failed"):
+        io.copy(read, {"layer.0", "layer.1"})
+    assert read.completed_ranges == 1
+    io.copy(read, {"layer.0"})
+    io.copy(read)
+    io.finish(read)
+    assert calls == [ctypes.addressof(target), ctypes.addressof(target) + 4, ctypes.addressof(target) + 4]
+    assert read.completed_ranges == 2
+    assert target.raw == source.raw
+    assert not backend.leases
+
+
 def test_incomplete_or_failed_copy_never_published():
     backend = MemoryBackend()
     io = MemcacheStoreLayoutIO(backend)
@@ -257,3 +357,36 @@ def test_incomplete_readability_response_is_not_a_hit(monkeypatch):
     monkeypatch.setattr(backend, "batch_is_readable", lambda keys: [])
     with pytest.raises(RuntimeError, match="incomplete readability"):
         MemcacheStoreLayoutIO(backend).batch_is_exist(["missing"])
+
+
+@pytest.mark.parametrize("fail_second_copy", [False, True])
+def test_send_layer_batches_sessions_before_publication(fail_second_copy):
+    backend = MemoryBackend()
+    io = MemcacheStoreLayoutIO(backend, max_segments=2)
+    sources = [ctypes.create_string_buffer(value, 8) for value in (b"abcdefgh", b"ABCDEFGH")]
+    sessions = [io.begin([replace(plan(source), key=f"key-{i}")], writing=True) for i, source in enumerate(sources)]
+    batches = []
+
+    def send(gvas, addresses, sizes):
+        batches.append(sizes.tolist())
+        if len(batches) == 2 and fail_second_copy:
+            return -1
+        return backend.batch_copy(gvas.tolist(), addresses.tolist(), sizes.tolist(), 0)
+
+    io.copy_save_layer(sessions, {"layer.0"}, send)
+    assert not backend.readable
+    if fail_second_copy:
+        with pytest.raises(RuntimeError, match="copy failed"):
+            io.copy_save_layer(sessions, {"layer.1"}, send)
+        assert [session.completed_ranges for session in sessions] == [1, 1]
+        for session in sessions:
+            with pytest.raises(RuntimeError, match="partially copied"):
+                io.finish(session)
+        assert not backend.readable
+    else:
+        io.copy_save_layer(sessions, {"layer.1"}, send)
+        assert not backend.readable
+        for i, session in enumerate(sessions):
+            io.finish(session)
+            assert backend.objects[f"key-{i}"].raw == sources[i].raw
+    assert batches == [[4, 4], [4, 4]]

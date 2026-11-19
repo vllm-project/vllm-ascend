@@ -664,6 +664,23 @@ class TestKVPoolScheduler(unittest.TestCase):
 
 
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_shared_pool_prefix_survives_save_only_chunk(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        scheduler.shared_pool_enabled = True
+        tracker = RequestTracker("r1", 48, allocated_block_ids=[[1, 2, 3, 4]])
+        tokens = list(range(64))
+        hashes = [b"hash"] * 4
+        first = scheduler._build_req_meta(tracker, hashes, LoadSpec(0, 32, True), tokens, False)
+        self.assertFalse(first.can_save)
+        self.assertEqual(first.shared_pool_prefix_end, 32)
+
+        tracker.token_len = 64
+        second = scheduler._build_req_meta(tracker, hashes, None, tokens, False)
+        self.assertTrue(second.can_save)
+        self.assertIsNone(second.load_spec)
+        self.assertEqual(second.shared_pool_prefix_end, 32)
+
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key.get_shared_groups",
         return_value={"prefix_groups": [0], "target_groups": [0], "stateful": False},

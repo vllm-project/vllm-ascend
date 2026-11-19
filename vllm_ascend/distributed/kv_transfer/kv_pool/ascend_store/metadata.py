@@ -801,6 +801,7 @@ class RequestTracker:
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
+    shared_pool_prefix_end: int = 0
 
     # The token ids that has been scheduled so far
     # NOTE: This field will only be used when you enable kv-event
@@ -939,6 +940,8 @@ class ReqMeta:
     save_start_token: int = 0
     # Exact producer-computed boundary for an admitted shared PD handoff.
     published_prompt_end: int = 0
+    # Prefix found during admission, carried to later save-only steps as a hint.
+    shared_pool_prefix_end: int = 0
 
     can_save: bool | None = None
     # load_spec
@@ -1005,6 +1008,7 @@ class ReqMeta:
         load_keys: list[str] | None = None,
         *,
         published_prompt_end: int = 0,
+        shared_pool_prefix_end: int = 0,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1014,6 +1018,7 @@ class ReqMeta:
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
         self.published_prompt_end = published_prompt_end
+        self.shared_pool_prefix_end = shared_pool_prefix_end
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group
@@ -1208,6 +1213,7 @@ class ReqMeta:
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
             save_start_token=previous_saved_tokens,
+            shared_pool_prefix_end=tracker.shared_pool_prefix_end,
             block_ids_by_group=tracker.allocated_block_ids_by_group,
             can_save=not skip_save,
             load_spec=load_spec,
