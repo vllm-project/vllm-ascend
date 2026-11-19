@@ -19,12 +19,13 @@
 
 This module owns the pure DCP metadata calculations that used to live inside
 ``vllm_ascend/worker/dcp_utils.py::DCPManager``: interleave-aware rank-local KV
-lengths, the documented interleaved slot layout as a CPU reference
-implementation, and the ``AscendDCPMetadata`` builders. The worker manager now
-keeps only the orchestration and delegates here.
+lengths and the documented interleaved slot layout as a CPU reference
+implementation.
 
-vLLM and ``AscendDCPMetadata`` are imported lazily inside the functions so the
-slot-layout math can be unit tested without a vLLM installation.
+vLLM helpers are imported lazily inside the functions so the slot-layout math
+can be unit tested without a vLLM installation. The DCP metadata containers
+themselves are built by the backend-specific builders in
+``vllm_ascend/attention/context_parallel/``.
 """
 
 from __future__ import annotations
@@ -116,41 +117,6 @@ def reference_dcp_slot_offsets(
     logical_block_idx = virtual_block_index + local_physical_offsets // block_size
     block_offset = local_physical_offsets % block_size
     return owned_mask, logical_block_idx, block_offset
-
-
-def build_dcp_metadata(
-    local_seq_lens: torch.Tensor,
-    query_lens_cpu: torch.Tensor,
-    max_query_len: int,
-    dcp_mtp_attn_mask=None,
-):
-    """Build AscendDCPMetadata from rank-local lengths (lazy import AscendDCPMetadata)."""
-    from vllm_ascend.attention.utils import AscendDCPMetadata
-
-    return AscendDCPMetadata(
-        num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-        query_lens_cpu=query_lens_cpu,
-        max_query_len=max_query_len,
-        dcp_mtp_attn_mask=dcp_mtp_attn_mask,
-    )
-
-
-def build_legacy_gqa_dcp_metadata(
-    seq_lens_cpu: torch.Tensor,
-    query_start_loc_cpu: torch.Tensor,
-    max_query_len: int,
-    *,
-    dcp_size: int,
-    cp_kv_cache_interleave_size: int,
-):
-    """Build the legacy GQA AscendDCPMetadata (all-rank local lengths) from CPU mirrors."""
-    local_seq_lens = dcp_local_seq_lens(
-        seq_lens_cpu,
-        dcp_size=dcp_size,
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-    )
-    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-    return build_dcp_metadata(local_seq_lens, query_lens_cpu, max_query_len, None)
 
 
 def validate_spec_decode_drafting_metadata(attn_metadata, kv_cache_spec) -> None:

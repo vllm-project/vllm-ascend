@@ -164,25 +164,6 @@ def test_local_seq_lens_counts_only_owned_tokens(dcp_size, cp_kv_cache_interleav
         torch.testing.assert_close(cpu_lens, rank_lens)
 
 
-def test_legacy_gqa_metadata_fields_match_current_contract() -> None:
-    helper_metadata = dcp_metadata.build_legacy_gqa_dcp_metadata(
-        torch.tensor([133, 261], dtype=torch.int32),
-        torch.tensor([0, 5, 10], dtype=torch.int32),
-        5,
-        dcp_size=2,
-        cp_kv_cache_interleave_size=1,
-    )
-
-    # Pin the DCP metadata contract for the legacy GQA path.
-    np.testing.assert_array_equal(
-        helper_metadata.num_computed_tokens_of_dcp,
-        np.array([[67, 66], [131, 130]], dtype=np.int32),
-    )
-    torch.testing.assert_close(helper_metadata.query_lens_cpu, torch.tensor([5, 5], dtype=torch.int32))
-    assert helper_metadata.max_query_len == 5
-    assert helper_metadata.dcp_mtp_attn_mask is None
-
-
 def test_slot_reference_supports_empty_and_single_token() -> None:
     empty_positions = torch.empty(0, dtype=torch.int64)
     empty_owned, empty_block_idx, empty_block_offset = dcp_metadata.reference_dcp_slot_offsets(
