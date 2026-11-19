@@ -1651,3 +1651,75 @@ def test_a5_async_plans_reject_unsupported_visibility_contract(
     with pytest.raises(ValueError, match=error):
         dsa_v41.AscendDSAV41MetadataBuilder.build(builder, 0, common)
     builder._device_backend.mixed_quant_sparse_flash_mla_metadata.assert_not_called()
+
+
+class TestOwnerLocalKvWrites:
+    """Local prefill KV writes are opt-in and require an owner slab."""
+
+    @staticmethod
+    def _pcp_metadata():
+        metadata = object.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
+        metadata.global_metadata = object()
+        return metadata
+
+    def test_local_write_requires_mapped_owner_slab(self, monkeypatch):
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
+        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "1")
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: False)
+        assert dsa_v41_cp._local_cache_writes_enabled() is False
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: True)
+        assert dsa_v41_cp._local_cache_writes_enabled() is True
+
+    def test_local_source_write_is_off_with_a_replicated_index_copy(self, monkeypatch):
+        from vllm_ascend.models.deepseek_v41 import cache_config
+
+        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "1")
+        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE", "1")
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda: True)
+        # Owners of the replicated index plane need the complete global rows.
+        assert dsa_v41_cp._local_source_writes_enabled() is False
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda: False)
+        assert dsa_v41_cp._local_source_writes_enabled() is True
+
+    def test_swa_write_skips_gather_for_local_rows(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl,
+            "_gather_cache_rows",
+            staticmethod(lambda *args, **kwargs: pytest.fail("local writes must not gather")),
+        )
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: calls.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        value = torch.arange(6, dtype=torch.float32).view(3, 2)
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(object(), metadata, value)
+        assert calls == [(metadata, value)]
+
+    def test_swa_write_gathers_global_rows_by_default(self, monkeypatch):
+        gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
+        writes = []
+
+        def gather(value, metadata):
+            assert value.shape[0] == 3
+            return gathered
+
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: False)
+        monkeypatch.setattr(dsa_v41_cp.AscendDSAV41PCPImpl, "_gather_cache_rows", staticmethod(gather))
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: writes.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            object(), metadata, torch.arange(6, dtype=torch.float32).view(3, 2)
+        )
+        assert len(writes) == 1
+        assert writes[0][0] is metadata.global_metadata
+        assert writes[0][1] is gathered

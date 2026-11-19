@@ -30,6 +30,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.context_parallel.pcp_owner_timing import enter as _timing_enter
+from vllm_ascend.attention.context_parallel.pcp_owner_timing import exit as _timing_exit
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
@@ -346,6 +348,391 @@ def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     if indices.shape[-1] < topk:
         indices = F.pad(indices, (0, topk - indices.shape[-1]), value=-1)
     return indices.unsqueeze(1).contiguous().int()
+
+
+def _swa_stage_enabled() -> bool:
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_stage_swa_enabled
+
+    return owner_stage_swa_enabled()
+
+
+def _swa_stage_chunk_enabled() -> bool:
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_stage_swa_chunk_enabled
+
+    return owner_stage_swa_chunk_enabled()
+
+
+class _SwaChunkPlan:
+    """Immutable per-step view shared by the four layers of one SWA group.
+
+    ``window_block_table`` lists, per local chunk row, exactly the slab blocks
+    that the sliding window can reach. Staging turns them into a dense local
+    range; ``replay_seq_lens`` rebases the operator's causal coordinates onto
+    that range. ``smla_cache`` holds the rebuilt operator tiling metadata per
+    attention-metadata object, because compressed layers read the long-KV
+    group's metadata rather than the SWA group's.
+    """
+
+    __slots__ = (
+        "window_block_table",
+        "counts",
+        "replay_seq_lens",
+        "total_blocks",
+        "max_replay_seq_len",
+        "prepared",
+        "smla_cache",
+    )
+
+    def __init__(self, window_block_table, counts, replay_seq_lens, total_blocks, max_replay_seq_len, prepared):
+        self.window_block_table = window_block_table
+        self.counts = counts
+        self.replay_seq_lens = replay_seq_lens
+        self.total_blocks = total_blocks
+        self.max_replay_seq_len = max_replay_seq_len
+        # Dense stage table and flat source-block list, shared by every layer
+        # in this group; only the copied data differs per layer.
+        self.prepared = prepared
+        self.smla_cache: dict[int, torch.Tensor | bool] = {}
+
+
+_SWA_CHUNK_DEBUG_PRINTED = False
+
+
+def _maybe_log_swa_chunk_layout(metadata, segments, num_reqs, block_size, window):
+    """Print the rank-local chunk layout once so the row assumption is visible."""
+    global _SWA_CHUNK_DEBUG_PRINTED
+    if _SWA_CHUNK_DEBUG_PRINTED:
+        return
+    from vllm.logger import logger
+
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import swa_chunk_debug_enabled
+
+    if not swa_chunk_debug_enabled():
+        return
+    _SWA_CHUNK_DEBUG_PRINTED = True
+    starts = metadata.query_start_loc_cpu.tolist()[: num_reqs + 1]
+    seqs = metadata.seq_lens_cpu.tolist()[:num_reqs]
+    logger.info(
+        "PCP SWA chunk layout: rows=%d block=%d window=%d query_start_loc=%s seq_lens=%s",
+        num_reqs,
+        block_size,
+        window,
+        starts,
+        seqs,
+    )
+    for row, segment in enumerate(segments):
+        chunk_len = int(starts[row + 1] - starts[row])
+        logger.info(
+            "PCP SWA chunk row=%d chunk_start=%d chunk_len=%d chunk_end=%d replay_start=%d replay_len=%d blocks=%d",
+            row,
+            int(seqs[row]) - chunk_len,
+            chunk_len,
+            int(seqs[row]),
+            segment.replay_start,
+            segment.replay_seq_len,
+            segment.num_blocks,
+        )
+
+
+def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, num_blocks):
+    """Build (and memoize) the bounded SWA view for this step.
+
+    Runs on the CPU-side sequence lengths only: no device synchronization and
+    no full-prefix gather. Returns ``None`` for any batch the bounded view
+    cannot represent exactly, in which case the caller keeps the direct
+    peer-read path.
+    """
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+        build_stage_tables_fixed,
+        plan_swa_chunk_segments,
+    )
+
+    key = (int(block_table.data_ptr()), int(num_reqs), int(block_size), int(window), int(num_blocks))
+    cached = getattr(metadata, "_swa_chunk_plan", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    plan = None
+    segments = plan_swa_chunk_segments(
+        getattr(metadata, "query_start_loc_cpu", None),
+        getattr(metadata, "seq_lens_cpu", None),
+        num_reqs,
+        block_size,
+        window,
+    )
+    if segments is not None:
+        _maybe_log_swa_chunk_layout(metadata, segments, num_reqs, block_size, window)
+    if segments is not None and block_table.shape[1] > 0:
+        max_blocks = max((segment.num_blocks for segment in segments), default=0)
+        if max_blocks > 0 and max_blocks <= int(block_table.shape[1]):
+            device = block_table.device
+            indices = torch.full((num_reqs, max_blocks), -1, dtype=torch.int64, device=device)
+            for row, segment in enumerate(segments):
+                indices[row, : segment.num_blocks] = torch.arange(
+                    segment.first_block,
+                    segment.first_block + segment.num_blocks,
+                    dtype=torch.int64,
+                    device=device,
+                )
+            valid = indices >= 0
+            gathered = block_table[:num_reqs].gather(1, indices.clamp_min(0))
+            window_block_table = torch.where(valid, gathered, torch.full_like(gathered, -1))
+            counts = [segment.num_blocks for segment in segments]
+            replay_seq_lens = torch.tensor(
+                [segment.replay_seq_len for segment in segments],
+                dtype=metadata.seq_lens.dtype,
+                device=metadata.seq_lens.device,
+            )
+            prepared = build_stage_tables_fixed(window_block_table, counts, num_blocks=num_blocks)
+            plan = _SwaChunkPlan(
+                window_block_table=window_block_table,
+                counts=counts,
+                replay_seq_lens=replay_seq_lens,
+                total_blocks=sum(counts),
+                max_replay_seq_len=max(segment.replay_seq_len for segment in segments),
+                prepared=prepared,
+            )
+    metadata._swa_chunk_plan = key, plan
+    return plan
+
+
+def _build_swa_chunk_smla_metadata(
+    attn,
+    swa_metadata,
+    operator_metadata,
+    plan,
+    *,
+    has_compressed,
+    ratio,
+    cmp_seq_lens,
+    cmp_residual,
+    cmp_topk,
+    num_reqs,
+):
+    """Rebuild the operator tiling metadata for the rebased bounded view.
+
+    The builder produced it from the unbounded sequence lengths; the kernel
+    must see the same batch with ``seqused_ori_kv`` shortened to each segment's
+    replay length. Memoized per attention-metadata object so a step pays one
+    metadata op per cache group, not one per layer.
+    """
+    key = id(operator_metadata)
+    cached = plan.smla_cache.get(key)
+    if cached is not None:
+        return cached if cached is not False else None
+    try:
+        value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
+            attn.n_local_heads,
+            1,
+            attn.head_dim,
+            cu_seqlens_q=swa_metadata.query_start_loc[: num_reqs + 1].int(),
+            seqused_ori_kv=plan.replay_seq_lens,
+            seqused_cmp_kv=cmp_seq_lens if has_compressed else None,
+            cmp_residual_kv=cmp_residual if has_compressed else None,
+            batch_size=num_reqs,
+            max_seqlen_q=int(swa_metadata.max_query_len),
+            max_seqlen_ori_kv=int(plan.max_replay_seq_len),
+            max_seqlen_cmp_kv=(int(operator_metadata.max_cache_seq_len) if has_compressed else 0),
+            ori_topk=0,
+            ori_topk_length=swa_metadata.ori_topk_length,
+            cmp_topk=cmp_topk if has_compressed else 0,
+            cmp_ratio=ratio if has_compressed else 0,
+            ori_mask_mode=swa_metadata.ori_mask_mode,
+            cmp_mask_mode=3 if has_compressed else 0,
+            ori_win_left=swa_metadata.ori_win_left,
+            ori_win_right=swa_metadata.ori_win_right,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            has_ori_kv=True,
+            has_cmp_kv=has_compressed,
+        )
+    except Exception:  # noqa: BLE001 - fail open to the unbounded path
+        from vllm.logger import logger
+
+        logger.warning_once(
+            "PCP SWA chunk staging: rebuilding sparse-MLA metadata failed; "
+            "keeping the direct peer-read path for this step.",
+            exc_info=True,
+        )
+        plan.smla_cache[key] = False
+        return None
+    plan.smla_cache[key] = value
+    return value
+
+
+def _index_stage_enabled() -> bool:
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+        owner_stage_index_enabled,
+    )
+
+    return owner_stage_index_enabled()
+
+
+def _index_block_counts(metadata, num_reqs, width, block_size, ratio):
+    """Sync-free live page counts for the index plane.
+
+    ``seq_lens_cpu`` holds original-token coordinates; the indexer block table
+    is addressed in compressed positions, so divide by the compressor ratio
+    first and then by the plane's storage block size.
+    """
+    seq_lens_cpu = getattr(metadata, "seq_lens_cpu", None)
+    if seq_lens_cpu is None or block_size is None or block_size <= 0:
+        return None
+    try:
+        values = seq_lens_cpu[:num_reqs].tolist()
+    except (TypeError, ValueError):
+        return None
+    ratio = max(1, int(ratio or 1))
+    block_size = int(block_size)
+    counts = []
+    for value in values:
+        cache_len = int(value) // ratio
+        counts.append(min(width, (cache_len + block_size - 1) // block_size))
+    return counts
+
+
+def _maybe_stage_index_cache(source_cache, metadata, ratio):
+    """Copy a pure-prefill batch's index planes into local scratch.
+
+    The index K plane lives inside the owner-sharded page, so QLI's block
+    gather otherwise pays peer latency on three quarters of its reads. Copying
+    the live pages once per step and remapping the block table keeps ``select``
+    on local HBM at the cost of a few MiB per step. Returns
+    ``(staged_views, staged_metadata)`` or ``None`` to keep the direct path.
+    """
+    if source_cache is None or metadata is None:
+        return None
+    if getattr(metadata, "num_prefills", 0) <= 0 or getattr(metadata, "num_decodes", 0) > 0:
+        return None
+    if not _index_stage_enabled():
+        return None
+    block_table = getattr(metadata, "block_table", None)
+    if block_table is None or block_table.shape[1] <= 0:
+        return None
+    views = source_cache if isinstance(source_cache, tuple) else (source_cache,)
+    if not views:
+        return None
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+        build_stage_tables_fixed,
+        get_index_page_stage_cache,
+        get_index_plane_stage_cache,
+    )
+    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+    if owner_slab_for_tensor(views[0]) is None:
+        return None
+    # Every index source in one tuple shares this metadata object, so a step
+    # pays one copy per cache group rather than one per selecting layer. The
+    # candidate source and its consumers therefore see the same remapped IDs.
+    memo = getattr(metadata, "_pcp_index_stage_memo", None)
+    if memo is not None and memo[0] == views[0].data_ptr():
+        return memo[1], memo[2]
+    num_reqs = int(getattr(metadata, "num_reqs", block_table.shape[0]))
+    counts = _index_block_counts(
+        metadata,
+        num_reqs,
+        int(block_table.shape[1]),
+        getattr(metadata, "storage_block_size", None),
+        ratio,
+    )
+    if counts is None:
+        return None
+    prepared = build_stage_tables_fixed(block_table[:num_reqs], counts, num_blocks=int(views[0].shape[0]))
+    if prepared[2] <= 0:
+        return None
+    base = views[0]
+    storage_ptr = base.untyped_storage().data_ptr()
+    page_bytes = int(base.stride(0)) * base.element_size()
+    staged_views = None
+    if page_bytes > 0 and all(view.untyped_storage().data_ptr() == storage_ptr for view in views):
+        # One whole-page gather replaces one strided gather per plane. The
+        # planes are then zero-copy views at their original intra-page
+        # offsets, so the operator-visible layout is unchanged.
+        staged_views = get_index_page_stage_cache(base.device, page_bytes).stage(base, views, prepared)
+    if staged_views is None:
+        # Fail open to the per-plane stager on odd layouts or overflow.
+        staged_views = []
+        for view in views:
+            staged = get_index_plane_stage_cache(view.device, view).stage(view, prepared)
+            if staged is None:
+                return None
+            staged_views.append(staged)
+    staged_metadata = replace(metadata, block_table=prepared[0])
+    metadata._pcp_index_stage_memo = (views[0].data_ptr(), tuple(staged_views), staged_metadata)
+    return tuple(staged_views), staged_metadata
+
+
+def _maybe_stage_owner_cmp_cache(
+    source_cache, block_table, metadata, num_reqs, seq_lens=None, block_size=None, ratio=1
+):
+    """Copy a pure-prefill batch's long-KV blocks into local scratch.
+
+    Only applies to owner-sharded caches: every PCP rank writes one quarter of
+    the slab locally and maps the rest over peer memory, where one-byte-grain
+    reads run at a third of local bandwidth.  Copying the referenced blocks
+    once per layer turns that into a bulk gather and leaves the attention
+    kernel on local HBM.  Decode steps and non-prefill batches keep the
+    original table; overflow falls back to direct peer reads.
+    """
+    if source_cache is None or block_table is None:
+        return None
+    # Pure-prefill steps only.  Decode rows address the whole history, so a
+    # per-step bulk copy would cost more than the peer reads it replaces; a
+    # mixed step keeps direct peer reads for every row.
+    if getattr(metadata, "num_prefills", 0) <= 0 or getattr(metadata, "num_decodes", 0) > 0:
+        return None
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+        get_stage_cache,
+        owner_stage_enabled,
+    )
+
+    if not owner_stage_enabled():
+        return None
+    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+    if owner_slab_for_tensor(source_cache) is None:
+        return None
+    # Consumers of one long-KV source share the same cache and block table:
+    # the source layer owns both, and every later layer in the group reads
+    # them unchanged.  Memoizing on the (per-group, per-step) metadata object
+    # turns 38 copies per forward into 4 without any ordering hazard, because
+    # the source layer's own write happens before its first stage call.
+    memo = getattr(metadata, "_pcp_stage_memo", None)
+    if memo is not None and memo[0] == source_cache.data_ptr():
+        return memo[1]
+    counts = _stage_block_counts(metadata, num_reqs, block_table, block_size, ratio=ratio)
+    result = get_stage_cache(source_cache.device, source_cache).stage(
+        source_cache, block_table, seq_lens=seq_lens, block_size=block_size, counts=counts
+    )
+    if result is not None:
+        metadata._pcp_stage_memo = (source_cache.data_ptr(), result)
+    return result
+
+
+def _stage_block_counts(metadata, num_reqs, block_table, block_size, ratio=1):
+    """Per-request live-block counts from the CPU sequence lengths.
+
+    Returning ``None`` keeps the mask-based path, which needs one D2H sync per
+    call; the CPU path is the fast one.  Counts are clamped to the block-table
+    width and may over-approximate the live prefix (padding rows copy block 0
+    and are never addressed by the kernel).
+    """
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_cpu_plan_enabled
+
+    if not block_size or not owner_cpu_plan_enabled():
+        return None
+    seq_lens_cpu = getattr(metadata, "seq_lens_cpu", None)
+    if seq_lens_cpu is None:
+        return None
+    values = seq_lens_cpu[:num_reqs].tolist()
+    width = int(block_table.shape[1])
+    ratio = max(1, int(ratio or 1))
+    counts = []
+    for value in values:
+        # Match the builder: cache positions are ``seq_len // ratio`` and the
+        # block table is indexed in those positions.
+        cache_len = int(value) // ratio
+        counts.append(min(width, (cache_len + block_size - 1) // block_size))
+    return counts
 
 
 class AscendDSAV41Impl:
@@ -672,6 +1059,13 @@ class AscendDSAV41Impl:
             folded_name = self.index_k_source_prefix + "_folded"
             folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
+        index_metadata = metadata.indexer.cache
+        if _index_stage_enabled():
+            timing = _timing_enter("stage_index")
+            staged_index = _maybe_stage_index_cache(source_cache, index_metadata, int(self.role.compress_ratio or 1))
+            _timing_exit(timing)
+            if staged_index is not None:
+                source_cache, index_metadata = staged_index
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
             torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
@@ -680,7 +1074,7 @@ class AscendDSAV41Impl:
             prepared_indexer.weights,
             positions,
             source_cache,
-            metadata.indexer.cache,
+            index_metadata,
             quantized_query=prepared_indexer.quantized_query,
             query_scale=prepared_indexer.query_scale,
             is_candidate_source=self.role.is_candidate_source,
@@ -738,6 +1132,19 @@ class AscendDSAV41Impl:
             cmp_residual = metadata.attention.cmp_residual
             cmp_topk = self.topology.index_topk
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
+            timing = _timing_enter("stage")
+            staged = _maybe_stage_owner_cmp_cache(
+                source_cache,
+                cmp_block_table,
+                metadata.attention,
+                num_reqs,
+                seq_lens=cmp_seq_lens,
+                block_size=getattr(metadata.attention, "storage_block_size", None),
+                ratio=getattr(self.role, "compress_ratio", 1),
+            )
+            _timing_exit(timing)
+            if staged is not None:
+                source_cache, cmp_block_table = staged
 
         operator_metadata = metadata.attention if has_compressed else metadata.swa
         op_metadata = operator_metadata.smla_metadata
@@ -749,10 +1156,91 @@ class AscendDSAV41Impl:
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
+            timing = _timing_enter("swa_gather")
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
+            _timing_exit(timing)
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
             seq_lens = metadata.swa.replay_seq_lens
+        elif _swa_stage_chunk_enabled():
+            # Each rank-local row is already one DualChunkSwap chunk, so the
+            # kernel only needs ``[chunk_start - window, chunk_end)`` of the
+            # owner slab. Stage that bounded range and rebase the operator
+            # coordinates onto it; the sliding-window mask is relative, so it
+            # is unchanged. Decodes, mixed batches, non-owner caches and sparse
+            # ori indices keep the direct peer-read path.
+            eligible = (
+                metadata.swa.num_decodes == 0
+                and metadata.swa.num_prefills > 0
+                and metadata.swa.ori_sparse_indices is None
+                # A per-token visible-length floor (bounded replay) is tied to
+                # the unbounded coordinate system; keep that path untouched.
+                and metadata.swa.ori_topk_length is None
+                and metadata.swa.storage_block_size
+                and metadata.swa.ori_win_left >= 0
+            )
+            if eligible:
+                from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+                    get_swa_chunk_stage_cache,
+                )
+                from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+                    owner_slab_for_tensor,
+                )
+
+                if owner_slab_for_tensor(swa_cache) is not None:
+                    timing = _timing_enter("stage_swa_chunk")
+                    plan = _build_swa_chunk_plan(
+                        metadata.swa,
+                        ori_block_table,
+                        num_reqs,
+                        int(metadata.swa.storage_block_size),
+                        int(metadata.swa.ori_win_left) + 1,
+                        int(swa_cache.shape[0]),
+                    )
+                    staged = None
+                    rebuilt = None
+                    if plan is not None and plan.total_blocks > 0:
+                        rebuilt = _build_swa_chunk_smla_metadata(
+                            attn,
+                            metadata.swa,
+                            operator_metadata,
+                            plan,
+                            has_compressed=has_compressed,
+                            ratio=ratio,
+                            cmp_seq_lens=cmp_seq_lens,
+                            cmp_residual=cmp_residual,
+                            cmp_topk=cmp_topk,
+                            num_reqs=num_reqs,
+                        )
+                        if rebuilt is not None:
+                            staged = get_swa_chunk_stage_cache(swa_cache.device, swa_cache).stage(
+                                swa_cache,
+                                plan.window_block_table,
+                                counts=plan.counts,
+                                prepared=plan.prepared,
+                            )
+                    _timing_exit(timing)
+                    if staged is not None:
+                        swa_cache, ori_block_table = staged
+                        seq_lens = plan.replay_seq_lens
+                        op_metadata = rebuilt
+        elif _swa_stage_enabled():
+            # The kernel reads the sliding-window cache through
+            # ``ori_block_table``; on an owner slab those reads are peer reads
+            # at per-token granularity. Stage the live prefix locally.
+            timing = _timing_enter("stage_swa")
+            staged = _maybe_stage_owner_cmp_cache(
+                swa_cache,
+                ori_block_table,
+                metadata.swa,
+                num_reqs,
+                seq_lens=seq_lens,
+                block_size=getattr(metadata.swa, "storage_block_size", None),
+            )
+            _timing_exit(timing)
+            if staged is not None:
+                swa_cache, ori_block_table = staged
+        timing = _timing_enter("kernel")
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,
@@ -779,6 +1267,7 @@ class AscendDSAV41Impl:
             topk_value_mode=1,
             return_softmax_lse=False,
         )
+        _timing_exit(timing)
         return output
 
     @staticmethod
@@ -1398,9 +1887,9 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
             ring_meta = self._c2_ring_metadata[: 5 * req.num_reqs].view(5, req.num_reqs)
             input_positions = req.positions
             if self._supports_device_ops:
-                assert self._c2_full_source_rope is not None, (
-                    "Enable device metadata before building compressor metadata"
-                )
+                assert (
+                    self._c2_full_source_rope is not None
+                ), "Enable device metadata before building compressor metadata"
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
