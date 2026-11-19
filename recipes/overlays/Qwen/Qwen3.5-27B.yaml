@@ -1,0 +1,243 @@
+# Ascend overlay for Qwen/Qwen3.5-27B — add-only, Huawei hardware scope only.
+#
+# Base recipe (unchanged by this overlay):
+#   https://github.com/vllm-project/vllm/blob/main/recipes/models/Qwen/Qwen3.5-27B.yaml
+# Deployment reference:
+#   docs/source/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md (v0.30.0)
+#
+# Scope notes:
+#   * Atlas 300I DUO is intentionally absent. The renderer taxonomy has no 310P
+#     hardware profile, so the 310P path can only be expressed downstream
+#     (vllm-ascend-recipes, `atlas_300i_duo`).
+#   * Ascend 950DT is intentionally absent. The tutorial's weight and
+#     single-node tables list A3 / A2 / 300I DUO for Qwen3.5-27B only; the
+#     950DT path starts at Qwen3.6-27B.
+#   * `meta.hardware` uses `supported`, not `verified`: no end-to-end run on
+#     Ascend hardware backs this file. Promote to `verified` only after a real
+#     NPU run of the rendered command.
+
+meta:
+  hardware:
+    ascend_910c: supported
+    ascend_910b: supported
+    # 950DT / 950PR are not verified for Qwen3.5-27B this round. Marking them
+    # unsupported keeps the renderer from emitting an unbacked command and
+    # avoids the ASC001/ASC002 fallback findings in the Ascend CI check.
+    ascend_950dt: unsupported
+    ascend_950pr: unsupported
+    ascend_950dt_8x: unsupported
+    ascend_950pr_8x: unsupported
+
+features:
+  # The base recipe declares a plain `args` list for spec decoding (native MTP,
+  # 1 token). The Ascend checkpoints use the shared `qwen3_5_mtp` head with 3
+  # speculative tokens, so the args are overridden per hardware generation — a
+  # feature may not declare both `args` and `modes`.
+  spec_decoding:
+    hardware_overrides:
+      ascend_910c:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3}'
+
+variants:
+  # BF16. 27.78B params => ~55.6 GB of weights, so every Ascend layout needs
+  # TP=2 on 64 GB dies. Without this block the renderer keeps the NVIDIA image
+  # and emits an unrunnable `vllm serve` for ascend_910c / ascend_910b.
+  default:
+    tp:
+      ascend_910c: 2
+      ascend_910b: 2
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        extra_args:
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8000'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+        install:
+          # No Ascend wheel on PyPI; the pinned image is the only path.
+          pip: false
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: "vllm serve"
+        extra_args:
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8000'
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+        install:
+          pip: false
+
+  # The generic FP8 / GPTQ INT4 variants come from the base recipe. They are
+  # not part of this Ascend task, but the Ascend CI check still enumerates them
+  # for every Ascend GPU id; declare an explicit Ascend image and no pip tab so
+  # it never falls back to vllm/vllm-openai:latest + --torch-backend auto.
+  fp8:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+  gptq_int4:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+
+  # W8A8 on one Atlas 800 A3 (16x 910C), TP=2 + DP=8 fills the node.
+  ascend_w8a8_a3:
+    model_id: Eco-Tech/Qwen3.5-27B-w8a8-mtp
+    precision: int8
+    label: W8A8 (Ascend A3)
+    vram_minimum_gb: 33
+    supported_hardware:
+      - ascend_910c
+    tp: 2
+    min_vllm_version: 0.30.0
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '8'
+      - '--quantization'
+      - ascend
+      - '--served-model-name'
+      - qwen3.5
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '133120'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - bfloat16
+      - '--reasoning-parser'
+      - qwen3
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-encoder-tp-mode'
+      - data
+      - '--mm-processor-cache-type'
+      - shm
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+      - '--async-scheduling'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '512'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+    description: ModelSlim W8A8 checkpoint with the MTP head, one Atlas 800 A3 node (16x 910C) at TP2+DP8. Requires --quantization ascend.
+
+  # W8A8 on one Atlas 800 A2 (8x 910B), TP=2 + DP=4 fills the node.
+  ascend_w8a8_a2:
+    model_id: Eco-Tech/Qwen3.5-27B-w8a8-mtp
+    precision: int8
+    label: W8A8 (Ascend A2)
+    vram_minimum_gb: 33
+    supported_hardware:
+      - ascend_910b
+    tp: 2
+    min_vllm_version: 0.30.0
+    extra_args:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8000'
+      - '--data-parallel-size'
+      - '4'
+      - '--quantization'
+      - ascend
+      - '--served-model-name'
+      - qwen3.5
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '32768'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--allowed-local-media-path'
+      - '/'
+      - '--dtype'
+      - bfloat16
+      - '--reasoning-parser'
+      - qwen3
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--mm-encoder-tp-mode'
+      - data
+      - '--mm-processor-cache-type'
+      - shm
+      - '--gpu-memory-utilization'
+      - '0.85'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true}'
+      - '--async-scheduling'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '512'
+      OMP_PROC_BIND: 'false'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+    description: Same W8A8 MTP checkpoint on one Atlas 800 A2 node (8x 910B) at TP2+DP4. Requires --quantization ascend.
+
+strategy_overrides:
+  multi_node_tp:
+    hardware_overrides:
+      # TP already spans every device in this strategy. The single-node DP8
+      # setting must not create eight copies of that cluster-wide TP group.
+      ascend_910c:
+        extra_args: ['--data-parallel-size', '1']
+      ascend_910b:
+        extra_args: ['--data-parallel-size', '1']
