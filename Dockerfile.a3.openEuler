@@ -26,11 +26,6 @@ RUN yum update -y && \
     yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
     rm -rf /var/cache/yum/*
 
-# Install rustup + rust toolchain (required for tools/build_rust.sh / vllm-rs)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
-    source /root/.cargo/env && \
-    rustc --version && cargo --version
-
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
@@ -40,8 +35,9 @@ ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.23.0
 ARG VLLM_COMMIT=""
 ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-# 可选：如果你暂时不需要vllm-rs，可以 ARG BUILD_VLLM_RUST=0 跳过编译
-ARG BUILD_VLLM_RUST=1
+# NOTE: vLLM v0.23.0 has no Rust frontend (no tools/build_rust.sh and no
+# requirements/build/rust.txt). The rust toolchain and the rust build step
+# that this file used to carry are removed to keep the tag consistent.
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
@@ -52,18 +48,6 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
     python3 -m pip uninstall -y triton && \
-    cd /vllm-workspace/vllm && \
-    source /root/.cargo/env && \
-    export PATH="/root/.cargo/bin:$PATH" && \
-    export PROTOC_INCLUDE=/usr/include && \
-    # v0.23.0 does NOT have requirements/build/rust.txt, guard this line for version compatibility
-    if [ -f requirements/build/rust.txt ]; then \
-        python3 -m pip install -r requirements/build/rust.txt; \
-    fi && \
-    # 条件执行rust编译，BUILD_VLLM_RUST=0 直接跳过
-    if [ "${BUILD_VLLM_RUST}" = "1" ]; then \
-        bash tools/build_rust.sh; \
-    fi && \
     python3 -m pip cache purge
 
 # Install vllm-ascend
