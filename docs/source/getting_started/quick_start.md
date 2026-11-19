@@ -17,7 +17,7 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
     Atlas A2 Products (A2), Atlas A3 Products (A3), and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
 
-    For the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
+    For component roles and the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 
 ## Installation {: #quick-start-installation }
 
@@ -49,7 +49,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 ??? tip "If Hugging Face access is restricted"
 
-    If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to ModelScope:
+    If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to [ModelScope](https://www.modelscope.cn/):
 
     <!-- doctest: quickstart-modelscope -->
 

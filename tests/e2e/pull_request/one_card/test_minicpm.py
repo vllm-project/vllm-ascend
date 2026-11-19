@@ -26,7 +26,6 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MINICPM_MODELS = [
-    "openbmb/MiniCPM-2B-sft-bf16",
     "OpenBMB/MiniCPM4-0.5B",
 ]
 

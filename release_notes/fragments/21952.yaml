@@ -1,0 +1,6 @@
+pr: 21952
+entries:
+  - category: bugfix
+    text: Fixed an A5 attention indexing bug that could cause DeepSeek V4.1 to return incorrect or off-topic answers after a prefix-cache hit when SWA bounded replay is enabled.
+    model: deepseek-v4.1
+    hardware: [A5]

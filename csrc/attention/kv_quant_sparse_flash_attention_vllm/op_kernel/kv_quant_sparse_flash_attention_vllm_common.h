@@ -49,17 +49,35 @@ enum class QUANT_SCALE_REPO_MODE {
 
 template <typename Q_T, typename KV_T, typename OUT_T, const bool FLASH_DECODE = false,
 	  QSFA_LAYOUT LAYOUT_T = QSFA_LAYOUT::BSND, QSFA_LAYOUT KV_LAYOUT_T = QSFA_LAYOUT::BSND,
-          const int TEMPLATE_MODE = C_TEMPLATE, typename... Args>
+          const int TEMPLATE_MODE = C_TEMPLATE, const bool NO_ROPE = false, typename... Args>
 struct QSFAType {
     using queryType = Q_T;
     using kvType = KV_T;
     using kRopeType = Q_T;
     using outputType = OUT_T;
     static constexpr bool flashDecode = FLASH_DECODE;
+    static constexpr bool noRope = NO_ROPE;
+    static constexpr bool adaptiveAddresses = false;
     static constexpr QSFA_LAYOUT layout = LAYOUT_T;
     static constexpr QSFA_LAYOUT kvLayout = KV_LAYOUT_T;
     static constexpr int templateMode = TEMPLATE_MODE;
     static constexpr bool pageAttention = (KV_LAYOUT_T == QSFA_LAYOUT::PA_BSND);
+};
+
+// Internal specialization only; public template keys and small-table types stay unchanged.
+template <typename BaseType>
+struct QSFAAdaptiveAddressType : BaseType {
+    static constexpr bool adaptiveAddresses = true;
+};
+
+template <typename BaseType, bool UseLargeTable>
+struct QSFAAddressTableType {
+    using type = BaseType;
+};
+
+template <typename BaseType>
+struct QSFAAddressTableType<BaseType, true> {
+    using type = QSFAAdaptiveAddressType<BaseType>;
 };
 
 // ================================Util functions==================================

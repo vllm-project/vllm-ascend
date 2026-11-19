@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
@@ -23,7 +24,7 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -34,14 +35,17 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | Mapping[int, int] | None = None,
         speculator: Any = None,
+        *,
+        decode_query_lens: Mapping[int, int] | None = None,
     ):
+        query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
         super().__init__(
             vllm_config,
             device,
             cudagraph_mode,
-            decode_query_len,
+            query_shapes,
         )
 
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
@@ -96,6 +100,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         attn_backend = list(self.speculator.attn_backends.values())[0]
+        if all(backend is AscendFlashAttentionBackend for backend in self.speculator.attn_backends.values()):
+            # Length preparation and FlashAttn tiling run inside the graph,
+            # reading the draft's persistent device buffers on every replay.
+            return super().run_fullgraph(desc)
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,

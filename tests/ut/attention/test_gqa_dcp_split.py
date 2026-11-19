@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, attr-defined, method-assign, union-attr"
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -309,7 +310,8 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
 def test_v2_draft_steps_update_history_and_current_independently(interleave):
     speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = True
     prepare_local = MagicMock(
         side_effect=lambda lengths: get_dcp_local_seq_lens(
@@ -352,7 +354,8 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
     )
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=[13, 31])
     speculator.num_speculative_steps = 3
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     query = (4, 2, 1) if is_prefill else (1, 1, 1)
     steps = [
         {
@@ -426,15 +429,17 @@ def test_v2_draft_metadata_does_not_alias_history_between_steps():
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank):
+def test_draft_builder_owns_history_and_padding(rank):
     from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-    from vllm_ascend.worker.dcp_utils import DCPManager
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
-    builder.speculative_config = SimpleNamespace(parallel_drafting=False)
+    builder.speculative_config = SimpleNamespace(
+        parallel_drafting=False,
+        speculator_config=SimpleNamespace(parallel_drafting=False),
+    )
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
@@ -461,35 +466,16 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
         slot_mapping=torch.arange(16, dtype=torch.int32),
         attn_state=None,
         causal=True,
-        is_prefilling=torch.ones(16, dtype=torch.bool),
-        context_parallel_metadata=object(),
+        is_prefilling=torch.zeros(16, dtype=torch.bool),
     )
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_size, manager.dcp_world_rank = 2, rank
-    manager.vllm_config = builder.vllm_config
-    manager._get_dcp_local_seq_lens = MagicMock(side_effect=AssertionError("builder owns GQA lengths"))
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
-        patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor),
-    ):
-        manager.prepare_spec_decode_drafting_cp_metadata(common, object())
-        assert common.context_parallel_metadata is None
+    with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
         metadata = builder.build(0, common)
-        decode = metadata.decode
-        original_history = decode.cp_history_seq_len
-        original_total = decode.num_computed_tokens_of_dcp
-        manager.update_spec_decode_drafting_cp_metadata(
-            metadata, object(), torch.tensor([10, 11, 12, 13]), draft_index=99
-        )
+    decode = metadata.decode
     expected = [sum(position % 2 == rank for position in range(length)) for length in [11, 12, 13, 14]]
     assert metadata.num_decodes == 16
     assert decode.cp_history_seq_len == expected + [0] * 12
     assert decode.block_tables.shape == (16, 1)
     assert decode.num_computed_tokens_of_dcp.shape == (16, 2)
-    assert decode.cp_history_seq_len is original_history
-    assert decode.num_computed_tokens_of_dcp is original_total
-    manager._get_dcp_local_seq_lens.assert_not_called()
 
 
 def test_dcp_forward_preserves_graph_padding_query_span():

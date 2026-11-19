@@ -90,6 +90,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mock_get_config = self.config_patcher.start()
 
         mock_config = MagicMock()
+        mock_config.use_v2_model_runner = False
 
         mock_config.scheduler_config.max_num_seqs = 256
 
@@ -172,6 +173,47 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.need_extra_args)
         self.assertEqual(self.dispatcher.global_bs, 0)
+
+    def test_lmhead_sync_keeps_dispatch_and_combine_masks_paired(self):
+        for v2 in (False, True):
+            for lmhead in (False, True):
+                for dcp in (1, 2):
+                    for base_skip in (False, True):
+                        with self.subTest(v2=v2, lmhead=lmhead, dcp=dcp, base_skip=base_skip):
+                            config = self.mock_get_config.return_value
+                            config.use_v2_model_runner = v2
+                            config.parallel_config.decode_context_parallel_size = dcp
+                            self.mock_skip_allreduce.return_value = base_skip
+                            with patch("vllm_ascend.utils.lmhead_tp_enable", return_value=lmhead):
+                                dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=1, num_experts=8)
+                            uniform = not base_skip or (v2 and lmhead and dcp == 1)
+                            self.assertEqual(dispatcher.global_bs, 0 if uniform else 1024)
+                            mask = torch.tensor([True, True, False, False])
+                            dispatch_input = build_token_dispatch_input_fixture(
+                                hidden_states=torch.randn(4, 8),
+                                topk_weights=torch.ones(4, 1),
+                                topk_ids=torch.zeros(4, 1, dtype=torch.int32),
+                                expert_map=torch.arange(8),
+                                mc2_mask=mask,
+                            )
+                            with patch(
+                                "torch_npu.npu_moe_distribute_dispatch_v2",
+                                return_value=(torch.randn(4, 8),) * 5 + (None, None),
+                                create=True,
+                            ) as dispatch:
+                                output = dispatcher.token_dispatch(dispatch_input)
+                            dispatch_kwargs = dispatch.call_args.kwargs
+                            metadata = output.combine_metadata
+                            combine_kwargs = dispatcher.get_combine_mc_kwargs(output.hidden_states, metadata)
+                            if uniform:
+                                self.assertIs(dispatch_kwargs["x_active_mask"], mask)
+                                self.assertIs(metadata.mc2_mask, mask)
+                                self.assertIs(combine_kwargs["x_active_mask"], mask)
+                            else:
+                                self.assertNotIn("x_active_mask", dispatch_kwargs)
+                                self.assertIsNone(metadata.mc2_mask)
+                                self.assertNotIn("x_active_mask", combine_kwargs)
+                            self.assertEqual(dispatch_kwargs["global_bs"], combine_kwargs["global_bs"])
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
         self.mock_get_config.return_value.parallel_config.tensor_parallel_size = 4
@@ -523,8 +565,100 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertIsNotNone(output.dynamic_scale)
         self.assertTrue(output.combine_metadata.quant.dispatch_with_quant)
 
+    def test_mxfp8_ceil_dispatch_preserves_fp8_transport(self):
+        self.dispatcher.dynamic_mx_quant_scale_alg = 1
+        self.dispatcher.need_shared_expert_args = True
+        hidden_states = torch.full((2, 128), 1.8984375, dtype=torch.bfloat16)
+        quantized = torch.full((2, 128), 240.0).to(torch.float8_e4m3fn)
+        scales = torch.full((2, 2, 2), 120, dtype=torch.uint8)
+        for comm_mode in (None, 0):
+            with self.subTest(comm_mode=comm_mode):
+                token_input = build_token_dispatch_input_fixture(
+                    hidden_states=hidden_states,
+                    topk_weights=torch.ones(2, 1),
+                    topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+                    expert_map=torch.arange(8),
+                    quant_type=QuantType.W8A8MXFP,
+                    act_quant_type=torch.float8_e4m3fn,
+                    comm_quant_mode=comm_mode,
+                )
+                with patch("torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scales)) as quantize:
+                    kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_input)
+                if comm_mode is None:
+                    quantize.assert_called_once_with(hidden_states, dst_type=torch.float8_e4m3fn, scale_alg=1)
+                    self.assertIs(kwargs["x"], quantized)
+                    self.assertEqual(kwargs["scales"].dtype, torch.float8_e8m0fnu)
+                    torch.testing.assert_close(kwargs["scales"].view(torch.uint8), scales.reshape(2, -1))
+                    self.assertEqual(kwargs["y_dtype"], torch.float8_e4m3fn)
+                else:
+                    quantize.assert_not_called()
+                    self.assertIs(kwargs["x"], hidden_states)
+                self.assertEqual(kwargs["quant_mode"], 0)
 
-def test_allgather_token_dispatch_quant_mode_without_dynamic_scale():
+    def test_mxfp8_ceil_combine_preserves_bf16_and_explicit_overrides(self):
+        self.dispatcher.dynamic_mx_quant_scale_alg = 1
+        self.dispatcher.moe_expert_num = 8
+        hidden_states = torch.randn(2, 128, dtype=torch.bfloat16)
+        for scale_alg, forced_mode, comm_mode, expected in (
+            (1, 0, None, 0),
+            (0, 0, None, 4),
+            (1, 4, None, 4),
+            (1, 0, 4, 4),
+            (1, 4, 2, 4),
+        ):
+            with self.subTest(scale_alg=scale_alg, forced_mode=forced_mode, comm_mode=comm_mode):
+                self.dispatcher.dynamic_mx_quant_scale_alg = scale_alg
+                self.mock_ascend_config.combine_quant_mode = forced_mode
+                metadata = MoEMC2CombineMetadata(
+                    topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+                    topk_weights=torch.ones(2, 1),
+                    expert_map=torch.arange(8),
+                    ep_recv_counts=torch.ones(8, dtype=torch.int32),
+                    tp_recv_counts=torch.ones(1, dtype=torch.int32),
+                    assist_info_for_combine=torch.arange(2),
+                    expand_scales=None,
+                    quant=MoEQuantParams(quant_type=QuantType.W8A8MXFP, comm_quant_mode=comm_mode),
+                )
+                kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, metadata)
+                self.assertEqual(kwargs["comm_quant_mode"], expected)
+                self.assertIs(kwargs["expand_x"], hidden_states)
+
+
+@pytest.mark.parametrize("prequantized", [False, True])
+def test_allgather_mxfp8_ceil_quantization(prequantized):
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_local_experts=2)
+    original = torch.full((2, 128), 1.8984375, dtype=torch.bfloat16)
+    quantized = torch.full((2, 128), 240.0).to(torch.float8_e4m3fn)
+    scales = torch.full((2, 2, 2), 120, dtype=torch.uint8)
+    token_input = build_token_dispatch_input_fixture(
+        hidden_states=quantized if prequantized else original,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        pertoken_scale=scales if prequantized else None,
+        quant_type=QuantType.W8A8MXFP,
+        act_quant_type=torch.float8_e4m3fn,
+    )
+    with (
+        patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_dynamic_mx_quant_scale_alg", return_value=1, create=True),
+        patch("torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scales)) as quantize,
+        patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+            return_value=(quantized, torch.arange(2), torch.ones(2, dtype=torch.int32), scales),
+        ) as route,
+    ):
+        output = dispatcher.token_dispatch(token_input)
+    if prequantized:
+        quantize.assert_not_called()
+    else:
+        quantize.assert_called_once_with(original, dst_type=torch.float8_e4m3fn, scale_alg=1)
+    assert route.call_args.args[0] is quantized
+    assert route.call_args.kwargs["quant_mode"] == -1
+    assert route.call_args.kwargs["scale"] is scales
+    assert output.dynamic_scale is scales
+
+
+@patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_dynamic_mx_quant_scale_alg", return_value=0)
+def test_allgather_token_dispatch_quant_mode_without_dynamic_scale(_scale_alg):
     dispatcher = TokenDispatcherWithAllGather(top_k=2, num_experts=128)
     hidden_states = torch.randn(3, 128)
     topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])

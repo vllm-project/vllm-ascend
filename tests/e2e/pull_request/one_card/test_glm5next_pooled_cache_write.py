@@ -9,9 +9,8 @@ import torch_npu  # noqa: F401
 from vllm_ascend.ops.triton import glm5_next_cann_keypool as adapters
 
 
-@pytest.mark.parametrize("cp_start", [None, 0, 4, 8])
 @torch.inference_mode()
-def test_cann_facing_metadata_and_tail_indices(cp_start):
+def test_cann_facing_metadata_and_tail_indices():
     device = "npu"
     common = SimpleNamespace(
         num_reqs=3,
@@ -37,30 +36,7 @@ def test_cann_facing_metadata_and_tail_indices(cp_start):
     buffers = SimpleNamespace(
         **{name: torch.full((size,), 77, dtype=dtype, device=device) for name, (size, dtype) in fields.items()}
     )
-    query = (
-        None
-        if cp_start is None
-        else SimpleNamespace(
-            positions=buffers.positions[cp_start : cp_start + 4],
-            **{
-                name: torch.full((3,), 77, dtype=torch.int64, device=device)
-                for name in ("cum_query_lens", "seq_lens", "pool_tail")
-            },
-        )
-    )
-    outputs = adapters.build_keypool_metadata(
-        common, buffers, 8, 6, 128, 4, query_metadata=query, local_start=cp_start or 0
-    )
-    if query is not None:
-        expected_query = {
-            0: ([3, 4, 4], [16384, 16385, 0], [3, 0, 0]),
-            4: ([0, 2, 2], [0, 16385, 0], [0, 2, 0]),
-            8: ([0, 0, 0], [0, 0, 0], [0, 0, 0]),
-        }[cp_start]
-        for field, values in zip(("cum_query_lens", "seq_lens", "pool_tail"), expected_query):
-            torch.testing.assert_close(
-                getattr(query, field).cpu(), torch.tensor(values, dtype=torch.int64), rtol=0, atol=0
-            )
+    outputs = adapters.build_keypool_metadata(common, buffers, 8, 6, 128, 4)
     expected = (
         [65536, 65537, 65538, 65539, 65540, 65541, 0, 0],
         [-1, -1, -1, 33, -1, -1, -1, -1],

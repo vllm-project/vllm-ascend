@@ -9,6 +9,10 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
+!!! warning "Deprecation Notice for GQA Models"
+
+    Decode Context Parallelism (DCP) for **GQA models** is **deprecated** as of v0.32.0 and has entered the sunset process (will be removed in a future release). GQA models naturally shard KV heads across TP ranks, and in speculative decoding, GQA draft models maintain native TP sharding under target DCP. Maintaining dedicated GQA DCP metadata and communication paths is no longer justified. Note that DCP for **MLA and SFA models** remains fully supported and recommended. For more details, see [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }
@@ -22,6 +26,8 @@ PCP support is experimental. The following table shows the basic backend support
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA/KPool (GLM-5.3-Flash) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (MTP) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA (Kimi-K3.1-Pro) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
@@ -68,7 +74,10 @@ PCP supports MTP with MLA, SFA, and DeepSeek-V4 DSA models, Eagle3 with
 GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models. The target
 model runs with the configured PCP topology, while the draft model is replicated on every PCP rank
 and runs with a logical PCP size of `1`. Configure PCP only for the target
-model.
+model. DFlash and DFlash2 also use a replicated draft with logical PCP size `1`.
+DFlash2 candidate selection merges the target LM head's vocabulary shards across
+both PCP and TP before computing the global candidate TopK.
+For replicated DFlash/DFlash2 with `TP=1` and `DP=1`, keep EPLB disabled.
 
 For general speculative decoding configuration and model requirements, see [Speculative Decoding](speculative_decoding.md).
 
@@ -107,7 +116,8 @@ For either method, remove `--enforce-eager` and add the following option to use 
 - For PP+PCP, use `MooncakeConnectorV2` on [supported models](pipeline_parallel.md).
 - KV cache pooling with PCP supports only `AscendStoreConnector` with `use_layerwise=false`.
 - PCP speculative decoding supports MTP with MLA, SFA, and DeepSeek-V4 DSA models,
-  Eagle3 with GQA models, and DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models.
+  Eagle3 with GQA models, DSpark with SFA, DeepSeek-V4 DSA, and DeepSeek-V4.1 DSA models,
+  and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
@@ -163,5 +173,7 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
+
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. For GQA/MQA, `tensor_parallel_size // num_key_value_heads` must be at least the DCP size. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

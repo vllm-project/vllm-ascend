@@ -65,6 +65,47 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 )
 
 
+@pytest.mark.parametrize("device_id", [0, 1, 3])
+def test_send_thread_uses_worker_device(device_id):
+    state = ProducerSendState(
+        last_layer_idx=0,
+        layer_metadata={},
+        p_session="test-session",
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(),
+        layer_storage_slots={},
+    )
+    thread = MembPullSendingThread(ready_event=threading.Event(), state=state, device_id=device_id)
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    with patch(f"{module}.torch.npu.set_device") as set_device:
+        thread.start()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        set_device.assert_called_once_with(device_id)
+        assert thread.ready_event.is_set()
+        assert thread.startup_error is None
+
+
+def test_send_thread_reports_device_binding_failure():
+    thread = MembPullSendingThread(
+        ready_event=threading.Event(),
+        state=ProducerSendState(0, {}, "test-session", 0, 0, (), {}),
+        device_id=3,
+    )
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    error = RuntimeError("could not bind to NPU")
+    with patch(f"{module}.torch.npu.set_device", side_effect=error) as set_device:
+        thread.run()
+
+        assert thread.startup_error is error
+        assert thread.ready_event.is_set()
+        set_device.assert_called_once_with(3)
+
+
 def test_sfa_remote_d2h_connector_is_registered():
     with (
         patch.object(KVConnectorFactory, "_registry", {}),

@@ -39,7 +39,6 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -297,9 +296,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.ALWAYS
 
-    def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
-        return False
-
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -365,8 +361,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        # Reuse the runner-maintained device boundaries without another H2D.
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         # vLLM main keeps speculative-decode request metadata at the real
@@ -526,16 +522,28 @@ class FIAParamProvider:
         metadata = attn_metadata[self.layer_name]
 
         if self.is_draft_model or not self.sliding_window:
-            return {
+            params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
                 "block_table": None if self.is_non_pa else metadata.block_tables,
             }
         else:
-            return {
+            params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
             }
+        # Replay-time mask choice (cf. PR #17682 review, issue #16889):
+        # FULL graphs are captured with the right-aligned causal mask +
+        # sparse_mode=3, which must stay valid for every replay shape.
+        # For genuine single-token decode batches causal masking is
+        # implicit, so the maskless parameterization (atten_mask=None,
+        # sparse_mode=0) is valid and avoids redundant mask construction.
+        # Sliding-window decode and multi-token replays (speculative-decode
+        # verification, draft expansion, chunked prefill) keep the mask.
+        if self.sliding_window is None and getattr(metadata, "max_query_len", 0) == 1:
+            params["atten_mask"] = None
+            params["sparse_mode"] = 0
+        return params
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +587,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
+        if (
+            attn_type == AttentionType.ENCODER_ONLY
+            and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Bidirectional (ENCODER_ONLY) attention does not support prefill context parallelism (PCP): each "
+                "PCP rank only holds its slice of the prompt and the encoder attention path does not gather the "
+                "other ranks' K/V, so the result would silently be wrong. Set --prefill-context-parallel-size to 1."
+            )
         self.use_pcp = (
             type(self) is AscendAttentionBackendImpl
             and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
@@ -590,6 +607,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.hidden_size = self.num_heads * self.head_size
         self.sliding_window = sliding_window
+        self._non_causal_swa_attn_mask: torch.Tensor | None = None
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
@@ -652,6 +670,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
 
+    def _get_fia_mask_params(
+        self, attn_metadata: AscendMetadata, device: torch.device
+    ) -> tuple[torch.Tensor | None, int, int, int]:
+        if not attn_metadata.causal:
+            if self.sliding_window is None:
+                return None, 0, SWA_INT_MAX, SWA_INT_MAX
+            # Match upstream FlashAttention's non-causal window (W-1, W-1).
+            # FIA band mode uses a compressed triangular template; its pre/next
+            # offsets, rather than the template alone, define visibility. Build
+            # the mask once and share it between eager and graph execution.
+            if self._non_causal_swa_attn_mask is None:
+                self._non_causal_swa_attn_mask = AttentionMaskBuilder(device).get_splitfuse_attn_mask()
+            radius = self.sliding_window - 1
+            return self._non_causal_swa_attn_mask, 4, radius, radius
+        # Graph capture must keep the mask + sparse_mode=3 (right-aligned
+        # causal): FULL-graph capture dummies are always DecodeOnly with one
+        # query token per request (AscendInputBatch.make_dummy), but the
+        # captured graphs also replay multi-token batches (speculative-decode
+        # verification, adaptive verification, chunked prefill). FIA graph
+        # replay cannot rebind atten_mask/sparse_mode (FIAParamProvider only
+        # updates lengths/block tables), so capture-time parameters must stay
+        # valid for every replay shape. The mask is only skipped on the eager
+        # path, where the metadata describes the real batch.
+        return (
+            attn_metadata.attn_mask,
+            4 if self.sliding_window else 3,
+            self.sliding_window or SWA_INT_MAX,
+            0 if self.sliding_window else SWA_INT_MAX,
+        )
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -667,10 +715,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
@@ -975,7 +1020,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if not attn_metadata.causal:
+            if not attn_metadata.causal and self.sliding_window is not None:
+                attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_mask,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=sparse_mode,
+                    pre_tokens=pre_tokens,
+                    next_tokens=next_tokens,
+                )
+            elif not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1029,11 +1093,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
+                # Decode-only eager batches: every query token attends to all
+                # its cached keys, so causal masking is implicit. Skip the
+                # explicit mask and use sparse_mode=0 to avoid redundant mask
+                # construction in FIA (issue #16889, same pattern as #10302).
+                # max_query_len == 1 guarantees every request has a single
+                # query token; multi-token batches labeled DecodeOnly
+                # (spec-decode draft/verify) keep the mask, cf. #17948.
+                is_decode = (
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
+                )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
                     value=value,
-                    atten_mask=attn_metadata.attn_mask,
+                    atten_mask=None if is_decode else attn_metadata.attn_mask,
                     block_table=block_table,
                     input_layout="TND",
                     block_size=block_size,
@@ -1049,7 +1123,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     current_value=passed_value,
                     attn_metadata=attn_metadata,
                     is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
+                    sparse_mode=0 if is_decode else 3,
                 )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
@@ -1080,11 +1154,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
+            # Only skip the explicit mask when every decode request carries
+            # exactly one query token: split_decodes_and_prefills classifies
+            # short extends (query_len <= decode_threshold) and speculative
+            # verification blocks as decodes too, and those multi-token
+            # queries still need the causal mask (issue #16889, cf. #17948).
+            decode_skips_mask = num_decode_tokens == num_decodes
             decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
                 query=query[:num_decode_tokens],
                 key=key,
                 value=value,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=None if decode_skips_mask else attn_metadata.attn_mask,
                 block_table=block_table[:num_decodes],
                 input_layout="TND",
                 block_size=block_size,
@@ -1101,7 +1181,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 current_value=value,
                 attn_metadata=attn_metadata,
                 is_prefill_no_cache=False,
-                sparse_mode=3,
+                sparse_mode=0 if decode_skips_mask else 3,
             )
             output[:num_decode_tokens] = decode_out.view(num_decode_tokens, self.num_heads, self.head_size)
 
@@ -1367,8 +1447,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, output_padded = self.reshape_and_cache(
                     query, key, value, kv_cache, attn_metadata, output
                 )
-        # pooling model branch
-        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
+        # pooling model branch. ENCODER_ONLY layers are bidirectional even when the metadata of a
+        # hybrid model still says causal (they never go through the EncoderOnlyAttention wrapper).
+        if attn_metadata.model_runner_type == "pooling" and (
+            not attn_metadata.causal or self.attn_type == AttentionType.ENCODER_ONLY
+        ):
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output

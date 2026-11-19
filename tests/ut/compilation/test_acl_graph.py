@@ -136,6 +136,9 @@ class TestACLGraphWrapper(TestBase):
         self.mock_updatable_graph = self.exit_stack.enter_context(
             patch("vllm_ascend.compilation.acl_graph.UpdatableGraph")
         )
+        self.mock_is_forward_context_available = self.exit_stack.enter_context(
+            patch("vllm_ascend.compilation.acl_graph.is_forward_context_available", return_value=True)
+        )
 
         # Mock VllmConfig
         self.mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -221,6 +224,48 @@ class TestACLGraphWrapper(TestBase):
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_call_without_forward_context(
+        self, mock_envs, mock_current_platform, mock_get_forward_context, mock_get_forward_context_2
+    ):
+        """Compiled helpers outside model forward bypass graph dispatch."""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        self.mock_is_forward_context_available.return_value = False
+        args = (object(), object())
+        kwargs = {"keyword": object()}
+        output = object()
+
+        for runtime_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            with self.subTest(runtime_mode=runtime_mode):
+                self.mock_runnable.reset_mock(side_effect=True)
+                self.mock_runnable.return_value = output
+                wrapper = ACLGraphWrapper(
+                    runnable=self.mock_runnable,
+                    vllm_config=self.mock_vllm_config,
+                    runtime_mode=runtime_mode,
+                    cudagraph_options=self.mock_cudagraph_options,
+                )
+
+                self.assertIs(wrapper(*args, **kwargs), output)
+                self.mock_runnable.assert_called_once_with(*args, **kwargs)
+
+                self.mock_runnable.reset_mock()
+                error = RuntimeError("runnable failed")
+                self.mock_runnable.side_effect = error
+                with self.assertRaises(RuntimeError) as context:
+                    wrapper(*args, **kwargs)
+                self.assertIs(context.exception, error)
+                self.mock_runnable.assert_called_once_with(*args, **kwargs)
+
+                mock_get_forward_context.assert_not_called()
+                mock_get_forward_context_2.assert_not_called()
+                self.mock_updatable_graph.assert_not_called()
+                self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
     def test_call_with_none_runtime_mode(
         self, mock_envs, mock_current_platform, mock_get_forward_context, mock_get_forward_context_2
     ):
@@ -271,7 +316,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(result, "test_output")
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -329,7 +374,10 @@ class TestACLGraphWrapper(TestBase):
         result = wrapper(test_tensor, "arg2")
 
         # Verify graph capture happened
-        mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        if acl_graph.vllm_version_is("0.33.0"):
+            mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        else:
+            mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
@@ -348,7 +396,7 @@ class TestACLGraphWrapper(TestBase):
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
     @patch("vllm_ascend.utils.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -410,7 +458,7 @@ class TestACLGraphWrapper(TestBase):
                     mock_npu_graph.super_kernel_optimize.assert_not_called()
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -470,7 +518,10 @@ class TestACLGraphWrapper(TestBase):
         first_result = wrapper(test_tensor, "arg2")
 
         # Verify graph capture happened during first call
-        mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        if acl_graph.vllm_version_is("0.33.0"):
+            mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        else:
+            mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once()
 
@@ -492,7 +543,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(second_result, "weak_ref_output")  # Weak ref output
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -554,7 +605,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertTrue(True)
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -617,7 +668,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertIn("Input addresses for aclgraphs are different", str(context.exception))
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -691,7 +742,10 @@ class TestACLGraphWrapper(TestBase):
         self.assertTrue(mock_patch.called)
 
         # Verify graph capture happened
-        mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        if acl_graph.vllm_version_is("0.33.0"):
+            mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        else:
+            mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
@@ -699,7 +753,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(result, "test_output")
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
-    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
+    @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True)
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
@@ -765,7 +819,10 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(mock_weak_ref_tensors.call_count, 2)
 
         # Verify graph capture happened
-        mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        if acl_graph.vllm_version_is("0.33.0"):
+            mock_validate_cudagraph_capturing_enabled.assert_called_once()
+        else:
+            mock_validate_cudagraph_capturing_enabled.assert_not_called()
         self.mock_updatable_graph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
 
@@ -814,7 +871,7 @@ class TestACLGraphWrapper(TestBase):
                 mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
 
                 # Mock validate_cudagraph_capturing_enabled
-                with patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled"):
+                with patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled", create=True):
                     wrapper = ACLGraphWrapper(
                         runnable=self.mock_runnable,
                         vllm_config=self.mock_vllm_config,
