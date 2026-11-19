@@ -98,6 +98,7 @@ def test_native_fused_weights_do_not_require_projection_scales(monkeypatch):
     fused_weight = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4)
     impl = SimpleNamespace(
         fa_quant_layer=True,
+        _is_k3_dspark_draft=True,
         _load_fa_quant_scales=MagicMock(),
         q_proj=SimpleNamespace(quant_method=native, weight=q_weight),
         fused_qkv_a_proj=SimpleNamespace(quant_method=native, weight=fused_weight),
@@ -121,7 +122,10 @@ def test_native_fused_weights_do_not_require_projection_scales(monkeypatch):
 
 def test_mixed_projection_methods_are_rejected_before_weight_conversion():
     impl = SimpleNamespace(
-        fa_quant_layer=False,
+        fa_quant_layer=True,
+        _is_k3_dspark_draft=True,
+        _mlapo_uses_native_weights=False,
+        _load_fa_quant_scales=MagicMock(),
         q_proj=SimpleNamespace(quant_method=UnquantizedLinearMethod()),
         fused_qkv_a_proj=SimpleNamespace(quant_method=SimpleNamespace(quant_method=object())),
     )
