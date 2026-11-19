@@ -1432,6 +1432,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         except AssertionError:
             return None
 
+    def wait_for_previous_save(self) -> None:
+        self._drain_deferred_last_save()
+
     def _drain_deferred_last_save(self) -> None:
         """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
         if not getattr(self, "_pending_last_save_drain", False):
@@ -1709,10 +1712,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
             if _LW_DEFER_LAST_SAVE:
-                # PERF-TUNE(2): move the last layer's save drain off the forward
-                # critical path. The drain (host wait + event reset) runs at the
-                # start of the NEXT step's start_load_kv, absorbing the send
-                # thread's tail latency into the inter-step scheduling gap.
+                # The next step drains pending saves before it can reuse cache pages.
                 self._pending_last_save_drain = True
             else:
                 self._wait_for_final_layer_save(num_local, send_thread)
