@@ -187,10 +187,9 @@ class BalanceScheduler(Scheduler):
         preempted_reqs: list[Request] = []
 
         iteration_details = None
-        if not vllm_version_is("0.33.0") and (
-            (self.log_stats and self.observability_config.enable_logging_iteration_details)
-            or self.vllm_config.profiler_config.profiler is not None
-        ):
+        if (
+            self.log_stats and self.observability_config.enable_logging_iteration_details
+        ) or self.vllm_config.profiler_config.profiler is not None:
             iteration_details = IterationDetails()
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -857,7 +856,7 @@ class BalanceScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        if vllm_version_is("0.33.0"):
+        if vllm_version_is("0.34.0"):
             scheduled_encoder_input_stats = None
             if self.log_stats and self.observability_config.enable_logging_iteration_details:
                 scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
