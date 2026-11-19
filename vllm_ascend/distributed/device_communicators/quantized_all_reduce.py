@@ -54,15 +54,20 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
     TP   break-even   default min_numel   payload   gain at the default
     2    9-11 MiB     8,388,608           16 MiB    1.45x
     4    21-23 MiB    16,777,216          32 MiB    1.30x
-    8    41-49 MiB    26,214,400          50 MiB    1.07x (1.24x at 160 MiB)
+    8    31-38 MiB    31,457,280          60 MiB    1.11x (1.24x at 160 MiB)
 
-  The TP=8 crossing moves with bf16 throughput from run to run (41-49 MiB over
-  five sweeps on the same node), so every default is kept above the upper end
-  of its range and the exact crossing only decides how much headroom is left.
-  The TP=2 and TP=4 gates sit ~1.5x above their break-even and gain 1.3-1.5x as
-  soon as they trigger. TP=8 has no such headroom to give: its curve flattens
-  right after the crossing (1.07x at 50 MiB, 1.24x at the deployed 160 MiB), so
-  its gate is the break-even itself. Degrees that were not measured (3, 5-7)
+  TP=8 is the only degree whose end-to-end crossing sits well above the
+  collective one: the isolated chain lets the 8 KiB fp32 amax all-reduce
+  overlap perfectly, while a real forward pass does not, so end to end keeps
+  40-90% of the collective gain. A 37-point scan in 64-token steps puts the
+  chained crossing at 31-38 MiB (31 MiB fitting the >=46 MiB region, 38 MiB
+  from the 40/80 MiB endpoints), yet serving is still neutral at 50 MiB
+  (+0.17% TTFT) and first pays at 60 MiB (-1.89%). The gate is therefore
+  60 MiB, the lowest measured payload that is strictly profitable, which
+  leaves 1.6-1.9x headroom over the collective crossing; the gain then grows
+  with the payload (1.11x at 60 MiB, 1.16x at 80 MiB, 1.24x at the deployed
+  160 MiB). The TP=2 and TP=4 gates sit ~1.5x above their break-even and gain
+  1.3-1.5x as soon as they trigger. Degrees that were not measured (3, 5-7)
   take the next larger default, so the gate never undercuts a measured
   break-even.
 
@@ -105,15 +110,17 @@ _MAX_VALID_WORLD_SIZE = 8
 
 # Default payload gate in elements, per tensor-parallel degree, for A2 (910B).
 # A bf16 payload of N elements is N * 2 bytes, so N = MiB * 524,288 and these
-# entries are 16 / 32 / 50 MiB. TP=2 and TP=4 are their measured break-even
-# (~10 / ~20 MiB) rounded up 1.5x, so the quantized path is a clear win right at
-# the gate; TP=8 is its break-even as measured (49 MiB), because the curve
-# flattens immediately after the crossing. See the module docstring for the
-# measurement and the protocol.
+# entries are 16 / 32 / 60 MiB. TP=2 and TP=4 are their measured break-even
+# (~10 / ~22 MiB) rounded up 1.5x, so the quantized path is a clear win right at
+# the gate. TP=8 is set 1.6-1.9x above its 31-38 MiB collective crossing, at the
+# lowest payload that is strictly profitable end to end (60 MiB, -1.89% TTFT);
+# 50 MiB is neutral (+0.17%) because a real forward keeps only 40-90% of the
+# collective gain. See the module docstring for the measurement and the
+# protocol.
 _DEFAULT_MIN_NUMEL_A2: dict[int, int] = {
     2: 8_388_608,
     4: 16_777_216,
-    8: 26_214_400,
+    8: 31_457_280,
 }
 
 
@@ -133,9 +140,7 @@ def default_min_numel(world_size: int) -> int:
 class QuantizedAllReduce:
     """Wrapper adding int8 quantized all-reduce around a base all_reduce."""
 
-    def __init__(
-        self, group: "dist.ProcessGroup", min_numel: int | None = None, group_name: str = ""
-    ) -> None:
+    def __init__(self, group: "dist.ProcessGroup", min_numel: int | None = None, group_name: str = "") -> None:
         self.group = group
         self.group_name = group_name
         self.world_size = dist.get_world_size(group)

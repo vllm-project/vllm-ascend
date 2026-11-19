@@ -423,9 +423,10 @@ class QuantizedAllReduceConfig:
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. Left at
     ``None`` (the default) the int8 gate is picked per tensor-parallel degree
     from the A2 measurements: 8,388,608 (16 MiB) at TP=2, 16,777,216 (32 MiB)
-    at TP=4 and 26,214,400 (50 MiB) at TP=8. The first two are 1.5x above their
-    measured break-even; the last one sits on a curve that flattens right after
-    the crossing. MXFP8 has no per-TP calibration yet and keeps 16,777,216
+    at TP=4 and 31,457,280 (60 MiB) at TP=8. The first two are 1.5x above their
+    measured break-even; the TP=8 gate is 1.6-1.9x above its 31-38 MiB
+    collective crossing and is the lowest payload that is strictly profitable
+    end to end. MXFP8 has no per-TP calibration yet and keeps 16,777,216
     (32 MiB); benchmark it on the intended A5 workload before lowering it.
 
     The wrapper is built for every parallel group; unsupported group sizes
