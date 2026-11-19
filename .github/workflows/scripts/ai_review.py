@@ -169,7 +169,8 @@ class Orchestrator:
         from the checked-out workspace (they live under
         .github/agent-review/, inside the repo the job checked out).
         """
-        instructions = open(os.path.join(self.workspace, ".github", "agent-review", "instructions.md")).read()
+        with open(os.path.join(self.workspace, ".github", "agent-review", "instructions.md")) as f:
+            instructions = f.read()
         kb_map = self._knowledge_base_map()
         diff = self._gh("pr", "diff", str(self.pr))
         prev_agent_comment = self._last_agent_comment_text()
@@ -218,7 +219,8 @@ class Orchestrator:
         with open(out_file, "w") as out:
             subprocess.run([*cmd, prompt_file], stdout=out, check=True, env=env)
 
-        output = open(out_file).read()
+        with open(out_file) as f:
+            output = f.read()
         verdict_pass = PASS_MARKER in output
 
         new_state = State(state="reviewing", round=round_no, total=self.state.total + 1)
@@ -260,7 +262,8 @@ class Orchestrator:
                     continue
                 path = os.path.join(root, name)
                 rel = os.path.relpath(path, self.workspace)
-                entry_ids = re.findall(r"^-\s+`([\w-]+#\w[\w-]*)`", open(path).read(), re.M)
+                with open(path) as f:
+                    entry_ids = re.findall(r"^-\s+`([\w-]+#\w[\w-]*)`", f.read(), re.M)
                 ids = ", ".join(f"`{i}`" for i in entry_ids) or "(n/a)"
                 lines.append(f"- `{rel}` — rules with IDs: {ids}")
         return "\n".join(lines)
@@ -268,7 +271,8 @@ class Orchestrator:
     def _touched_domains(self) -> list[dict]:
         registry_path = os.path.join(self.workspace, ".github", "agent-review", "domains.yaml")
         files = self._gh_json("pr", "view", str(self.pr), "--json", "files", "-q", "[.files[].path]")
-        return resolve_domains(open(registry_path).read(), files)
+        with open(registry_path) as f:
+            return resolve_domains(f.read(), files)
 
     def _last_agent_comment_text(self) -> str:
         comments = self._gh_json("pr", "view", str(self.pr), "--json", "comments", "-q", ".comments")
@@ -412,7 +416,8 @@ def main() -> int:
 
     comment_body = ""
     if args.comment_body_file and os.path.exists(args.comment_body_file):
-        comment_body = open(args.comment_body_file).read()
+        with open(args.comment_body_file) as f:
+            comment_body = f.read()
 
     orch = Orchestrator(args.workspace, args.pr, args.event, args.actor, comment_body)
     return orch.handle()
