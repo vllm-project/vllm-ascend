@@ -28,7 +28,6 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
 | Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
-| Runtime Guard                 | 🔵 Experimental  | Detect / report / dump_kv; see [Runtime Guard][runtime_guard].          |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 | KVPP                          | 🔵 Experimental  | Non-hybrid MLA/SFA models with eager or PIECEWISE execution; see [KVPP][kvpp] for supported combinations. |
 | Fine-grained TP               | 🔵 Experimental  | Functional, see detailed note: [Fine-grained TP Doc][finegrained_tp] |
@@ -51,7 +50,6 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
-[runtime_guard]: ../feature_guide/runtime_guard.md
 [eplb]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/expert_parallelism_load_balancer.html
 [pipeline_parallel]: ../feature_guide/pipeline_parallel.md
 [kvpp]: ../feature_guide/kvpp.md
