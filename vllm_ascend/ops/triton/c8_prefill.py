@@ -20,6 +20,8 @@ def _dequant_one(
     TILE_G: tl.constexpr,
     TILE_T: tl.constexpr,
 ):
+    # A physical NZ page is [kv_head, head_dim / 32, token, 32].
+    # Flatten the first two axes into channel groups while keeping lanes contiguous.
     nz_ptr = tl.make_block_ptr(
         base=cache + physical * (GROUPS * BLOCK * 32),
         shape=(GROUPS, valid_tokens, 32),
@@ -36,6 +38,8 @@ def _dequant_one(
         block_shape=(TILE_G, 32),
         order=(1, 0),
     )
+    # Dense output is token-major. The page starts at its packed token offset,
+    # and valid_tokens bounds both the tail-page reads and writes.
     nd_ptr = tl.make_block_ptr(
         base=dense + dst_token * (GROUPS * 32),
         shape=(valid_tokens, GROUPS, 32),
@@ -45,6 +49,9 @@ def _dequant_one(
         order=(2, 1, 0),
     )
 
+    # An INT8 value is exact in both FP16 and BF16, so the reference cast to
+    # target_dtype introduces no rounding. Multiply in FP32 and round once
+    # to the promoted output dtype, matching the reference scale multiply.
     values = tl.load(nz_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
     scales = tl.load(scale_ptr, boundary_check=(0,), padding_option="zero").to(tl.float32)
     converted = (values * scales[:, None, :]).to(dense.dtype.element_ty)
@@ -69,6 +76,7 @@ def _fused_tiles(
     token_tiles: tl.constexpr = (BLOCK + TILE_T - 1) // TILE_T
     group_tiles: tl.constexpr = (GROUPS + TILE_G - 1) // TILE_G
     tiles_per_page: tl.constexpr = token_tiles * group_tiles
+    # The grid covers channel and token tiles within each live page.
     program = tl.program_id(0)
     page = program // tiles_per_page
     local_tile = program % tiles_per_page
@@ -99,8 +107,9 @@ def try_fused_c8_prefill(
     k_scale,
     v_scale,
 ):
-    # PIECEWISE executes cached attention outside the captured partitions.
-    # Raw graph capture cannot rebuild host page descriptors on replay.
+    # Return None to keep the existing path when the layout or dtype is unsupported.
+    # Replay does not rerun Python to rebuild descriptors or resize the grid.
+    # PIECEWISE runs cached attention between its captured partitions.
     scales = k_scale, v_scale
     if (
         key.device.type != "npu"
@@ -131,6 +140,9 @@ def try_fused_c8_prefill(
     ):
         return None
 
+    # Each descriptor stores (offset into block_table, first dense token,
+    # valid tokens on the page). Host lengths let us skip padded columns
+    # without reading back the device-resident physical page IDs.
     entries = []
     output_start = 0
     max_length = block_table.shape[1] * block_size
@@ -144,6 +156,7 @@ def try_fused_c8_prefill(
     if output_start >= 2**31 or (entries and entries[-1][0] >= 2**31):
         return None
 
+    # Keep the same promotion as multiplying target_dtype by each scale tensor.
     outputs = tuple(
         torch.empty(
             (output_start, num_kv_heads, head_size),
