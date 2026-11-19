@@ -735,10 +735,9 @@ class NPUWorker(WorkerBase):
         enable_ep = self.parallel_config.enable_expert_parallel
         ep_size = dp_size * tp_size if enable_ep else 1
         from vllm_ascend.ascend_config import get_ascend_config
+
         _ac = get_ascend_config()
-        num_redundant = (
-            int(_ac.eplb_config.num_redundant_experts)
-            if _ac.eplb_config.dynamic_eplb else 0)
+        num_redundant = int(_ac.eplb_config.num_redundant_experts) if _ac.eplb_config.dynamic_eplb else 0
         num_local_experts = (num_experts + num_redundant) // ep_size if ep_size > 0 else (num_experts + num_redundant)
 
         # PP-aware MoE layer range: with pipeline parallelism each stage
@@ -771,6 +770,7 @@ class NPUWorker(WorkerBase):
 
     def load_model(self) -> None:
         from vllm_ascend.ascend_config import get_ascend_config
+
         _bf = get_ascend_config().moe_offload_config
         if _bf.enabled:
             self._init_offload_manager()
@@ -789,6 +789,7 @@ class NPUWorker(WorkerBase):
 
         if get_ascend_config().moe_offload_config.enabled:
             from vllm_ascend.moe_offload import MoEOffloadManager
+
             manager = MoEOffloadManager.get_instance()
             manager.finalize_and_prime()
 

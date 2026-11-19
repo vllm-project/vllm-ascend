@@ -233,8 +233,9 @@ class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
 
 
-# [V18PORT] w4a8-local slot layer registry (manager-independent)
-_V18PORT_SLOT_LAYERS = {}
+# [V18PORT] w4a8-local slot layer registry is stored on the
+# MoEOffloadManager instance (_mgr._w4a8_slot_layers) to avoid a
+# module-level mutable global.
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -572,6 +573,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if self.moe_offload:
             from vllm_ascend.moe_offload import MoEOffloadManager
+
             manager = MoEOffloadManager.get_instance()
             if manager.is_offload_managed(layer.layer_name):
                 manager.prepare_layer(layer.layer_name)
@@ -822,12 +824,14 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         if self.is_per_channel_weight:
             layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)
 
-        import re as _re
+        import regex as _re
+
         _m = _re.search(r"layers\.(\d+)", layer.layer_name)
         _layer_idx = int(_m.group(1)) if _m else -1
         _do_offload = False
         if self.moe_offload:
             from vllm_ascend.moe_offload import MoEOffloadManager
+
             if MoEOffloadManager._instance is not None:
                 _top = MoEOffloadManager._instance.topology
                 _do_offload = _top.moe_layer_offset <= _layer_idx < _top.moe_layer_offset + _top.moe_layer_count
@@ -835,15 +839,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 # keeps its weights EXCLUSIVELY resident on the NPU —
                 # never aliased to a slot. Excluded here so it takes the
                 # per-expert clone branch (original EPLB D2D, like MTP).
-                if (
-                    _do_offload
-                    and MoEOffloadManager._instance.resident_tail_layer
-                    == _layer_idx
-                ):
+                if _do_offload and MoEOffloadManager._instance.resident_tail_layer == _layer_idx:
                     _do_offload = False
 
         if _do_offload:
             from vllm_ascend.moe_offload import MoEOffloadManager as _WOM
+
             _mgr = _WOM.get_instance()
             _top = _mgr.topology
             _rel = _layer_idx - _top.moe_layer_offset
@@ -885,13 +886,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 _em = getattr(layer, "expert_map_manager", None)
                 _emap = getattr(_em, "_expert_map", None) if _em is not None else None
             if _emap is None:
-                _re = getattr(layer, "routed_experts", None)
-                _em = getattr(_re, "expert_map_manager", None) if _re is not None else None
-                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+                _routed = getattr(layer, "routed_experts", None)
+                _em_routed = getattr(_routed, "expert_map_manager", None) if _routed is not None else None
+                _emap = getattr(_em_routed, "_expert_map", None) if _em_routed is not None else None
             if _emap is None:
-                raise RuntimeError(
-                    f"cannot locate expert_map on "
-                    f"{layer.layer_name} for EPLB-compatible registration")
+                raise RuntimeError(f"cannot locate expert_map on {layer.layer_name} for EPLB-compatible registration")
             if _emap.device.type == "npu":
                 _emap = _emap.cpu()
             _E_local = int(layer.w13_weight.data.shape[0])
@@ -899,9 +898,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             for _g, _pos in enumerate(_emap.tolist()):
                 if 0 <= _pos < _E_local:
                     _global_ids[_pos] = _g
-            _mgr.register_layer(layer.layer_name, _ep,
-                                param_names=_param_names,
-                                global_ids=_global_ids)
+            _mgr.register_layer(layer.layer_name, _ep, param_names=_param_names, global_ids=_global_ids)
             _mgr.register_moe_module(layer.layer_name, layer)
 
             if _rel < _top.moe_slot_count:
@@ -912,12 +909,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 layer.w13_weight_scale_list = list(layer.w13_weight_scale.data.unbind(dim=0))
                 layer.w2_weight_scale_list = list(layer.w2_weight_scale.data.unbind(dim=0))
                 layer.w13_scale_bias_list = (
-                    list(layer.w13_scale_bias.data.unbind(dim=0))
-                    if hasattr(layer, "w13_scale_bias") else None
+                    list(layer.w13_scale_bias.data.unbind(dim=0)) if hasattr(layer, "w13_scale_bias") else None
                 )
                 layer.w2_scale_bias_list = (
-                    list(layer.w2_scale_bias.data.unbind(dim=0))
-                    if hasattr(layer, "w2_scale_bias") else None
+                    list(layer.w2_scale_bias.data.unbind(dim=0)) if hasattr(layer, "w2_scale_bias") else None
                 )
                 # Store flat tensor refs for batched H2D (views share this storage)
                 layer._offload_w13_weight = layer.w13_weight.data
@@ -928,7 +923,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     layer._offload_w13_scale_bias = layer.w13_scale_bias.data
                 if hasattr(layer, "w2_scale_bias"):
                     layer._offload_w2_scale_bias = layer.w2_scale_bias.data
-                _V18PORT_SLOT_LAYERS[_rel] = layer
+                if not hasattr(_mgr, "_w4a8_slot_layers"):
+                    _mgr._w4a8_slot_layers = {}
+                _mgr._w4a8_slot_layers[_rel] = layer
             else:
                 # Non-slot: share slot per-expert lists AND flat storage refs
                 # for ALL SIX params. Scales MUST follow the slot layout:
@@ -936,7 +933,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 # expert order after an EPLB rearrange while the weights
                 # (via the slot) are in the NEW order — a weight/scale
                 # mismatch that corrupts every expert's quantization.
-                _sl = _V18PORT_SLOT_LAYERS[_rel % _top.moe_slot_count]
+                _sl = _mgr._w4a8_slot_layers[_rel % _top.moe_slot_count]
                 layer.w13_weight_list = _sl.w13_weight_list
                 layer.w2_weight_list = _sl.w2_weight_list
                 layer.w13_weight_scale_list = _sl.w13_weight_scale_list
@@ -952,9 +949,17 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     layer._offload_w13_scale_bias = _sl._offload_w13_scale_bias
                     layer._offload_w2_scale_bias = _sl._offload_w2_scale_bias
 
-            # [V18PORT] free only the big weights; scales stay resident
+            # [V18PORT] free weights and scales: they live in the host
+            # mirror + NPU slots now (slot-owner storage is kept alive by
+            # the _offload_* refs on the manager side)
             del layer.w13_weight
             del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w2_weight_scale
+            if hasattr(layer, "w13_scale_bias"):
+                del layer.w13_scale_bias
+            if hasattr(layer, "w2_scale_bias"):
+                del layer.w2_scale_bias
             torch.npu.empty_cache()
         elif self.dynamic_eplb or self.moe_offload:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)

@@ -212,7 +212,8 @@ def _patched_forward_end(self, eplb_heat_collection_status: bool = True):
         self.update_iteration()
 
 
-# Apply patch at import time.
-EplbUpdator.forward_before = _patched_forward_before
-EplbUpdator.forward_end = _patched_forward_end
-EplbUpdator.warm_up_eplb = _patched_warm_up_eplb
+# Apply patch at import time. Monkey-patching is the point of this
+# module; silence the method-assignment checker accordingly.
+EplbUpdator.forward_before = _patched_forward_before  # type: ignore[method-assign]
+EplbUpdator.forward_end = _patched_forward_end  # type: ignore[method-assign]
+EplbUpdator.warm_up_eplb = _patched_warm_up_eplb  # type: ignore[method-assign]

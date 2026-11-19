@@ -27,13 +27,16 @@ EPLB coexistence (D2D + staging + async D2H writeback scheme):
 
 import logging
 import os
-import re
 import time
 import weakref
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
+import regex as re
 import torch
+
+if TYPE_CHECKING:
+    from vllm_ascend.moe_offload.eplb_d2d import EplbD2DManager
 
 # NOTE: `acl.rt` / `torch_npu` are imported lazily at their use sites so
 # that CPU-only environments (e.g. x86 UT runners without torch_npu) can
@@ -51,7 +54,7 @@ NZ_FORMAT = 29  # FRACTAL_NZ
 # Diag counters (host-only, no NPU allocation)
 # ---------------------------------------------------------------------------
 _diag_time = time.monotonic
-_DIAG = {
+_DIAG: dict[str, Any] = {
     "n": 0,
     "prep": 0.0,
     "sub": 0.0,
@@ -65,7 +68,7 @@ _DIAG = {
 
 # Saved by _numa_bind_for_mirror() before restricting the main thread's
 # affinity; restored by finalize_and_prime() after all mirrors are allocated.
-_ORIGINAL_CPU_AFFINITY = None
+_ORIGINAL_CPU_AFFINITY: set[int] | None = None
 
 
 def _numa_bind_for_mirror():
@@ -83,7 +86,7 @@ def _numa_bind_for_mirror():
     """
     if getattr(_numa_bind_for_mirror, "_done", False):
         return
-    _numa_bind_for_mirror._done = True
+    _numa_bind_for_mirror._done = True  # type: ignore[attr-defined]
     logger.info("NUMA mirror-bind: enter pid=%s", os.getpid())
     try:
         try:
@@ -156,7 +159,7 @@ def _numa_bind_for_mirror():
                 return
             binder = CpuAlloc(local_rank, npu_id=running_npus[local_rank])
         except TypeError:
-            binder = CpuAlloc(local_rank)  # v0.23 signature
+            binder = CpuAlloc(local_rank)  # type: ignore[call-arg]  # v0.23 signature
 
         # build_cpu_pools() dispatches per device (A2/A3/A5/310P each
         # get their own pool mode) and fills npu_cpu_pool; allocate()
@@ -250,6 +253,7 @@ class FullLayerTransferState:
 # ---------------------------------------------------------------------------
 class MoEOffloadManager:
     _instance: Optional["MoEOffloadManager"] = None
+    _initialized: bool = False
 
     # ------------------------------------------------------------------ #
     # construction / singleton (0.23 shim signature)                     #
@@ -290,7 +294,7 @@ class MoEOffloadManager:
         # docstring). `_eplb_d2d_mgr` is created lazily by the EPLB
         # patch after warmup; until then everything runs the stock H2D
         # path with zero overhead.
-        self._eplb_d2d_mgr = None
+        self._eplb_d2d_mgr: EplbD2DManager | None = None
         self._eplb_pending_d2h: set = set()
         self.pending_transfers: dict = {}
         self.reader_done_events: dict = {}
@@ -489,7 +493,7 @@ class MoEOffloadManager:
         if w13_t is None or w2_t is None:
             raise RuntimeError(f"{layer_prefix}: w13/w2 tensors required for v18 port")
         torch.npu.synchronize()
-        mirrors = []
+        mirrors: list[torch.Tensor] = []
         for t in expert_params:
             if t is not None and torch.is_tensor(t):
                 flat = t.reshape(-1) if t.dim() != 1 else t
@@ -587,6 +591,7 @@ class MoEOffloadManager:
                 # mirror H2D. Same-stream ordering covers the copy-stream
                 # part of the staging fill; the compute-stream part
                 # (recv -> staging) needs an explicit cross-stream wait.
+                assert d2d is not None, "staging present but no EPLB D2D manager"
                 recv_ev = d2d.get_staging_recv_event(layer_prefix)
                 if recv_ev is not None:
                     copy_stream.wait_event(recv_ev)

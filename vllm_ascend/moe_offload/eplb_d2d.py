@@ -42,6 +42,7 @@ H2D=1, D2H=2, D2D=3.
 import logging
 import weakref
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -72,8 +73,8 @@ class _StagingState:
     # d2h-stream event: staging -> mirror writeback submitted.
     ev_d2h: object = None
     consumed: bool = False
-    new_l2g: list = None
-    expert_bytes: list = None
+    new_l2g: list | None = None
+    expert_bytes: list | None = None
     kept: int = 0
     recv: int = 0
 
@@ -143,7 +144,7 @@ class EplbD2DManager:
         # what HCCL P2P requires and what the recv buffers look like.
         send = []
         for e in range(E):
-            per = []
+            per: list[Any] = []
             for name in names:
                 lst = getattr(module, f"{name}_list", None)
                 if lst is None or e >= len(lst):
@@ -189,10 +190,12 @@ class EplbD2DManager:
         entry = mgr.full_layer_expert_params[layer_prefix]
         E = entry.expert_count
         expert_bytes = [t.numel() // E if t is not None else 0 for t in entry.params]
+        send_experts = self._send_experts
+        assert send_experts is not None, "send buffer not primed"
         with torch.npu.stream(self._send_stream):
             for e in range(E):
                 for pid, src_t in enumerate(entry.params):
-                    dst_t = self._send_experts[e][pid]
+                    dst_t = send_experts[e][pid]
                     if src_t is None or dst_t is None:
                         continue
                     eb = expert_bytes[pid]
@@ -248,18 +251,20 @@ class EplbD2DManager:
 
         comm_group = updator.comm_group
         old_map = updator.adaptor.expert_map_per_layer_cpu[layer_id]
+        send_experts = self._send_experts
+        assert send_experts is not None, "send buffer not primed before exchange"
         ops = []
         n_send = 0
         for dst_rank, g in expert_send_info:
             local_pos = int(old_map[int(g)].item())
-            if local_pos < 0 or local_pos >= len(self._send_experts):
+            if local_pos < 0 or local_pos >= len(send_experts):
                 raise RuntimeError(
                     "[EPLB-D2D-SENTINEL] send pos OOB "
                     f"layer_id={layer_id} g={int(g)} "
                     f"local_pos={local_pos} "
-                    f"E={len(self._send_experts)}"
+                    f"E={len(send_experts)}"
                 )
-            for t in self._send_experts[local_pos]:
+            for t in send_experts[local_pos]:
                 if t is None:
                     continue
                 ops.append(

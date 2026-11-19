@@ -47,7 +47,8 @@ class TestParseLayerIdx:
         assert mgr_glm._parse_layer_idx("model.layers.12.mlp.experts") == 12
 
     def test_no_layers_token_raises(self, mgr_glm):
-        # MTP-style prefix (outside MoE) must raise, not mis-parse
+        # MTP-style prefix (outside MoE) must raise rather than be
+        # accepted as a MoE layer index
         with pytest.raises(ValueError):
             mgr_glm._parse_layer_idx("mtp.0.self_attn")
 

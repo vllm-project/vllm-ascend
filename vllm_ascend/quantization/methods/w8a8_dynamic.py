@@ -151,8 +151,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
-# [V18PORT] w8a8-local slot layer registry (manager-independent)
-_V18PORT_SLOT_LAYERS = {}
+# [V18PORT] w8a8-local slot layer registry is stored on the
+# MoEOffloadManager instance (_mgr._w8a8_slot_layers) to avoid a
+# module-level mutable global.
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -311,6 +312,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         if self.moe_offload:
             from vllm_ascend.moe_offload import MoEOffloadManager
+
             manager = MoEOffloadManager.get_instance()
             if manager.is_offload_managed(layer.layer_name):
                 manager.prepare_layer(layer.layer_name)
@@ -389,29 +391,23 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
 
-        import re as _re
+        import regex as _re
+
         _m = _re.search(r"layers\.(\d+)", layer.layer_name)
         _layer_idx = int(_m.group(1)) if _m else -1
         _do_offload = False
         if self.moe_offload:
             from vllm_ascend.moe_offload import MoEOffloadManager
+
             if MoEOffloadManager._instance is not None:
                 _top = MoEOffloadManager._instance.topology
-                _do_offload = (
-                    _top.moe_layer_offset
-                    <= _layer_idx
-                    < _top.moe_layer_offset + _top.moe_layer_count
-                )
+                _do_offload = _top.moe_layer_offset <= _layer_idx < _top.moe_layer_offset + _top.moe_layer_count
                 # v0.18 semantics: the resident tail keeps its weights
                 # EXCLUSIVELY resident on the NPU — never aliased to a
                 # slot. Routes it through the per-expert clone branch
                 # below so the ORIGINAL EPLB D2D path applies to it
                 # (like the MTP layer).
-                if (
-                    _do_offload
-                    and MoEOffloadManager._instance.resident_tail_layer
-                    == _layer_idx
-                ):
+                if _do_offload and MoEOffloadManager._instance.resident_tail_layer == _layer_idx:
                     _do_offload = False
 
         if _do_offload:
@@ -436,13 +432,11 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 _em = getattr(layer, "expert_map_manager", None)
                 _emap = getattr(_em, "_expert_map", None) if _em is not None else None
             if _emap is None:
-                _re = getattr(layer, "routed_experts", None)
-                _em = getattr(_re, "expert_map_manager", None) if _re is not None else None
-                _emap = getattr(_em, "_expert_map", None) if _em is not None else None
+                _routed = getattr(layer, "routed_experts", None)
+                _em_re = getattr(_routed, "expert_map_manager", None) if _routed is not None else None
+                _emap = getattr(_em_re, "_expert_map", None) if _em_re is not None else None
             if _emap is None:
-                raise RuntimeError(
-                    f"cannot locate expert_map on "
-                    f"{layer.layer_name} for EPLB-compatible registration")
+                raise RuntimeError(f"cannot locate expert_map on {layer.layer_name} for EPLB-compatible registration")
             if _emap.device.type == "npu":
                 _emap = _emap.cpu()
             _E_local = int(layer.w13_weight.data.shape[0])
@@ -471,9 +465,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 layer.fused_w1_scale if _mc2 else None,
                 layer.fused_w2_scale if _mc2 else None,
             ]
-            _mgr.register_layer(layer.layer_name, _ep,
-                                param_names=_param_names,
-                                global_ids=_global_ids)
+            _mgr.register_layer(layer.layer_name, _ep, param_names=_param_names, global_ids=_global_ids)
             _mgr.register_moe_module(layer.layer_name, layer)
 
             if _rel < _top.moe_slot_count:
@@ -497,10 +489,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 if _mc2:
                     layer._offload_fused_w1_scale = layer.fused_w1_scale
                     layer._offload_fused_w2_scale = layer.fused_w2_scale
-                _V18PORT_SLOT_LAYERS[_rel] = layer
+                if not hasattr(_mgr, "_w8a8_slot_layers"):
+                    _mgr._w8a8_slot_layers = {}
+                _mgr._w8a8_slot_layers[_rel] = layer
             else:
                 # Non-slot: share slot per-expert lists AND flat storage refs
-                _sl = _V18PORT_SLOT_LAYERS[_rel % _top.moe_slot_count]
+                _sl = _mgr._w8a8_slot_layers[_rel % _top.moe_slot_count]
                 layer.w13_weight_list = _sl.w13_weight_list
                 layer.w2_weight_list = _sl.w2_weight_list
                 layer.w13_weight_scale_fp32_list = _sl.w13_weight_scale_fp32_list

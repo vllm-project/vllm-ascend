@@ -236,6 +236,15 @@
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
 
+# MoE expert weight offload (host mirror + NPU slot rotation)
+- name: moe_offload
+  optional: false
+  cpu_only: true
+  source_file_dependencies:
+    - vllm_ascend/moe_offload
+  tests:
+    - tests/ut/moe_offload
+
 # weight transfer
 - name: weight_transfer
   optional: true
