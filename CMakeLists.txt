@@ -66,6 +66,37 @@ else()
     )
 endif()
 
+# Host-direct CATLASS kernel (Dsv41MlaProlog) built as an isolated ASC project
+# (the design package's own CMake) and linked into the extension. Keeping the
+# ASC language enablement out of this CMakeLists avoids interfering with the
+# ascendc_library precompile projects.
+if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950"))
+    include(ExternalProject)
+    set(DSV41_MLAP_DIRECT_BUILD_DIR
+        ${CMAKE_CURRENT_BINARY_DIR}/dsv41_mla_prolog_direct_build)
+    ExternalProject_Add(dsv41_mla_prolog_direct_ep
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/csrc/direct_kernels/dsv41_mla_prolog
+        BINARY_DIR ${DSV41_MLAP_DIRECT_BUILD_DIR}
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=Release
+            -DASCEND_HOME_PATH=${ASCEND_HOME_PATH}
+            -DCATLASS_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/csrc/third_party/catlass
+        BUILD_BYPRODUCTS
+            ${DSV41_MLAP_DIRECT_BUILD_DIR}/libvllm_ascend_mla_prolog_direct.so
+        INSTALL_COMMAND ""
+        BUILD_ALWAYS TRUE
+    )
+    add_library(vllm_ascend_mla_prolog_direct SHARED IMPORTED GLOBAL)
+    set_target_properties(vllm_ascend_mla_prolog_direct PROPERTIES
+        IMPORTED_LOCATION
+            ${DSV41_MLAP_DIRECT_BUILD_DIR}/libvllm_ascend_mla_prolog_direct.so
+    )
+    add_dependencies(vllm_ascend_mla_prolog_direct dsv41_mla_prolog_direct_ep)
+    install(FILES
+        ${DSV41_MLAP_DIRECT_BUILD_DIR}/libvllm_ascend_mla_prolog_direct.so
+        DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+endif()
+
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 if(SOC_VERSION MATCHES "ascend310p.*")
@@ -202,6 +233,8 @@ else()
     vllm_ascend_kernels
     ${VLLM_ASCEND_C_COMMON_LIBS}
   )
+  target_link_libraries(vllm_ascend_C PRIVATE vllm_ascend_mla_prolog_direct)
+  add_dependencies(vllm_ascend_C dsv41_mla_prolog_direct_ep)
 endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")

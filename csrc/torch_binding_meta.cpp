@@ -1781,6 +1781,25 @@ void npu_fused_quant_lightning_indexer_manage_meta(
     return;
 }
 
+
+std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_meta(
+    const at::Tensor &x,
+    const at::Tensor &wqA,
+    const at::Tensor &gammaQa,
+    const at::Tensor &wqB,
+    const at::Tensor &wqBScale,
+    const at::Tensor &wkv,
+    const at::Tensor &gammaKv,
+    const at::Tensor &ropeCos,
+    const at::Tensor &ropeSin,
+    const at::Tensor &slotMapping,
+    at::Tensor &kvCache,
+    double epsilon)
+{
+    at::Tensor qOutput = at::empty({x.size(0), 64, 512}, x.options());
+    at::Tensor qr = at::empty({x.size(0), 1280}, x.options());
+    return std::tuple<at::Tensor, at::Tensor>(qOutput, qr);
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1822,6 +1841,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
+    ops.impl("dsv41_mla_prolog", &vllm_ascend::meta::dsv41_mla_prolog_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
