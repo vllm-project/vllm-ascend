@@ -813,6 +813,10 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
     assert_no_hit(after, final, tag=f"{tag} R4")
 
     state["hit"] = hit2
+    # The perf phase re-issues the same prefix; keep the expected hit count so it
+    # can verify the steady-state hit rate instead of assuming it.
+    state["expected_hit_tokens"] = expected
+    state["prompt_tokens"] = len(prompt_a)
     prefix_hits = after.hits - before.hits
     prefix_queries = after.queries - before.queries
     overall_queries = final.queries - before.queries
@@ -869,26 +873,71 @@ def _percentile(values: list[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, rank - 1)]
 
 
-def _phase_perf(runner: VllmRunner, prompt_ids: list[int], tag: str) -> tuple[float, float, float]:
-    """Phase 3: end-to-end latency of the repeatedly-hit prefix (TTFT proxy)."""
+def _phase_perf(
+    runner: VllmRunner,
+    prompt_ids: list[int],
+    tag: str,
+    expected_hit_tokens: int | None = None,
+) -> tuple[float, float, float]:
+    """Phase 3: end-to-end latency of the repeatedly-hit prefix (TTFT proxy).
+
+    Every request re-issues the same prompt, so the pool has to return the same
+    number of cached tokens each time. When ``expected_hit_tokens`` is given (the
+    pool leg), each request is followed by a metrics snapshot taken *outside* the
+    timing window, one line is printed per round, and the aggregate is checked:
+    because ``expected_hit_tokens`` is also the per-round maximum, a total equal
+    to ``AB_SAMPLES * expected_hit_tokens`` proves that no measured round
+    under-hit. ``expected_hit_tokens=None`` (control leg, no pool) skips all of
+    this and only times the requests.
+    """
     _touch_progress()
     ttft: list[float] = []
     produced = 0
     measured_seconds = 0.0
+    measured_hits = 0.0
+    measured_queries = 0.0
+    warmup_hits = 0.0
+    previous = snapshot_metrics(runner) if expected_hit_tokens is not None else None
     for index in range(AB_WARMUP + AB_SAMPLES):
         began = time.perf_counter()
         _generate(runner, prompt_ids, 1)
         elapsed = time.perf_counter() - began
+        round_hits = round_queries = 0.0
+        if expected_hit_tokens is not None and previous is not None:
+            current = snapshot_metrics(runner)
+            round_hits = current.hits - previous.hits
+            round_queries = current.queries - previous.queries
+            previous = current
         if index < AB_WARMUP:
             # Warmup only. Keeping it out of every accumulator means the
             # reported throughput divides the measured tokens by the measured
             # time, so it is comparable across runs and unaffected by how many
             # warmup iterations the tier needs (the pool leg's first requests
             # are measurably slower: warmup/steady-state ratio up to 1.7x).
+            if expected_hit_tokens is not None:
+                warmup_hits += round_hits
+                print(
+                    f"[kv_pool_a2] {tag} perf_warmup={index + 1}/{AB_WARMUP} "
+                    f"ttft={elapsed * 1000.0:.1f}ms hits_delta={round_hits:.0f} "
+                    f"queries_delta={round_queries:.0f}",
+                    flush=True,
+                )
             continue
         ttft.append(elapsed * 1000.0)
         produced += len(prompt_ids)
         measured_seconds += elapsed
+        if expected_hit_tokens is not None:
+            measured_hits += round_hits
+            measured_queries += round_queries
+            print(
+                f"[kv_pool_a2] {tag} perf_round={index - AB_WARMUP + 1}/{AB_SAMPLES} "
+                f"ttft={elapsed * 1000.0:.1f}ms tok_s={len(prompt_ids) / elapsed:.0f} "
+                f"hits_delta={round_hits:.0f} queries_delta={round_queries:.0f} "
+                f"query_hit_rate={(round_hits / round_queries if round_queries else 0.0):.2%} "
+                f"token_hit_rate={(round_hits / expected_hit_tokens):.2%} "
+                f"full_hit={'yes' if round_hits >= expected_hit_tokens else 'NO'}",
+                flush=True,
+            )
     p50 = _percentile(ttft, 0.50)
     p80 = _percentile(ttft, 0.80)
     p95 = _percentile(ttft, 0.95)
@@ -911,6 +960,24 @@ def _phase_perf(runner: VllmRunner, prompt_ids: list[int], tag: str) -> tuple[fl
         f"[kv_pool_a2] {tag} perf_samples_tok_s={[round(len(prompt_ids) / (value / 1000.0)) for value in ttft]}",
         flush=True,
     )
+    if expected_hit_tokens is not None:
+        hits_cap = AB_SAMPLES * expected_hit_tokens
+        queries_cap = AB_SAMPLES * len(prompt_ids)
+        print(
+            f"[kv_pool_a2] {tag} perf_hits: measured_rounds={AB_SAMPLES} "
+            f"hits_delta={measured_hits:.0f}/{hits_cap} "
+            f"queries_delta={measured_queries:.0f}/{queries_cap} "
+            f"query_hit_rate={(measured_hits / measured_queries if measured_queries else 0.0):.2%} "
+            f"token_hit_rate={(measured_hits / hits_cap if hits_cap else 0.0):.2%} "
+            f"all_rounds_full_hit={'yes' if measured_hits >= hits_cap else 'NO'} "
+            f"warmup_hits={warmup_hits:.0f}",
+            flush=True,
+        )
+        assert measured_hits >= hits_cap, (
+            f"[{tag}] perf phase returned only {measured_hits:.0f} of {hits_cap} expected hit "
+            f"tokens over {AB_SAMPLES} rounds: the repeatedly measured prefix stopped hitting "
+            "at full block granularity even though the hit phase passed"
+        )
     if PERF_SAMPLE_OUT is not None:
         PERF_SAMPLE_OUT[tag] = {"p50": p50, "p80": p80, "p95": p95, "throughput": throughput}
     return p50, p95, throughput
@@ -1189,7 +1256,12 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             )
             _phase_accuracy(runner, a_state, f"{case}-A")
             _phase_hit(runner, a_state, f"{case}-A")
-            a_p50, a_p95, a_throughput = _phase_perf(runner, a_state["prompt_a"], f"{case}-A")
+            a_p50, a_p95, a_throughput = _phase_perf(
+                runner,
+                a_state["prompt_a"],
+                f"{case}-A",
+                a_state.get("expected_hit_tokens"),
+            )
 
         # Leave time for the pool service and worker processes to release NPU
         # memory before the control leg starts.
