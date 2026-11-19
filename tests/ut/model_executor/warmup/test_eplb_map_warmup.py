@@ -34,7 +34,6 @@ def test_factory_registers_only_active_eplb():
     factory = Mock(return_value=SimpleNamespace(router=router))
     ascend = SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None))
     with (
-        patch.object(owner, "get_device_config", return_value=SimpleNamespace(use_flat_eplb_map=True)),
         patch.object(owner, "_original_FusedMoE", factory),
         patch.object(owner, "_adapt_eplb_router"),
         patch.object(owner, "get_ascend_config", return_value=ascend),
@@ -78,7 +77,6 @@ def test_factory_collects_worker_warmup_geometry():
     ascend = SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None))
     with (
         patch("vllm_ascend.ops.triton.eplb_map_flat._EPLB_MAP_KERNEL", worker_kernel),
-        patch.object(owner, "get_device_config", return_value=SimpleNamespace(use_flat_eplb_map=True)),
         patch.object(owner, "_original_FusedMoE", factory),
         patch.object(owner, "_adapt_eplb_router"),
         patch.object(owner, "get_ascend_config", return_value=ascend),

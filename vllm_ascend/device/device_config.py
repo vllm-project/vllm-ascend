@@ -25,10 +25,6 @@ class DeviceConfig:
 
     _device_type: AscendDeviceType
 
-    @property
-    def use_flat_eplb_map(self) -> bool:
-        return self._device_type == AscendDeviceType.A5
-
 
 def _device_type_from_build_info() -> AscendDeviceType:
     from vllm_ascend import _build_info  # type: ignore

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.model_executor.warmup.dspark_swa_indices_warmup import (
     dspark_swa_indices_warmup,
 )
@@ -54,7 +53,7 @@ def kernel_warmup(worker: NPUWorker) -> None:
     _run_warmup("indexer", indexer_triton_warmup, worker)
     _run_warmup("dspark_swa_indices", dspark_swa_indices_warmup, worker)
 
-    if worker.vllm_config.parallel_config.enable_eplb is True and get_device_config().use_flat_eplb_map:
+    if worker.vllm_config.parallel_config.enable_eplb is True:
         from vllm_ascend.ops.triton.eplb_map_flat import _EPLB_MAP_KERNEL
 
         _EPLB_MAP_KERNEL.warmup()
