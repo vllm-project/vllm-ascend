@@ -16,8 +16,9 @@ LoRA applies to both dense models and mixture-of-experts (MoE) models. The base 
 | --- | --- | --- |
 | Non-quantized | Supported | Supported |
 | W8A8 dynamic quantization | Supported | Supported |
+| W4A8 dynamic quantization (per-channel) | Supported | Supported (AllGather in graph mode, All-to-All in eager mode) |
 
-Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.
+Other MoE quantization methods (including per-group W4A8 and weights with antiquant offsets), Fused MC2, and dynamic EPLB are not supported with LoRA.
 
 ## LoRA Parameters
 
@@ -67,6 +68,30 @@ vllm serve /path/to/Qwen3.5-27B \
 ```
 
 To use the fully sharded path, add `--fully-sharded-loras` on the same command.
+
+### DeepSeek-V4.1
+
+This path enables language-model LoRA projections (`wq_a`, `wq_b`, `wkv`, `wo_a`, `wo_b`, `gate_up_proj`, `down_proj`, and shared experts) on DeepSeek-V4.1:
+
+- HF text-backbone `.attn.` names are mapped to `self_attn` and re-rooted under `language_model.`. Vision and aligner modules stay frozen and are excluded.
+- LoRA with expert parallelism uses AllGather when ACL graph capture is enabled and All-to-All under `--enforce-eager`. MC2 and Fused MC2 are not supported.
+- Active `wo_a` adapters require a single local output-projection group per rank (`n_local_groups == 1`), no fine-grained output-projection TP, and `--fully-sharded-loras` left off.
+- W4A8 MoE LoRA requires per-channel weight scales without antiquant offsets or dynamic EPLB.
+- Under `DP=1`, layers with no active expert slot keep the fused base kernel; under `EP` with `DP>1`, layers with loaded expert slots conservatively use the LoRA path because remote ranks may route adapter tokens.
+
+Set `WEIGHTS_DIR` and `ADAPTER_ROOT` to compatible local artifacts before launching:
+
+```bash
+vllm serve "${WEIGHTS_DIR}" \
+    --served-model-name deepseek-lora \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --quantization ascend --enable-lora --max-loras 1 --max-lora-rank 8 \
+    --lora-modules "adapter=${ADAPTER_ROOT}" \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_fused_mc2":0}'
+```
+
+For eager validation, replace `--compilation-config ...` with `--enforce-eager`. Verify base requests, a zero adapter, and a non-zero adapter with identical prompts and sampling parameters.
 
 ### Request
 

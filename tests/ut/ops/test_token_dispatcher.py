@@ -1272,6 +1272,108 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         np.testing.assert_array_equal(output_splits, [4])
         self.mock_repeat_interleave.assert_not_called()
 
+    def test_w8a8_lora_dispatch_keeps_shape_without_local_adapter_tokens(self):
+        """An idle DP peer with a loaded expert adapter keeps the float exchange.
+
+        Under DP>1, an idle peer reports ``no_lora=True`` locally while remote
+        ranks may send adapter tokens, so gating the dispatch shape on
+        ``has_moe_lora`` would skip the token-scale exchange and hang HCCL.
+        """
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=False,
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W8A8,
+        )
+
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_dynamic_quant.assert_not_called()
+        self.assertIsNone(result.dynamic_scale)
+        self.assertEqual(self.mock_async_all_to_all.call_count, 1)
+
+    def test_all2all_keeps_quant_when_layer_has_no_loaded_expert_adapter(self):
+        """Unloaded MoE layers must not fail on unregistered quant types or lose quant dispatch."""
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={0}),
+                layer_lora_slots=set(),
+                replicated_batch=False,
+                split_lora_indices=None,
+            )
+        )
+        for quant_type in (QuantType.W8A8, QuantType.W4A8MXFP):
+            self.mock_npu_dynamic_quant.reset_mock()
+            self.mock_async_all_to_all.reset_mock()
+            token_dispatch_input = build_token_dispatch_input_fixture(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                quant_type=quant_type,
+            )
+            with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+                result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+            self.mock_npu_dynamic_quant.assert_called_once()
+            self.assertIsNotNone(result.dynamic_scale)
+            self.assertEqual(self.mock_async_all_to_all.call_count, 2)
+
+    def test_all2all_keeps_quant_for_dp1_base_only_batch_even_when_adapter_loaded(self):
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=True,
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W8A8,
+        )
+
+        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_dynamic_quant.assert_called_once()
+        self.assertIsNotNone(result.dynamic_scale)
+        self.assertEqual(self.mock_async_all_to_all.call_count, 2)
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
         hidden_states = torch.randn(16, 16)

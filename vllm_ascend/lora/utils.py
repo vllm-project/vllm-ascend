@@ -7,6 +7,7 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedQKVParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
@@ -15,6 +16,7 @@ from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.platforms import current_platform
@@ -155,10 +157,14 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        self._lora_slots: set[int] = set()
 
     def reset_lora(self, index: int) -> None:
         super().reset_lora(index)
         self.lora_b_packed[index].zero_()
+        lora_slots = getattr(self, "_lora_slots", None)
+        if lora_slots is not None:
+            lora_slots.discard(index)
 
     def set_lora(
         self,
@@ -171,6 +177,11 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
             self.lora_b_stacked[0][index, 0].transpose(0, 1),
             non_blocking=True,
         )
+        lora_slots = getattr(self, "_lora_slots", None)
+        if lora_slots is None:
+            self._lora_slots = {index}
+        else:
+            lora_slots.add(index)
 
     def _apply_lora_to_output(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         return _apply_packed_lora(self, x, output)
@@ -199,8 +210,21 @@ class AscendColumnParallelLinearWithLoRA(_SingleLinearLoRAWrapper, ColumnParalle
     base_layer_cls = ColumnParallelLinear
 
 
+class AscendReplicatedLinearWithLoRA(_SingleLinearLoRAWrapper, ReplicatedLinearWithLoRA):
+    """Replicated (non-TP) linear with the Ascend packed-B expand kernel.
+
+    ``ReplicatedLinear`` is never split across ranks, so the whole output is
+    produced locally. Without this wrapper the generic Ascend runtime leaves
+    those layers on the fallback path instead of the single-slot packed kernel
+    used by ``wq_a``/``wkv`` projections in DeepSeek compressed attention.
+    """
+
+    base_layer_cls = ReplicatedLinear
+
+
 def refresh_all_lora_classes():
     ascend_classes = (
+        AscendReplicatedLinearWithLoRA,
         AscendRowParallelLinearWithLoRA,
         AscendColumnParallelLinearWithLoRA,
         AscendMergedColumnParallelLinearWithLoRA,

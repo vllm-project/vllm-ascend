@@ -35,9 +35,10 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
-    has_lora,
+    has_moe_lora,
     postprocess_lora_indices,
     preprocess_lora_indices,
+    should_disable_all2all_quant_for_lora,
 )
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
@@ -374,7 +375,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
         with_quant = with_quant and not unquantized_mxfp4_dispatch
-        if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+        if has_moe_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
             validate_quant_moe_lora_activation_input(
                 quant_type=quant_type,
                 hidden_states=token_dispatch_input.hidden_states,
@@ -539,7 +540,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
     ):
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
-        if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+        # This decision selects how many AlltoAll exchanges the dispatch issues
+        # (the quantized path sends the token scale in a second exchange), so
+        # every EP rank in the group must take the same branch. Relying on
+        # ``layer_lora_slots`` (and ``active_lora_slots`` when DP=1) keeps
+        # quantized dispatch active when this layer has no MoE adapter loaded
+        # while staying conservative for loaded layers under DP>1 so idle DP
+        # peers never diverge and hang HCCL.
+        if should_disable_all2all_quant_for_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
             validate_quant_moe_lora_activation_input(
                 quant_type=token_dispatch_input.quant.quant_type,
                 hidden_states=token_dispatch_input.hidden_states,

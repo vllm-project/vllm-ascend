@@ -13,13 +13,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import torch
 import vllm.lora.utils as lora_utils
+from vllm.config import LoRAConfig
+from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm_ascend.lora.fused_moe import AscendFusedMoE3DWithLoRA, AscendFusedMoEWithLoRA
 from vllm_ascend.lora.utils import (
     AscendColumnParallelLinearWithLoRA,
     AscendMergedColumnParallelLinearWithLoRA,
     AscendMergedQKVParallelLinearWithLoRA,
+    AscendReplicatedLinearWithLoRA,
     AscendRowParallelLinearWithLoRA,
     refresh_all_lora_classes,
 )
@@ -33,6 +37,7 @@ def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
         refresh_all_lora_classes()
         classes = list(lora_utils._all_lora_classes)
         expected_prefix = [
+            AscendReplicatedLinearWithLoRA,
             AscendRowParallelLinearWithLoRA,
             AscendColumnParallelLinearWithLoRA,
             AscendMergedColumnParallelLinearWithLoRA,
@@ -47,3 +52,28 @@ def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
         assert AscendFusedMoE3DWithLoRA.__name__ == "FusedMoE3DWithLoRA"
     finally:
         lora_utils._all_lora_classes = original
+
+
+def test_single_linear_wrapper_tracks_loaded_lora_slots() -> None:
+    layer = object.__new__(AscendReplicatedLinearWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.base_layer = object.__new__(ReplicatedLinear)
+    layer.n_slices = 1
+    layer.input_size = 4
+    layer.output_size = 6
+    layer.tp_size = 1
+    layer.device = torch.device("cpu")
+
+    lora_config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=torch.bfloat16)
+    layer.create_lora_weights(max_loras=1, lora_config=lora_config)
+    assert layer._lora_slots == set()
+
+    layer.set_lora(
+        0,
+        torch.ones(8, 4, dtype=torch.bfloat16),
+        torch.ones(6, 8, dtype=torch.bfloat16),
+    )
+    assert layer._lora_slots == {0}
+
+    layer.reset_lora(0)
+    assert layer._lora_slots == set()

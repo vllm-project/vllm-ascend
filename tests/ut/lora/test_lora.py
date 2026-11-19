@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.layers import LoRAMapping
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
@@ -14,12 +15,14 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     all2all_lora_indices,
     has_lora,
+    has_moe_lora,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     postprocess_lora_indices,
     prepare_lora_indices,
     preprocess_lora_indices,
     reset_lora_indices,
+    should_disable_all2all_quant_for_lora,
     sync_lora_context,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
@@ -28,6 +31,7 @@ from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 def _make_base_layer(*, num_local_experts=256, is_act_and_mul=True, shared_experts=None, use_ep=False):
     return SimpleNamespace(
         moe_config=SimpleNamespace(
+            dp_size=1,
             hidden_dim=4096,
             num_local_experts=num_local_experts,
             num_experts=num_local_experts,
@@ -380,3 +384,147 @@ def test_packed_single_lora_matmul(add_inputs: bool) -> None:
     if add_inputs:
         expected.add_(original)
     torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize(
+    ("active", "loaded", "expected"),
+    [({0}, {0}, True), ({1}, {0}, False), ({1}, set(), False)],
+)
+def test_moe_lora_intersects_active_and_loaded_slots(active, loaded, expected):
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots=active),
+        layer_lora_slots=loaded,
+        use_ep=False,
+    )
+    assert has_moe_lora(context) is expected
+
+
+def test_ep_lora_does_not_drop_remote_tokens_on_idle_rank():
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+        layer_lora_slots={0},
+        use_ep=True,
+    )
+    assert has_moe_lora(context)
+
+
+def test_request_ids_resolve_to_slots_without_treating_base_as_adapter():
+    wrapper = object.__new__(PunicaWrapperNPU)
+    with patch.object(PunicaWrapperBase, "update_metadata"):
+        wrapper.update_metadata(SimpleNamespace(index_mapping=(0, 7, 0)), [7, 11], 2, 100)
+        assert wrapper.active_lora_slots == {0}
+        assert not wrapper.no_lora
+        wrapper.update_metadata(SimpleNamespace(index_mapping=(0, 0)), [7, 11], 2, 100)
+        assert wrapper.active_lora_slots == set()
+        assert wrapper.no_lora
+
+
+@pytest.mark.parametrize("is_prefill", [True, False])
+def test_metadata_uses_upstream_id_to_slot_conversion(is_prefill):
+    wrapper = object.__new__(PunicaWrapperNPU)
+    PunicaWrapperBase.__init__(wrapper, 8, 4, torch.device("cpu"))
+    wrapper._single_lora_mask = None
+    mapping = LoRAMapping((0, 7, 0), (0, 7, 0), is_prefill=is_prefill)
+    wrapper.update_metadata(mapping, [7, 11], 2, 100)
+    assert wrapper.token_lora_indices.tolist() == [-1, 0, -1]
+    assert wrapper.active_lora_slots == {0}
+    assert not wrapper.no_lora
+    mapping = LoRAMapping((0, 0), (0, 0), is_prefill=is_prefill)
+    wrapper.update_metadata(mapping, [7, 11], 2, 100)
+    assert wrapper.token_lora_indices.tolist() == [-1, -1]
+    assert wrapper.no_lora
+
+
+def test_ep_replicated_batch_ignores_inactive_loaded_adapter():
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={1}),
+        layer_lora_slots={0},
+        use_ep=True,
+        replicated_batch=True,
+    )
+    assert not has_moe_lora(context)
+
+
+def test_expert_bounds_cannot_address_another_adapter():
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+    weights = (torch.ones(2, 4, 1, 1),)
+    wrapper.add_lora_fused_moe(
+        torch.zeros(4, 1),
+        torch.ones(4, 1),
+        weights,
+        weights,
+        expert_ids=torch.tensor([4, -1, 3, 0]),
+        token_lora_mapping=torch.tensor([0, 1, 1, 2]),
+        adapter_enabled=torch.ones(2, dtype=torch.bool),
+    )
+    assert wrapper.bgmv_shrink.call_args.args[3].tolist() == [-1, -1, 7, -1]
+
+
+def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+    weights = (torch.ones(1, 4, 1, 1),)
+    wrapper.add_lora_fused_moe(
+        torch.zeros(2, 1),
+        torch.ones(2, 1),
+        weights,
+        weights,
+        expert_ids=torch.tensor([0, 1]),
+        token_lora_mapping=torch.tensor([0, -1]),
+        adapter_enabled=torch.zeros(0, dtype=torch.bool),
+    )
+    wrapper.bgmv_shrink.assert_not_called()
+    wrapper.bgmv_expand_slice.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        (None, False),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={0}),
+                layer_lora_slots=set(),
+                replicated_batch=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={1}),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={0}),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            True,
+        ),
+    ],
+)
+def test_should_disable_all2all_quant_for_lora(context, expected):
+    assert should_disable_all2all_quant_for_lora(context) is expected

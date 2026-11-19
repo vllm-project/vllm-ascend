@@ -406,6 +406,23 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale_bias = [w2_scale_bias]
         return w1_scale_bias, w2_scale_bias
 
+    def get_mlp_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Standard MLP-layout weights plus the INT4 scale-bias used as gmm bias."""
+        w1, w1_scale, w2, w2_scale = self._get_mlp_weights(layer)
+        w1_scale_bias, w2_scale_bias = self._get_mlp_scale_bias(layer)
+        return MoEWeights(
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+        )
+
+    def get_mlp_group_list(self, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, int]:
+        """Group list layout consumed by this scheme's grouped-matmul calls."""
+        return self._maybe_convert_group_list(mlp_compute_input)
+
     def _maybe_convert_group_list(self, mlp_compute_input):
         """scale_bias prelude: group_list 0->1 conversion and output dtype."""
         group_list = mlp_compute_input.group_list

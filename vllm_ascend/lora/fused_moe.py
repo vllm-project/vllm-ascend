@@ -53,6 +53,49 @@ def has_lora(lora_context) -> bool:
     return lora_context is not None and not lora_context.punica_wrapper.no_lora
 
 
+def has_moe_lora(lora_context) -> bool:
+    """Keep the base kernel when this layer has no active or routed expert adapter.
+
+    Request activity is tracked separately from layer slot residency. Under EP
+    with DP>1, do not use local request activity to suppress MoE LoRA: remote
+    peers may route adapter tokens to this rank.
+    """
+    if lora_context is None:
+        return False
+    slots = getattr(lora_context, "layer_lora_slots", None)
+    if slots is not None and not slots:
+        return False
+    if getattr(lora_context, "use_ep", False) is True and getattr(lora_context, "replicated_batch", False) is not True:
+        return True
+    if not has_lora(lora_context):
+        return False
+    active = getattr(lora_context.punica_wrapper, "active_lora_slots", None)
+    return slots is None or active is None or bool(slots.intersection(active))
+
+
+def should_disable_all2all_quant_for_lora(lora_context) -> bool:
+    """Return whether AlltoAll dispatch must stay floating-point for MoE LoRA.
+
+    Every EP rank must agree on whether to issue the extra activation-scale
+    AlltoAll exchange. Layer slot residency (``layer_lora_slots``) is identical
+    across ranks; when ``replicated_batch`` is True (DP=1), active request slots
+    are also identical across ranks. Under DP>1 (or unknown replication), stay
+    conservative whenever the layer has a loaded expert adapter so idle DP peers
+    never diverge on collective exchange count.
+    """
+    if lora_context is None:
+        return False
+    slots = getattr(lora_context, "layer_lora_slots", None)
+    if slots is not None and not slots:
+        return False
+    if getattr(lora_context, "replicated_batch", False) is not True:
+        return True
+    if not has_lora(lora_context):
+        return False
+    active = getattr(lora_context.punica_wrapper, "active_lora_slots", None)
+    return slots is None or active is None or bool(slots.intersection(active))
+
+
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):
@@ -342,15 +385,26 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
+        self._lora_slots: set[int] = set()
         # Preserve the model-manager-visible module path used to discover and
         # wrap shared_experts.{gate_up,down}_proj as ordinary dense LoRA.
         shared_experts = getattr(base_layer, "_shared_experts", None)
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    def reset_lora(self, index: int) -> None:
+        super().reset_lora(index)
+        self._lora_slots.discard(index)
+
+    def set_lora(self, index: int, lora_a, lora_b) -> None:
+        super().set_lora(index, lora_a, lora_b)
+        self._lora_slots.add(index)
+
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        lora_context.layer_lora_slots = self._lora_slots
+        lora_context.replicated_batch = self.moe_config.dp_size == 1
         return lora_context
 
     # ------------------------------------------------------------------
