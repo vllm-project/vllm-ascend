@@ -86,7 +86,7 @@ Each nested detector section supports:
 |-----|------|-------------|
 | `enabled` | bool | Master switch (default `false`) |
 | `on_trigger` | list[str] | Override actions for this incident type |
-| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). |
+| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_cp*` (`cp` from PCP×DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [runtime_guard.md](../feature_guide/runtime_guard.md#feature-compatibility). |
 
 ### spec_acceptance
 
@@ -102,13 +102,30 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 ### token_repeat
 
+> **Pending open PR:** [#21492](https://github.com/vllm-project/vllm-ascend/pull/21492)
+> — replaces the former sliding-window detector with a native CPU **pattern**
+> backend. See also [Token repetition detection (pattern
+> backend)](../feature_guide/token_repeat_pattern.md).
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `window` | int | `32` | Sliding content window |
-| `repeat_sum_threshold` | int | `64` | Alert when sum of repeat scores exceeds this |
-| `min_tokens` | int | `32` | Minimum content tokens before alerting |
-| `consecutive_hits` | int | `1` | Required consecutive over-threshold steps |
-| `ignore_token_ids` | list[int] | `[]` | Token ids excluded from window scoring |
+| `enabled` | bool | `false` | Master switch |
+| `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |
+
+Native CPU pattern backend is built with vllm-ascend (no separate install).
+Former sliding-window keys (`window`, `repeat_sum_threshold`, `min_tokens`,
+`consecutive_hits`, `ignore_token_ids`, `algorithm`) are rejected as unknown.
+Hot-reload still applies when `runtime_config_hot_reload` is on (enable/disable
+and `think_end`). Alert thresholds and reason strings live in packaged
+`native_pattern/pattern.json` (loaded once at detector init; not a
+`runtime_config` hot-reload field).
+
+```json
+"token_repeat": {
+  "enabled": true,
+  "think_end": -1
+}
+```
 
 ### logits_finite
 
@@ -125,6 +142,30 @@ path launches a non-blocking host copy of that gate and waits in
 are resolved (indices are snapshotted at pre-sample when needed). Set
 ``item_sync: true`` when you need kind/attribution against pristine pre-sample
 logits. Retired: ``check_every_tokens`` (multi-step window) — ignored if present.
+
+### rare_chars
+
+> **Pending open PR:** [#20138](https://github.com/vllm-project/vllm-ascend/pull/20138) — not on `main` yet.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Alert on visible garbled / foreign-script / illegal UTF-8 |
+
+Algorithm knobs live in packaged ``detector/rare/rare.json`` (not runtime_config):
+``think_end`` (default ``auto``, resolved from the served tokenizer) and
+``alert_monitor`` (default ``false`` = strict-tier alerts only). The
+per-tokenizer rare table is always built at model warmup from the served
+tokenizer; the shared GB model (`rare_gb.npz`) ships with the package.
+
+Guard collects `(top1, sampled)` natural-log logprobs from a pre-sample logits
+stash via Ascend Triton ``_narrow_collect_partials`` / ``_narrow_collect_finish`` (no API
+``SamplingParams.logprobs``). Sampled ids stay on device and the kernels read
+logits by stride. Each step's ``RareLogprobBatch`` is attached to that step's
+``AscendAsyncOutput`` (no shared runner slot). ``get_output`` only submits to
+``RareLogprobFeedQueue``; that worker waits for collect, issues the D2H, then
+pack+feeds. Request finish flushes look-ahead at reap after ``rare_feed_jobs``
+drain. Prefer shadow/`report` first — strict-tier holdout false-positive
+rate can exceed 0.1% on some corpora.
 
 ### manual_trigger
 
@@ -151,8 +192,7 @@ Not a detector — control-plane for `dump.manual_dump`. Always runs `dump_kv` o
   "detector": {
     "token_repeat": {
       "enabled": true,
-      "window": 32,
-      "repeat_sum_threshold": 64,
+      "think_end": -1,
       "on_trigger": ["report", "dump_kv"],
       "dump_kv": { "scope": "request" }
     }

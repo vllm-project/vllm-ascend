@@ -169,9 +169,6 @@ msgstr "## 检测器"
 msgid "| Type | Stage | Typical use |"
 msgstr "| 类型 | 阶段 | 典型用途 |"
 
-msgid "| `token_repeat` | after sample | Stutter / repetition |"
-msgstr "| `token_repeat` | 采样后 | 卡顿/重复 |"
-
 msgid ""
 "| `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; "
 "default **async** ``.item()`` wait at after-sample — logits may be mutated "
@@ -306,3 +303,25 @@ msgstr ""
 "`mark_finished` 之后布防（finish 可能先于 after-sample）；在这种情况下，reports / "
 "`request_info` / `.pt` 会设置 `request_finished_at_dump: true` —— KV "
 "可能已被释放或复用，因此应将张量视为可疑。被回收的 ids 在布防时会被拒绝。"
+
+msgid "| `token_repeat` | after sample | Pattern-based stutter / repetition (native CPU extension — **Pending** `#21492`) |"
+msgstr "| `token_repeat` | 采样后 | 基于模式的卡顿/重复（原生 CPU 扩展 — **待合入** `#21492`） |"
+
+msgid "> **Review note (docs-only PR):** sections marked **Pending** document open feature PRs not yet on `main` (`#21492` pattern `token_repeat`, `#20138` `rare_chars`). They are included here so reviewers can see the full Guard docs surface in one place; landing those features still requires the corresponding code PRs."
+msgstr "> **审阅说明（仅文档 PR）：** 标为 **Pending** 的章节对应尚未合入 `main` 的功能 PR（`#21492` pattern `token_repeat`、`#20138` `rare_chars`）。放在此处便于审阅者一次看到完整 Guard 文档面；合入功能仍需对应代码 PR。"
+
+msgid "## Token repetition (pattern, Pending)"
+msgstr "## Token 重复检测（pattern，待合入）"
+
+msgid "> **Pending open PR:** [#21492](https://github.com/vllm-project/vllm-ascend/pull/21492)."
+msgstr "> **待合入 PR：** [#21492](https://github.com/vllm-project/vllm-ascend/pull/21492)。"
+
+msgid ""
+"See [Token repetition detection (pattern backend)](token_repeat_pattern.md) for\n"
+"independent CPU extension installation, tokenizer warmup, configuration and\n"
+"validation. Sliding-window `token_repeat` and multi-window `#19015` are not\n"
+"part of that PR."
+msgstr "参见 [Token 重复检测（pattern 后端）](token_repeat_pattern.md)，了解独立 CPU 扩展安装、tokenizer 预热、配置与验证。滑动窗口 `token_repeat` 与多窗口 `#19015` 不属于该 PR。"
+
+msgid "- Pending feature PRs (docs preview only): [#20138](https://github.com/vllm-project/vllm-ascend/pull/20138), [#21492](https://github.com/vllm-project/vllm-ascend/pull/21492)"
+msgstr "- 待合入功能 PR（仅文档预览）：[#20138](https://github.com/vllm-project/vllm-ascend/pull/20138)、[#21492](https://github.com/vllm-project/vllm-ascend/pull/21492)"
