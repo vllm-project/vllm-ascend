@@ -290,6 +290,14 @@ presets:
 
   a3_pd_prefill:
     label: PD / Prefill worker (A3)
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    runbook: >-
+      Run Prefill on devices 0–7 and select the same workload point for the
+      A3 Decode worker on devices 8–15 of this host. Start the proxy
+      for that workload after both roles respond at `/v1/models`.
     hardware: ascend_910c
     strategy: single_node_tp
     variants:
@@ -378,6 +386,14 @@ presets:
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
   a3_pd_decode:
     label: PD / Decode worker (A3)
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    runbook: >-
+      Run Decode on devices 8–15 and select the same workload point for the
+      A3 Prefill worker on devices 0–7 of this host. Start the proxy
+      for that workload after both roles respond at `/v1/models`.
     hardware: ascend_910c
     strategy: single_node_tp
     variants:
@@ -457,6 +473,14 @@ presets:
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
   a5_pd_prefill:
     label: PD / Prefill worker (950DT)
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    runbook: >-
+      Run Prefill on devices 0–3 and select the same workload point for the
+      950DT Decode worker on devices 4–7 of this host. Start the proxy
+      for that workload after both roles respond at `/v1/models`.
     hardware: ascend_950dt
     strategy: single_node_tp
     variants:
@@ -648,6 +672,14 @@ presets:
           HCCL_BUFFSIZE: '512'
   a5_pd_decode:
     label: PD / Decode worker (950DT)
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
+    runbook: >-
+      Run Decode on devices 4–7 and select the same workload point for the
+      950DT Prefill worker on devices 0–3 of this host. Start the proxy
+      for that workload after both roles respond at `/v1/models`.
     hardware: ascend_950dt
     strategy: single_node_tp
     variants:
@@ -830,6 +862,14 @@ presets:
       - ascend_w4a8
     workload: Prefill/decode disaggregation, 141312 context, MTP
     default: true
+    source:
+      label: Atlas A2 two-node PD recipe (PR 21856)
+      href: https://github.com/vllm-project/vllm-ascend/blob/18044dbc2b11f4e3e2f75aedb2cac879833b16f0/recipes/overlays/Qwen/Qwen3.8-Flash-Next.yaml
+      revision: 18044dbc2b11f4e3e2f75aedb2cac879833b16f0
+    runbook: >-
+      Start Decode on its dedicated host first so it can compile while Prefill
+      starts on the other host. Once Prefill on port 8001 and all four Decode
+      endpoints on ports 8002–8005 are ready, start the Ascend Router.
     description: >-
       One node per pool. The prefill role overrides the pool's whole-node TP8 sizing with
       tp 4 and pp 2, which renders the verified TP4 x PP2 prefill layout; the decode role
@@ -840,6 +880,8 @@ presets:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
+      features:
+        spec_decoding: true
     roles:
       prefill:
         nodes: 1
