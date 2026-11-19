@@ -1791,6 +1791,22 @@
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
 
+# ** File: platform/patch_kimi_structured_boundary.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.structured_output.StructuredOutputManager`
+#    Why:
+#       A later think-open draft must not remove an earlier JSON boundary.
+#    How:
+#       For Kimi only, preserve the earliest close using a context-free fast
+#       lookup or singleton checks over a bounded, non-copying token view.
+#       Delegate other parsers and early exits to the upstream method.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/68112
+#    Future Plan:
+#       Remove only after every supported vLLM pin includes the upstream fix
+#       (or an equivalent backport), and boundary/JSON regressions pass without
+#       this wrapper. Verify the target-image NPU/PD path before removal.
+
 # ** 36. File: worker/patch_staged_writes.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
@@ -1811,19 +1827,3 @@
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
 #
-
-# ** File: platform/patch_kimi_structured_boundary.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.structured_output.StructuredOutputManager`
-#    Why:
-#       A later think-open draft must not remove an earlier JSON boundary.
-#    How:
-#       For Kimi only, preserve the earliest close using a context-free fast
-#       lookup or singleton checks over a bounded, non-copying token view.
-#       Delegate other parsers and early exits to the upstream method.
-#    Related PR:
-#       https://github.com/vllm-project/vllm/pull/68112
-#    Future Plan:
-#       Remove only after every supported vLLM pin includes the upstream fix
-#       (or an equivalent backport), and boundary/JSON regressions pass without
-#       this wrapper. Verify the target-image NPU/PD path before removal.
