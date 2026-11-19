@@ -48,6 +48,9 @@ examples and links together.
 | [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
 | [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
 | [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
+| [mamba/aligned_indices.py](mamba/aligned_indices.py) | `worker/v2/model_states/mamba_hybrid.py` | [aligned_indices.md](docs/aligned_indices.md) |
+| [mamba/cached_decode.py](mamba/cached_decode.py) | `ops/gdn_attn_builder.py` | [cached_decode.md](docs/cached_decode.md) |
+| [mamba/graph_state.py](mamba/graph_state.py) | `ops/gdn_attn_builder.py` | [graph_state.md](docs/graph_state.md) |
 | [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
 
 ## Shared runner support
