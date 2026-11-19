@@ -93,3 +93,61 @@ def test_eplb_name_map_matches_the_fp32_scale_attributes():
         names = EPLB_EXPERT_WEIGHT_NAMES[(QuantType.W8A8, fused)]
         assert "w2_weight_scale_fp32_list" in names
         assert "w2_weight_scale_list" not in names
+
+
+def _loader_layer(num_experts: int = 2, hidden: int = 4, intermediate: int = 3) -> SimpleNamespace:
+    """Build the tensor layout the loader hands over, before any view happens.
+
+    ``get_dynamic_quant_param`` allocates the per-channel scales as [E, N, 1], so
+    the fp32 copy must be taken *after* the [E, N] view; otherwise grouped matmul
+    receives a 3-D scale that cannot broadcast over the per-channel axis.
+    """
+    scale = torch.float16
+    return SimpleNamespace(
+        w13_weight=torch.zeros(num_experts, 2 * intermediate, hidden, dtype=torch.int8),
+        w2_weight=torch.zeros(num_experts, hidden, intermediate, dtype=torch.int8),
+        w13_weight_scale=torch.ones(num_experts, 2 * intermediate, 1, dtype=scale),
+        w2_weight_scale=torch.ones(num_experts, hidden, 1, dtype=scale),
+        w13_weight_offset=torch.zeros(num_experts, 2 * intermediate, 1, dtype=scale),
+        w2_weight_offset=torch.zeros(num_experts, hidden, 1, dtype=scale),
+    )
+
+
+def _run_loader(monkeypatch, layer: SimpleNamespace, use_expert_weight_list: bool):
+    import vllm_ascend.quantization.methods.w8a8.w8a8_dynamic as w8a8_dynamic
+
+    method = SimpleNamespace(quant_type=QuantType.W8A8, use_expert_weight_list=use_expert_weight_list)
+    monkeypatch.setattr(w8a8_dynamic, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=0))
+    monkeypatch.setattr(w8a8_dynamic, "get_current_vllm_config", lambda: None)
+    monkeypatch.setattr(w8a8_dynamic, "use_cann_megamoe", lambda *_: False)
+    monkeypatch.setattr(w8a8_dynamic.torch_npu, "npu_format_cast", lambda tensor, _fmt: tensor)
+    AscendW8A8DynamicFusedMoEMethod.process_weights_after_loading(method, layer)
+    return method
+
+
+def test_fp32_w2_scale_keeps_the_per_channel_layout_when_stacked(monkeypatch):
+    num_experts, hidden, intermediate = 2, 4, 3
+    layer = _loader_layer(num_experts, hidden, intermediate)
+    method = _run_loader(monkeypatch, layer, use_expert_weight_list=False)
+
+    assert layer.w13_weight_scale.data.shape == (num_experts, 2 * intermediate)
+    assert layer.w2_weight_scale.data.shape == (num_experts, hidden)
+    assert layer.w2_weight_scale_fp32.shape == (num_experts, hidden)
+    assert layer.w2_weight_scale_fp32.dtype == torch.float32
+
+    _, _, _, w2_scale = AscendW8A8DynamicFusedMoEMethod._get_mlp_weights(method, layer)
+    assert w2_scale[0].shape == (num_experts, hidden)
+
+
+def test_fp32_w2_scale_keeps_the_per_channel_layout_for_eplb(monkeypatch):
+    num_experts, hidden, intermediate = 2, 4, 3
+    layer = _loader_layer(num_experts, hidden, intermediate)
+    method = _run_loader(monkeypatch, layer, use_expert_weight_list=True)
+
+    assert len(layer.w2_weight_scale_fp32_list) == num_experts
+    assert all(scale.shape == (hidden,) for scale in layer.w2_weight_scale_fp32_list)
+    assert all(scale.dtype == torch.float32 for scale in layer.w2_weight_scale_fp32_list)
+    assert all(scale.shape == (2 * intermediate,) for scale in layer.w13_weight_scale_fp32_list)
+
+    _, _, _, w2_scale = AscendW8A8DynamicFusedMoEMethod._get_mlp_weights(method, layer)
+    assert all(scale.shape == (hidden,) for scale in w2_scale)
