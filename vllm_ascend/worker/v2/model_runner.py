@@ -498,6 +498,7 @@ class NPUModelRunner(GPUModelRunner):
         # P also needs persistent prompt draft KV until D acknowledges its
         # transfer. It must never alias target layerwise scratch buffers.
         persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+        persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(

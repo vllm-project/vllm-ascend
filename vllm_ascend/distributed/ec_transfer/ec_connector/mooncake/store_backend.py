@@ -31,6 +31,7 @@ from vllm.utils.network_utils import get_ip
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import AscendProducerMemoryPool
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.store_client import AscendMooncakeEmbeddingStoreClient
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import AscendMooncakeTransfer
+from vllm_ascend.utils import vllm_version_is
 
 
 def use_store_independent_te() -> bool:
@@ -115,7 +116,10 @@ def create_ascend_mooncake_embedding_store_client(
     except ImportError as error:
         raise ImportError("Install mooncake with Store support to enable cross_encoder_cache.") from error
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+    if vllm_version_is("0.33.0"):
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+    else:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 
     store = MooncakeDistributedStore()
     local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
