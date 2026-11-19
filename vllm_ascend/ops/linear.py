@@ -127,8 +127,10 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
         # applies to load-format=dummy too, where weight_loader never runs.
         if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            replace_parameter(
+                layer,
+                "weight",
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous(),
             )
 
     def apply(

@@ -99,7 +99,9 @@ class IndexerWrapper(nn.Module):
         return self.impl.get_topk_lengths(positions)
 
     def process_weights_after_loading(self) -> None:
-        self.impl.process_weights_after_loading()
+        # Main finalizes registered backend modules in the children-first walk.
+        if not isinstance(self.impl, nn.Module):
+            self.impl.process_weights_after_loading()
 
     def prepare_pcp_hidden(
         self, hidden_states: torch.Tensor, indexer_metadata: AttentionMetadata
