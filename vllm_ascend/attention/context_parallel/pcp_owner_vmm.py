@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-import os
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -644,7 +643,9 @@ class PcpOwnerSlabRuntime:
         self.local_only = bool(local_only)
         # Diagnostic knob: shard only the first N slabs, keep the rest
         # replicated, to measure the HBM/latency tradeoff curve.
-        raw_limit = os.environ.get("VLLM_ASCEND_PCP_OWNER_MAX_SLABS", "").strip()
+        from vllm_ascend import envs
+
+        raw_limit = str(envs.VLLM_ASCEND_PCP_OWNER_MAX_SLABS or "").strip()
         self.max_slabs = int(raw_limit) if raw_limit else None
         self.device = device
         self.device_index = int(device.index or 0)
@@ -1286,9 +1287,9 @@ def get_owner_slab_allocator(vllm_config, device: torch.device) -> PcpOwnerSlabR
         )
         placement = SLAB_PLACEMENT_CONTIGUOUS
 
-    import os
+    from vllm_ascend import envs
 
-    local_only = os.environ.get("VLLM_ASCEND_PCP_OWNER_LOCAL_VMM", "").strip().lower() in ("1", "true", "yes", "on")
+    local_only = str(envs.VLLM_ASCEND_PCP_OWNER_LOCAL_VMM).strip().lower() in ("1", "true", "yes", "on")
     if local_only:
         logger.warning(
             "PCP owner KV control mode: full local VMM slab per rank "

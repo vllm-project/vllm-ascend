@@ -153,6 +153,42 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES": lambda: os.getenv(
         "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES", "134217728"
     ),
+    # Write prefill KV for each rank's own DualChunkSwap chunks from the
+    # rank-local hidden states instead of the gathered view. Off by default and
+    # ignored unless an owner slab mapped successfully: on a replicated
+    # allocation the local write would lose the other ranks' rows. Only the
+    # prefill PCP path is affected; decode keeps the gathered write.
+    "VLLM_ASCEND_PCP_LOCAL_KV_WRITE": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "0"),
+    # Also write the compressed source planes from local tokens. Off by
+    # default. Requires VLLM_ASCEND_PCP_LOCAL_KV_WRITE and assumes chunk-aligned
+    # ratio-2 pairing. Inactive while VLLM_ASCEND_PCP_LOCAL_INDEX keeps the
+    # index plane replicated, because that copy needs the complete global rows.
+    "VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE", "0"),
+    # Memoize long-KV staging per source layer for owner-sharded prefill: copy
+    # the referenced slab blocks into local scratch once per forward instead of
+    # paying per-row peer reads in the sparse-attention kernel. Off by default;
+    # overflow falls back to direct peer reads. Only pure-prefill steps stage.
+    "VLLM_ASCEND_PCP_OWNER_STAGE": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE", "0"),
+    # Local scratch budget in bytes for long-KV staging. Default 1 GiB.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_BYTES": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_BYTES", "1073741824"),
+    # Stage the whole live sliding-window prefix as well. Off by default and
+    # slower than the bounded per-chunk path; kept as a diagnostic.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_SWA": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_SWA", "0"),
+    # Plan staged tables from host-side block counts instead of device masks.
+    # Diagnostic and off by default; the mask path is the validated one.
+    "VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN", "0"),
+    # Diagnostic: shard only the first N owner slabs and keep the rest
+    # replicated, to measure the HBM/latency tradeoff. Unset means all slabs.
+    "VLLM_ASCEND_PCP_OWNER_MAX_SLABS": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_MAX_SLABS", None),
+    # Diagnostic control mode: allocate the full slab locally on every rank
+    # (same virtual mapping, no peer export/import, no HBM saving).
+    "VLLM_ASCEND_PCP_OWNER_LOCAL_VMM": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_LOCAL_VMM", "0"),
+    # Allow an external KV-transfer connector alongside owner sharding. Off by
+    # default; the owner slab is not validated with KV pooling or Mooncake.
+    "VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER", "0"),
+    # Log per-region device time for the DSV4.1 attention forward. Off by
+    # default; synchronizes only in batches.
+    "VLLM_ASCEND_PCP_TIMING": lambda: os.getenv("VLLM_ASCEND_PCP_TIMING", "0"),
 }
 
 # end-env-vars-definition

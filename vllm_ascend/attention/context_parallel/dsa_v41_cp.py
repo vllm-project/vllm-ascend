@@ -3,7 +3,6 @@
 """V4.1 replicated-cache adapters for MRV2 PCP."""
 
 import dataclasses
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import Any, ClassVar
@@ -14,6 +13,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
+from vllm_ascend import envs
 from vllm_ascend.attention import dsa_v41 as v41
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
@@ -679,7 +679,7 @@ def _local_cache_writes_enabled() -> bool:
     would lose the other ``(pcp_size - 1) / pcp_size`` rows, so the switch is
     ignored unless an owner slab mapped successfully.
     """
-    if not _env_flag(os.environ.get("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "")):
+    if not _env_flag(envs.VLLM_ASCEND_PCP_LOCAL_KV_WRITE):
         return False
     from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_runtime_active
 
@@ -700,7 +700,7 @@ def _local_source_writes_enabled() -> bool:
 
     if local_index_copy_enabled():
         return False
-    return _env_flag(os.environ.get("VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE", ""))
+    return _env_flag(envs.VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE)
 
 
 class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
