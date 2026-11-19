@@ -1,0 +1,5 @@
+pr: 22515
+entries:
+  - category: feature
+    text: Added CANN V2 KV-quantized sparse flash attention for eligible RoPE64 sparse MLA workloads with FP8 E4M3FN or INT8 KV caches on Ascend 950.
+    hardware: [A5]
