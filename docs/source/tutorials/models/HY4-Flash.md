@@ -125,10 +125,26 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.85 \
         --kv-cache-dtype fp8 \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-        --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
-        --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32],"max_decode_cudagraph_capture_tokens":512}' \
-        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}' \
+        --engram-config '{
+            "cpu_offload": true,
+            "dp_shared_memory": false
+        }' \
+        --speculative-config '{
+            "method": "dfly",
+            "num_speculative_tokens": 5
+        }' \
+        --compilation-config '{
+            "mode": 0,
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "decode_cudagraph_capture_request_sizes": [1, 2, 3, 4, 5, 6, 7, 8, 16, 32],
+            "max_decode_cudagraph_capture_tokens": 512
+        }' \
+        --additional-config '{
+            "multistream_overlap_shared_expert": true,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true
+            }
+        }' \
         --enable-prefix-caching \
         --async-scheduling \
         --seed 1024
@@ -183,7 +199,10 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --data-parallel-size 1 \
         --served-model-name hy4-flash \
         --dtype bfloat16 \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{
+            "cpu_offload": true,
+            "dp_shared_memory": false
+        }' \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
@@ -195,9 +214,33 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --async-scheduling \
         --enforce-eager \
         --seed 1024 \
-        --compilation-config '{"mode":0,"cudagraph_mode":"NONE"}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":'"$KV_PORT"',"engine_id":"hy4-flash-prefill","kv_connector_extra_config":{"ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'","prefill":{"tp_size":4,"dp_size":1},"decode":{"tp_size":1,"dp_size":4}}}' \
-        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}'
+        --compilation-config '{
+            "mode": 0,
+            "cudagraph_mode": "NONE"
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV2",
+            "kv_role": "kv_producer",
+            "kv_port": '"$KV_PORT"',
+            "engine_id": "hy4-flash-prefill",
+            "kv_connector_extra_config": {
+                "ascend_local_comm_res_path": "'"$UB_ENDPOINTS_PATH"'",
+                "prefill": {
+                    "tp_size": 4,
+                    "dp_size": 1
+                },
+                "decode": {
+                    "tp_size": 1,
+                    "dp_size": 4
+                }
+            }
+        }' \
+        --additional-config '{
+            "multistream_overlap_shared_expert": true,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true
+            }
+        }'
     ```
 
     Start the Prefill service:
@@ -242,7 +285,10 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --data-parallel-rpc-port 13445 \
         --served-model-name hy4-flash \
         --dtype bfloat16 \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --engram-config '{
+            "cpu_offload": true,
+            "dp_shared_memory": true
+        }' \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
@@ -253,10 +299,39 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --no-enable-prefix-caching \
         --async-scheduling \
         --seed 1024 \
-        --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32,64,128],"max_decode_cudagraph_capture_tokens":512}' \
-        --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":'"$KV_PORT"',"engine_id":"hy4-flash-decode","kv_connector_extra_config":{"ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'","prefill":{"tp_size":4,"dp_size":1},"decode":{"tp_size":1,"dp_size":4}}}' \
-        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}'
+        --compilation-config '{
+            "mode": 0,
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "decode_cudagraph_capture_request_sizes": [1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128],
+            "max_decode_cudagraph_capture_tokens": 512
+        }' \
+        --speculative-config '{
+            "method": "dfly",
+            "num_speculative_tokens": 5
+        }' \
+        --kv-transfer-config '{
+            "kv_connector": "MooncakeConnectorV2",
+            "kv_role": "kv_consumer",
+            "kv_port": '"$KV_PORT"',
+            "engine_id": "hy4-flash-decode",
+            "kv_connector_extra_config": {
+                "ascend_local_comm_res_path": "'"$UB_ENDPOINTS_PATH"'",
+                "prefill": {
+                    "tp_size": 4,
+                    "dp_size": 1
+                },
+                "decode": {
+                    "tp_size": 1,
+                    "dp_size": 4
+                }
+            }
+        }' \
+        --additional-config '{
+            "multistream_overlap_shared_expert": true,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true
+            }
+        }'
     ```
 
     Start the Decode service:
@@ -411,7 +486,14 @@ PY
         --dataset-hub modelscope \
         --dataset-args "$dataset_args" \
         --eval-batch-size 16 \
-        --generation-config '{"temperature":0.9,"top_p":1.0,"top_k":-1,"max_tokens":131072,"stream":true,"timeout":1800}' \
+        --generation-config '{
+            "temperature": 0.9,
+            "top_p": 1,
+            "top_k": -1,
+            "max_tokens": 131072,
+            "stream": true,
+            "timeout": 1800
+        }' \
         --work-dir "$EVAL_DIR/$dataset" \
         --no-timestamp
 done
