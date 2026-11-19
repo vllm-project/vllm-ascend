@@ -38,7 +38,7 @@ In that configuration the greedy output tokens are identical to the recorded Mod
 
 Two limitations are tracked in the shared MoE sibling and apply to the same batched speculative-decoding path:
 
-- [#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) — host-side prefill overhead that correlates with the CANN ACLNN operator cache filling up. `ACLNN_CACHE_LIMIT` is exposed as a diagnostic knob: measure before and after, and keep a larger value only if it actually helps.
+- [#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) — host-side prefill overhead. The CANN ACLNN operator-descriptor cache is a candidate explanation (single-operator descriptors are cached per thread, with a separate process-wide pool for large fused operators), not an established cause; `ACLNN_CACHE_LIMIT` is exposed as a diagnostic knob: measure before and after, and keep a larger value only if it actually helps.
 - [#21742](https://github.com/vllm-project/vllm-ascend/issues/21742) — batched speculative decoding is not self-consistent yet. For accuracy validation submit one request per `generate()` call.
 
 ## 3 Prerequisites
