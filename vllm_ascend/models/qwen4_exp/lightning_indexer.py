@@ -13,9 +13,10 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
 
+from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
-from .quantization import qsa_c8_indexer_cache_views, quantize_qsa_rows
+from .quantization import qsa_c8_indexer_cache_views
 
 _HEAD_DIM = 128
 _COMPRESS_RATIO = 4
@@ -260,7 +261,7 @@ def qsa_select_paged_tokens_quantized(
     out.fill_(-1)
     if not rows:
         return out
-    query_codes, query_scales = quantize_qsa_rows(query)
+    query_codes, query_scales = quantize_qsa_query(query)
     # A2/A3 QLI-v2 requires 64 query heads and FP16 scales/weights. All
     # additional heads have zero weight, preserving the unpadded score sum.
     padded_query = torch.zeros((rows, 64, _HEAD_DIM), dtype=torch.int8, device=query.device)

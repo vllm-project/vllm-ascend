@@ -12,8 +12,8 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from tests.ut.models.test_qwen4_exp_cache_config import _groups
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.models.qwen4_exp.cache_config import (
-    build_qwen4_kv_cache_layout,
     QSA_K_SCALE_REGION,
+    build_qwen4_kv_cache_layout,
     make_qsa_c8_kernel_page_cache,
 )
 from vllm_ascend.models.qwen4_exp.quantization import (
@@ -25,6 +25,7 @@ from vllm_ascend.models.qwen4_exp.quantization import (
     quantize_qsa_values,
     uses_qsa_c8_quantization,
 )
+from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query, store_qsa_c8_rows
 
 
 def test_exact_owner_metadata_and_draft_isolation():
@@ -171,8 +172,11 @@ def test_c8_cache_update_keeps_scale_and_codes_in_one_transaction(monkeypatch):
     monkeypatch.setattr(qsa, "store_qsa_c8_rows", callback)
     impl = object.__new__(qsa.AscendQSAImpl)
     key, value = torch.randn(2, 1, 128), torch.randn(2, 1, 128)
-    cache = (torch.empty(1, 128, 1, 128, dtype=torch.int8), torch.empty(1, 128, 1, 128, dtype=torch.int8),
-             torch.empty(1, 1, 128))
+    cache = (
+        torch.empty(1, 128, 1, 128, dtype=torch.int8),
+        torch.empty(1, 128, 1, 128, dtype=torch.int8),
+        torch.empty(1, 1, 128),
+    )
     slots = torch.tensor([0, -1])
     v_scale = torch.ones(1, 128)
     impl.do_kv_cache_update(
@@ -184,7 +188,6 @@ def test_c8_cache_update_keeps_scale_and_codes_in_one_transaction(monkeypatch):
     assert callback.call_args_list[1].kwargs["v_scale"] is v_scale
     with pytest.raises(ValueError, match="requires K, V and K scales"):
         impl.do_kv_cache_update(SimpleNamespace(c8_enabled=True), key, value, cache[:2], slots)
-
 
 
 @pytest.mark.parametrize("all_c8", [False, True])
@@ -379,9 +382,23 @@ def test_qsa_indexer_fused_dispatch_uses_each_norm_dtype(monkeypatch, query_dtyp
         assert fused.call_args.args[2].shape == (3, 2)
 
 
-def test_c8_device_interfaces_reject_cpu_workloads():
-    from vllm_ascend.ops.triton.qwen4_exp.c8 import store_qsa_c8_rows
+@pytest.mark.parametrize("shape", [(3, 2, 128), (0, 2, 128), (3, 2, 64)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_c8_query_quantization_cpu_fallback(shape, dtype):
+    tokens, heads, dim = shape
+    query = torch.randn(tokens, dim, heads, dtype=dtype).transpose(1, 2)
+    actual = quantize_qsa_query(query)
+    expected = quantize_qsa_rows(query)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
+
+@pytest.mark.parametrize("query", [torch.ones(2, 128), torch.zeros(2, 1, 0), torch.zeros(2, 1, 128, dtype=torch.int8)])
+def test_c8_query_quantization_rejects_invalid_rows(query):
+    with pytest.raises(ValueError, match="requires floating"):
+        quantize_qsa_query(query)
+
+
+def test_c8_device_interfaces_reject_cpu_workloads():
     cache = torch.zeros(1, 128, 1, 128, dtype=torch.int8)
     slots, rows = torch.tensor([0]), torch.zeros(1, 1, 128)
     with pytest.raises(ValueError, match="same NPU"):

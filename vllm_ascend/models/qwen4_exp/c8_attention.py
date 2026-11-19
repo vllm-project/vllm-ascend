@@ -4,10 +4,10 @@
 import torch
 
 from vllm_ascend.ops.gbsa import GBSAQuantMode, generic_block_sparse_attention, generic_block_sparse_attention_metadata
+from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
-from .quantization import quantize_qsa_rows
 
 C8_PROBABILITY_QUANT_SCALE = 127.0
 
@@ -73,7 +73,7 @@ def qsa_c8_attention(
         is_consistent_topk=False,
     )
     # GBSA follows the scheduler page table for both K/V codes and K scales.
-    codes_q, scales_q = quantize_qsa_rows(query)
+    codes_q, scales_q = quantize_qsa_query(query)
     metadata = generic_block_sparse_attention_metadata(
         groups,
         counts,
