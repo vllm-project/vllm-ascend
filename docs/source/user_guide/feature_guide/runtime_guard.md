@@ -125,7 +125,6 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 
 Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hardware; it is not gated by default CI.
 
-
 ## Feature compatibility
 
 Runtime Guard is wired on **Model Runner v2** only (v1 is not wired). Tracking epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976).
