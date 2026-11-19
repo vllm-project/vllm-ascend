@@ -220,18 +220,17 @@ the trainer to a separate NPU and use HCCL.
 
 ### Speculative draft weight updates
 
-With a model-based speculative decoder and a weight-transfer backend that
-supports draft updates, call `start_draft_weight_update()` instead of
+With a model-based speculative decoder and the HCCL weight-transfer backend,
+call `start_draft_weight_update()` instead of
 `start_weight_update()`. Send the draft model's weight chunks through the same
 `update_weights()` interface, then call `finish_weight_update()`. The worker
 selects the draft model and its model configuration for that session and
 restores the transfer engine's target model afterward.
 
-Draft weight updates require Model Runner V2, the only runner in this tree.
-The worker reuses upstream helpers to temporarily select source LM heads
-and restore or refresh online-quantized copies afterward. A draft that shares
-the target LM head also updates that shared source when its LM-head weights
-are transferred.
+Draft weight updates require Model Runner V2. The worker selects and restores
+the receiver through the transfer engine's public target-selection interfaces.
+Ordinary target updates retain the existing Ascend lifecycle. This feature
+does not enable draft updates for IPC or other transfer backends.
 
 Generation must remain paused throughout the update. Overlapping target and
 draft update sessions are rejected. Failed updates do not roll back partially
