@@ -783,6 +783,13 @@ def _allocate_deepseek_v41_shared_cache(
     by_size: dict[int, list] = {}
     for descriptor in kv_cache_config.kv_cache_tensors:
         by_size.setdefault(int(descriptor.size), []).append(descriptor)
+    if len(by_size) != 1:
+        # Only the LOCAL_INDEX split emits a second backing. Keep the strict
+        # single-backing contract for every other DeepSeek-V4 layout.
+        from vllm_ascend.models.deepseek_v41.cache_config import local_index_copy_enabled
+
+        if not local_index_copy_enabled():
+            raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
 
     tensors: dict[str, torch.Tensor] = {}
     uses_turboquant = uses_turboquant_groups(kv_cache_config.kv_cache_groups)
