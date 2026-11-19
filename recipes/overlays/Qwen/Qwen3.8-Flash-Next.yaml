@@ -880,8 +880,6 @@ presets:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
-      features:
-        spec_decoding: true
     roles:
       prefill:
         nodes: 1
