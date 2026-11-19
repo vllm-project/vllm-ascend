@@ -18,7 +18,7 @@ from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
-from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_max_num_reqs
+from vllm_ascend.attention.context_parallel.common_cp import get_cp_max_num_reqs
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -133,7 +133,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             # Core PCP creates a new int64 idx_mapping per batch; the resolver
             # needs a fixed int32 input. Later draft decode uses Core's global map.
             self._pcp_request_state_indices = torch.empty(
-                get_sfa_max_num_reqs(vllm_config), dtype=torch.int32, device=device
+                get_cp_max_num_reqs(vllm_config), dtype=torch.int32, device=device
             )
         self._row_capacity = max(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -154,10 +154,12 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             )
         # Use Core's device-boundary mapping with Ascend's padded input extent.
         # Keep separate backing storage for each captured MTP graph owner.
+        # Map padding to the last request so prefill staging stays in bounds
+        # after subtracting num_decodes. Actual query boundaries stay unchanged.
         metadata.req_id_per_token = compute_token_to_req_indices(
             metadata.query_start_loc,
             self._request_row_buffers[draft_index],
-            int(common_attn_metadata.query_start_loc_cpu[-1]),
+            metadata.num_input_tokens,
             metadata.num_input_tokens,
         )
         if pcp_context is not None:

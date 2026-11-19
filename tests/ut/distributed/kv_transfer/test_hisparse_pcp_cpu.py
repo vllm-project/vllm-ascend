@@ -355,6 +355,81 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     assert states.tolist() == [9, -1, -1]
 
 
+@pytest.mark.parametrize("use_pcp", [False, True])
+@pytest.mark.parametrize(
+    "num_decodes,prefill_lens,padding",
+    [(3, (4, 4), 1), (0, (4, 4), 1), (3, (4, 4), 0), (3, (), 1), (3, (), 0)],
+)
+def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
+    monkeypatch, use_pcp, num_decodes, prefill_lens, padding
+):
+    from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
+
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+
+    query_lens = torch.tensor([1] * num_decodes + list(prefill_lens), dtype=torch.int32)
+    starts = torch.cat((torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0).to(torch.int32)))
+    actual = int(starts[-1])
+    padded = actual + padding
+    num_reqs = query_lens.numel()
+    meta = NS(
+        query_start_loc=starts,
+        num_actual_tokens=actual,
+        num_input_tokens=padded,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        num_prefills=len(prefill_lens),
+        pcp_has_global_prefill=bool(prefill_lens),
+        uses_pcp_sharded_layout=use_pcp,
+        seq_lens_cpu=query_lens,
+        seq_lens=query_lens,
+        block_table=torch.zeros(num_reqs, 1, dtype=torch.int32),
+        block_size=128,
+    )
+    builder = sfa_hisparse.AscendHiSparseMetadataBuilder.__new__(sfa_hisparse.AscendHiSparseMetadataBuilder)
+    builder.device = torch.device("cpu")
+    builder.is_pcp_decode_sharded = True
+    builder._row_capacity = padded
+    builder._request_row_buffers = {}
+    builder._pcp_request_state_indices = torch.empty(num_reqs, dtype=torch.int32)
+    common = NS(num_reqs=num_reqs, query_start_loc_cpu=starts)
+    context = NS(local_request_state_indices=torch.arange(num_reqs)) if use_pcp else None
+    calls = []
+
+    def map_requests(offsets, out, num_mapped, num_tokens):
+        # CPU reference for Core's existing mapping kernel, including its
+        # last-request clamp and explicit zero-padding policy.
+        calls.append((num_mapped, num_tokens))
+        tokens = torch.arange(num_tokens, dtype=offsets.dtype)
+        rows = torch.searchsorted(offsets[1:], tokens, right=True).clamp_max(num_reqs - 1)
+        out[:num_tokens].copy_(torch.where(tokens < num_mapped, rows, 0))
+        return out[:num_tokens]
+
+    monkeypatch.setattr(AscendSFAMetadataBuilder, "_build", lambda *args: meta)
+    monkeypatch.setattr(sfa_hisparse, "compute_token_to_req_indices", map_requests)
+    monkeypatch.setattr(sfa_hisparse, "get_pcp_group", lambda: NS(world_size=2))
+    monkeypatch.setattr(
+        sfa_hisparse,
+        "build_hisparse_prefill_staging_plan",
+        lambda table, *args: NS(block_table=table, block_size=128),
+    )
+    built = builder._build(common, pcp_context=context)
+    assert calls == [(padded, padded)]
+    expected_real = torch.repeat_interleave(torch.arange(num_reqs), query_lens.long()).to(torch.int32)
+    torch.testing.assert_close(built.req_id_per_token[:actual], expected_real)
+    if padding:
+        assert built.req_id_per_token[-1].item() == num_reqs - 1
+    if prefill_lens:
+        source = torch.zeros(1, 128, 2)
+        cache = NS(view=None, block_table=None, runtime=NS(gather_prefill_cache=lambda *args, **kwargs: source))
+        group = NS(cache=lambda index: cache)
+        _, table, request_rows = HiSparseMLAIndexGroup.stage_prefill_rows(group, 0, source, built)
+        # This lookup used to fail for PCP's [3 decode, 2 prefill, 1 pad] layout.
+        selected_tables = table[request_rows.long()]
+        assert selected_tables.shape[0] == padded - num_decodes
+
+
 def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
 
