@@ -1200,7 +1200,7 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
         pytest.param(1, False, id="layer-outer-1-to-1"),
         pytest.param(2, False, id="layer-outer-1-to-2"),
         pytest.param(1, True, id="block-outer-1-to-1"),
-        pytest.param(2, True, id="block-outer-1-to-2-keeps-legacy"),
+        pytest.param(2, True, id="block-outer-1-to-2-rejected"),
     ],
 )
 def test_k3_unified_allocator_preserves_runtime_views(
@@ -1255,24 +1255,18 @@ def test_k3_unified_allocator_preserves_runtime_views(
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")),
         kv_transfer_config=None,
-        speculative_config=None,
-        cache_config=SimpleNamespace(use_replayssm=False, cache_dtype="auto"),
-        additional_config={},
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
-    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: True)
 
-    legacy_result = {}
-    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", lambda *args, **kwargs: legacy_result)
-    monkeypatch.setattr(attn_utils, "_reshape_kv_cache_v2", lambda **kwargs: legacy_result)
-    caches = attn_utils.allocate_kv_cache_main(
-        config, torch.device("cpu"), None, [kernel_block_size, kda_spec.block_size], allocate=None
-    )
+    kernel_block_sizes = [kernel_block_size, kda_spec.block_size]
     if block_outer and kernel_blocks_per_manager > 1:
-        assert caches is legacy_result
+        with pytest.raises(ValueError, match="Splitting manager pages requires adjacent physical kernel slots"):
+            attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_block_sizes)
         return
+
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_block_sizes)
 
     assert caches.keys() == layers.keys()
     kernel_slot_bytes = block_stride // kernel_blocks_per_manager

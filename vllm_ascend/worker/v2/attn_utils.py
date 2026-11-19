@@ -1561,50 +1561,6 @@ def unified_allocate_kv_cache(
     )
 
 
-def _uses_k3_unified_cache(
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-    kernel_block_sizes: list[int],
-) -> bool:
-    """Select resident KDA and standard single-backing MLA configurations."""
-    if (
-        vllm_config.kv_transfer_config is not None
-        or vllm_config.speculative_config is not None
-        or vllm_config.cache_config.use_replayssm
-        or KVPPConfig.from_vllm_config(vllm_config).size != 1
-    ):
-        return False
-
-    descriptors = kv_cache_config.kv_cache_tensors
-    if not descriptors or len({descriptor.size for descriptor in descriptors}) != 1:
-        return False
-    if any(descriptor.host_resident for descriptor in descriptors):
-        return False
-
-    if len(kernel_block_sizes) < len(kv_cache_config.kv_cache_groups):
-        return False
-    specs = _get_layer_kv_cache_specs(kv_cache_config)
-    if not all(
-        isinstance(spec, MambaSpec) or _uses_single_raw_mla_cache(vllm_config, name, spec)
-        for name, spec in specs.items()
-    ):
-        return False
-
-    block_strides = {name: descriptor.block_stride for descriptor in descriptors for name in descriptor.layers}
-    shared_layers = get_shared_kv_cache_layers(vllm_config)
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        kernel_block_size = kernel_block_sizes[group_id]
-        for name in group.layer_names:
-            spec = specs[name]
-            if name in shared_layers or isinstance(spec, MambaSpec):
-                continue
-            if kernel_block_size <= 0 or spec.block_size % kernel_block_size:
-                return False
-            if spec.block_size != kernel_block_size and block_strides[name] != spec.page_size_bytes:
-                return False
-    return True
-
-
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1624,9 +1580,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
-        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
-    if model_type == "kimi_linear" and _uses_k3_unified_cache(vllm_config, kv_cache_config, kernel_block_sizes):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
