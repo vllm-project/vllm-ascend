@@ -1011,20 +1011,19 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> StoreLookupResult | None:
         prompt_token_len = len(request.prompt_token_ids)
-        token_len = prompt_token_len
         if self.enable_partial_hash_hits:
-            # Check full hash units, but send the original prompt end so the
-            # worker can retain the final-token recomputation boundary.
-            if self.cache_coordinator.align_lookup_length(token_len) <= num_computed_tokens:
-                return None
+            # Preserve the prompt end so the worker can reserve the final token for recomputation.
+            token_len = prompt_token_len
         elif len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
-        elif self._discard_partial_chunks:
-            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-        if not self.enable_partial_hash_hits and (
-            token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len
-        ):
+        else:
+            token_len = (
+                self._floor_to_cache_transfer_granularity(prompt_token_len)
+                if self._discard_partial_chunks
+                else prompt_token_len
+            )
+        if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
             return None
         if self.client is None or self.client.closed:
             self.client = LookupKeyClient(self.vllm_config)
