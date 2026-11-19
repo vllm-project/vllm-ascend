@@ -265,6 +265,9 @@ def program(c, unroll_taps=False):
     return main
 
 
+# Six-token BF16 input shapes whose next six rows select a faster GEMM.
+EXTRA_REQUEST_BATCHES = frozenset((14, 17, 19, 22))
+
 WEIGHT_REUSE_BATCHES = frozenset((1, 3, 5, 6, 7, 8, 9, 10))
 
 
@@ -273,6 +276,11 @@ class FusedMiddle:
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
+        self.projection_rows = c.batch * c.tokens
+        if c.batch in (6, 7, 8):
+            self.projection_rows = 54
+        elif tuned and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128) and c.batch in EXTRA_REQUEST_BATCHES:
+            self.projection_rows += c.tokens
         self.wf = i["w_f"].reshape(h // 2, 2 * d, d)
         self.wg = i["w_g"].reshape(h // 2, 2 * d, d)
         if tuned and c.batch <= 80:
@@ -289,8 +297,8 @@ class FusedMiddle:
         c = n.c
         i = n.i
         rows = c.batch * c.tokens
-        if c.batch in (6, 7, 8):
-            p = F.linear(F.pad(n.x, (0, 0, 0, 54 - rows)), i["w_in"])[:rows]
+        if self.projection_rows > rows:
+            p = F.linear(F.pad(n.x, (0, 0, 0, self.projection_rows - rows)), i["w_in"])[:rows]
         else:
             p = n.project()
         self.kernel(

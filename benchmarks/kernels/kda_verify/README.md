@@ -41,6 +41,11 @@ All tuned schedules read history and current tokens from a contiguous on-chip wi
 Except at batch 2, the Vector kernel accumulates the decay prefix in registers and rounds the recurrence output to BF16 before computing its gated RMS normalization in the same Vector function.
 The paired runner also enables weight reuse at batches 1, 3 and 5 through 10.
 
+For batches 14, 17, 19 and 22, the tuned benchmark pads the input projection by six rows,
+producing GEMMs with 90, 108, 120 and 138 rows respectively. It slices the result back to the
+valid tokens before the mixed kernel. Graph timings include the padding and projection.
+The paired runner records the actual projection height in `tilelang_projection_rows`.
+
 ## Accuracy checks
 
 The harness compares output, convolution cache, normalized values, correction records, KG records and the FP32 checkpoint with the unfused path. It exercises accepted prefixes of one, two and six tokens, plus mixed prefixes across requests. To repeat the additional correctness runs:
@@ -75,7 +80,7 @@ For this fixed shape and six-token workload, `model_utilization` reports useful 
 (1,651,507,200 per request) divided by elapsed time and a 432 TFLOP/s reference peak.
 Logical MBU uses a 4 TB/s reference peak and the modeled tensor bytes for the path.
 For batch size B, modeled bytes are 275,481,096 + 7,790,100 × B for unfused and
-275,481,088 + 6,020,612 × B for TileLang, with another 98,304 × B at batches 6–8 for input padding.
+275,481,088 + 6,020,612 × B for TileLang, with another 98,304 × B when the input projection is padded. This allowance counts reads and writes of valid input rows. Dummy rows add no useful FLOPs.
 Both metrics use the same complete QKV-to-output median latency.
 The sum is expressed in percentage points. These model estimates exclude FP32 and vector work from
 the FLOP numerator and do not measure physical HBM traffic or hardware occupancy.

@@ -29,10 +29,13 @@ TOLERANCES = {
 }
 
 
-def model_utilization(batch, latency_us, *, fused):
+def model_utilization(batch, latency_us, *, fused, projection_rows=None):
+    """Pass the measured input projection height when comparing padded schedules."""
     if fused:
         logical_bytes = 275_481_088 + 6_020_612 * batch
-        if batch in (6, 7, 8):
+        if projection_rows is None:
+            projection_rows = 54 if batch in (6, 7, 8) else 6 * batch
+        if projection_rows > 6 * batch:
             logical_bytes += 98_304 * batch
     else:
         logical_bytes = 275_481_096 + 7_790_100 * batch
@@ -110,11 +113,15 @@ def run_batch(b, args):
     medians = {k: statistics.median(x) for k, x in samples.items()}
     return {
         "batch": b,
+        "tilelang_projection_rows": paths["tilelang"].projection_rows,
         "tilelang_weight_reuse": b in WEIGHT_REUSE_BATCHES,
         "checks": checks,
         "graph_replay_validated": True,
         "median_us": medians,
-        "model_utilization": {k: model_utilization(b, us, fused=k == "tilelang") for k, us in medians.items()},
+        "model_utilization": {
+            k: model_utilization(b, us, fused=k == "tilelang", projection_rows=paths["tilelang"].projection_rows)
+            for k, us in medians.items()
+        },
         "samples_us": samples,
     }
 
