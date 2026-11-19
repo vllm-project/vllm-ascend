@@ -90,7 +90,9 @@ class VocabParallelPlan:
     shard_world_size: int
     token_exchange_group: GroupCoordinator | None = None
     output_reduce_group: GroupCoordinator | None = None
-    composed_with_tp: bool = False
+    # Set when a fine-grained LM head composes with standard TP: the exchange
+    # covers one TP column, so this group joins the remaining columns.
+    tp_gather_group: GroupCoordinator | None = None
 
 
 def _resolve_vocab_parallel_plan(
@@ -143,14 +145,16 @@ def _resolve_vocab_parallel_plan(
         # Compose with standard TP into one flat grid of tp_size x P shards,
         # TP outer / fine-grained inner (rank = tp_rank * P + fg_rank).
         tp_group = get_tp_group()
+        tp_gather_group = None
         if tp_group.world_size > 1:
             shard_rank = tp_group.rank_in_group * shard_world_size + shard_rank
             shard_world_size *= tp_group.world_size
+            tp_gather_group = tp_group
         return VocabParallelPlan(
             VocabParallelMode.FINE_GRAINED,
             shard_rank,
             shard_world_size,
-            composed_with_tp=tp_group.world_size > 1,
+            tp_gather_group=tp_gather_group,
         )
 
     if is_token_embedding and embedding_tp_enable():
@@ -171,7 +175,6 @@ def _resolve_vocab_parallel_plan(
             shard_world_size,
             token_exchange_group=group,
             output_reduce_group=output_reduce_group,
-            composed_with_tp=tp_group.world_size > 1,
         )
 
     tp_group = get_tp_group()
@@ -218,7 +221,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # layout spans two real communication groups rather than one TP group.
         self.tp_rank = plan.shard_rank
         self.tp_size = plan.shard_world_size
-        self.composed_with_tp = plan.composed_with_tp
+        self.tp_gather_group = plan.tp_gather_group
 
         if self.token_exchange_group is not None:
             self.embedding_tp_capacity = max(
@@ -628,12 +631,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = gather_lm_head_hidden_states(hidden_states)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
-        # Gather logits for tensor parallel. With standard TP composed in, the
-        # all-to-all leaves only this TP column's vocabulary span, and the same
-        # exchange completes the remaining columns over the TP group. Running it
-        # after the all-to-all keeps the TP collective on the local token rows.
-        completion_group = get_tp_group() if getattr(lm_head, "composed_with_tp", False) else None
-        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode, completion_group)
+        # Gather logits for tensor parallel. A composed head (fine-grained TP
+        # stacked with standard TP) carries the group that joins the remaining
+        # TP columns; running it after the all-to-all keeps that collective on
+        # the local token rows.
+        logits = gather_lm_head_outputs(logits, lm_head.parallel_mode, getattr(lm_head, "tp_gather_group", None))
 
         # Remove paddings in vocab (if any)
         if logits is not None:

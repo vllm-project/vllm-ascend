@@ -4,7 +4,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -306,7 +306,7 @@ def _gather_lm_head_candidates(
     # With standard TP composed into the head, the exchange below covers only
     # this TP column's candidates; the same (packed) exchange joins the other
     # columns.
-    completion_group = get_tp_group() if getattr(lm_head, "composed_with_tp", False) else None
+    completion_group = getattr(lm_head, "tp_gather_group", None)
     if packed:
         score_dtype = values.dtype
         pairs = torch.stack((values.float(), ids.float()), dim=-1)

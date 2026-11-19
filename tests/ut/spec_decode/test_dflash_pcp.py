@@ -305,14 +305,12 @@ def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
 
     monkeypatch.setattr(vocab_module, "get_lmhead_tp_group", lambda: group)
     monkeypatch.setattr(vocab_module.dist, "all_to_all_single", all_to_all)
-    monkeypatch.setattr(
-        model_module, "get_tp_group", lambda: SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather)
-    )
     head = SimpleNamespace(
         weight=weight[rank * shard_size : (rank + 1) * shard_size],
         quant_method=UnquantizedEmbeddingMethod(),
         parallel_mode=VocabParallelMode.FINE_GRAINED,
-        composed_with_tp=True,
+        # The composed layout publishes the group that completes the TP columns.
+        tp_gather_group=SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather),
         num_embeddings_padded=fg_world * tp_world * shard_size,
         shard_indices=SimpleNamespace(num_org_vocab_padding=0, org_vocab_start_index=rank * shard_size),
     )
