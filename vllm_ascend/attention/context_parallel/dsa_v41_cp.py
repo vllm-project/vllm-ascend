@@ -703,6 +703,31 @@ def _local_source_writes_enabled() -> bool:
     return _env_flag(envs.VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE)
 
 
+def _tensor_is_owner_backed(tensor) -> bool:
+    """Whether this exact cache plane lives in a mapped owner slab.
+
+    The runtime is process-wide, but a diagnostic ``OWNER_MAX_SLABS`` limit (or
+    a partially mapped group) can leave some planes on replicated tensors.
+    Deciding from ``owner_slab_runtime_active()`` alone would then skip the
+    gather for a replicated plane and drop every other rank's rows.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        return False
+    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+    return owner_slab_for_tensor(tensor) is not None
+
+
+def _swa_cache_is_owner_backed(attn) -> bool:
+    cache_layer = getattr(getattr(attn, "dsa_attn", None), "swa_cache_layer", None)
+    return _tensor_is_owner_backed(getattr(cache_layer, "kv_cache", None))
+
+
+def _long_kv_cache_is_owner_backed(attn) -> bool:
+    cache_layer = getattr(attn, "long_kv_cache", None)
+    return _tensor_is_owner_backed(getattr(cache_layer, "kv_cache", None))
+
+
 class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     """Update replicated caches once, then run rank-local V4.1 attention."""
 
@@ -773,7 +798,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         if isinstance(metadata, AscendDSAV41PCPMetadata):
-            if _local_cache_writes_enabled():
+            if _local_cache_writes_enabled() and _swa_cache_is_owner_backed(attn):
                 # The rank-local slot mapping addresses this rank's own slab
                 # pages; SWA has one entry per token and no cross-chunk state,
                 # so the local write is exact and needs no gather.
@@ -797,7 +822,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
                 prepared_indexer=prepared_indexer,
             )
         self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
-        local_source = _local_source_writes_enabled()
+        local_source = _local_source_writes_enabled() and _long_kv_cache_is_owner_backed(attn)
         write_metadata = local_metadata if local_source else global_metadata
         if self.role.compress_ratio == 2:
             latent = self._compress_local_c2(attn, hidden_states, local_metadata, global_metadata)

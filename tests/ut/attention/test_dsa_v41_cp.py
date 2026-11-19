@@ -1662,6 +1662,11 @@ class TestOwnerLocalKvWrites:
         metadata.global_metadata = object()
         return metadata
 
+    @staticmethod
+    def _attn():
+        layer = SimpleNamespace(kv_cache=torch.zeros(1))
+        return SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=layer), long_kv_cache=layer)
+
     def test_local_write_requires_mapped_owner_slab(self, monkeypatch):
         from vllm_ascend.attention.context_parallel import pcp_owner_vmm
 
@@ -1684,8 +1689,11 @@ class TestOwnerLocalKvWrites:
         assert dsa_v41_cp._local_source_writes_enabled() is True
 
     def test_swa_write_skips_gather_for_local_rows(self, monkeypatch):
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
         calls = []
         monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: object())
         monkeypatch.setattr(
             dsa_v41_cp.AscendDSAV41PCPImpl,
             "_gather_cache_rows",
@@ -1698,8 +1706,32 @@ class TestOwnerLocalKvWrites:
         )
         metadata = self._pcp_metadata()
         value = torch.arange(6, dtype=torch.float32).view(3, 2)
-        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(object(), metadata, value)
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(self._attn(), metadata, value)
         assert calls == [(metadata, value)]
+
+    def test_swa_write_gathers_when_the_backing_is_replicated(self, monkeypatch):
+        """An owner runtime does not make a replicated plane safe to write locally."""
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
+
+        gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
+        writes = []
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: None)
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41PCPImpl,
+            "_gather_cache_rows",
+            staticmethod(lambda value, metadata: gathered),
+        )
+        monkeypatch.setattr(
+            dsa_v41_cp.AscendDSAV41Impl,
+            "_write_swa_cache",
+            staticmethod(lambda attn, metadata, value: writes.append((metadata, value))),
+        )
+        metadata = self._pcp_metadata()
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            self._attn(), metadata, torch.arange(6, dtype=torch.float32).view(3, 2)
+        )
+        assert writes == [(metadata.global_metadata, gathered)]
 
     def test_swa_write_gathers_global_rows_by_default(self, monkeypatch):
         gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
