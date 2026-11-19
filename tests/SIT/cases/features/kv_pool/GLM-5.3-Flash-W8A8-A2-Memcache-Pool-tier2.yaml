@@ -1,0 +1,114 @@
+# GLM-5.3-Flash W8A8 A2 single-node KV-pool protection (memcache bulk, tier-2 DRAM)
+#
+# Engine config validated end to end on an A2 runner (nightly-main image,
+# vllm 0.33.0, memcache-hybrid 1.3.0): the same engine/pool/env parameters
+# passed the full A/B via tests/SIT/cases/features/kv_pool/
+# test_glm53_flash_kv_pool_ab_a2.py (R2/R3 hit 16000/16000, TTFT 1.08x/1.04x,
+# throughput 0.97x, token identical, verdict=PASS), and this YAML-driven
+# variant passed the single-node harness validation on the same runner.
+#
+# The memcache tier-3 (DRAM + UBS IO raw block device) variant is not
+# registered here: it needs a runner-provisioned /dev/loopN raw device and
+# is covered by the pytest A/B case on provisioned environments until the
+# nightly runners carry the device.
+test_cases:
+  - name: "GLM-5.3-Flash-W8A8-A2-Memcache-Pool-tier2"
+    model: "Eco-Tech/GLM-5.3-Flash-w8a8"
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "256"
+      HCCL_INTRA_ROCE_ENABLE: "1"
+      ASCEND_AGGREGATE_ENABLE: "1"
+      ASCEND_TRANSPORT_PRINT: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      TASK_QUEUE_ENABLE: "1"
+      PYTHONHASHSEED: "0"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+      HCCL_EXEC_TIMEOUT: "204"
+      HCCL_CONNECT_TIMEOUT: "120"
+      SERVER_PORT: "DEFAULT_PORT"
+    kv_pool:
+      type: "memcache"
+      meta_service_port: 5000
+      config_store_port: 6000
+      config:
+        meta:
+          ock.mmc.log_level: "info"
+        local:
+          ock.mmc.log_level: "info"
+          ock.mmc.local_service.world_size: 256
+          ock.mmc.local_service.protocol: "device_rdma"
+          ock.mmc.local_service.dram.size: "40GB"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--enable-prefix-caching"
+      - "--seed"
+      - "1024"
+      - "--enable-chunked-prefill"
+      - "--async-scheduling"
+      - "--max-model-len"
+      - "16640"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "256"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--quantization"
+      - "ascend"
+      - "--enforce-eager"
+      - "--limit-mm-per-prompt"
+      - '{"image": 0, "video": 0}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
+      - "--mamba-cache-mode"
+      - "align"
+      - "--kv-transfer-config"
+      - '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_buffer_device":"npu","kv_port":14579,"kv_load_failure_policy":"fail","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache"}}'
+    benchmarks:
+      perf_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 1024
+        batch_size: 1
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 8
+        baseline: 95
+        threshold: 10

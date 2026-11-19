@@ -1,0 +1,105 @@
+# DeepSeek-V4.1-Flash W4A8 A2 single-node KV-pool protection (mooncake bulk, tier-2 DRAM)
+#
+# Engine config validated end to end on an A2 runner (nightly-main image,
+# vllm 0.33.0, mooncake 0.3.14rc3): the same engine/pool/env parameters
+# passed the full A/B via tests/SIT/cases/features/kv_pool/
+# test_deepseek_v41_flash_kv_pool_ab_a2.py (R2/R3 hit 16384/16384, TTFT
+# 1.09x/1.14x, throughput 0.92x, token identical, verdict=PASS), and this
+# YAML-driven variant passed the single-node harness validation on the same
+# runner.
+#
+# The mooncake tier-3 (DRAM + SSD) variant is covered by the pytest A/B case
+# on provisioned environments until the nightly runners carry the SSD paths.
+test_cases:
+  - name: "DeepSeek-V41-Flash-A2-Mooncake-Pool-tier2"
+    model: "Eco-Tech/DeepSeek-V4.1-Flash-w4a8"
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "256"
+      HCCL_INTRA_ROCE_ENABLE: "1"
+      ASCEND_AGGREGATE_ENABLE: "1"
+      PYTHONHASHSEED: "0"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+      HCCL_EXEC_TIMEOUT: "204"
+      HCCL_CONNECT_TIMEOUT: "120"
+      SERVER_PORT: "DEFAULT_PORT"
+    kv_pool:
+      type: "mooncake"
+      master_port: 46053
+      metrics_port: 33573
+      config:
+        metadata_server: "P2PHANDSHAKE"
+        protocol: "ascend"
+        device_name: ""
+        global_segment_size: "4GB"
+        local_buffer_size: "1GB"
+        preferred_segment: false
+        prefer_alloc_in_same_node: true
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--enable-prefix-caching"
+      - "--seed"
+      - "1024"
+      - "--enable-chunked-prefill"
+      - "--async-scheduling"
+      - "--max-model-len"
+      - "16640"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--max-num-seqs"
+      - "4"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--quantization"
+      - "ascend"
+      - "--enforce-eager"
+      - "--limit-mm-per-prompt"
+      - '{"image": 0, "video": 0}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 5, "method": "dspark", "enforce_eager": true}'
+      - "--kv-transfer-config"
+      - '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_buffer_device":"npu","kv_port":14579,"kv_load_failure_policy":"fail","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"mooncake"}}'
+    benchmarks:
+      perf_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 4
+        max_out_len: 1024
+        batch_size: 1
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1024
+        batch_size: 16
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 8
+        baseline: 95
+        threshold: 10

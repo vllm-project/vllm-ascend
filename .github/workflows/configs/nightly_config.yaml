@@ -12,16 +12,27 @@ a2:
   single_node:
     test_config:
       # pytest-driven tests
-      # KV-pool A/B protection on one 8-NPU node (TP8): the pool leg must return
-      # exactly the same tokens as the local-prefix-cache leg and stay inside the
-      # per-tier TTFT/throughput limits.
+      # (none: the KV-pool A/B pytest cases stay in
+      # tests/SIT/cases/features/kv_pool/ for deep verification on provisioned
+      # environments; the nightly matrix registers the YAML-driven pool cases
+      # below, which the nightly runners can execute without per-test env
+      # provisioning - the model resolves through ModelScope and the pool
+      # service is managed by the single-node harness.)
+      # YAML-driven tests
+      # KV-pool protection on one 8-NPU node (TP8): the prefix-heavy GSM8K
+      # perf baseline gates the pool hit rate (a full miss collapses the
+      # shared-prefix throughput) and the accuracy baseline gates KV
+      # corruption. Engine/pool/env parameters are the validated A/B set -
+      # see the header of each YAML.
       - name: kv-pool-glm53-flash-w8a8-a2-tp8
         os: linux-aarch64-a2b3-8
-        tests: tests/SIT/cases/features/kv_pool/test_glm53_flash_kv_pool_ab_a2.py
+        config_file_path: GLM-5.3-Flash-W8A8-A2-Memcache-Pool-tier2.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
       - name: kv-pool-deepseek-v41-flash-a2-tp8
         os: linux-aarch64-a2b3-8
-        tests: tests/SIT/cases/features/kv_pool/test_deepseek_v41_flash_kv_pool_ab_a2.py
-      # YAML-driven tests
+        config_file_path: DeepSeek-V41-Flash-A2-Mooncake-Pool-tier2.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
+      # (other) YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
         os: linux-aarch64-a2b3-8
         config_file_path: Qwen3-30B-A3B-BF16-A2.yaml
