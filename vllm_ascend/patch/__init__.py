@@ -249,9 +249,9 @@
 #       MooncakeConnectorV2 the producer-side worker never produces a
 #       non-empty output (it reports receive results only, records no
 #       transfer stats, and leaves the remaining fields at their defaults),
-#       so the gate never opens. Once the KV cache is full, no new request
-#       can be scheduled to produce a step that reaches the hook, and every
-#       request deadlocks behind `capacity` until restart.
+#       so the gate never opens. Once the KV cache is full, no request can
+#       be scheduled any more, nothing advances, and every request deadlocks
+#       behind `capacity` until restart.
 #    How:
 #       Wrap `_process_engine_step`: when the step executed no model but the
 #       scheduler still has requests and a connector is installed, drain it
@@ -268,8 +268,7 @@
 #       https://github.com/vllm-project/vllm-ascend/pull/20755 (open; its
 #       worker-output ACK routing declares that it covers V2 idle steps)
 #       https://github.com/vllm-project/vllm/pull/66295 (withdrawn unmerged;
-#       it synthesized an empty output inside `update_from_output`, which a
-#       step that schedules no tokens never reaches)
+#       it synthesized the same empty output inside `update_from_output`)
 #    Future Plan:
 #       Transitional fix. Remove this patch and its platform import once
 #       #20755 lands in a pinned release and covers idle steps; re-run the

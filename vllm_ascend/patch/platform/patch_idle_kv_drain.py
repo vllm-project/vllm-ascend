@@ -21,9 +21,9 @@ results and the receiving thread exists on the decode role alone, while
 no code path records transfer stats and the remaining fields stay at their
 base-class defaults. ``is_empty()`` is therefore always true, the empty
 output is compacted away, and the gate stays closed - not only on idle
-steps but under normal traffic too. Once the KV cache fills up, no new
-request can be scheduled to produce a step that would reach the hook, so
-every request deadlocks behind ``capacity`` until the process is restarted.
+steps but under normal traffic too. Once the KV cache fills up, no request
+can be scheduled any more, so nothing advances and every request deadlocks
+behind ``capacity`` until the process is restarted.
 
 Upstream already knows about this window (the post-step hook yields the GIL
 for "delayed KV connector frees") but only sleeps. This patch drains the
