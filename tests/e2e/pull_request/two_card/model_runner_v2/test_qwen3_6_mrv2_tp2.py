@@ -133,3 +133,27 @@ def test_qwen3_6_moe_tp2_matches_golden() -> None:
         assert delta <= atol, f"{key}: step {index} delta {delta:.4f} > {atol}"
         worst = max(worst, delta)
     assert worst <= DECODE_ATOL
+
+
+@pytest.mark.e2e_model(MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="",
+    parallel="TP",
+    deploy="pd_mix",
+    quantization="W8A8",
+    hardware="A2",
+    graph_mode="eager",
+)
+def test_qwen3_6_moe_tp_exceeds_devices_reports_clear_error() -> None:
+    """TP larger than the visible cards must fail at startup with a device message.
+
+    The partition this file runs in exposes two NPUs, so tp=4 is unresolvable by
+    construction. The case documents the boundary behaviour the task book asks for
+    without depending on how many cards the host happens to have.
+    """
+    kwargs = _runner_kwargs() | {"tensor_parallel_size": 4, "enable_expert_parallel": False}
+    with patch.dict(os.environ, _COMMON_ENVS):
+        with pytest.raises(Exception, match=r"(?i)(device|world.?size|tensor.?parallel|card)"):
+            with VllmRunner(MODEL, **kwargs):
+                pass
