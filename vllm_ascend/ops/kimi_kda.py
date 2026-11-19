@@ -3,6 +3,7 @@
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
 from functools import wraps
+from os import getenv
 
 import torch
 import torch_npu
@@ -36,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTPLayout
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
@@ -64,7 +66,7 @@ _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
-    """Share one persistent F/beta/BFG compute stream across KDA layers."""
+    """Share one persistent auxiliary stream across KDA layers."""
     global _KDA_BFG_STREAM
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
@@ -447,12 +449,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         main = torch.npu.current_stream()
         aux = _kda_bfg_stream()
-        with npu_stream_switch(aux):
-            aux.wait_stream(main)
-            owner.record_stream(aux)
-            forget = self.f_b_proj(self.f_a_proj(owner)[0])[0]
+        q_hidden = owner
+        gather_work = None
+        if layout.group is not None:
+            q_hidden, gather_work = all_gather_async(owner, layout.group)
+        forget = self.f_b_proj(self.f_a_proj(owner)[0])[0]
+        if gather_work is not None:
+            gather_work.wait()
 
-        q_hidden = layout.group.all_gather(owner, dim=0) if layout.group is not None else owner
         with npu_stream_switch(aux):
             aux.wait_stream(main)
             q_hidden.record_stream(aux)
@@ -460,44 +464,66 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         quantized = self._quantize_fused_qkv(q_hidden)
         main.wait_stream(aux)
         beta.record_stream(main)
-        forget.record_stream(main)
         qkv = self._matmul_fused_qkv(quantized)
         core_out = hidden.new_zeros((1, capacity, self.local_num_heads, self.head_dim))
+
+        gate_layout = self.gate_layout
+        gate_hidden = owner
+        if gate_layout.group is layout.group:
+            gate_hidden = q_hidden
+        elif gate_layout.group is not None:
+            gate_hidden = gate_layout.group.all_gather(owner, dim=0)
+
+        packed_qkv_beta = None
+        qkv_beta_ready = None
         if layout.group is not None:
             if qkv.dtype != beta.dtype:
                 raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
-            received = layout.all_to_all(torch.cat((qkv, beta), dim=-1))
+            packed_qkv_beta = torch.cat((qkv, beta), dim=-1)
+            if getenv("HCCL_OP_EXPANSION_MODE") not in ("AIV", "AIV_ONLY"):
+                # The exchange must wait for packing, and can start while G runs on main.
+                qkv_beta_ready = main.record_event()
+        gate = self.g_proj(gate_hidden)[0]
+        if gate_layout.group is not None:
+            gate = gate.contiguous()
+        if packed_qkv_beta is not None:
+            if qkv_beta_ready is not None:
+                with npu_stream_switch(aux):
+                    aux.wait_event(qkv_beta_ready)
+                    packed_qkv_beta.record_stream(aux)
+                    received = layout.all_to_all(packed_qkv_beta)
+                main.wait_stream(aux)
+                received.record_stream(main)
+            else:
+                received = layout.all_to_all(packed_qkv_beta)
             qkv, beta = layout.restore_qkv_beta(received, capacity)
         else:
             beta = beta.unsqueeze(0)
         forget = forget.view(1, capacity, self.num_heads, self.head_dim)
 
-        owner_gate = None
+        received_gate = gate if gate_layout.group is None else None
 
-        def launch_gate():
-            nonlocal owner_gate
-            gate_layout = self.gate_layout
+        def launch_gate_exchange():
+            nonlocal received_gate
             with npu_stream_switch(aux):
-                # Fork after the first convolution. G and its exchange can run alongside the recurrent kernel.
+                # Only the G exchange forks after convolution, alongside the recurrent kernel.
                 aux.wait_stream(main)
-                gate_hidden = owner
-                if gate_layout.group is layout.group:
-                    gate_hidden = q_hidden
-                elif gate_layout.group is not None:
-                    gate_hidden = gate_layout.group.all_gather(owner, dim=0)
-                gate = self.g_proj(gate_hidden)[0]
-                if gate_layout.group is not None:
-                    gate = gate_layout.all_to_all(gate.contiguous())
-                owner_gate = gate_layout.restore_gate(gate, capacity)
+                gate.record_stream(aux)
+                received_gate = gate_layout.all_to_all(gate)
 
-        norm_input = self._forward_core(qkv, forget, beta, core_out, launch_gate=launch_gate)
-        if owner_gate is None:
-            # An idle owner still owes its peers their gate shards.
-            launch_gate()
-        main.wait_stream(aux)
-        assert owner_gate is not None
-        owner_gate.record_stream(main)
+        norm_input = self._forward_core(
+            qkv, forget, beta, core_out, launch_gate=launch_gate_exchange if gate_layout.group is not None else None
+        )
+        if gate_layout.group is not None:
+            if received_gate is None:
+                # An idle owner still owes its peers their gate shards.
+                launch_gate_exchange()
+            main.wait_stream(aux)
+            assert received_gate is not None
+            received_gate.record_stream(main)
         if norm_input is not None:
+            assert received_gate is not None
+            owner_gate = gate_layout.restore_gate(received_gate, capacity)
             self.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
             maybe_save_kv_layer_to_connector("", [])
         projected = self.o_proj(core_out.reshape(capacity, -1))[0]

@@ -806,7 +806,8 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
 
 @pytest.mark.parametrize("groups", ["shared", "distinct", "qkv_only", "gate_only"])
 @pytest.mark.parametrize("mode", ["decode", "verify", "mixed", "idle", "no_metadata"])
-def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
+@pytest.mark.parametrize("comm_mode", ["CCU_SCHED", "AIV", "AIV_ONLY"])
+def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode):
     """Trace stream submissions through the real KDA dispatch, including owners with no recurrent work."""
     trace = []
     main, aux = MagicMock(), MagicMock()
@@ -826,6 +827,19 @@ def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
 
     main.wait_stream.side_effect = lambda stream: mark("join")
     aux.wait_stream.side_effect = lambda stream: mark("fork")
+    pack_ready = object()
+
+    def record_event():
+        mark("pack_ready")
+        return pack_ready
+
+    def wait_event(event):
+        assert event is pack_ready
+        mark("wait_pack")
+
+    main.record_event.side_effect = record_event
+    aux.wait_event.side_effect = wait_event
+    monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", comm_mode)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: active)
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
     monkeypatch.setattr(projection_module, "_kda_bfg_stream", lambda: aux)
@@ -836,10 +850,15 @@ def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
         mark("AG")
         return torch.cat([hidden, hidden], dim=dim)
 
+    def gather_async(hidden, group):
+        mark("AG_submit")
+        return torch.cat([hidden, hidden]), SimpleNamespace(wait=lambda: mark("AG_wait"))
+
     def exchange(out, src, group):
-        mark("A2A")
+        mark("QKV_A2A" if src.shape[-1] == 3 * q_layout.width + q_layout.heads else "G_A2A")
         out.copy_(src)
 
+    monkeypatch.setattr(projection_module, "all_gather_async", gather_async)
     monkeypatch.setattr(common_projection.dist, "all_to_all_single", exchange)
     group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
     q_group = None if groups == "gate_only" else group
@@ -848,6 +867,13 @@ def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
         g_group = SimpleNamespace(world_size=2, device_group=object(), all_gather=gather)
     layout = common_projection.KDAInputProjectionTPLayout
     q_layout, g_layout = layout(q_group, 2, 2), layout(g_group, 2, 2)
+    restore_gate = g_layout.restore_gate
+
+    def restore(received, capacity):
+        mark("restore_G")
+        return restore_gate(received, capacity)
+
+    monkeypatch.setattr(g_layout, "restore_gate", restore)
 
     def linear(name, width):
         def apply(x):
@@ -941,27 +967,52 @@ def test_local_tp_gate_runs_on_aux_at_recurrence(monkeypatch, groups, mode):
     hidden = torch.ones((0 if mode == "idle" else 2, 4))
     layer._forward_local_tp = AscendKimiK3DeltaAttention._forward_local_tp.__get__(layer)
     output = AscendKimiK3DeltaAttention.forward(layer, hidden, torch.arange(len(hidden)))
-    assert trace.count(("AG", "main")) == int(q_group is not None)
-    assert trace.count(("AG", "aux")) == int(g_group is not None and g_group is not q_group)
-    assert trace.count(("A2A", "main")) == int(q_group is not None)
-    assert trace.count(("A2A", "aux")) == int(g_group is not None)
+    assert trace.count(("AG", "main")) == int(g_group is not None and g_group is not q_group)
+    assert trace.count(("AG_submit", "main")) == int(q_group is not None)
+    qkv_exchange_stream = "aux" if comm_mode == "CCU_SCHED" else "main"
+    assert trace.count(("QKV_A2A", qkv_exchange_stream)) == int(q_group is not None)
+    assert trace.count(("G_A2A", "aux")) == int(g_group is not None)
     assert (
-        trace.index(("beta", "aux"))
+        trace.index(("F_a", "main"))
+        < trace.index(("F_b", "main"))
+        < trace.index(("beta", "aux"))
         < trace.index(("quant", "main"))
         < trace.index(("join", "main"))
         < trace.index(("QKV", "main"))
+        < trace.index(("G", "main"))
     )
-    assert trace.count(("G", "aux")) == 1
-    gate_index = trace.index(("G", "aux"))
+    gate_index = trace.index(("G", "main"))
+    if q_group is not None:
+        qkv_exchange_index = trace.index(("QKV_A2A", qkv_exchange_stream))
+        assert gate_index < qkv_exchange_index
+        assert (
+            trace.index(("AG_submit", "main"))
+            < trace.index(("F_a", "main"))
+            < trace.index(("F_b", "main"))
+            < trace.index(("AG_wait", "main"))
+            < trace.index(("beta", "aux"))
+        )
+        if comm_mode == "CCU_SCHED":
+            assert trace.index(("pack_ready", "main")) < gate_index < trace.index(("wait_pack", "aux"))
+            assert trace[qkv_exchange_index + 1] == ("join", "main")
     if g_group is not None:
-        assert gate_index < trace.index(("A2A", "aux"))
+        gate_exchange_index = trace.index(("G_A2A", "aux"))
+        assert gate_index < gate_exchange_index
+        if q_group is not None:
+            assert qkv_exchange_index < gate_exchange_index
     if mode in ("idle", "no_metadata"):
+        assert ("restore_G", "main") not in trace
         assert ("norm", "main") not in trace
         torch.testing.assert_close(output, torch.zeros_like(hidden))
     else:
         first_kernel = "verify" if speculative else "recurrent"
-        assert trace.index(("conv", "main")) < gate_index < trace.index((first_kernel, "main"))
-        assert trace[-2:] == [("join", "main"), ("norm", "main")]
+        assert gate_index < trace.index(("conv", "main")) < trace.index((first_kernel, "main"))
+        if g_group is not None:
+            assert trace.index(("conv", "main")) < gate_exchange_index < trace.index((first_kernel, "main"))
+            assert trace[-3] == ("join", "main")
+        if mode == "mixed":
+            assert trace.index(("recurrent", "main")) < trace.index(("restore_G", "main"))
+        assert trace[-2:] == [("restore_G", "main"), ("norm", "main")]
         torch.testing.assert_close(output, torch.ones_like(hidden))
 
 
