@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
+"""GLM-5.3-Flash KDA layer with a fused convolution and a bounded safe gate."""
 
 import torch
 import torch.distributed as dist
@@ -104,10 +104,39 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
+def _fused_qkv_conv1d(
+    conv_size: int,
+    projection_size: int,
+    tp_size: int,
+    tp_rank: int,
+    prefix: str,
+    column_linear: type[ColumnParallelLinear] = ColumnParallelLinear,
+) -> ColumnParallelLinear:
+    """Load checkpoint Q/K/V shards into one TP- or PCP-sharded parameter."""
+    # The upstream module imports FLA, so defer it until worker device selection.
+    from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import _make_fused_conv1d_weight_loader
+
+    conv1d = column_linear(
+        input_size=conv_size,
+        output_size=3 * projection_size,
+        bias=False,
+        params_dtype=torch.float32,
+        prefix=prefix,
+    )
+    conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
+    delattr(conv1d.weight, "weight_loader")
+    set_weight_attrs(
+        conv1d.weight,
+        {"weight_loader": _make_fused_conv1d_weight_loader([projection_size] * 3, tp_size, tp_rank)},
+    )
+    return conv1d
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+    _merged_conv_weight: torch.Tensor | None
 
     def get_state_dtype(
         self,
@@ -196,40 +225,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.q_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.q_conv1d",
+        self.conv1d = _fused_qkv_conv1d(
+            self.conv_size,
+            projection_size,
+            self.tp_size,
+            self.tp_rank,
+            prefix=f"{prefix}.conv1d",
         )
-        self.k_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.k_conv1d",
-        )
-        self.v_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.v_conv1d",
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # Rebuilt by the deferred post-load hook while retaining the address
+        # captured by ACL graphs across weight updates.
+        self._merged_conv_weight = None
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
+        set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
 
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -272,6 +280,34 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        """Refresh the q|k|v convolution after initial loading and weight refits.
+
+        vLLM finalizes the projection children before calling this hook.
+        Updating the derived tensor in place preserves decode graph arguments across
+        every reload.
+        """
+        # v0.30.0 passes the activation dtype explicitly.
+        if act_dtype is None:
+            act_dtype = self.model_config.dtype
+        # AscendC consumes [kernel width, Q|K|V] in the activation dtype,
+        # unlike the checkpoint-shaped FP32 fused parameter.
+        merged = self.conv1d.weight.squeeze(1).transpose(0, 1).to(dtype=act_dtype, copy=True).contiguous()
+        # TODO: Use upstream refill_derived once all vLLM versions supported
+        # by vllm-ascend main provide it.
+        if self._merged_conv_weight is None:
+            self._merged_conv_weight = merged
+        else:
+            self._merged_conv_weight.copy_(merged)
+
+    def _a_log_weight_loader(self, param, loaded_weight):
+        # Accept checkpoint vectors as well as the legacy four-dimensional layout.
+        if loaded_weight.dim() == 1:
+            loaded_weight = loaded_weight.view(1, 1, -1, 1)
+        shard_size = param.shape[2]
+        default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * shard_size, shard_size))
 
     def get_attn_backend(self):
         return AscendGDNHostMetadataBackend
@@ -413,24 +449,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim preserves the independent q/k/v convolutions.
-        # The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = (
-                torch.cat(
-                    [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                    dim=0,
-                )
-                .transpose(0, 1)
-                .to(dtype=qkv_proj_states.dtype)
-                .contiguous()
-            )
         conv_weights = self._merged_conv_weight
+        assert conv_weights is not None, "KDA convolution weights must be processed before forward"
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
