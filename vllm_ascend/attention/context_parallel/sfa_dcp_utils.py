@@ -12,7 +12,7 @@ from vllm.utils.math_utils import cdiv
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
     """Return a byte view for FP8 tensors, preserving their bit patterns."""
-    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+    if x.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e8m0fnu):
         return x.view(torch.uint8)
     return x
 

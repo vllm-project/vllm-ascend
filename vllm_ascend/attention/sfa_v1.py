@@ -1,6 +1,6 @@
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, ClassVar, TypeVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import torch
 import torch_npu
@@ -8,6 +8,7 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -31,7 +32,8 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
-from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerCache
+from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -83,6 +85,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
+
+if TYPE_CHECKING:
+    from vllm_ascend.attention.sfa_shardq import SFAShardQMetadata
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
@@ -301,6 +306,7 @@ class SparseMLAMetadataState:
                 dtype=torch.float32,
                 device=device,
             )
+            self.shardq_sinks: torch.Tensor | None = None
 
     def prepare(self, metadata):
         expanded = metadata.block_table
@@ -329,6 +335,20 @@ class SparseMLAMetadataState:
             metadata.smla_metadata = self.metadata_buffer
             metadata.smla_sinks = self.sinks
         return metadata
+
+    def prepare_shardq(self, shardq: "SFAShardQMetadata", num_heads: int) -> None:
+        if not self.use_smla:
+            return
+        if self.shardq_sinks is None:
+            self.shardq_sinks = self.sinks.new_full((num_heads,), SMLA_DEFAULT_SINK_VALUE)
+        # Both calls are ordered on the attention stream and can reuse the
+        # plan scratch. Keep the already sliced tables and bind only the
+        # length/mask rows the operator will consume.
+        for view, sinks in ((shardq.decode, self.sinks), (shardq.attn_metadata, self.shardq_sinks)):
+            if view is not None:
+                view.smla_topk_length = self.length_buffer[: view.num_actual_tokens]
+                view.smla_valid_mask = self.valid_mask_buffer[: view.num_actual_tokens]
+                view.smla_sinks = sinks
 
 
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
@@ -480,6 +500,7 @@ class AscendSFAMetadata:
     smla_topk_length: torch.Tensor | None = None
     smla_valid_mask: torch.Tensor | None = None
     smla_sinks: torch.Tensor | None = None
+    shardq: "SFAShardQMetadata | None" = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -560,6 +581,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+        self.use_shardq = any(
+            getattr(vllm_config.compilation_config.static_forward_context[name].impl, "use_shardq", False) is True
+            for name in layer_names
+        )
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
@@ -730,6 +755,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         )
         if self.nope:
             self._prepare_nope_metadata(metadata, draft_index)
+        if getattr(self, "use_shardq", False) and draft_index is None:
+            from vllm_ascend.attention.sfa_shardq import build_sfa_shardq_metadata
+
+            metadata.shardq = build_sfa_shardq_metadata(common_attn_metadata, metadata, self.vllm_config)
+            if self.nope and metadata.shardq is not None:
+                self.nope_states[None].prepare_shardq(
+                    metadata.shardq, self.model_config.hf_text_config.num_attention_heads
+                )
         return metadata
 
     def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
@@ -907,6 +940,26 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_cache_dtype = self.vllm_config.cache_config.cache_dtype
         self.enable_sparse_sfa_turboquant = ascend_config.enable_sparse_sfa_turboquant
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        parallel = self.vllm_config.parallel_config
+        graph_mode = self.vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+        # Shared layers have no Indexer of their own. Their eligibility is
+        # finalized with the other users of the buffer after model construction.
+        indexer_type = type(getattr(self.indexer, "impl", None))
+        self.use_shardq = (
+            getattr(self.vllm_config.attention_config, "sparse_mla_shard_q", False) is True
+            and self.tp_size > 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and not self._is_mtp_layer
+            and (
+                (self.qk_rope_head_dim > 0 and (self.skip_topk or indexer_type is AscendSFAIndexerBackend))
+                or (self.qk_rope_head_dim == 0 and indexer_type is Glm5NextKPoolIndexerBackend)
+            )
+            and (not self.use_index_cache or self.topk_indices_buffer is not None)
+            and not self.store_kv_cache_on_host
+            and self.vllm_config.attention_config.hisparse_config is None
+            and graph_mode.mixed_mode() != CUDAGraphMode.FULL
+        )
         if self.enable_sparse_sfa_c8:
             self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
                 self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
@@ -980,6 +1033,33 @@ class AscendSFAImpl(MLAAttentionImpl):
     def runtime_has_indexer(self) -> bool:
         return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
+    def _configure_indexcache_shardq(self) -> None:
+        context = self.vllm_config.compilation_config.static_forward_context
+        layers = [
+            impl
+            for layer in context.values()
+            if isinstance(impl := getattr(layer, "impl", None), AscendSFAImpl)
+            and impl.topk_indices_buffer is self.topk_indices_buffer
+        ]
+        # Resolve the layout once per shared buffer, after all layers are registered.
+        if next((layer for layer in layers if layer.use_shardq), None) is not self:
+            return
+        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        crosses_pp = False
+        if pp_size > 1:
+            from vllm_ascend.worker.v2.pp_transport import pp_stage_requires_topk_indices
+
+            config = self.vllm_config.model_config.hf_config
+            crosses_pp = any(
+                pp_stage_requires_topk_indices(config, get_pp_indices(config.num_hidden_layers, rank, pp_size)[0])
+                for rank in range(1, pp_size)
+            )
+        # PP can reassemble tensors from different TP ranks, so a shared
+        # buffer sent across stages must keep its replicated row layout.
+        if crosses_pp or layers[0].skip_topk or not all(layer.use_shardq and layer.use_index_cache for layer in layers):
+            for layer in layers:
+                layer.use_shardq = False
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -993,6 +1073,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if self.use_shardq and self.use_index_cache:
+            self._configure_indexcache_shardq()
         # kv_b_proj is absorbed into W_UK/W_UV below and then disposed, so it never runs a
         # matmul. What matters is that whichever quant method owns it left a dense weight
         # behind; a quantized one would have replaced it with a layout we cannot split.
@@ -1770,6 +1852,41 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        shardq = getattr(attn_metadata, "shardq", None) if getattr(self, "use_shardq", False) else None
+        if shardq is not None:
+            from vllm.v1.attention.ops.shardq import shard_q, unshard_out
+
+            q = ql_nope.contiguous() if self.qk_rope_head_dim == 0 else (ql_nope, q_pe)
+            decode_q, prefill_q = shard_q(q, shardq)
+            num_decode_tokens = shardq.num_decode_tokens
+            decode_output = None
+            if shardq.decode is not None:
+                decode_nope, decode_pe = decode_q.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+                decode_output = self._execute_sparse_flash_attention_process(
+                    decode_nope,
+                    decode_pe,
+                    kv_cache,
+                    topk_indices[:num_decode_tokens],
+                    shardq.decode,
+                    shardq.decode.cum_query_lens,
+                    shardq.decode.seq_lens,
+                )
+            prefill_nope, prefill_pe = prefill_q.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            prefill_output = self._execute_sparse_flash_attention_process(
+                prefill_nope,
+                prefill_pe,
+                kv_cache,
+                topk_indices[num_decode_tokens:],
+                shardq.attn_metadata,
+                shardq.attn_metadata.cum_query_lens,
+                shardq.attn_metadata.seq_lens,
+            )
+            output = unshard_out(prefill_output, shardq, decode_output)
+            # Graph/DP padding is not exchanged, but V/O projection retains
+            # the input row count and writes into the caller's padded buffer.
+            if output.shape[0] < ql_nope.shape[0]:
+                output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, ql_nope.shape[0] - output.shape[0]))
+            return output
         if self.enable_sparse_sfa_turboquant:
             attn_out, _, _ = self._turboquant_sfa(
                 self._tq_rotate_query(ql_nope, q_pe),
@@ -2056,6 +2173,20 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.turboquant._initialize(hidden_states.device)
         if attn_metadata is None:
             # Profiling run.
+            if getattr(self, "use_shardq", False):
+                # The upstream generic exchange allocates Q packing, receive
+                # and output-restoration tensors dynamically. Account for their
+                # simultaneous peak before sizing KV; no persistent copy is
+                # needed. Zigzag owns at most two rounded chunks per request.
+                num_tokens = hidden_states.shape[0]
+                local_tokens = min(
+                    num_tokens,
+                    cdiv(num_tokens, self.tp_size) + 2 * self.vllm_config.scheduler_config.max_num_seqs,
+                )
+                exchange_rows = num_tokens + self.tp_size * local_tokens
+                _ = hidden_states.new_empty(
+                    (2 * exchange_rows, self.local_num_heads, 2 * self.kv_lora_rank + self.qk_rope_head_dim)
+                )
             return output.fill_(0)
 
         if self.qk_rope_head_dim == 0:
@@ -2088,6 +2219,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query = attn_metadata.cum_query_lens
         actual_seq_lengths_key = attn_metadata.seq_lens
         topk_num_tokens = num_input_tokens or hidden_states.shape[0]
+        shardq = attn_metadata.shardq if getattr(self, "use_shardq", False) else None
 
         fused_type: PreprocessType = self.preprocess_type
         # PROLOG_V3 serves every attention state (decode, spec decoding and
@@ -2215,6 +2347,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
             self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
+            if shardq is not None:
+                indexer_attn_metadata = replace(indexer_attn_metadata, shardq=shardq)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
@@ -2224,16 +2358,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             # Release pending indexer receive buffers after their consumer.
             k_hidden_states = None
-            if self.skip_topk:
-                topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-            elif self.use_index_cache and has_local_query:
+            if not self.skip_topk and self.use_index_cache and has_local_query:
                 self._update_indexcache_topk_indices(topk_indices)
-        elif self.skip_topk:
-            # Static shared-index layers keep no runtime indexer cache and
-            # only reuse the shared top-k indices.
-            topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-        else:
+        elif not self.skip_topk:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
+        if self.skip_topk:
+            if shardq is not None:
+                # Only the decode prefix and this rank's prefill rows were written.
+                topk_num_tokens = shardq.num_decode_tokens + shardq.attn_metadata.num_actual_tokens
+            topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
 
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
