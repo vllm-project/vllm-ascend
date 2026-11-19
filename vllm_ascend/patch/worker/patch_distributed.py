@@ -134,6 +134,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_cpu_custom_send_recv = False
         self.group_name = group_name
         self.group_ranks = group_ranks
+        self.dead_dp_ranks: set[int] = set()
+        # GroupCoordinator.cpu_all_reduce_ forwards this cached timeout.
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
 
         try:
             self._init_device_groups(create_cpu_group=True)

@@ -416,6 +416,11 @@ def is_internal_npu_format(tensor: torch.Tensor) -> bool:
     return int(torch_npu.get_npu_format(tensor)) not in (0, ACL_FORMAT_FRACTAL_ND)
 
 
+def transpose_expert_weight_last_two_dims(weight: torch.Tensor) -> torch.Tensor:
+    """Swap the last two dims into the NPU runtime layout."""
+    return weight.transpose(-2, -1).contiguous()
+
+
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow additional_config.weight_nz_mode

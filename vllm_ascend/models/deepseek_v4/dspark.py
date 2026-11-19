@@ -45,6 +45,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
+    AscendDeepseekV4ForCausalLM,
     DeepseekV2MixtureOfExperts,
     DeepseekV4DecoderLayer,
     DeepseekV4MoE,
@@ -129,7 +130,9 @@ class DeepseekV4DSparkModel(nn.Module):
             {
                 str(self.mtp_start_layer_idx + idx): DeepseekV4DecoderLayer(
                     vllm_config,
-                    prefix=f"mtp.{idx}",
+                    # Keep the parent prefix: quant description and FT reload
+                    # keys use the mapper's "model.mtp.N" namespace.
+                    prefix=maybe_prefix(prefix, f"mtp.{idx}"),
                     is_draft_layer=True,
                 )
                 for idx in range(self.num_dspark_layers)
@@ -152,14 +155,15 @@ class DeepseekV4DSparkModel(nn.Module):
         # ModelSlim chooses the quantization method according to the linear prefix.
         # context_wkv_proj is a synthetic runtime module and does not exist in the
         # checkpoint quantization description, so reuse the first DSpark WKV prefix
-        # when selecting its quantization scheme.
+        # when selecting its quantization scheme. The description keys on the
+        # mapped "model.mtp.N" namespace.
         self.context_wkv_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [config.head_dim] * self.num_dspark_layers,
             bias=False,
             return_bias=False,
             quant_config=vllm_config.quant_config,
-            prefix="mtp.0.self_attn.wkv",
+            prefix=maybe_prefix(prefix, "mtp.0.self_attn.wkv"),
             disable_tp=True,
         )
 
@@ -399,6 +403,9 @@ class DeepseekV4DSparkModel(nn.Module):
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
     draft_id_to_target_id = None
+    # Quantization lookup and FT reload use the same checkpoint-name mapping,
+    # e.g. mtp.0.ffn.experts.7.w1.weight -> model.mtp.0.mlp.experts.7.gate_proj.weight.
+    hf_to_vllm_mapper = AscendDeepseekV4ForCausalLM.hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
