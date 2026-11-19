@@ -34,7 +34,7 @@ permissions:
 jobs:
   rerun:
     name: Re-run failed CI jobs
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
     outputs:

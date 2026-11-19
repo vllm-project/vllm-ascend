@@ -75,7 +75,7 @@ jobs:
     # Self-hosted CPU label: this org has no GitHub-hosted runners, so
     # ubuntu-latest would queue forever. Lightweight artifact-download and
     # comment-posting steps only.
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Resolve source run id
         id: resolve-run

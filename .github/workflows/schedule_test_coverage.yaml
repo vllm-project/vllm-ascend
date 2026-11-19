@@ -45,7 +45,7 @@ concurrency:
 jobs:
   select-full-tests:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:

@@ -61,7 +61,7 @@ jobs:
   # Plan on CPU before allocating NPU runners; image tags come from mkdocs.yml.
   plan:
     name: Plan doctests
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-2-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
