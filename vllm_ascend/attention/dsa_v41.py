@@ -333,7 +333,7 @@ def scatter_cache_sk(
     cache = cache.squeeze(-2)
     indices = slot_mapping[: values.shape[0]]
     updates = values.to(cache.dtype).contiguous()
-    # A5 PP mirrors move packed bytes verbatim. ScatterNdUpdateSk accepts
+    # A5 PP mirrors move packed bytes verbatim. The scatter operator accepts
     # signed 8-bit elements, so use same-size views without converting data.
     if cache.dtype == torch.uint8:
         cache = cache.view(torch.int8)

@@ -16,6 +16,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 
 from tests.deepseek_v41_utils import allocate_cache_views, make_cache_config
+from vllm_ascend.attention.dsa_v41 import scatter_cache_sk
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41 import model as v41_model
 from vllm_ascend.models.deepseek_v41.cache_config import (
@@ -84,6 +85,26 @@ def _reference_gather(cache, slots, output):
 def _reference_scatter(cache, coordinates, values):
     valid = (coordinates[:, 0] >= 0) & (coordinates[:, 1] >= 0)
     cache.squeeze(-2)[coordinates[valid, 0].long(), coordinates[valid, 1].long()] = values[valid]
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.bfloat16, torch.float16])
+def test_scatter_preserves_packed_bytes_and_untouched_slots(monkeypatch, dtype):
+    cache = _plane(3, 4, 320, dtype, 23)
+    coordinates = torch.tensor([[1, 2], [-1, -1], [0, 0]], dtype=torch.int32)
+    values = torch.arange(960).reshape(3, 320).remainder(256).to(dtype).t().contiguous().t()
+    expected = cache.clone()
+    _reference_scatter(expected, coordinates, values)
+
+    def scatter(destination, indices, updates):
+        assert destination.dtype == (torch.int8 if dtype == torch.uint8 else dtype)
+        assert updates.dtype == destination.dtype and updates.is_contiguous()
+        assert destination.data_ptr() == cache.data_ptr()
+        assert destination.stride() == cache.squeeze(-2).stride()
+        _reference_scatter(destination, indices, updates)
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter, raising=False)
+    scatter_cache_sk(cache, coordinates, values)
+    torch.testing.assert_close(cache, expected, rtol=0, atol=0)
 
 
 def _shared(fill=0):
