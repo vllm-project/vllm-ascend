@@ -14,11 +14,13 @@
   `normed = bf16(s * rsqrt(mean(s * s) + eps) * scale)`, where
   `scale = weight + 1` for zero-centered weights and `weight` otherwise.
 - **Algorithm flow** — Assign contiguous row ranges to vector cores, load norm
-  weights once per core, and mask padded columns. Promote the activation to
-  FP32 on load, add the residual if present, and compute RMSNorm in FP32. The
-  store to the BF16 output performs the cast. Write an updated FP32 residual
+  weights once per core, and process one row per tile with padded columns masked.
+  Promote the activation to FP32 on load, add the residual if present, and
+  compute RMSNorm in FP32. The store to the BF16 output performs the cast.
+  Write an updated FP32 residual
   only when the input residual is present.
-- **Supported modes** — Ascend A5 with Triton in FP32 residual mode.
+- **Supported modes** — Step5 is adapted for Ascend 950DT (A5). Validation
+  of this model-specific Triton kernel covers 950DT with FP32 residual mode.
 
 ## Parameters
 
@@ -43,8 +45,8 @@
   reduce-scatter. Other cases use the existing path.
 - The custom op supplies fake output shape and dtype metadata for graph tracing.
   The A5 TP8 Step5 benchmark exercised `FULL_DECODE_ONLY` graph replay with MTP.
-- Row count is a non-specialized runtime argument. The tile, weight-centering and residual
-  flags, and pointer dtypes can produce different variants.
+- Row count is a non-specialized runtime argument. Tile width, weight centering,
+  residual presence, and pointer dtypes can produce different variants.
 
 ## Origin and Differences
 
@@ -65,3 +67,10 @@ BF16 output elements must satisfy the mixed tolerance with
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_add_rms_norm.py
 ```
+
+The single-card performance test compares the fused kernel with
+`Cast(FP32) → torch_npu.npu_add_rms_norm → Cast(BF16)`. Both paths use the same
+BF16 activations, FP32 residuals, and equivalent norm weights. The
+baseline's effective scale is precomputed outside the timed region.
+The test uses the Step-5-Preview hidden size of 4096 and epsilon of `1e-5`,
+and reports median NPU event time per call over warmed-up graph replays.

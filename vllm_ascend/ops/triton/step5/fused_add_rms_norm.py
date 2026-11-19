@@ -7,13 +7,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-# Use several rows per tile for narrow inputs. As the width of a row grows,
-# reduce the number of rows to limit vector-core local memory use.
-_SMALL_TILE_WIDTH = 1024
-_SMALL_TILE_ROWS = 16
-_MEDIUM_TILE_WIDTH = 2048
-_MEDIUM_TILE_ROWS = 4
-
 
 @triton.jit(do_not_specialize=["total_rows"])
 def _fused_add_rms_norm_cast_kernel(
@@ -27,9 +20,10 @@ def _fused_add_rms_norm_cast_kernel(
     hidden_size,
     HAS_RESIDUAL: tl.constexpr,
     ZERO_CENTERED: tl.constexpr,
-    BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
+    # Use one row per tile to minimize latency for small decode batches.
+    BLOCK_M: tl.constexpr = 1
     core_id = tl.program_id(0)
     core_num = tl.num_programs(0)
     rows_per_core = tl.cdiv(total_rows, core_num)
@@ -100,12 +94,6 @@ def _fused_add_rms_norm_cast_impl(
     total_rows = x.numel() // hidden_size
     grid = (min(get_vectorcore_num(), total_rows),)
     block_n = triton.next_power_of_2(hidden_size)
-    if block_n <= _SMALL_TILE_WIDTH:
-        block_m = _SMALL_TILE_ROWS
-    elif block_n <= _MEDIUM_TILE_WIDTH:
-        block_m = _MEDIUM_TILE_ROWS
-    else:
-        block_m = 1
     _fused_add_rms_norm_cast_kernel[grid](
         x,
         residual,
@@ -117,7 +105,6 @@ def _fused_add_rms_norm_cast_impl(
         hidden_size,
         HAS_RESIDUAL=residual is not None,
         ZERO_CENTERED=zero_centered,
-        BLOCK_M=block_m,
         BLOCK_N=block_n,
     )
     return outputs
