@@ -25,6 +25,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.selector import _cached_get_attn_backend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
@@ -98,7 +99,14 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
+        # The upstream selection cache does not include model_tag. A draft with
+        # the same geometry as the target must still run the draft-only selector.
+        # Clear again on exit so later target layers cannot inherit draft routing.
+        _cached_get_attn_backend.cache_clear()
+        try:
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        finally:
+            _cached_get_attn_backend.cache_clear()
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -232,6 +240,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 block_tables,
                 target_input_buffers,
                 target_attn_groups,
+                # vLLM main initializes draft groups with the kernel block sizes
+                # selected for the shared KV allocation (0.33 predates this).
+                *(() if vllm_version_is("0.33.0") else (getattr(block_tables, "kernel_block_sizes", None),)),
             )
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
