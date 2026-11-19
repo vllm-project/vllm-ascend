@@ -19,6 +19,13 @@ from torch import nn
 
 ROOT = Path(__file__).resolve().parents[3]
 
+_pp_state = threading.local()
+
+
+def _pp_group():
+    # CPU stand-in for the release mixin's get_pp_group in BaseModel below.
+    return getattr(_pp_state, "pp", SimpleNamespace(is_first_rank=True, is_last_rank=True))
+
 
 def _keep_definition(item, allowed):
     if getattr(item, "name", None) in allowed:
@@ -83,9 +90,13 @@ class BaseModel(nn.Module):
     _aux_upstream_total_cached = 0
 
     def _cache_aux_pp_layout(self):
-        # Upstream EagleModelMixin caches post-layer aux slots with <= start.
-        self._aux_slot_base_cached = bisect_right(self.aux_hidden_state_layers, self.start_layer)
-        self._aux_upstream_total_cached = self._aux_slot_base_cached
+        # Upstream EagleModelMixin caches post-layer aux slots with <= start;
+        # middle stages do not collect them - the runner relays the payload.
+        pp = _pp_group()
+        if not pp.is_first_rank:
+            self._aux_slot_base_cached = bisect_right(self.aux_hidden_state_layers, self.start_layer)
+        if pp.is_last_rank:
+            self._aux_upstream_total_cached = self._aux_slot_base_cached
 
     def pack_local_aux_hidden_states(self, aux_hidden_states):
         # v0.34.0 carries the cumulative aux payload through the PP tensors.
@@ -371,20 +382,16 @@ def native_aux_runtime(runtime, monkeypatch):
         _cache_aux_pp_layout = EagleModelMixin._cache_aux_pp_layout
         _set_aux_hidden_state_layers = EagleModelMixin._set_aux_hidden_state_layers
         pack_local_aux_hidden_states = EagleModelMixin.pack_local_aux_hidden_states
+        # Bind the installed collector explicitly: BaseModel's stub shadows it
+        # through the MRO. main returns [] (the runner merges the upstream
+        # states); v0.34.0 returns the relayed upstream slots on the last rank.
+        collect_remote_aux_hidden_states = EagleModelMixin.collect_remote_aux_hidden_states
         AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     # vLLM main exposes the slot-key contract; v0.34.0 relays the cumulative
     # payload through the mixin's collect_remote_aux_hidden_states instead.
     if hasattr(EagleModelMixin, "aux_hidden_state_slot_keys"):
         NativeBase.aux_hidden_state_slot_keys = EagleModelMixin.aux_hidden_state_slot_keys
-    if not hasattr(EagleModelMixin, "_aux_upstream_total_cached"):
-        # Alias the original test's legacy diagnostic to native receive slots.
-        # vLLM main no longer has or needs this attribute.
-        setattr(  # noqa: B010 - install the main-only diagnostic descriptor on the test class
-            NativeBase,
-            "_aux_upstream_total_cached",
-            property(lambda self: self._aux_slot_base_cached if context.pp.is_last_rank else 0),
-        )
     namespace.update(BaseModel=NativeBase)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
@@ -469,6 +476,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
         intermediate = None
         for stage, (start, end) in enumerate(zip(cuts, cuts[1:])):
             context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == len(cuts) - 2)
+            _pp_state.pp = context.pp
             context.forward = SimpleNamespace(is_padding=torch.zeros(num_tokens, dtype=torch.bool))
             model = make_model(namespace, context, start, end, block_size, sp, materialized)
             if intermediate is not None:
@@ -477,7 +485,8 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 buffers = model.make_empty_intermediate_tensors(capacity, dtype, "cpu")
                 assert buffers.tensors.keys() == intermediate.tensors.keys()
                 assert model._aux_slot_base_cached == len(intermediate.tensors) - 2
-                if context.pp.is_last_rank:
+                if context.pp.is_last_rank and hasattr(model, "_aux_upstream_total_cached"):
+                    # v0.34.0's mixin totals the upstream slots on the last rank.
                     assert model._aux_upstream_total_cached == len(intermediate.tensors) - 2
                 # Boundary tensors are full-sequence replicas under the
                 # stage-boundary gather contract.
@@ -499,6 +508,14 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 assert not context.forward.is_padding.any()
             if context.pp.is_last_rank:
                 return output
+            if intermediate is not None:
+                # The runner relays the received upstream slots into the
+                # outgoing payload (PPHandler.relay_aux_hidden_states); the
+                # native fixture already relays inside its runner hook, so
+                # merge only what is still missing to keep the payload
+                # cumulative across the hop.
+                relayed = {k: v for k, v in intermediate.tensors.items() if k not in output.tensors}
+                output = IntermediateTensors({**relayed, **output.tensors})
             intermediate = output
 
     with ThreadPoolExecutor(max_workers=tp) as pool:
