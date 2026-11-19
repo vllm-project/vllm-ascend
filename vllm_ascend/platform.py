@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import torch
@@ -71,12 +71,16 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    MLAPrefillBackend = None
+    MLAPrefillSelectorConfig = None
     AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
@@ -395,6 +399,14 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Eager side-effect import: registers the Ascend KV-cache dtype
+        # handlers (fp8 -> torch.float8_e4m3fn, int8, mxfp8) via vLLM's
+        # register_kv_cache_dtype mechanism. This runs in the launcher
+        # process, so CacheConfig._validate_cache_dtype sees the registered
+        # dtypes. Worker processes re-run the registration through the eager
+        # import in vllm_ascend/worker/worker.py.
+        from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -404,13 +416,13 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
             # Same pattern for --kv-cache-dtype: the argparse choices were
-            # built from the upstream CacheDType Literal before this patch
-            # widened it, so append the Ascend-only dtypes here.
+            # built before the Ascend handlers were registered, so append
+            # every registered dtype here (including int8/mxfp8).
             dtype_action = parser._option_string_actions.get("--kv-cache-dtype")
             if dtype_action and hasattr(dtype_action, "choices") and dtype_action.choices:
-                from vllm.config.cache import CacheConfig
+                from vllm.config.cache import KV_CACHE_DTYPES
 
-                for dtype in get_args(CacheConfig.__dataclass_fields__["cache_dtype"].type):
+                for dtype in KV_CACHE_DTYPES:
                     if dtype not in dtype_action.choices:
                         dtype_action.choices.append(dtype)
 
@@ -495,6 +507,15 @@ class NPUPlatform(Platform):
             else:
                 return
             cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+
+    @classmethod
+    def get_mla_prefill_backend_cls(cls, mla_selector_config: MLAPrefillSelectorConfig) -> type[MLAPrefillBackend]:
+        # Ascend's AscendSFAImpl/AscendMLAImpl handles the full MLA forward
+        # pass (including prefill) via impl.forward(), so return the no-op
+        # Ascend backend instead of the CUDA capability-based selection.
+        from vllm_ascend.attention.mla_prefill import AscendMLAPrefillBackend
+
+        return AscendMLAPrefillBackend
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
@@ -648,6 +669,7 @@ class NPUPlatform(Platform):
         _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_deepseek_v41_adaptive_config(vllm_config)
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
@@ -855,8 +877,12 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         return
 
     sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
-    sparse_freq = sparse_config.get("sparse_attention_freq") or []
-    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    if sparse_config:
+        sparse_freq = sparse_config.get("sparse_attention_freq") or []
+        sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    else:
+        layer_types = getattr(text_config, "layer_types", None) or ()
+        sparse_layer_ids = {i for i, layer_type in enumerate(layer_types) if layer_type == "minimax_m3_sparse"}
     gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
     if not gqa_layer_ids:
         return
@@ -2196,6 +2222,26 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     if num_experts == 384:
         return "V4 Pro"
     return None
+
+
+def _validate_deepseek_v41_adaptive_config(vllm_config: VllmConfig) -> None:
+    spec = vllm_config.speculative_config
+    if spec is None or not spec.enable_adaptive_verification:
+        return
+    if _get_deepseek_v4_variant(vllm_config.model_config) != "V4.1":
+        return
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_size = parallel.decode_context_parallel_size
+    # CP partitions from host boundaries, which do not describe the per-request
+    # draft budgets allocated on device by adaptive verification.
+    if pcp_size > 1 or dcp_size > 1:
+        raise ValueError(
+            "DeepSeek V4.1 adaptive verification on Ascend does not support "
+            f"context parallelism (PCP={pcp_size}, DCP={dcp_size}). "
+            "Set --prefill-context-parallel-size 1 and --decode-context-parallel-size 1, "
+            "or set enable_adaptive_verification=false in --speculative-config."
+        )
 
 
 def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:

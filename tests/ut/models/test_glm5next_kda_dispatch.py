@@ -49,7 +49,9 @@ def test_projection_tp_uses_shared_kda_boundary_with_live_metadata(monkeypatch, 
     library = torch.library.Library("vllm", "IMPL", "CPU")
     hidden = torch.arange(8, dtype=torch.float32).view(2, 4)
     try:
-        library.impl(name, getattr(model_kda, name))
+        # CPU-platform runs already register the kernel when importing KDA.
+        if not torch._C._dispatch_has_kernel_for_dispatch_key(f"vllm::{name}", "CPU"):
+            library.impl(name, getattr(model_kda, name))
         with torch.inference_mode():
             compiled = torch.compile(layer, backend="eager", fullgraph=True)
             torch.testing.assert_close(compiled(hidden, torch.arange(2)), torch.zeros_like(hidden))
@@ -126,10 +128,12 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
         projection.reduce_results = True
         projection.return_bias = True
         projection.quant_method = SimpleNamespace(apply=lambda _, inputs, bias: inputs)
-        projection.tp_group = SimpleNamespace(
+        projection.pcp_group = SimpleNamespace(
+            world_size=pcp_size,
             all_reduce=Mock(side_effect=lambda values: values),
             reduce_scatter=Mock(side_effect=lambda values, dim: values.chunk(pcp_size, dim=dim)[pcp_rank]),
         )
+        projection.tp_group = SimpleNamespace(world_size=1)
         layer.o_proj = projection
     seen = []
 
@@ -180,10 +184,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     assert torch.count_nonzero(output[:, 1]) == 0
     if pcp_projection:
         use_reduce_scatter = uses_pcp_prefill and not mixed
-        assert projection.tp_group.reduce_scatter.call_count == int(use_reduce_scatter)
-        assert projection.tp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
+        assert projection.pcp_group.reduce_scatter.call_count == int(use_reduce_scatter)
+        assert projection.pcp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
         if mixed and pcp_size > 1:
-            assert projection.tp_group.all_reduce.call_args.args[0].shape[0] == 6
+            assert projection.pcp_group.all_reduce.call_args.args[0].shape[0] == 6
 
 
 @pytest.mark.parametrize("recover", [False, True])
@@ -237,10 +241,12 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     layer._merged_conv_weight = None
     # Checkpoints retain FP32 convolution weights; AscendC needs the activation
     # dtype and [width, q|k|v] ordering in the cached packed weight.
-    for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
-        setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
+    layer.conv1d = SimpleNamespace(
+        weight=torch.arange(1, 4).repeat_interleave(128).float().view(384, 1, 1).expand(-1, 1, 4)
+    )
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
+    layer.process_weights_after_loading(torch.bfloat16)
     tokens = 2 if spec_only else (5 if speculative else 4)
     metadata = object.__new__(model_kda.GDNAttentionMetadata)
     values = dict(
