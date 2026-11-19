@@ -40,18 +40,18 @@ Diff Coverage column. The output is a 4x3 markdown table:
     | ------------ | --------------   | ------------- |
     | **Total**    | 145055 lines     | 191 lines     |
     | **Missing**  | 41592 lines      | 85 lines      |
-    | **Coverage** | [REDACTED] <b>71%</b>    | [REDACTED] <b>55%</b> |
+    | **Coverage** | <b>71%</b> | <span style="color:red">55%</span> |
 
-Coverage cells render with a red indicator (U+1F7E5) when below the
-threshold (Total < 70%, Diff < 80%), bold when at/above.
+Coverage cells render with red inline text (<span style="color:red">) when
+below the threshold (Total < 70%, Diff < 80%), bold when at/above.
 """
 
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import regex as re
-from pathlib import Path
 
 
 def _parse_bullet(line: str) -> tuple:
@@ -122,12 +122,12 @@ def extract_total_coverage(json_text: str) -> dict | None:
 
 
 def _fmt_coverage(pct: float, threshold: float) -> str:
-    """Format a coverage cell: red circle below threshold, bold at/above."""
+    """Format a coverage cell: red text below threshold, bold at/above."""
     pct_str = f"{pct}%"
     if isinstance(pct, float) and pct.is_integer():
         pct_str = f"{int(pct)}%"
     if pct < threshold:
-        return f"\U0001f7e5 <b>{pct_str}</b>"
+        return f'<span style="color:red">{pct_str}</span>'
     return f"<b>{pct_str}</b>"
 
 
