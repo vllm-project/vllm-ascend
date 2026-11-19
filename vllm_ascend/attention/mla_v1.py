@@ -98,6 +98,8 @@ BUILD_METADATA_STEP_DECODE = 1
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+# CANN aclnnMlaPrologV3 operator strictly restricts Hcq (q_lora_rank) to 1536 or 2048.
+PROLOG_V3_SUPPORTED_Q_LORA_RANKS = (1536, 2048)
 PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
 
@@ -1904,6 +1906,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.fused_qkv_a_proj is not None
             and self.q_proj is not None
             and self.q_lora_rank is not None
+            and self.q_lora_rank in PROLOG_V3_SUPPORTED_Q_LORA_RANKS
             and self.q_a_layernorm is not None
             and self.kv_a_layernorm is not None
         )
@@ -2042,6 +2045,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None, "PROLOG_V3 requires fused_qkv_a_proj"
         assert self.q_proj is not None, "PROLOG_V3 requires q_proj"
         assert self.q_lora_rank is not None, "PROLOG_V3 requires q_lora_rank"
+        assert self.q_lora_rank in PROLOG_V3_SUPPORTED_Q_LORA_RANKS, (
+            f"PROLOG_V3 requires q_lora_rank in {PROLOG_V3_SUPPORTED_Q_LORA_RANKS}, got {self.q_lora_rank}"
+        )
         assert self.q_a_layernorm is not None, "PROLOG_V3 requires q_a_layernorm"
         assert self.kv_a_layernorm is not None, "PROLOG_V3 requires kv_a_layernorm"
         # Bound the KV-A slice when Kimi-K3 fused its output gate into the
