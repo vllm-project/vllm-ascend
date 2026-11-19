@@ -3,10 +3,10 @@
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +40,9 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+
+if TYPE_CHECKING:
+    from vllm_ascend.attention.sfa_shardq import SFAShardQMetadata
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -234,6 +237,34 @@ class AscendIndexerKPoolMetadata:
     pcp_local_token_count: int = 0
     # Per-rank contiguous scoring slice, or None for the replicated path.
     indexer_row_shard: AscendIndexerKPoolRowShard | None = None
+    shardq: "SFAShardQMetadata | None" = None
+
+
+def _shardq_scoring_view(
+    metadata: AscendIndexerKPoolMetadata, shardq: "SFAShardQMetadata"
+) -> tuple[torch.Tensor, AscendIndexerKPoolMetadata]:
+    prefill = shardq.attn_metadata
+    rows = shardq.query_indices
+    block_table = metadata.block_table[shardq.prefill_request_ids]
+    visible = prefill.seq_lens.to(metadata.seq_lens.dtype)
+    assert metadata.cum_query_lens is not None
+    query_ends = prefill.cum_query_lens.to(metadata.cum_query_lens.dtype)
+    if shardq.decode is not None:
+        decode = shardq.decode
+        num_decodes = decode.seq_lens.numel()
+        block_table = torch.cat((metadata.block_table[:num_decodes], block_table))
+        visible = torch.cat((decode.seq_lens.to(visible.dtype), visible))
+        query_ends = torch.cat((metadata.cum_query_lens[:num_decodes], query_ends + shardq.num_decode_tokens))
+    # Use each fragment's exact token length, including the partial pool.
+    # Packing reads the original per-token positions, not compact row IDs.
+    return rows, replace(
+        metadata,
+        block_table=block_table,
+        seq_lens=visible // metadata.compress_ratio,
+        pool_tail=visible % metadata.compress_ratio,
+        cum_query_lens=query_ends,
+        positions=metadata.positions[rows],
+    )
 
 
 @dataclass
@@ -934,18 +965,19 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         assert self._head_weight_f32 is not None
         q_values = None
         weights = None
+        shardq_scoring = None
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
-            # Under TP row sharding only the rank's slice of the query
-            # projections is scored; the cache writes below still consume the
-            # full batch hidden states.
-            row_shard = indexer_metadata.indexer_row_shard
-            row_start, row_stop = 0, num_tokens
-            if row_shard is not None:
-                row_start, row_stop = row_shard.start, row_shard.stop
-            q_values = self.wq_b(q_c[row_start:row_stop])[0].view(row_stop - row_start, self.n_head, self.head_dim)
-            weights = F.linear(hidden[row_start:row_stop].float(), self._head_weight_f32).to(q_values.dtype)
+            # Project only the scoring rows. Cache writes below still
+            # consume the full batch hidden states.
+            rows: slice | torch.Tensor = slice(0, num_tokens)
+            if indexer_metadata.shardq is not None:
+                rows, shardq_scoring = _shardq_scoring_view(indexer_metadata, indexer_metadata.shardq)
+            elif (row_shard := indexer_metadata.indexer_row_shard) is not None:
+                rows = slice(row_shard.start, row_shard.stop)
+            q_values = self.wq_b(q_c[rows])[0].view(-1, self.n_head, self.head_dim)
+            weights = F.linear(hidden[rows].float(), self._head_weight_f32).to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
@@ -961,6 +993,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_metadata,
             compute_topk=compute_topk,
             indexer_scale_cache=scale_caches[0] if scale_caches else None,
+            shardq_scoring=shardq_scoring,
         )
 
     def _init_cann_ops(self) -> None:
@@ -1001,6 +1034,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         *,
         compute_topk: bool,
         indexer_scale_cache: torch.Tensor | None = None,
+        shardq_scoring: AscendIndexerKPoolMetadata | None = None,
     ) -> torch.Tensor | None:
         cache_metadata = indexer_metadata.write_metadata or indexer_metadata
         num_tokens = q_values.shape[0] if q_values is not None else indexer_metadata.positions.shape[0]
@@ -1116,14 +1150,14 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # slice only; every sliced row still scores its full visible key
         # history, so the packed indices are bitwise-equal to the
         # replicated path before the exchange restores the global row order.
-        row_shard = indexer_metadata.indexer_row_shard
+        row_shard = indexer_metadata.indexer_row_shard if shardq_scoring is None else None
         if row_shard is not None:
             scoring: AscendIndexerKPoolRowShard | AscendIndexerKPoolMetadata = row_shard
             output_buffer: torch.Tensor | None = (
                 self.topk_indices_buffer[row_shard.start :] if self.topk_indices_buffer is not None else None
             )
         else:
-            scoring = indexer_metadata
+            scoring = shardq_scoring if shardq_scoring is not None else indexer_metadata
             output_buffer = self.topk_indices_buffer
         if quantized:
             assert indexer_scale_cache is not None
@@ -1140,7 +1174,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             scoring.pool_tail,
             actual_seq_q=scoring.cum_query_lens,
             actual_seq_k=scoring.seq_lens,
-            block_table=row_shard.block_table if row_shard is not None else indexer_metadata.block_table,
+            block_table=scoring.block_table,
             layout_q="TND",
             layout_k="PA_BBND",
             topk=self.topk_tokens,

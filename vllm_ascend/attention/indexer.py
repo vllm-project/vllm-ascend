@@ -2,7 +2,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import scipy.linalg  # type: ignore
@@ -35,6 +35,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    as_byte_view,
     build_sfa_dcp_replicated_block_table,
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
@@ -58,6 +59,9 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, wait_for_device_metadata
+
+if TYPE_CHECKING:
+    from vllm_ascend.attention.sfa_shardq import SFAShardQMetadata
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.indexer_quant_cache_int8 import (
@@ -121,6 +125,7 @@ class AscendSFAIndexerMetadata:
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
+    shardq: "SFAShardQMetadata | None" = None
     local_visible_lengths: torch.Tensor | None = None
     # Shared verbatim by the A5 metadata producer and QLI consumer.
     qli_dcp_args: dict[str, Any] | None = None
@@ -786,8 +791,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k_hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        q_rope: tuple[torch.Tensor, torch.Tensor],
+        k_rope: tuple[torch.Tensor, torch.Tensor],
         fuse_cache: bool,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Size], torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Pair Q Cube/K Vector, then Q Vector/K Cube; join before cache writes."""
@@ -797,12 +802,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         kw, _ = self.wk_weights_proj(k_hidden_states)
         q_stream.wait_stream(main_stream)
         with torch_npu.npu.stream(q_stream):
-            q_li = self._project_q(hidden_states, q_c, cos, sin)
+            q_li = self._project_q(hidden_states, q_c, *q_rope)
             q_shape = q_li.shape
             q_hadamard = q_li @ self.q_hadamard
             for value in q_c if isinstance(q_c, tuple) else (q_c,):
                 value.record_stream(q_stream)
-        k_li, indexer_weights = self._project_k(k_hidden_states, cos, sin, projected_kw=kw)
+        k_li, indexer_weights = self._project_k(k_hidden_states, *k_rope, projected_kw=kw)
 
         # These two event edges form a stage boundary: both Q Hadamard and
         # K LayerNorm must finish before Q quantization / K Hadamard begin.
@@ -868,11 +873,26 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         inputs."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
+        shardq = getattr(indexer_metadata, "shardq", None) if compute_topk else None
+        rows = shardq.query_indices if shardq is not None else None
+        q_rope = (cos, sin)
+        if rows is not None:
+            # Select before Q projection. K and its RoPE/cache still see the full batch.
+            if isinstance(q_c, tuple):
+                q_values, q_scale = q_c
+                q_c = (
+                    as_byte_view(q_values)[rows].view(q_values.dtype),
+                    as_byte_view(q_scale)[rows].view(q_scale.dtype),
+                )
+            else:
+                q_c = q_c[rows]
+            if cos is not None and sin is not None:
+                q_rope = (cos[rows], sin[rows])
         q_stream, fuse_cache, fuse_store = self._select_execution_paths(k_hidden_states, indexer_metadata, compute_topk)
         q_result = None
         if q_stream is not None:
             q_result, k_li, k_li_scale, indexer_weights = self._forward_qk(
-                hidden_states, q_c, k_hidden_states, cos, sin, fuse_cache
+                hidden_states, q_c, k_hidden_states, q_rope, (cos, sin), fuse_cache
             )
         elif fuse_cache:
             k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, quantize=False)
@@ -916,15 +936,19 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             # The k path already ran wk_weights_proj on these hidden states
             # (SFA hands both stages the same tensor); reuse its weights tail
             # instead of duplicating the GEMM.
-            weights = indexer_weights
+            weights = indexer_weights if rows is None else indexer_weights[rows]
         else:
-            kw, _ = self.wk_weights_proj(hidden_states)
+            kw, _ = self.wk_weights_proj(hidden_states if rows is None else hidden_states[rows])
             weights = kw[:, self.head_dim :]
 
         if q_result is None:
-            q_result = self._forward_q(hidden_states, q_c, cos, sin)
+            q_result = self._forward_q(hidden_states, q_c, *q_rope)
         q_li, q_li_scale, q_li_shape_ori = q_result
 
+        if shardq is not None:
+            from vllm_ascend.attention.sfa_shardq import select_shardq_topk
+
+            return select_shardq_topk(q_li, weights, self, indexer_metadata, q_li_scale, shardq=shardq)
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
