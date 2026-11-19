@@ -66,3 +66,97 @@ def test_mhc_native_ops_preserve_deferred_mixing_and_input_norm(monkeypatch, pos
     for value, expected in zip(actual, (mixed, next_post, next_comb, next_y)):
         torch.testing.assert_close(value, expected)
     torch.testing.assert_close(residual, original)
+
+
+def test_mega_mhc_post_pre_maps_glm_inputs_and_outputs(monkeypatch):
+    layer = Glm5NextDecoderLayer.__new__(Glm5NextDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.n = 4
+    layer.mhc_sinkhorn_iterations = 20
+    layer.rms_norm_eps = 1e-6
+    layer.hc_eps = 2e-6
+    layer.mhc_post_mult_value = 2.0
+    layer._use_mega_mhc = True
+
+    x = torch.randn(3, 8).bfloat16()
+    residual = torch.randn(3, 4, 8).bfloat16()
+    post = torch.randn(3, 4, 1)
+    comb = torch.randn(3, 4, 4)
+    fn = torch.randn(24, 32)
+    scale = torch.tensor([0.5, 0.6, 0.7])
+    base = torch.randn(24)
+    norm_weight = torch.linspace(0.5, 1.5, 8).bfloat16()
+    norm_eps = 1e-5
+    expected = (
+        torch.randn_like(residual),
+        torch.randn_like(post),
+        torch.randn_like(comb),
+        torch.randn_like(x),
+    )
+    captured = {}
+
+    def mega_mhc(*args):
+        captured["args"] = args
+        return expected
+
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_mega_mhc", mega_mhc, raising=False)
+    monkeypatch.setattr(layer, "hc_post", lambda *args: pytest.fail("legacy hc_post should not be called"))
+    monkeypatch.setattr(layer, "hc_pre", lambda *args, **kwargs: pytest.fail("legacy hc_pre should not be called"))
+
+    actual = layer.hc_post_pre(x, residual, post, comb, fn, scale, base, norm_weight, norm_eps)
+
+    assert all(actual_value is expected_value for actual_value, expected_value in zip(actual, expected))
+    args = captured["args"]
+    assert all(actual is expected for actual, expected in zip(args[:7], (x, residual, post, comb, fn, scale, base)))
+    assert args[7].dtype == torch.float32
+    torch.testing.assert_close(args[7], norm_weight.float())
+    assert args[8:] == (4, 20, norm_eps, layer.rms_norm_eps, layer.hc_eps, layer.mhc_post_mult_value)
+
+
+@pytest.mark.parametrize(
+    ("mega_enabled", "with_norm", "x_dtype"),
+    [
+        (False, True, torch.bfloat16),
+        (True, False, torch.bfloat16),
+        (True, True, torch.float16),
+        (True, True, torch.float32),
+    ],
+)
+def test_mega_mhc_post_pre_preserves_legacy_fallback(monkeypatch, mega_enabled, with_norm, x_dtype):
+    layer = Glm5NextDecoderLayer.__new__(Glm5NextDecoderLayer)
+    nn.Module.__init__(layer)
+    layer._use_mega_mhc = mega_enabled
+
+    x = torch.randn(3, 8, dtype=x_dtype)
+    residual = torch.randn(3, 4, 8, dtype=x_dtype)
+    post = torch.randn(3, 4, 1)
+    comb = torch.randn(3, 4, 4)
+    fn = torch.randn(24, 32)
+    scale = torch.tensor([0.5, 0.6, 0.7])
+    base = torch.randn(24)
+    norm_weight = torch.randn(8) if with_norm else None
+    expected = (residual.clone(), post.clone(), comb.clone(), x.clone())
+    calls = []
+
+    def legacy_post(*args):
+        calls.append("post")
+        return expected[0]
+
+    def legacy_pre(*args, **kwargs):
+        calls.append("pre")
+        assert kwargs["norm_weight"] is norm_weight
+        return expected[1:]
+
+    monkeypatch.setattr(layer, "hc_post", legacy_post)
+    monkeypatch.setattr(layer, "hc_pre", legacy_pre)
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "npu_mega_mhc",
+        lambda *args: pytest.fail("MegaMhc should not be called on the fallback path"),
+        raising=False,
+    )
+
+    actual = layer.hc_post_pre(x, residual, post, comb, fn, scale, base, norm_weight, 1e-5)
+
+    assert all(actual_value is expected_value for actual_value, expected_value in zip(actual, expected))
+    assert calls == ["post", "pre"]

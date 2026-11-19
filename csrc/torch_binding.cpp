@@ -1709,6 +1709,80 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_npu(
     return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mega_mhc_npu(
+    const at::Tensor& x, const at::Tensor& residual, const at::Tensor& post, const at::Tensor& comb,
+    const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base, const at::Tensor& norm_weight,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_norm_eps, double hc_pre_eps,
+    double hc_post_scale)
+{
+    constexpr int64_t MEGA_MHC_HC_MULT = 4;
+    constexpr int64_t MEGA_MHC_MIN_HIDDEN_SIZE = 16;
+    constexpr int64_t MEGA_MHC_MAX_HIDDEN_SIZE = 16384;
+    constexpr int64_t MEGA_MHC_HIDDEN_ALIGNMENT = 16;
+    constexpr int64_t MEGA_MHC_HF32 = 1;
+    constexpr int64_t MEGA_MHC_NO_SINKHORN = 0;
+    constexpr int64_t MEGA_MHC_UNQUANTIZED_OUTPUT = 0;
+    constexpr int64_t MHC_SINKHORN_MIN_ITERS = 1;
+    constexpr int64_t MHC_SINKHORN_MAX_ITERS = 100;
+    constexpr double MEGA_MHC_SINKHORN_EPS = 1e-6;
+    constexpr double MEGA_MHC_RMS_NORM_SCALE = 1.0;
+
+    const c10::optional<at::Tensor> no_tensor = c10::nullopt;
+    check_hc_pre_shape_and_dtype(residual, hc_fn, hc_scale, hc_base, no_tensor, hc_mult);
+    TORCH_CHECK(hc_mult == MEGA_MHC_HC_MULT, "MegaMhc only supports hc_mult=4.");
+    TORCH_CHECK(x.dim() == 2 || x.dim() == 3, "MegaMhc x must be [T,D] or [B,S,D].");
+    TORCH_CHECK(residual.dim() == x.dim() + 1, "MegaMhc residual must add one head dimension to x.");
+    TORCH_CHECK(x.dtype() == residual.dtype(), "MegaMhc x and residual must have the same dtype.");
+    TORCH_CHECK(x.size(-1) >= MEGA_MHC_MIN_HIDDEN_SIZE && x.size(-1) <= MEGA_MHC_MAX_HIDDEN_SIZE &&
+                    x.size(-1) % MEGA_MHC_HIDDEN_ALIGNMENT == 0,
+                "MegaMhc hidden size must be in [16,16384] and aligned to 16.");
+    TORCH_CHECK(post.dim() == x.dim() + 1 && comb.dim() == x.dim() + 1,
+                "MegaMhc post and comb must add one head dimension to x.");
+    for (int64_t i = 0; i < x.dim() - 1; ++i) {
+        TORCH_CHECK(residual.size(i) == x.size(i) && post.size(i) == x.size(i) && comb.size(i) == x.size(i),
+                    "MegaMhc inputs must have the same leading dimensions.");
+    }
+    TORCH_CHECK(residual.size(-2) == hc_mult && residual.size(-1) == x.size(-1),
+                "MegaMhc residual must be [...,hc_mult,hidden_size].");
+    TORCH_CHECK(post.size(-2) == hc_mult && post.size(-1) == 1, "MegaMhc post must be [...,hc_mult,1].");
+    TORCH_CHECK(comb.size(-2) == hc_mult && comb.size(-1) == hc_mult,
+                "MegaMhc comb must be [...,hc_mult,hc_mult].");
+    TORCH_CHECK(post.dtype() == at::kFloat && comb.dtype() == at::kFloat && norm_weight.dtype() == at::kFloat,
+                "MegaMhc post, comb and norm weight must be FLOAT32.");
+    TORCH_CHECK(norm_weight.dim() == 1 && norm_weight.size(0) == x.size(-1),
+                "MegaMhc norm weight must be [hidden_size].");
+    TORCH_CHECK(hc_sinkhorn_iters >= MHC_SINKHORN_MIN_ITERS && hc_sinkhorn_iters <= MHC_SINKHORN_MAX_ITERS,
+                "MhcSinkhorn iterations must be in [1,100].");
+    TORCH_CHECK(std::isfinite(norm_eps) && norm_eps > 0 && std::isfinite(hc_norm_eps) && hc_norm_eps > 0 &&
+                    std::isfinite(hc_pre_eps) && hc_pre_eps > 0 && std::isfinite(hc_post_scale),
+                "MegaMhc epsilon values must be positive and hc_post_scale must be finite.");
+
+    at::Tensor new_residual = at::empty(residual.sizes(), residual.options());
+    at::Tensor new_post = at::empty(post.sizes(), post.options());
+    at::Tensor comb_logits = at::empty(comb.sizes(), comb.options());
+    at::Tensor new_comb = at::empty(comb.sizes(), comb.options());
+    at::Tensor y = at::empty(x.sizes(), x.options());
+    EXEC_NPU_CMD(aclnnMegaMhc, x, residual, post, hc_fn, hc_scale, hc_base, norm_weight, comb, no_tensor, no_tensor,
+                 no_tensor, norm_eps, hc_norm_eps, hc_pre_eps, MEGA_MHC_HF32, hc_mult, hc_post_scale,
+                 MEGA_MHC_SINKHORN_EPS, MEGA_MHC_NO_SINKHORN, MEGA_MHC_RMS_NORM_SCALE,
+                 MEGA_MHC_UNQUANTIZED_OUTPUT,
+                 new_residual, new_post, comb_logits, no_tensor, y, no_tensor, no_tensor);
+    const float sinkhorn_eps = static_cast<float>(hc_pre_eps);
+    EXEC_NPU_CMD(aclnnMhcSinkhorn, comb_logits, sinkhorn_eps, hc_sinkhorn_iters, new_comb, no_tensor, no_tensor);
+    return {new_residual, new_post, new_comb, y};
+}
+
+bool is_mega_mhc_available()
+{
+    static const bool is_available = []() {
+        return GetOpApiFuncAddr("aclnnMegaMhc") != nullptr &&
+               GetOpApiFuncAddr("aclnnMegaMhcGetWorkspaceSize") != nullptr &&
+               GetOpApiFuncAddr("aclnnMhcSinkhorn") != nullptr &&
+               GetOpApiFuncAddr("aclnnMhcSinkhornGetWorkspaceSize") != nullptr;
+    }();
+    return is_available;
+}
+
 void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice, bool negate_sin)
 {
     constexpr int BSND_DIM_NUM = 4;
@@ -3452,6 +3526,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor post, Tensor comb_frag, Tensor pre)"
         );
     ops.impl("npu_hc_pre_v3", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v3_npu);
+
+    ops.def(
+        "npu_mega_mhc("
+            "Tensor x, Tensor residual, Tensor post, Tensor comb, "
+            "Tensor hc_fn, Tensor hc_scale, Tensor hc_base, Tensor norm_weight, "
+            "int hc_mult, int hc_sinkhorn_iters, float norm_eps, float hc_norm_eps, "
+            "float hc_pre_eps, float hc_post_scale"
+        ") -> (Tensor residual, Tensor post, Tensor comb, Tensor y)"
+        );
+    ops.impl("npu_mega_mhc", torch::kPrivateUse1, &vllm_ascend::npu_mega_mhc_npu);
+    ops.def("is_mega_mhc_available() -> bool");
+    ops.impl("is_mega_mhc_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_mega_mhc_available);
 
     ops.def(
         "inplace_partial_rotary_mul("

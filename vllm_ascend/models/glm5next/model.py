@@ -80,6 +80,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import pad_sequence_parallel_tokens
 
 from .attention import Glm5NextMLAAttention
@@ -94,6 +95,12 @@ from .ops.mhc_ops import hc_contract, hc_expand
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
 _MHC_POST_MULT_VALUE = 2.0
+_MEGA_MHC_HC_MULT = 4
+_MEGA_MHC_MIN_HIDDEN_SIZE = 16
+_MEGA_MHC_MAX_HIDDEN_SIZE = 16384
+_MEGA_MHC_HIDDEN_ALIGNMENT = 16
+_MEGA_MHC_MIN_SINKHORN_ITERS = 1
+_MEGA_MHC_MAX_SINKHORN_ITERS = 100
 _LOGIT_SCALE = 1.0
 
 
@@ -399,6 +406,16 @@ class Glm5NextDecoderLayer(nn.Module):
             mix_hc = (2 + n) * n
 
             self.n = n
+            self._use_mega_mhc = (
+                n == _MEGA_MHC_HC_MULT
+                and _MEGA_MHC_MIN_HIDDEN_SIZE <= self.hidden_size <= _MEGA_MHC_MAX_HIDDEN_SIZE
+                and self.hidden_size % _MEGA_MHC_HIDDEN_ALIGNMENT == 0
+                and _MEGA_MHC_MIN_SINKHORN_ITERS <= self.mhc_sinkhorn_iterations <= _MEGA_MHC_MAX_SINKHORN_ITERS
+                and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMHC)
+                and hasattr(torch.ops._C_ascend, "npu_mega_mhc")
+                and hasattr(torch.ops._C_ascend, "is_mega_mhc_available")
+                and torch.ops._C_ascend.is_mega_mhc_available()
+            )
 
             # attn hc
             self.hc_attn_fn = nn.Parameter(torch.empty(mix_hc, d_model, dtype=torch.float32))
@@ -581,6 +598,29 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ):
+        if (
+            getattr(self, "_use_mega_mhc", False)
+            and norm_weight is not None
+            and x.dtype == torch.bfloat16
+            and residual.dtype == x.dtype
+        ):
+            norm_weight_fp32 = norm_weight if norm_weight.dtype == torch.float32 else norm_weight.float()
+            return torch.ops._C_ascend.npu_mega_mhc(
+                x,
+                residual,
+                post,
+                comb,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                norm_weight_fp32,
+                self.n,
+                self.mhc_sinkhorn_iterations,
+                norm_eps,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.mhc_post_mult_value,
+            )
         residual = self.hc_post(x, residual, post, comb)
         post, comb, layer_input = self.hc_pre(
             residual,
