@@ -1179,6 +1179,13 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, ratio)
+                    # DP padding may extend num_input_tokens past the local
+                    # slot mapping; pad with -1 so padded rows never write.
+                    if active_slots.numel() < num_input_tokens:
+                        pad = active_slots.new_full(
+                            (num_input_tokens - active_slots.numel(),), -1
+                        )
+                        active_slots = torch.cat((active_slots, pad))
                     valid = active_slots >= 0
                     if compressed and ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):
