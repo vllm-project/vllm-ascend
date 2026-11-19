@@ -184,6 +184,31 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(mon
     assert afc.get_mc2_tokens_capacity() == 264
 
 
+@pytest.mark.parametrize("decode_only", [False, True])
+@pytest.mark.parametrize("capture_size", [0, 432])
+@pytest.mark.parametrize("tp_size,profile_tokens,expected", [(1, 512, 512), (8, 513, 520)])
+def test_megamoe_capacity_covers_scheduler_profile(
+    monkeypatch, decode_only, capture_size, tp_size, profile_tokens, expected
+):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=1),
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _: decode_only)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        max_num_batched_tokens=profile_tokens,
+        cudagraph_capture_sizes=[capture_size] if capture_size else [],
+        max_cudagraph_capture_size=capture_size,
+    )
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=72, uniform_decode_query_len=6)
+
+    assert afc.get_mc2_tokens_capacity() == expected
+
+
 def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeypatch):
     monkeypatch.setattr(
         afc,

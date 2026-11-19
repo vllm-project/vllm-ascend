@@ -265,9 +265,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     use_mega_moe = use_cann_megamoe(vllm_config)
 
     # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
-    # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
-    # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
+    # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe uses a separate symmetric buffer.
+    # MegaMoe also handles scheduler-sized profile runs on decode-only nodes,
+    # which can exceed the largest decode graph.
+    if ascend_config.enable_prefill_mc2 or use_mega_moe:
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
