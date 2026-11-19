@@ -946,6 +946,26 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
     dspark_aux_capture_materialized = False
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        # v0.34.0's mixin appends the live tensor when the additive residual
+        # is None; vLLM main clones it (#66177) because the first layer
+        # updates that buffer in place. Mirror the snapshot on the release
+        # lane, keeping upstream's attn-res bank reset so the capture stays
+        # the raw prefix sum.
+        if vllm_version_is("0.34.0") and layer_idx in self.aux_hidden_state_layers:
+            if self.config.attn_res_block_size is not None:
+                residual = None
+            if residual is None:
+                aux_hidden_states.append(hidden_states.clone())
+                return aux_hidden_states
+        return super()._maybe_add_hidden_state(aux_hidden_states, layer_idx, hidden_states, residual)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
