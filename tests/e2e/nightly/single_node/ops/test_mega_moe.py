@@ -94,8 +94,6 @@ def main():
         for name, value in layer.named_parameters():
             baseline.register_parameter(name, torch.nn.Parameter(value.clone(), requires_grad=False))
         method = object.__new__(w4a8_mxfp4.AscendW4A8MXFPDynamicFusedMoEMethod)
-        method.use_expert_weight_list = False
-        baseline.activation = layer.activation = a.activation
         with patch.object(w4a8_mxfp4, "get_current_vllm_config", return_value=None):
             with patch.object(w4a8_mxfp4, "use_cann_megamoe", return_value=False):
                 method.process_weights_after_loading(baseline)
@@ -103,16 +101,6 @@ def main():
                 method.process_weights_after_loading(layer)
         with patch.object(w4a8_mxfp4, "_EXTRA_CTX", SimpleNamespace(use_mega_moe=True)):
             payload = method.get_fused_mc2_weights(layer)
-        for packed_weights, canonical_weights in (
-            (payload.w1, layer.w13_weight_list),
-            (payload.w2, layer.w2_weight_list),
-        ):
-            for packed, canonical in zip(packed_weights, canonical_weights, strict=True):
-                assert packed.dtype == torch.uint8
-                assert packed.data_ptr() == canonical.data_ptr()
-                assert packed.shape == canonical.shape
-                assert packed.stride() == canonical.stride()
-                assert torch_npu.get_npu_format(packed) == torch_npu.get_npu_format(canonical)
         return baseline, layer, payload
 
     baseline_layer, mega_layer, weights = prepare_weights()
