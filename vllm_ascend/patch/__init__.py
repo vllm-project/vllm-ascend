@@ -1746,3 +1746,34 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** 37. File: platform/patch_device_ids_visibility.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.engine.arg_utils.EngineArgs.create_engine_config`
+#    Why:
+#      `--device-ids` only renumbers the devices a worker eventually binds; it
+#      never restricts what the process can see. vLLM resolves the model
+#      architecture before that, and the import path reaches
+#      `vllm.third_party.flash_linear_attention.ops.utils.get_all_max_shared_mem()`,
+#      which queries every device in `device_count()`. torch_npu creates an ACL
+#      context per query, so `ASCEND_RT_VISIBLE_DEVICES=4,5 --device-ids 1`
+#      initializes chip 4 as well and npu-smi reports a process on both cards.
+#      The same window leaves npu:0 tensors alive in the engine core, which can
+#      fail graph capture with "Expected all tensors to be on the same device
+#      ... npu:1 ... different from other tensors on npu:0".
+#    How:
+#      Before `create_model_config()` imports the model, rewrite
+#      `ASCEND_RT_VISIBLE_DEVICES` to exactly the chips selected by
+#      `--device-ids` and renumber the ids to 0..N-1.
+#      `assigned_physical_gpu_ids` keeps the full selection, so
+#      `_init_device`'s two-stage mapping (local_rank -> assigned id -> visible
+#      ordinal) still resolves the same physical chips, and child processes
+#      inherit the narrowed set. No-op when ids are absent, are UUIDs, target
+#      Ray, are out of range, or already match the current environment.
+#    Related PR (if no, explain why):
+#      Upstream vllm#45026 introduced `device_ids` without a visibility hook;
+#      no upstream PR makes device enumeration lazy for query-only paths.
+#    Future Plan:
+#      Remove when vLLM enumerates devices lazily (or honors device_ids while
+#      probing), so configuration queries stop initializing every visible NPU.
+#
