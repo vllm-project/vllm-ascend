@@ -66,7 +66,6 @@ def selection(monkeypatch, profiles):
         kv_cache_dtype="auto",
     )
     monkeypatch.setitem(sys.modules, "vllm.config", NS(get_current_vllm_config_or_none=lambda: runtime.config))
-    monkeypatch.setitem(sys.modules, "vllm.compilation", NS(backends=NS(model_tag="dspark_head")))
     monkeypatch.setitem(sys.modules, "vllm.v1.attention.backend", NS(AttentionType=NS(DECODER="decoder")))
     namespace = {
         "torch": torch,
@@ -173,7 +172,7 @@ def test_unsupported_configurations_fall_back(selection, fault):
 
 
 @pytest.fixture
-def fa3(monkeypatch):
+def fa3():
     class Base:
         @classmethod
         def __class_getitem__(cls, _):
@@ -225,9 +224,7 @@ def fa3(monkeypatch):
         def __delattr__(self, name):
             del namespace[name]
 
-    proxy = Proxy()
-    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", proxy)
-    return proxy
+    return Proxy()
 
 
 def test_cache_write_precedes_attention_and_transfer_completion(fa3):
@@ -309,7 +306,6 @@ def test_graph_fusion_pass_registration(monkeypatch, method, enabled):
 
 def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
-    builder.is_speculative = False
     builder.capture_sizes, builder.capture_query_len = {16}, 8
     builder.max_num_reqs, builder.block_size = 2, 128
     spec = (4, 1, 128, torch.bfloat16, 0.1, 0.0, None)
@@ -350,9 +346,6 @@ def test_prefill_bounds_causal_storage_and_oversized_tiling(fa3):
 @pytest.mark.parametrize("softcap", [0.0, 30.0])
 def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
-    builder.is_speculative = True
-    builder.is_speculative_target = False
-    builder.use_graph_buffers = False
     builder.device = torch.device("cpu")
     builder.capture_sizes = set()
     builder.capture_query_len = None
@@ -409,13 +402,9 @@ def test_minimax_fa3_scheduler_api(fa3, causal, padded, softcap):
 
 def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
-    builder.is_speculative = True
-    builder.is_speculative_target = False
-    builder.use_graph_buffers = True
     builder.device = torch.device("cpu")
-    # Target uses nine queries per request; the DSpark draft uses eight.
-    builder.capture_sizes = {18, 27}
-    builder.capture_query_len = 9
+    builder.capture_sizes = {16, 24}
+    builder.capture_query_len = 8
     builder.max_num_reqs = 3
     builder.block_size = 128
     spec = (16, 1, 128, torch.bfloat16, 0.123, 0.0, 4096)
