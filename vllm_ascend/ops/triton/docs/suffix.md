@@ -23,6 +23,19 @@
   exercised on A3. Adaptive verification requires full decode graphs and an
   attention backend that supports variable query lengths.
 
+## Source layout
+
+The implementation is split by operator responsibility under `spec_decode/`:
+
+- `suffix_local_scan.py`: own-history scan and its launch wrapper.
+- `suffix_finalize.py`: draft selection, confidence and its launch wrapper.
+- `suffix_corpus.py`: corpus lookup/voting helpers, ingestion and its launch wrapper.
+- `suffix_observe.py`: acceptance buckets, observation and marker clearing.
+
+Each operator has a matching `test_suffix_<operator>.py` in the unit and
+nightly operator test directories. `test_suffix_speculator.py` retains
+cross-operator feature combinations and lifecycle checks.
+
 ## Parameters
 
 `B` is the active batch size, `R` the request capacity, `L` the history
@@ -101,8 +114,8 @@ path. The 54-case suite passed on A3 and A5 with CANN 9.3.0 and
 Triton-Ascend 3.6.0.post2, using vLLM `ba15685ab7`.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_suffix_speculator.py
-python -m pytest -q tests/ut/ops/triton/spec_decode/test_suffix_launchers.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_suffix_*.py
+python -m pytest -q tests/ut/ops/triton/spec_decode/test_suffix_*.py
 ```
 
 ## Example
