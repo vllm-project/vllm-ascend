@@ -68,7 +68,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1520,12 +1520,7 @@ def create_kv_cache_runtime_views(
             ]
             components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
             format_views = getattr(group.backend, "format_runtime_views", None)
-            if format_views is not None:
-                caches[name] = format_views(spec, components)
-            elif issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
-            else:
-                caches[name] = components
+            caches[name] = format_views(spec, components) if format_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
