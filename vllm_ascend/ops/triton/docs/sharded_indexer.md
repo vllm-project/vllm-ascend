@@ -62,11 +62,9 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_p
 
 ## Owner-prefix scan
 
-The A3 hardware profile selects parallel peer scans when the group has at least
-five ranks and there are more rows than vector cores. A5 selects parallel scans
-for every multi-rank group, including single-row queries. A single rank always
-uses the serial specialization. Other device profiles use serial scans. Within
-the parallel specialization, a row with a dominant peer can still scan serially.
+A single-rank group uses the serial specialization. Every multi-rank group
+uses parallel peer scans, including single-row queries. Within that
+specialization, a row with a dominant peer can still scan serially.
 
 For each owner pivot, the parallel scan counts the peer entries that rank ahead
 of it (higher score, then lower global ID). If the pivot wins, that count becomes
@@ -79,10 +77,8 @@ The serial scan stops reading a sorted peer after the first partial tile. For
 the first owner candidate, finding K better entries proves that the owner has
 no winners and the scan can skip the remaining peers.
 
-The public wrapper sets the compile-time peer strategy and tile from the device
-profile and input geometry. Crossing the routing boundary can select a different
-compiled variant even though `num_rows` itself is dynamic. The owner kernel
-uses lazy compilation.
+The public wrapper derives the compile-time peer strategy and tile from the
+group size. The kernel accepts a dynamic row count and uses lazy compilation.
 
 The owner test compares exact local IDs and padding with an independent CPU
 global Top-K followed by owner compaction. It also checks output guards and

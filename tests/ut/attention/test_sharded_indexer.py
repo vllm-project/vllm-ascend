@@ -10,8 +10,6 @@ import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel import sharded_indexer as indexer
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.triton import sharded_indexer as kernels
 
 
@@ -59,23 +57,13 @@ def test_shared_index_coordinate_contract(sharded, pcp, dsa_cp, turboquant, expe
 
 
 @pytest.mark.parametrize(
-    "device,world,rows,parallel",
-    [
-        (AscendDeviceType.A3, 4, 41, False),
-        (AscendDeviceType.A3, 5, 40, False),
-        (AscendDeviceType.A3, 5, 41, True),
-        (AscendDeviceType.A5, 1, 41, False),
-        (AscendDeviceType.A5, 2, 1, True),
-        (AscendDeviceType.A5, 8, 40, True),
-        (AscendDeviceType.A5, 8, 41, True),
-        (AscendDeviceType.A2, 5, 41, False),
-    ],
+    "world,rows,parallel",
+    [(1, 41, False), (2, 1, True), (8, 41, True)],
 )
-def test_owner_prefix_peer_strategy(monkeypatch, device, world, rows, parallel):
+def test_owner_prefix_peer_strategy(monkeypatch, world, rows, parallel):
     cores = 40
     monkeypatch.setattr(kernels, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(kernels, "get_vectorcore_num", lambda: cores)
-    monkeypatch.setattr(kernels, "get_current_hardware_profile", lambda: get_hardware_profile(device))
     owner_kernel = MagicMock()
     monkeypatch.setattr(kernels, "_merge_owner_prefix", owner_kernel)
     k = kernels.MAX_FUSED_TOPK
