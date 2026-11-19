@@ -264,8 +264,6 @@ def dispatch_qsa_attention(
         rows = slice(batch.query_start, batch.query_end)
         prepared = request_plan.prepared_union_batches[batch_index]
         if len(batch.request_indices) == 1:
-            kwargs = dict(request_index=batch.request_indices[0])
-            kwargs["prepared"] = prepared
             qsa_union_gbsa_attention(
                 query[rows],
                 key_cache,
@@ -276,11 +274,10 @@ def dispatch_qsa_attention(
                 logical_positions[rows],
                 seq_lens,
                 output[rows],
-                **kwargs,
+                request_index=batch.request_indices[0],
+                prepared=prepared,
             )
         else:
-            kwargs = dict(query_starts=batch.query_starts, request_indices=batch.request_indices)
-            kwargs["prepared"] = prepared
             qsa_union_gbsa_attention_batch(
                 query[rows],
                 key_cache,
@@ -291,7 +288,9 @@ def dispatch_qsa_attention(
                 logical_positions[rows],
                 seq_lens,
                 output[rows],
-                **kwargs,
+                query_starts=batch.query_starts,
+                request_indices=batch.request_indices,
+                prepared=prepared,
             )
     for start, end in request_plan.decode_spans:
         rows = slice(start, end)
