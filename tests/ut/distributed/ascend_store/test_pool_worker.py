@@ -3691,6 +3691,50 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         self.assertEqual(request.load_masks, ([False, True, False, True],))
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0, 201, 0, 201])
 
+    def test_restore_rotating_recurrent_state_from_previous_prefill_chunk(self):
+        for cached_tokens, lookup_keys in (
+            (31, ["private"]),
+            (32, ["public"]),
+            (32, ["public", "private"]),
+        ):
+            with self.subTest(cached_tokens=cached_tokens, lookup_keys=lookup_keys):
+                worker = self._make_worker()
+                worker.num_kv_cache_groups = 2
+                worker.grouped_block_size = [16, 16]
+                worker.group_uses_align_state = [False, True]
+                worker.cacheable_group_ids = {0, 1}
+                worker._reused_layers_by_group = {1: {0}}
+                worker._make_layerwise_full_key = MagicMock(return_value="public")
+                block_ids = [[10, 11], [20, 21]]
+                request = self._make_request(
+                    block_hashes=["h0", "h1"][: cached_tokens // 16],
+                    block_ids_by_group=block_ids,
+                    block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in block_ids],
+                    load_spec=LoadSpec(cached_tokens, cached_tokens, True, layerwise_previous_step=True),
+                )
+                worker._snapshot_keys[request.req_id] = {1: {1: "private"}}
+                selected_key = lookup_keys[-1]
+                available = {selected_key: SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])}
+                queries = []
+
+                def lookup(keys, available=available, queries=queries, **_):
+                    queries.append(list(keys))
+                    return [available.get(key) for key in keys]
+
+                worker.m_store.batch_get_key_info.side_effect = lookup
+                worker.m_store.batch_add_lease.return_value = [0]
+
+                worker._data_plane._prepare_load_gvas([request])
+
+                self.assertTrue(request.load_spec.can_load)
+                self.assertEqual(queries, [[key] for key in [*lookup_keys, selected_key]])
+                self.assertEqual(request.load_keys, [selected_key])
+                self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [])
+                self.assertEqual(
+                    request.load_block_gvas_by_group_np[1].tolist(), [0, 201 if cached_tokens == 32 else 0]
+                )
+                self.assertEqual(request.partial_load_gva_per_group, [0, 201 if cached_tokens == 31 else 0])
+
     def test_process_load_for_layer_batch_respects_load_mask(self):
         worker = self._make_worker()
         request = self._make_request(
