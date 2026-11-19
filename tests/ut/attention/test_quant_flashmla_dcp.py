@@ -173,14 +173,13 @@ def test_rebased_cache_owner_keeps_dtype_fix_scoped(is_draft, method, model_type
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/mla_v1.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendMLAAttention")
-    methods = [
+    owner = ast.parse("class Owner(Base): pass").body[0]
+    assert isinstance(owner, ast.ClassDef)
+    owner.body = [
         n
         for n in cls.body
         if isinstance(n, ast.FunctionDef) and n.name in ("get_kv_cache_spec", "_get_kv_cache_format")
     ]
-    owner = ast.ClassDef(
-        name="Owner", bases=[ast.Name(id="Base", ctx=ast.Load())], keywords=[], body=methods, decorator_list=[]
-    )
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
     module = ast.fix_missing_locations(ast.Module(body=[future, owner], type_ignores=[]))
     scope = dict(

@@ -268,7 +268,7 @@ def resolve_k3_dspark_quant_prefix(vllm_config, prefix: str) -> str:
         return prefix
     draft_config = getattr(speculative_config, "draft_model_config", None)
     draft_hf_config = getattr(draft_config, "hf_config", None)
-    if getattr(draft_hf_config, "model_type", None) != "k3_dspark":
+    if draft_hf_config is None or getattr(draft_hf_config, "model_type", None) != "k3_dspark":
         return prefix
     from vllm.compilation import backends
 
