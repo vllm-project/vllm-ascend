@@ -29,12 +29,14 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | `{{ release_hdk_version }}` | Driver and firmware requirements for the selected CANN release |
+    | Host enablement | Ascend HDK | `{{ release_hdk_version_a2_a3_300i_200i }}` | Driver and firmware for A2, A3, Atlas 300I DUO, and Atlas 200I Pro |
+    | ^^ | ^^ | `{{ release_hdk_version_a5 }}` | Driver and firmware for Atlas 850E and Atlas 650E |
     | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
     | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
+    | Kernel acceleration | FLA NPU | `{{ release_fla_npu_version }}` | Provides convolution and gated delta-rule operators on A2, A3, and 950DT Products; not required on Atlas 300I DUO or Atlas 200I Pro |
     | Inference engine | vLLM | `{{ release_vllm_version }}` | Model inference engine |
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
@@ -94,8 +96,11 @@ Choose one complete path based on your requirements. Container-based paths requi
     | PyTorch + TorchNPU | ✓ | ○ | ○ |
     | vLLM + vLLM Ascend | ✓ | ○ | ○ |
     | Triton Ascend | ✓ | ○ | ○ |
+    | FLA NPU (A2 / A3 / 950DT Products) | ✓ | ○ | ○ |
 
     **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
+
+    **FLA NPU:** Installed explicitly in the common follow-up step for pip, uv, and source installations on A2, A3, and 950DT Products.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 
