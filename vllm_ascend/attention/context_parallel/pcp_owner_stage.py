@@ -32,7 +32,6 @@ from vllm_ascend import envs
 
 DEFAULT_STAGE_BUDGET_BYTES = 1024 * 1024 * 1024
 DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES = 256 * 1024 * 1024
-DEFAULT_INDEX_STAGE_BUDGET_BYTES = 128 * 1024 * 1024
 
 
 def _env_flag(value: object) -> bool:
@@ -80,27 +79,6 @@ def swa_chunk_debug_enabled() -> bool:
     return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_DEBUG)
 
 
-def owner_stage_index_enabled() -> bool:
-    """Stage a pure prefill's index pages instead of reading peer pages.
-
-    The indexer K plane shares the owner-sharded page with long KV, so the
-    QLI's per-block gather pays the same one-byte-grain peer latency the long
-    KV kernel did. Copying the live pages once per step and remapping the
-    block table keeps the whole ``select`` on local HBM without the 1.2 GiB
-    replicated copy that ``VLLM_ASCEND_PCP_LOCAL_INDEX`` needs.
-    """
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_INDEX)
-
-
-def _index_stage_budget_bytes() -> int:
-    raw = envs.VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_INDEX_STAGE_BUDGET_BYTES
-    return value if value > 0 else DEFAULT_INDEX_STAGE_BUDGET_BYTES
-
-
 def _swa_chunk_stage_budget_bytes() -> int:
     raw = envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_BYTES
     try:
@@ -122,8 +100,6 @@ def owner_stage_reserve_bytes() -> int:
         total += _stage_budget_bytes()
     if owner_stage_swa_chunk_enabled():
         total += _swa_chunk_stage_budget_bytes()
-    if owner_stage_index_enabled():
-        total += _index_stage_budget_bytes()
     return total
 
 
@@ -393,208 +369,7 @@ class PcpOwnerStageCache:
         return view, staged_table
 
 
-class PcpPlaneStageCache:
-    """Bounded scratch for one plane of an owner-sharded page.
-
-    The indexer K plane shares the physical page with long KV, compressor state
-    and SWA aliases. The attention stager copies whole pages because the kernel
-    reads every long-KV row; the QLI reads only its own 8 KiB K plane (and a
-    0.5 KiB scale plane), so copying the enclosing 135 KiB page would move more
-    than an order of magnitude more peer data than the operator consumes. This
-    view copies only ``shape[1:]`` of each selected block, which is dense in the
-    layout produced by ``_adjust_dsv4_kv_layout``.
-    """
-
-    def __init__(self, device: torch.device, budget_bytes: int | None = None) -> None:
-        self.device = device
-        self._budget_bytes = budget_bytes
-        self._scratch: torch.Tensor | None = None
-        self.capacity_blocks = 0
-        self.stage_calls = 0
-        self.staged_blocks = 0
-        self.overflow_fallbacks = 0
-
-    def _ensure(self, source_cache: torch.Tensor) -> torch.Tensor:
-        if self._scratch is not None:
-            return self._scratch
-        self.block_elements = int(source_cache[0].numel())
-        block_bytes = self.block_elements * source_cache.element_size()
-        budget = self._budget_bytes if self._budget_bytes is not None else _index_stage_budget_bytes()
-        capacity = max(1, budget // max(1, block_bytes))
-        self._scratch = torch.empty((capacity, self.block_elements), dtype=source_cache.dtype, device=self.device)
-        self.capacity_blocks = capacity
-        logger.info_once(
-            "PCP index plane stage scratch: %.2f MiB (%d blocks x %d B) on %s; source shape=%s stride=%s",
-            capacity * block_bytes / (1024**2),
-            capacity,
-            block_bytes,
-            self.device,
-            tuple(source_cache.shape),
-            source_cache.stride(),
-        )
-        return self._scratch
-
-    def stage(
-        self, source_cache: torch.Tensor, prepared: tuple[torch.Tensor, torch.Tensor, int]
-    ) -> torch.Tensor | None:
-        """Return the staged plane view, or ``None`` when the batch overflows."""
-        from .pcp_owner_timing import enter as timing_enter
-        from .pcp_owner_timing import exit as timing_exit
-
-        staged_table, flat, total = prepared
-        if total == 0:
-            return None
-        scratch = self._ensure(source_cache)
-        if total > self.capacity_blocks:
-            self.overflow_fallbacks += 1
-            if self.overflow_fallbacks == 1:
-                logger.warning_once(
-                    "PCP index stage overflow: %d blocks > %d capacity; "
-                    "falling back to direct peer reads for this step.",
-                    total,
-                    self.capacity_blocks,
-                )
-            return None
-        timing = timing_enter("stage_index_copy")
-        source_rows = torch.as_strided(
-            source_cache,
-            (int(source_cache.shape[0]), self.block_elements),
-            (int(source_cache.stride(0)), 1),
-            source_cache.storage_offset(),
-        )
-        torch.index_select(source_rows, 0, flat, out=scratch[:total])
-        timing_exit(timing)
-        view = torch.as_strided(
-            scratch[:total],
-            (total,) + tuple(source_cache.shape[1:]),
-            (self.block_elements,) + tuple(source_cache.stride()[1:]),
-            0,
-        )
-        self.stage_calls += 1
-        self.staged_blocks += total
-        if self.stage_calls % 200 == 1:
-            logger.info(
-                "PCP index plane stage active: calls=%d last=%d blocks (%.2f MiB), avg=%.1f blocks, capacity=%d",
-                self.stage_calls,
-                total,
-                total * self.block_elements * source_cache.element_size() / (1024**2),
-                self.staged_blocks / self.stage_calls,
-                self.capacity_blocks,
-            )
-        return view
-
-
-class PcpPageStageCache:
-    """Bounded scratch holding whole owner pages, sliced locally per plane.
-
-    The indexer K, its scale twin and the folded candidate view live at
-    different offsets of one owner page. Staging each plane separately issues
-    nine small strided gathers per forward; staging the page once issues one
-    contiguous gather, after which every plane is a zero-copy view at its
-    original intra-page offset and block stride. The copy moves the whole page
-    (3.2x more bytes than the index planes alone) but removes eight kernel
-    launches and turns the source rows into full-page copies.
-    """
-
-    def __init__(self, device: torch.device, budget_bytes: int | None = None) -> None:
-        self.device = device
-        self._budget_bytes = budget_bytes
-        self._scratch: torch.Tensor | None = None
-        self._page_elements = 0
-        self.capacity_blocks = 0
-        self.stage_calls = 0
-        self.staged_blocks = 0
-        self.overflow_fallbacks = 0
-
-    def _ensure(self, base: torch.Tensor) -> torch.Tensor:
-        page_elements = int(base.stride(0))
-        if self._scratch is not None and self._page_elements == page_elements:
-            return self._scratch
-        page_bytes = page_elements * base.element_size()
-        budget = self._budget_bytes if self._budget_bytes is not None else _index_stage_budget_bytes()
-        capacity = max(1, budget // max(1, page_bytes))
-        self._scratch = torch.empty((capacity, page_elements), dtype=base.dtype, device=self.device)
-        self._page_elements = page_elements
-        self.capacity_blocks = capacity
-        logger.info_once(
-            "PCP index page stage scratch: %.2f MiB (%d pages x %d B) on %s",
-            capacity * page_bytes / (1024**2),
-            capacity,
-            page_bytes,
-            self.device,
-        )
-        return self._scratch
-
-    def stage(
-        self, base: torch.Tensor, views: tuple[torch.Tensor, ...], prepared: tuple[torch.Tensor, torch.Tensor, int]
-    ) -> tuple[torch.Tensor, ...] | None:
-        """Copy whole pages once and return each plane as a local view."""
-        from .pcp_owner_timing import enter as timing_enter
-        from .pcp_owner_timing import exit as timing_exit
-
-        _, flat, total = prepared
-        if total == 0:
-            return None
-        scratch = self._ensure(base)
-        if total > self.capacity_blocks:
-            self.overflow_fallbacks += 1
-            if self.overflow_fallbacks == 1:
-                logger.warning_once(
-                    "PCP index page stage overflow: %d pages > %d capacity; "
-                    "falling back to direct peer reads for this step.",
-                    total,
-                    self.capacity_blocks,
-                )
-            return None
-        page_elements = self._page_elements
-        page_bytes = page_elements * base.element_size()
-        timing = timing_enter("stage_index_copy")
-        # The slab starts at page 0 of its own storage; block b occupies
-        # ``[b * page_bytes, (b + 1) * page_bytes)``.
-        source_pages = torch.as_strided(base, (int(base.shape[0]), page_elements), (page_elements, 1), 0)
-        torch.index_select(source_pages, 0, flat, out=scratch[:total])
-        timing_exit(timing)
-        staged = []
-        for view in views:
-            offset_bytes = int(view.storage_offset()) * view.element_size()
-            block_bytes = int(view[0].numel()) * view.element_size()
-            if offset_bytes < 0 or offset_bytes >= page_bytes:
-                return None
-            if offset_bytes + block_bytes > page_bytes:
-                return None
-            if view.element_size() and offset_bytes % view.element_size():
-                return None
-            if view.dtype == base.dtype:
-                rows = scratch[:total]
-                block_stride = page_elements
-            else:
-                if page_bytes % view.element_size():
-                    return None
-                rows = scratch[:total].view(view.dtype)
-                block_stride = page_bytes // view.element_size()
-            staged.append(
-                torch.as_strided(
-                    rows,
-                    (total,) + tuple(view.shape[1:]),
-                    (block_stride,) + tuple(view.stride()[1:]),
-                    offset_bytes // view.element_size(),
-                )
-            )
-        self.stage_calls += 1
-        self.staged_blocks += total
-        if self.stage_calls % 200 == 1:
-            logger.info(
-                "PCP index page stage active: calls=%d last=%d pages (%.2f MiB), avg=%.1f pages, capacity=%d",
-                self.stage_calls,
-                total,
-                total * page_bytes / (1024**2),
-                self.staged_blocks / self.stage_calls,
-                self.capacity_blocks,
-            )
-        return tuple(staged)
-
-
-_stage_caches: dict[tuple, PcpOwnerStageCache | PcpPlaneStageCache | PcpPageStageCache] = {}
+_stage_caches: dict[tuple, PcpOwnerStageCache] = {}
 
 
 def get_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpOwnerStageCache:
@@ -615,33 +390,6 @@ def get_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpOwne
     cache = _stage_caches.get(key)
     if cache is None:
         cache = PcpOwnerStageCache(device)
-        _stage_caches[key] = cache
-    return cache
-
-
-def get_index_page_stage_cache(device: torch.device, page_bytes: int) -> PcpPageStageCache:
-    """Scratch for whole owner pages; one per page layout (128 / 144 KiB)."""
-    key = ("index_page", str(device), int(page_bytes))
-    cache = _stage_caches.get(key)
-    if cache is None:
-        cache = PcpPageStageCache(device)
-        _stage_caches[key] = cache
-    return cache
-
-
-def get_index_plane_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpPlaneStageCache:
-    """Scratch for one indexer plane; K and scale have distinct shapes."""
-    key = (
-        "index_plane",
-        str(device),
-        str(source_cache.dtype),
-        tuple(source_cache.shape[1:]),
-        int(source_cache.stride(0)),
-        tuple(source_cache.stride()[1:]),
-    )
-    cache = _stage_caches.get(key)
-    if cache is None:
-        cache = PcpPlaneStageCache(device)
         _stage_caches[key] = cache
     return cache
 

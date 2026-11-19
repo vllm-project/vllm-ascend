@@ -139,20 +139,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # index copy per rank (about 1.2 GiB) and lowers the global block capacity
     # by roughly 4-5%.
     "VLLM_ASCEND_PCP_LOCAL_INDEX": lambda: os.getenv("VLLM_ASCEND_PCP_LOCAL_INDEX", "0"),
-    # Owner-sharded indexer staging. Off by default. When "1"/"true"/"yes"/"on"
-    # and the index K plane stays inside the owner-sharded tuple, a pure-prefill
-    # step copies the live index pages of the rank-local chunk rows into a
-    # bounded local scratch and remaps the block table onto it, exactly like
-    # the long-KV staging. Inactive for mixed/decode batches, for the
-    # replicated index-only tuple (VLLM_ASCEND_PCP_LOCAL_INDEX), and when no
-    # owner slab backs the cache.
-    "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX": lambda: os.getenv("VLLM_ASCEND_PCP_OWNER_STAGE_INDEX", "0"),
-    # Local scratch budget in bytes per staged page layout. One page copy moves
-    # the whole 128 KiB (or 144 KiB for the ratio-1 tuple) block, so the default
-    # 128 MiB holds about 1000 live pages, several times one 40K prefill step.
-    "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES": lambda: os.getenv(
-        "VLLM_ASCEND_PCP_OWNER_STAGE_INDEX_BYTES", "134217728"
-    ),
     # Write prefill KV for each rank's own DualChunkSwap chunks from the
     # rank-local hidden states instead of the gathered view. Off by default and
     # ignored unless an owner slab mapped successfully: on a replicated
