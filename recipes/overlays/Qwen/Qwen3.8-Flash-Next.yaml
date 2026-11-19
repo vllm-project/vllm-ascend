@@ -519,7 +519,6 @@ presets:
           HCCL_EXEC_TIMEOUT: '204'
           HCCL_CONNECT_TIMEOUT: '120'
           VLLM_ASCEND_ENABLE_MLAPO: '1'
-          VLLM_USE_V1: '1'
           VLLM_ENGINE_READY_TIMEOUT_S: '4800'
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
           OMP_PROC_BIND: 'false'
@@ -560,7 +559,7 @@ presets:
           - '--additional-config'
           - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}'
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}'
           - '--tool-call-parser'
           - qwen3_coder
           - '--data-parallel-address'
@@ -608,7 +607,7 @@ presets:
           - '--hf-overrides'
           - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
         json_args:
           '--speculative-config':
             enforce_eager: true
@@ -709,7 +708,6 @@ presets:
           HCCL_EXEC_TIMEOUT: '204'
           HCCL_CONNECT_TIMEOUT: '120'
           VLLM_ASCEND_ENABLE_MLAPO: '1'
-          VLLM_USE_V1: '1'
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
           OMP_PROC_BIND: 'false'
           OMP_NUM_THREADS: '1'
@@ -749,7 +747,7 @@ presets:
           - '--additional-config'
           - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}'
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}'
           - '--tool-call-parser'
           - qwen3_coder
           - '--data-parallel-address'
@@ -791,7 +789,7 @@ presets:
           - '--hf-overrides'
           - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
         env:
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
           VLLM_ASCEND_PLE_BACKEND: torch
@@ -962,6 +960,10 @@ guide_sections:
     | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | TP4 PP2 DP1 (EP4) | TP2 DP4 (EP8) | TP2 PP2 DP1 (EP2) | TP2 DP2 (EP4) |
     | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | TP2 PP4 DP1 (EP2) | TP2 DP4 (EP8) | TP4 DP1 (EP4) | TP4 DP1 (EP4) |
     | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | TP2 PP2 DP2 (EP4) | TP2 DP4 (EP8) | TP2 DP2 (EP4) | TP2 DP2 (EP4) |
+
+    The 950DT Basic PD presets use the tutorial's `VLLM_VERSION=0.32.0` override with the
+    `v0.32.0rc1-a5` image. If you switch images, unset this override so vLLM Ascend
+    detects the installed vLLM version.
 
     For basic, image or long-context serving, prepare the hardware-specific container
     from Section 4.1. Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
