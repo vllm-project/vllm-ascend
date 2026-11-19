@@ -482,6 +482,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
         mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = False
+        mock_ascend_config.scheduler_config.decoder_append_prefill_enable = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 

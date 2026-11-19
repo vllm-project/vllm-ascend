@@ -615,7 +615,8 @@ class AscendConfig:
                     "bubble_threshold": 5.0,
                     "long_req_block_threshold": 700,
                     "dynamic_max_step": 256
-                }
+                },
+                "decoder_append_prefill_enable": false
             },
             "sparse_kv_offload_config": {
                 "enabled": false,
@@ -1682,6 +1683,7 @@ class SchedulerConfig:
 
     enable_balance_scheduling: bool = False
     recompute_scheduler_enable: bool = False
+    decoder_append_prefill_enable: bool = False
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
@@ -1721,6 +1723,7 @@ class SchedulerConfig:
             # the legacy environment fallback has been removed.
             "enable_balance_scheduling": _resolve("enable_balance_scheduling", False),
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
+            "decoder_append_prefill_enable": scheduler_config.get("decoder_append_prefill_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.
             "short_request_first_config": _resolve("short_request_first_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
