@@ -271,7 +271,7 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     bash run_proxy.sh
     ```
 
-    The scripts are also available under `examples/hy4flash/`. Send requests to the proxy on port `8000`.
+    Send requests to the proxy on port `8000`.
 
     Check readiness:
 
