@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""BF16 PLE tables in CANN-registered host memory."""
+"""BF16, INT8 and MXFP8 PLE tables in CANN-registered host memory."""
 
 import torch
 import torch.distributed as dist
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_engram_dp_group
+from vllm.distributed import get_engram_dp_group, get_etp_group, get_tp_group
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding, Qwen4ExpPLEPinnedHostEmbedding
@@ -16,7 +16,8 @@ from vllm_ascend.models.deepseek_v41.engram.npu import (
     SharedUvaBuffer,
 )
 from vllm_ascend.models.host_offload import register_host_offload_owner
-from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
+from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
 
 
 @Qwen4ExpPLEPinnedHostEmbedding.register_oot
@@ -25,6 +26,19 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
 
     def __init__(self, *args, **kwargs):
         self._host_table: HostUvaBuffer | SharedUvaBuffer | None = None
+        self._host_scale: HostUvaBuffer | SharedUvaBuffer | None = None
+        method = kwargs.get("embedding_method")
+        self._quantized = isinstance(method, AscendPLEQuantizedEmbeddingMethod)
+        self._mxfp8 = isinstance(method, AscendPLEQuantizedEmbeddingMethod) and method.mxfp8
+        self._scale_dtype = method.scale_dtype if isinstance(method, AscendPLEQuantizedEmbeddingMethod) else None
+        self._weight_dtype = (
+            method.weight_dtype if isinstance(method, AscendPLEQuantizedEmbeddingMethod) else torch.bfloat16
+        )
+        if self._quantized:
+            if get_etp_group().world_size != get_tp_group().world_size:
+                raise ValueError("Quantized PLE host lookup requires ETP=TP")
+            if kwargs.get("params_dtype") != torch.bfloat16:
+                raise ValueError("Quantized PLE host lookup requires BF16 activations")
         self._shared_group = None
         register_host_offload_owner(self)
         config = get_current_vllm_config().engram_config
@@ -49,7 +63,8 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         except HostUvaBufferCleanupError as exc:
             # The buffer constructor could not finish assigning _host_table.
             # Preserve its owner without hiding the original cleanup failure.
-            self._host_table = exc.host_buffer
+            if exc.host_buffer is not self._host_scale:
+                self._host_table = exc.host_buffer
             raise
         except Exception as initialization_error:
             try:
@@ -62,6 +77,12 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
 
     def close_host_offload(self) -> None:
         """Release after graph teardown; failed unregister remains retryable."""
+        if self._host_scale is not None:
+            # Drop aliases before closing shared storage, retaining failed owners.
+            if hasattr(self, "_parameters"):
+                self.register_parameter("weight_scale", None)
+            self._host_scale.close()
+            self._host_scale = None
         table = self._host_table
         if table is None:
             return
@@ -74,29 +95,41 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         logger.info("PLE registered host table released")
 
     def allocate_embedding_weight(self, num_embeddings: int, embedding_dim: int, dtype: torch.dtype) -> torch.Tensor:
-        if dtype != torch.bfloat16:
-            raise ValueError("Ascend PLE offload requires BF16 weights")
+        allowed = (self._weight_dtype, self._scale_dtype) if self._quantized else (torch.bfloat16,)
+        if dtype not in allowed:
+            raise ValueError(f"Unsupported PLE host storage dtype: {dtype}")
         device = torch.device("npu", torch.npu.current_device())
-        if self._shared_group is None:
-            self._host_table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, "_host_table", self)
-            tensor = self._host_table.tensor
-            assert tensor is not None
-            tensor.zero_()
+        buffer_name = "_host_scale" if dtype == self._scale_dtype else "_host_table"
+        table: HostUvaBuffer | SharedUvaBuffer
+        try:
+            if self._shared_group is None:
+                table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, buffer_name, self)
+            else:
+                table = SharedUvaBuffer(
+                    (num_embeddings, embedding_dim), dtype, device, self._shared_group, buffer_name, self
+                )
+        except HostUvaBufferCleanupError as exc:
+            if dtype == self._scale_dtype:
+                self._host_scale = exc.host_buffer
+            else:
+                self._host_table = exc.host_buffer
+            raise
+        if dtype == self._scale_dtype:
+            self._host_scale = table
         else:
-            self._host_table = SharedUvaBuffer(
-                (num_embeddings, embedding_dim), dtype, device, self._shared_group, "_host_table", self
-            )
-            tensor = self._host_table.tensor
-            assert tensor is not None
-            if self._shared_group.rank_in_group == 0:
-                tensor.zero_()
+            self._host_table = table
+        tensor = table.tensor
+        assert tensor is not None
+        if self._shared_group is None or self._shared_group.rank_in_group == 0:
+            tensor.view(torch.uint8).zero_()
+        if self._shared_group is not None:
             dist.barrier(group=self._shared_group.cpu_group)
         logger.info(
-            "PLE host offload: %d rows x %d, %.3f GiB mapped per rank, BF16, shared=%s",
+            "PLE host storage: %d rows x %d, dtype=%s, %.3f GiB per rank",
             num_embeddings,
             embedding_dim,
+            dtype,
             tensor.numel() * tensor.element_size() / 1024**3,
-            self._shared_group is not None,
         )
         return tensor
 
@@ -128,19 +161,37 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def _lookup(self, input_ids: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
         if self._host_table is None or self.weight is None:
             raise RuntimeError("PLE host table has been closed")
+        if self._quantized and (self._host_scale is None or self.weight_scale is None):
+            raise RuntimeError("Quantized PLE host storage has been closed")
         expected_shape = (*input_ids.shape, self.embedding_dim)
         if output is None:
             output = torch.empty(expected_shape, dtype=torch.bfloat16, device=input_ids.device)
         elif (
-            tuple(output.shape) != expected_shape or output.dtype != torch.bfloat16 or output.device != input_ids.device
+            tuple(output.shape) != expected_shape
+            or output.dtype != torch.bfloat16
+            or output.device != input_ids.device
+            or (self._quantized and not output.is_contiguous())
         ):
             raise ValueError("PLE prefetch output must match the input shape, lookup dtype, and input device")
-        ple_lookup.lookup(
-            self._host_table.ptrs,
-            input_ids,
-            output,
-            self.shard_indices.org_vocab_start_index,
-            self.shard_indices.org_vocab_end_index,
-            CHUNK_ROWS,
-        )
+        if self._quantized:
+            assert self._host_scale is not None
+            ple_lookup_quantized.lookup_quantized(
+                self._host_table.ptrs,
+                self._host_scale.ptrs,
+                input_ids,
+                output,
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+                CHUNK_ROWS,
+                is_mxfp8=self._mxfp8,
+            )
+        else:
+            ple_lookup.lookup(
+                self._host_table.ptrs,
+                input_ids,
+                output,
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+                CHUNK_ROWS,
+            )
         return output

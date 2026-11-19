@@ -236,7 +236,7 @@ Verify that all host device and file paths exist before running Docker.
 
 !!! note "950DT products communication prerequisites"
 
-    Prepare the communication environment following the [950DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#atlas-850850e950-superpod-950pr950dt-container-requirements) and [MemCache environment preparation](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Add communication-file mounts required by the selected runtime and transport; the container requirements describe when `/lib/route.conf` can be omitted.
+    Prepare the communication environment following the [950DT container requirements](../features/pd_disaggregation_mooncake_multi_node.md#950pr950dt-products-container-requirements) and [MemCache environment preparation](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend). Add communication-file mounts required by the selected runtime and transport; the container requirements describe when `/lib/route.conf` can be omitted.
 
 === "A2 series"
 

@@ -56,7 +56,7 @@ def test_v1_request_is_rejected_after_upstream_drops_the_entry(monkeypatch):
     from vllm import envs
 
     # Upstream removes the env entry together with Model Runner V1.
-    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", None, raising=False)
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
