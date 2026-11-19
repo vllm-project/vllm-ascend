@@ -15,11 +15,14 @@ import torch
 def preparation(monkeypatch):
     launch = MagicMock()
     runtime = ModuleType("vllm.triton_utils")
-    runtime.tl = SimpleNamespace(constexpr=object)
-    runtime.triton = SimpleNamespace(jit=lambda fn: launch, cdiv=lambda a, b: (a + b - 1) // b)
+    runtime.__dict__.update(
+        tl=SimpleNamespace(constexpr=object),
+        triton=SimpleNamespace(jit=lambda fn: launch, cdiv=lambda a, b: (a + b - 1) // b),
+    )
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/triton/qwen4_exp/lightning_v2_prepare.py"
     spec = importlib.util.spec_from_file_location("qsa_v2_prepare_contract", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.prepare_qsa_lightning_v2_inputs, launch

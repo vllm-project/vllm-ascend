@@ -52,7 +52,7 @@ def selector(monkeypatch):
             lengths.remainder(ratio),
         )
 
-    preparation.prepare_qsa_lightning_v2_inputs = Mock(side_effect=reference_prepare)
+    preparation.__dict__.update(prepare_qsa_lightning_v2_inputs=Mock(side_effect=reference_prepare))
     for module in (upstream, packing, utilities, preparation):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
