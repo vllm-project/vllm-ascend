@@ -1,0 +1,55 @@
+meta:
+  title: Qwen3-0.6B
+  slug: qwen3-0.6b
+  provider: Qwen
+  description: Run the 0.6B dense Qwen3 text model on Ascend NPUs.
+  date_added: '2026-11-19'
+  date_updated: '2026-11-19'
+  tasks:
+    - text
+  hardware:
+    ascend_910b: supported
+    ascend_910c: supported
+model:
+  model_id: Qwen/Qwen3-0.6B
+  architecture: dense
+  parameter_count: 0.6B
+  context_length: 40960
+  min_vllm_version: 0.21.0
+variants:
+  default:
+    precision: bf16
+    label: BF16 (Ascend)
+    vram_minimum_gb: 2
+    description: Original Qwen BF16 weights on Ascend.
+    supported_hardware:
+      - ascend_910b
+      - ascend_910c
+    tp: 1
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:nightly-main-a3
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+hardware_overrides:
+  ascend_910b:
+    extra_args:
+      - --dtype
+      - bfloat16
+  ascend_910c:
+    extra_args:
+      - --dtype
+      - bfloat16
+compatible_strategies:
+  - single_node_tp
+guide: |
+  ## Ascend deployment
+
+  This configuration serves the original BF16 weights with one Ascend chip.
+  See the [Qwen3 Dense tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-Dense.html) for the functional check, AIME 2025 accuracy example, and serving benchmarks.
