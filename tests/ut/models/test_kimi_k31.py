@@ -268,3 +268,27 @@ def test_kimi_attention_cache_proxy_supports_v2_cleanup_assignment():
     attention.kv_cache = replacement
     assert inner.kv_cache is replacement
     assert attention.kv_cache is replacement
+
+
+def test_needs_target_embedding_last_pp_rank_with_target_embed_draft(monkeypatch):
+    from vllm_ascend.models.kimi_k3 import kimi_k3 as kimi_k3_module
+
+    pp_group = SimpleNamespace(is_first_rank=False)
+    monkeypatch.setattr(kimi_k3_module, "get_pp_group", lambda: pp_group)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        kimi_k3_module,
+        "spec_decode_needs_target_embed",
+        lambda cfg: calls.append(cfg) or len(calls) == 1,
+    )
+    vllm_config = SimpleNamespace()
+
+    assert kimi_k3_module._needs_target_embedding(vllm_config) is True
+    assert calls == [vllm_config]
+
+    assert kimi_k3_module._needs_target_embedding(vllm_config) is False
+
+    pp_group.is_first_rank = True
+    del calls[:]
+    assert kimi_k3_module._needs_target_embedding(vllm_config) is True
+    assert calls == []

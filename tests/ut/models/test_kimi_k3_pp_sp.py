@@ -231,6 +231,16 @@ def runtime(monkeypatch):
     context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=True)
     # BaseModel above models the release's cumulative aux protocol.
     # Native main's centralized relay is covered separately with its real mixin/PPHandler.
+
+    # The AST-extracted AscendKimiLinearModel.__init__ calls the module-level
+    # _needs_target_embedding helper; mirror its production semantics here so
+    # the fixture stays importable without a vLLM installation.
+    def spec_decode_needs_target_embed(vllm_config):
+        spec = getattr(vllm_config, "speculative_config", None)
+        return spec is not None and getattr(spec, "method", None) in ("eagle", "eagle3", "dflash", "dspark")
+
+    def _needs_target_embedding(vllm_config):
+        return context.pp.is_first_rank or spec_decode_needs_target_embed(vllm_config)
     namespace = {
         "torch": torch,
         "F": torch.nn.functional,
@@ -255,6 +265,8 @@ def runtime(monkeypatch):
         # BaseModel models the cumulative release protocol, so the module
         # takes its v0.34.0 path. The native fixture installs the real check.
         "vllm_version_is": lambda _target: True,
+        "spec_decode_needs_target_embed": spec_decode_needs_target_embed,
+        "_needs_target_embedding": _needs_target_embedding,
     }
     # Transport and sharding use the repository implementations, including
     # multi-dimensional residuals and zero-length token tensors.
