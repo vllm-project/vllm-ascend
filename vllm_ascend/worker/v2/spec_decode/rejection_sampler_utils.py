@@ -431,7 +431,14 @@ def rejection_sample(
     # foreign step's data. Stream order pins the entry-enqueued reductions
     # to THIS step's logits; the fresh small result tensors are deferred
     # to the exit via the pending snapshot (consume_nan_census below).
-    nan_census_pending = issue_nan_census(target_logits, draft_logits, num_speculative_steps, cu_num_logits)
+    nan_census_pending = issue_nan_census(
+        target_logits,
+        draft_logits,
+        num_speculative_steps,
+        cu_num_logits,
+        expanded_idx_mapping,
+        expanded_local_pos,
+    )
 
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential

@@ -23,6 +23,11 @@
 #     issue returns None)
 #   * snapshot deferral: mutating the logits tensors AFTER issue must not
 #     change what consume reports (the regression for async buffer reuse)
+#   * draft census is restricted to the ACTIVE (slot, step) pairs the
+#     verify kernels read: draft_logits is a persistent
+#     [max_num_reqs, K, V] buffer whose inactive slots / unscheduled steps
+#     hold stale data that must NOT be reported (and must not take the
+#     limited display slots); bonus rows read no draft and are zeroed
 #   * num_sampled==1 marks a fully-rejected request (accepted drafts + 1),
 #     restricted to requests that actually had drafts under packed
 #     cu_num_logits
@@ -93,10 +98,20 @@ def _draft_records(cap):
     return [m for m in _messages(cap) if "draft_logits" in m]
 
 
-def _run_census(target, draft, steps, cu=None):
+def _run_census(target, draft, steps, cu=None, slot=None, step=None):
     """Two-phase path: issue at the entry, consume at the exit."""
-    pending = dfx.issue_nan_census(target, draft, steps, cu)
+    pending = dfx.issue_nan_census(target, draft, steps, cu, slot, step)
     dfx.consume_nan_census(pending)
+
+
+def _uniform_mappings(num_logits=NUM_LOGITS, k=K):
+    """Slot/step mappings for a uniform batch: every request occupies
+    k+1 packed rows (k draft rows + 1 bonus row at step == k), with
+    request r parked in draft-buffer slot r."""
+    rows_per_req = k + 1
+    slot = torch.tensor([i // rows_per_req for i in range(num_logits)], dtype=torch.int32)
+    step = torch.tensor([i % rows_per_req for i in range(num_logits)], dtype=torch.int32)
+    return slot, step
 
 
 def test_clean_inputs_silent(capture):
@@ -137,6 +152,71 @@ def test_multiple_rows_nan(capture):
 
 
 def test_draft_logits_nan(capture):
+    """Active draft NaN is reported with req/step/slot coordinates; a NaN
+    in an INACTIVE slot (persistent buffer, not in idx_mapping) is stale
+    data and must not be reported -- it must not take a display slot."""
+    draft = torch.zeros(4, K, V)
+    draft[0, 1, :7] = float("nan")  # slot 0 = req 0, step 1 -- ACTIVE
+    draft[3, 2, :V] = float("nan")  # slot 3 not in idx_mapping -- STALE
+    slot, step = _uniform_mappings()
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    _run_census(_clean_target(), draft, K, cu, slot, step)
+    recs = _draft_records(capture)
+    assert len(recs) == 1, recs
+    assert "rows_with_nan=1" in recs[0]
+    assert "total_nan=7" in recs[0]
+    assert "req=0 step=1 slot=0 nan=7" in recs[0]
+    assert "slot=3" not in recs[0]
+
+
+def test_draft_inactive_slot_not_reported(capture):
+    """A poisoned slot that no request maps to this step is stale buffer
+    content -- the census stays silent instead of reporting it."""
+    draft = torch.zeros(4, K, V)
+    draft[3, 2, :5] = float("nan")  # slot 3 unused by the active batch
+    slot, step = _uniform_mappings()
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    _run_census(_clean_target(), draft, K, cu, slot, step)
+    assert capture.records == [], f"stale slot must stay silent, got {_messages(capture)}"
+
+
+def test_draft_shorter_draft_stale_step_not_reported(capture):
+    """Regression: a request scheduled fewer drafts than K leaves its
+    higher step positions unpopulated this step. cu=[0, 6, 9]: req 0 has
+    five drafts (rows 0-4 + bonus at 5), req 1 has TWO drafts (rows 6-7 +
+    bonus at 8). A NaN at req 1's step 3 is stale -- only steps 0-1 were
+    scheduled and only those are read by the verifier."""
+    draft = torch.zeros(4, K, V)
+    draft[1, 3, :5] = float("nan")  # beyond req 1's scheduled steps -- STALE
+    draft[1, 0, :4] = float("nan")  # req 1, step 0 -- ACTIVE
+    slot = torch.tensor([0] * 6 + [1] * 3, dtype=torch.int32)
+    step = torch.tensor([0, 1, 2, 3, 4, 5, 0, 1, 2], dtype=torch.int32)
+    cu = torch.tensor([0, 6, 9], dtype=torch.int64)
+    _run_census(_clean_target(), draft, K, cu, slot, step)
+    recs = _draft_records(capture)
+    assert len(recs) == 1, recs
+    assert "req=1 step=0 slot=1 nan=4" in recs[0]
+    assert "step=3" not in recs[0]
+
+
+def test_draft_bonus_row_not_reported(capture):
+    """The bonus row (each request's last packed row) reads no draft in
+    the verifier; its clamped gather is discarded, so a poisoned last
+    draft step is reported at its own step, never as a bonus row."""
+    draft = torch.zeros(4, K, V)
+    draft[0, 4, :2] = float("nan")  # req 0, step 4 (last real draft) -- ACTIVE
+    slot, step = _uniform_mappings()  # rows 5/11 carry step == K (bonus)
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    _run_census(_clean_target(), draft, K, cu, slot, step)
+    recs = _draft_records(capture)
+    assert len(recs) == 1, recs
+    assert "req=0 step=4 slot=0 nan=2" in recs[0]
+    assert "step=5" not in recs[0]
+
+
+def test_draft_full_scan_legacy_coords(capture):
+    """Without row mappings the census falls back to the legacy full scan
+    with uniform slot coordinates."""
     draft = torch.zeros(4, K, V)
     draft[1, 3, :7] = float("nan")  # slot 1, step 3
     _run_census(_clean_target(), draft, K)
@@ -263,6 +343,15 @@ def test_census_never_raises(capture):
     _run_census(torch.zeros(0, V), None, K)  # zero rows
     _run_census(torch.zeros(3, 0), None, K)  # zero vocab
     dfx.issue_nan_census(torch.zeros(0, V), torch.zeros(0, K, 0), K)
+    # active-pair path with degenerate shapes
+    _run_census(
+        torch.zeros(0, V),
+        torch.zeros(0, K, 0),
+        K,
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(0, dtype=torch.int32),
+        torch.zeros(0, dtype=torch.int32),
+    )
     dfx.consume_nan_census(None)  # degenerate pending
     dfx.log_accept0_census(torch.zeros(0, dtype=torch.int32), 0)
     # no exception escaped; failures would surface as census-failed DEBUGs
