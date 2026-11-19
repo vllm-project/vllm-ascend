@@ -779,11 +779,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if not missing_indices:
             return True
         keys = [keys[index] for index in missing_indices]
-        result = self.m_store.put(
-            keys,
-            [boundary_values[key][0] for key in keys],
-            [boundary_values[key][1] for key in keys],
-        )
+        adds = [boundary_values[key][0] for key in keys]
+        sizes = [boundary_values[key][1] for key in keys]
+        result = self.m_store.put(keys, adds, sizes)
         if isinstance(result, list):
             if len(result) != len(keys) or not all(result):
                 return False
