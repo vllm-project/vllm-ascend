@@ -2,13 +2,13 @@
 
 ## 1 Introduction
 
-This release has been validated only on 950DT products. A2 and A3 have not yet been validated; support is planned for future releases.
-
 !!! note
 
     The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
+This release has been validated only on 950DT products. A2 and A3 have not yet been validated; support is planned for future releases.
 
 Hy4-Flash is a Mixture-of-Experts model with sliding-window attention, IndexPool sparse attention, iHC, and Engram conditional memory. The checkpoint has 42 language-model layers and an embedded five-layer DFly draft for speculative decoding.
 
@@ -58,14 +58,25 @@ export MODEL_DIR="<HY4_FLASH_FP8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
 mkdir -p "$WORK_DIR"
 
-docker run -it --name "$CONTAINER_NAME" \
-    --network host --ipc host --privileged --shm-size=100g \
-    --device /dev/davinci_manager --device /dev/hisi_hdc \
-    --device /dev/ummu --device /dev/uburma \
-    --device /dev/davinci0 --device /dev/davinci1 \
-    --device /dev/davinci2 --device /dev/davinci3 \
-    --device /dev/davinci4 --device /dev/davinci5 \
-    --device /dev/davinci6 --device /dev/davinci7 \
+docker run \
+    -it \
+    --name "$CONTAINER_NAME" \
+    --network host \
+    --ipc host \
+    --privileged \
+    --shm-size=100g \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
     -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
     -v /usr/local/sbin:/usr/local/sbin:ro \
@@ -77,7 +88,9 @@ docker run -it --name "$CONTAINER_NAME" \
     -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
     -v "$MODEL_DIR":/models/Hy4-Flash-FP8:ro \
     -v "$WORK_DIR":/workspace \
-    -w /workspace "$IMAGE" bash
+    -w /workspace \
+    "$IMAGE" \
+    bash
 ```
 
 Run the serving commands in Section 5 inside the container. For the remaining environment requirements, refer to [Installation](../../getting_started/installation.md).
@@ -114,16 +127,8 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
         --kv-cache-dtype fp8 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
         --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
-        --compilation-config '{
-            "mode":0,
-            "cudagraph_mode":"FULL_DECODE_ONLY",
-            "decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32],
-            "max_decode_cudagraph_capture_tokens":512
-        }' \
-        --additional-config '{
-            "multistream_overlap_shared_expert":true,
-            "ascend_compilation_config":{"enable_npugraph_ex":true}
-        }' \
+        --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32],"max_decode_cudagraph_capture_tokens":512}' \
+        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}' \
         --enable-prefix-caching \
         --async-scheduling \
         --seed 1024
@@ -172,39 +177,27 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     export VLLM_USE_V2_MODEL_RUNNER=1
 
     exec vllm serve "$MODEL_PATH" \
-      --host 127.0.0.1 --port "$SERVICE_PORT" \
-      --tensor-parallel-size 4 \
-      --data-parallel-size 1 \
-      --served-model-name hy4-flash \
-      --dtype bfloat16 \
-      --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-      --max-num-seqs "$MAX_NUM_SEQS" \
-      --max-model-len "$MAX_MODEL_LEN" \
-      --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
-      --enable-expert-parallel \
-      --trust-remote-code \
-      --kv-cache-dtype fp8 \
-      --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-      --enable-prefix-caching \
-      --async-scheduling \
-      --enforce-eager \
-      --seed 1024 \
-      --compilation-config '{"mode":0,"cudagraph_mode":"NONE"}' \
-      --kv-transfer-config '{
-        "kv_connector":"MooncakeConnectorV2",
-        "kv_role":"kv_producer",
-        "kv_port":'"$KV_PORT"',
-        "engine_id":"hy4-flash-prefill",
-        "kv_connector_extra_config":{
-          "ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'",
-          "prefill":{"tp_size":4,"dp_size":1},
-          "decode":{"tp_size":1,"dp_size":4}
-        }
-      }' \
-      --additional-config '{
-        "multistream_overlap_shared_expert":true,
-        "ascend_compilation_config":{"enable_npugraph_ex":true}
-      }'
+        --host 127.0.0.1 \
+        --port "$SERVICE_PORT" \
+        --tensor-parallel-size 4 \
+        --data-parallel-size 1 \
+        --served-model-name hy4-flash \
+        --dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --enable-expert-parallel \
+        --trust-remote-code \
+        --kv-cache-dtype fp8 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enforce-eager \
+        --seed 1024 \
+        --compilation-config '{"mode":0,"cudagraph_mode":"NONE"}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":'"$KV_PORT"',"engine_id":"hy4-flash-prefill","kv_connector_extra_config":{"ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'","prefill":{"tp_size":4,"dp_size":1},"decode":{"tp_size":1,"dp_size":4}}}' \
+        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}'
     ```
 
     Start the Prefill service:
@@ -242,45 +235,28 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     export VLLM_USE_V2_MODEL_RUNNER=1
 
     exec vllm serve "$MODEL_PATH" \
-      --host 127.0.0.1 --port "$SERVICE_PORT" \
-      --tensor-parallel-size 1 \
-      --data-parallel-size 4 \
-      --data-parallel-rpc-port 13445 \
-      --served-model-name hy4-flash \
-      --dtype bfloat16 \
-      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-      --max-num-seqs "$MAX_NUM_SEQS" \
-      --max-model-len "$MAX_MODEL_LEN" \
-      --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
-      --enable-expert-parallel \
-      --trust-remote-code \
-      --kv-cache-dtype fp8 \
-      --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-      --no-enable-prefix-caching \
-      --async-scheduling \
-      --seed 1024 \
-      --compilation-config '{
-        "mode":0,
-        "cudagraph_mode":"FULL_DECODE_ONLY",
-        "decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32,64,128],
-        "max_decode_cudagraph_capture_tokens":512
-      }' \
-      --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
-      --kv-transfer-config '{
-        "kv_connector":"MooncakeConnectorV2",
-        "kv_role":"kv_consumer",
-        "kv_port":'"$KV_PORT"',
-        "engine_id":"hy4-flash-decode",
-        "kv_connector_extra_config":{
-          "ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'",
-          "prefill":{"tp_size":4,"dp_size":1},
-          "decode":{"tp_size":1,"dp_size":4}
-        }
-      }' \
-      --additional-config '{
-        "multistream_overlap_shared_expert":true,
-        "ascend_compilation_config":{"enable_npugraph_ex":true}
-      }'
+        --host 127.0.0.1 \
+        --port "$SERVICE_PORT" \
+        --tensor-parallel-size 1 \
+        --data-parallel-size 4 \
+        --data-parallel-rpc-port 13445 \
+        --served-model-name hy4-flash \
+        --dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --max-num-seqs "$MAX_NUM_SEQS" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+        --enable-expert-parallel \
+        --trust-remote-code \
+        --kv-cache-dtype fp8 \
+        --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+        --no-enable-prefix-caching \
+        --async-scheduling \
+        --seed 1024 \
+        --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1,2,3,4,5,6,7,8,16,32,64,128],"max_decode_cudagraph_capture_tokens":512}' \
+        --speculative-config '{"method":"dfly","num_speculative_tokens":5}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":'"$KV_PORT"',"engine_id":"hy4-flash-decode","kv_connector_extra_config":{"ascend_local_comm_res_path":"'"$UB_ENDPOINTS_PATH"'","prefill":{"tp_size":4,"dp_size":1},"decode":{"tp_size":1,"dp_size":4}}}' \
+        --additional-config '{"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"enable_npugraph_ex":true}}'
     ```
 
     Start the Decode service:
@@ -300,9 +276,12 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     VLLM_ASCEND_PATH="<VLLM_ASCEND_SOURCE_DIRECTORY>"
 
     exec python "$VLLM_ASCEND_PATH/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py" \
-      --host 127.0.0.1 --port 8000 \
-      --prefiller-hosts 127.0.0.1 --prefiller-ports 8100 \
-      --decoder-hosts 127.0.0.1 --decoder-ports 8200
+        --host 127.0.0.1 \
+        --port 8000 \
+        --prefiller-hosts 127.0.0.1 \
+        --prefiller-ports 8100 \
+        --decoder-hosts 127.0.0.1 \
+        --decoder-ports 8200
     ```
 
     Start the proxy after both services report `Application startup complete`:
@@ -424,12 +403,17 @@ print(json.dumps({sys.argv[1]: {"local_path": sys.argv[2]}}))
 PY
 )
     evalscope eval \
-        --model hy4-flash --api-url "$API_URL" --api-key EMPTY \
-        --eval-type openai_api --datasets "$dataset" \
-        --dataset-hub modelscope --dataset-args "$dataset_args" \
+        --model hy4-flash \
+        --api-url "$API_URL" \
+        --api-key EMPTY \
+        --eval-type openai_api \
+        --datasets "$dataset" \
+        --dataset-hub modelscope \
+        --dataset-args "$dataset_args" \
         --eval-batch-size 16 \
         --generation-config '{"temperature":0.9,"top_p":1.0,"top_k":-1,"max_tokens":131072,"stream":true,"timeout":1800}' \
-        --work-dir "$EVAL_DIR/$dataset" --no-timestamp
+        --work-dir "$EVAL_DIR/$dataset" \
+        --no-timestamp
 done
 ```
 
@@ -455,13 +439,18 @@ vllm bench serve \
     --backend openai \
     --base-url http://127.0.0.1:8000 \
     --endpoint /v1/completions \
-    --model "$MODEL_PATH" --served-model-name hy4-flash \
+    --model "$MODEL_PATH" \
+    --served-model-name hy4-flash \
     --trust-remote-code \
     --dataset-name random \
-    --random-input-len 4096 --random-output-len 200 \
+    --random-input-len 4096 \
+    --random-output-len 200 \
     --random-range-ratio 1.0 \
-    --num-prompts 32 --max-concurrency 8 --request-rate inf \
-    --ignore-eos --save-result \
+    --num-prompts 32 \
+    --max-concurrency 8 \
+    --request-rate inf \
+    --ignore-eos \
+    --save-result \
     --result-dir /workspace/hy4flash-benchmarks
 ```
 
