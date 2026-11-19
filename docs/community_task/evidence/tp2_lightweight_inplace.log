@@ -1,0 +1,492 @@
+{"phase": "start", "tp": 2, "model": "/mnt/moark-models/Qwen3-0.6B", "visible": "0,1", "additional_config": {"weight_nz_mode": 0, "rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true, "sleep_hccl_policy": "lightweight", "sleep_acl_graph_policy": "inplace", "sleep_allow_fallback": true}}}
+INFO 11-19 04:20:05 [__init__.py:52] Available plugins for group vllm.platform_plugins:
+INFO 11-19 04:20:05 [__init__.py:54] - ascend -> vllm_ascend:register
+INFO 11-19 04:20:05 [__init__.py:57] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:13: FutureWarning: triton.language.extra.cann.extension.atan2 is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.atan2 instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.atan2")
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:35: FutureWarning: triton.language.extra.cann.extension.isfinited is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.isfinited instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.isfinited")
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:49: FutureWarning: triton.language.extra.cann.extension.finitef is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.finitef instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.finitef")
+INFO 11-19 04:20:05 [__init__.py:272] Platform plugin ascend is activated
+INFO 11-19 04:20:06 [platform.py:74] Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=0.
+{"phase": "device_probe", "torch": "2.10.0+cpu", "npu_count": 2}
+INFO 11-19 04:20:12 [patch_indexer_kv_dtype.py:102] Patched AttentionConfig.indexer_kv_dtype to accept 'int8' (DeepSeek V4 Ascend indexer K cache dtype).
+INFO 11-19 04:20:12 [patch_kv_cache_dtype.py:117] Patched CacheConfig.cache_dtype to accept 'int8' and 'mxfp8' (Ascend KV cache dtypes).
+INFO 11-19 04:20:12 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 11-19 04:20:12 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+INFO 11-19 04:20:12 [api_utils.py:286] non-default args: {'dtype': 'bfloat16', 'max_model_len': 1024, 'distributed_executor_backend': 'mp', 'tensor_parallel_size': 2, 'eplb_config': EPLBConfig(window_size=1000, step_interval=3000, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=True, policy='default', communicator=None), 'gpu_memory_utilization': 0.7, 'disable_log_stats': True, 'enable_sleep_mode': True, 'additional_config': {'weight_nz_mode': 0, 'rl_config': {'enabled': True, 'sleep_mode_extra_cleanup': True, 'sleep_hccl_policy': 'lightweight', 'sleep_acl_graph_policy': 'inplace', 'sleep_allow_fallback': True}}, 'model': '/mnt/moark-models/Qwen3-0.6B'}
+WARNING 11-19 04:20:12 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+INFO 11-19 04:20:12 [model.py:692] Resolved architecture: Qwen3ForCausalLM
+INFO 11-19 04:20:12 [model.py:2030] Using max model len 1024
+INFO 11-19 04:20:12 [scheduler.py:288] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 11-19 04:20:12 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'])
+INFO 11-19 04:20:12 [utils.py:225] No quantization signature detected from model files for "/mnt/moark-models/Qwen3-0.6B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+WARNING 11-19 04:20:12 [platform.py:731] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+INFO 11-19 04:20:12 [platform.py:945] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+INFO 11-19 04:20:12 [ascend_config.py:332] Dynamic EPLB is False
+INFO 11-19 04:20:12 [ascend_config.py:333] The number of redundant experts is 0
+INFO 11-19 04:20:12 [ascend_config.py:773] FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.
+INFO 11-19 04:20:12 [utils.py:1538] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+INFO 11-19 04:20:12 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+WARNING 11-19 04:20:15 [warnings.py:112] /usr/local/python3.12.16/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=13579) is multi-threaded, use of fork() may lead to deadlocks in the child.
+INFO 11-19 04:20:15 [ascend_config.py:332] Dynamic EPLB is False
+INFO 11-19 04:20:15 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=13859) INFO 11-19 04:20:15 [core.py:123] Initializing a V1 LLM engine (v0.30.0) with config: model='/mnt/moark-models/Qwen3-0.6B', speculative_config=None, tokenizer='/mnt/moark-models/Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir=None, load_format=auto, tensor_parallel_size=2, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=/mnt/moark-models/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::qwen4_exp_ple_short_conv', 'vllm::qwen4_exp_qsa_with_output', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update', 'vllm::mla_forward', 'vllm::dsa_forward', 'vllm::minimax_m3_fused_sparse_forward'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, moe_backend='auto', sparse_indexer_topk_backend='auto', linear_backend='auto', linear_backend_per_quant=None)
+(EngineCore pid=13859) INFO 11-19 04:20:15 [multiproc_executor.py:153] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.254.4.8 (local), world_size=2, local_world_size=2
+(EngineCore pid=13859) WARNING 11-19 04:20:15 [warnings.py:112] /usr/local/python3.12.16/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=13859) is multi-threaded, use of fork() may lead to deadlocks in the child.
+(EngineCore pid=13859) WARNING 11-19 04:20:17 [patch_triton.py:332] NPU Triton causal_conv1d_update is unavailable (cannot import name 'causal_conv1d_update_npu' from 'vllm_ascend.ops.triton.mamba.causal_conv1d' (/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/mamba/causal_conv1d.py)); falling back to the PyTorch implementation, which syncs per request and therefore stalls ACL graph capture at decode-FULL.
+(EngineCore pid=13859) WARNING 11-19 04:20:17 [patch_triton.py:332] NPU Triton causal_conv1d_update is unavailable (cannot import name 'causal_conv1d_update_npu' from 'vllm_ascend.ops.triton.mamba.causal_conv1d' (/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/mamba/causal_conv1d.py)); falling back to the PyTorch implementation, which syncs per request and therefore stalls ACL graph capture at decode-FULL.
+(EngineCore pid=13859) INFO 11-19 04:20:17 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=13859) INFO 11-19 04:20:17 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=13859) INFO 11-19 04:20:17 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=13859) INFO 11-19 04:20:17 [ascend_config.py:333] The number of redundant experts is 0
+(Worker pid=13881) INFO 11-19 04:20:19 [parallel_state.py:1827] world_size=2 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_93a6f5d1a78940a8b51dec04b199f611 backend=hccl
+(Worker pid=13883) INFO 11-19 04:20:19 [parallel_state.py:1827] world_size=2 rank=1 local_rank=1 distributed_init_method=file:///tmp/vllm_dist_93a6f5d1a78940a8b51dec04b199f611 backend=hccl
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank [Gloo] Rank 10 is connected to  is connected to 11 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 11
+
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(Worker pid=13881) INFO 11-19 04:20:19 [parallel_state.py:2267] rank 0 in world size 2 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank N/A, EPLB rank N/A
+[Gloo] Rank 0 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[rank0]:[W1119 04:20:19.208932138 NPUCachingAllocator.cpp:204] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+[rank1]:[W1119 04:20:19.220161377 NPUCachingAllocator.cpp:204] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+(Worker pid=13881) INFO 11-19 04:20:19 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(Worker pid=13883) INFO 11-19 04:20:19 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [model_runner_v1.py:4389] Starting to load model /mnt/moark-models/Qwen3-0.6B...
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [model_runner_v1.py:4389] Starting to load model /mnt/moark-models/Qwen3-0.6B...
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [compilation.py:1114] Using OOT custom backend for compilation.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [compilation.py:1114] Using OOT custom backend for compilation.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [compilation.py:1114] Using OOT custom backend for compilation.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [compilation.py:1114] Using OOT custom backend for compilation.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [weight_utils.py:857] Prefetching checkpoint files into page cache started (in background, num_threads=8, block_size=16777216 bytes)
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [weight_utils.py:895] Filesystem type for checkpoints: NFS4. Checkpoint size: 1.40 GiB. Available RAM: 230.40 GiB.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:19 [weight_utils.py:857] Prefetching checkpoint files into page cache started (in background, num_threads=8, block_size=16777216 bytes)
+(Worker_TP1 pid=13883) INFO 11-19 04:20:19 [weight_utils.py:852] Prefetching checkpoint files into page cache finished in 0.00s
+(Worker_TP0 pid=13881) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(Worker_TP0 pid=13881) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 11.96it/s]
+(Worker_TP0 pid=13881) 
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [default_loader.py:430] Loading weights took 0.11 seconds
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [model_runner_v1.py:4476] Loading model weights took 0.6012 GB
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [model_runner_v1.py:4563] Model runner load_model total time: 1.40 seconds
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [interface.py:635] Setting kv cache block size to 128 for CUSTOM backend.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:20 [model_runner_v1.py:4476] Loading model weights took 0.6012 GB
+(Worker_TP1 pid=13883) INFO 11-19 04:20:20 [model_runner_v1.py:4563] Model runner load_model total time: 1.40 seconds
+(Worker_TP1 pid=13883) INFO 11-19 04:20:20 [interface.py:635] Setting kv cache block size to 128 for CUSTOM backend.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [weight_utils.py:829] Prefetching checkpoint files: 10% (1/1)
+(Worker_TP0 pid=13881) INFO 11-19 04:20:20 [weight_utils.py:852] Prefetching checkpoint files into page cache finished in 0.93s
+(EngineCore pid=13859) INFO 11-19 04:20:20 [torch_utils.py:287] Reducing Torch threads from 16 to 1 for serving. Set OMP_NUM_THREADS in the external environment to override.
+(EngineCore pid=13859) INFO 11-19 04:20:20 [utils.py:320] Using LBNHC KV cache layout.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:23 [compiler_interface.py:279] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post7', 'enable_npugraph_ex': False, 'enable_static_kernel': False, 'enable_super_kernel': False}
+(Worker_TP0 pid=13881) INFO 11-19 04:20:23 [backends.py:1094] Using cache directory: /root/.cache/vllm/torch_compile_cache/57832f9300/rank_0_0/backbone for vLLM's torch.compile
+(Worker_TP0 pid=13881) INFO 11-19 04:20:23 [backends.py:1155] Dynamo bytecode transform time: 2.40 s
+(Worker_TP1 pid=13883) INFO 11-19 04:20:23 [compiler_interface.py:279] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post7', 'enable_npugraph_ex': False, 'enable_static_kernel': False, 'enable_super_kernel': False}
+(Worker_TP0 pid=13881) INFO 11-19 04:20:29 [backends.py:393] Compiling a graph for compile range (1, 8192) takes 4.61 s
+(Worker_TP0 pid=13881) INFO 11-19 04:20:30 [decorators.py:719] saved AOT compiled function to /root/.cache/vllm/torch_compile_cache/torch_aot_compile/90c116fe5cf5e9dbf526ee94ffa78b8fc4efca05df502d958f64dfc828f36c1b/rank_0_0/model
+(Worker_TP0 pid=13881) INFO 11-19 04:20:30 [monitor.py:53] torch.compile took 9.52 s in total
+(Worker_TP0 pid=13881) INFO 11-19 04:20:33 [monitor.py:81] Initial profiling/warmup run took 2.72 s
+(Worker_TP0 pid=13881) INFO 11-19 04:20:34 [worker.py:660] Available KV cache memory: 41.28 GiB
+(EngineCore pid=13859) INFO 11-19 04:20:34 [kv_cache_utils.py:2395] NPU KV cache size: 772,864 tokens, Maximum concurrency for 1,024 tokens per request: 754.75x
+(Worker_TP0 pid=13881) (Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:44] Starting Triton kernel warmup.
+INFO 11-19 04:20:36 [kernel_warmup.py:44] Starting Triton kernel warmup.
+(Worker_TP0 pid=13881) (Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:36] rejection_sampler Triton warmup complete in 0.000s.
+INFO 11-19 04:20:36 [kernel_warmup.py:36] rejection_sampler Triton warmup complete in 0.000s.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:36 [kernel_warmup.py:36] penalties Triton warmup complete in 0.062s.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:36 [kernel_warmup.py:36] rms Triton warmup complete in 0.000s.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:36 [kernel_warmup.py:36] indexer Triton warmup complete in 0.000s.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:36 [kernel_warmup.py:53] Triton kernel warmup finished in 0.063s.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:36 [gpu_model_runner.py:6883] Rank 0: Torch profiler disabled for CUDA graph capture
+(Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:36] penalties Triton warmup complete in 0.064s.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:36] rms Triton warmup complete in 0.000s.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:36] indexer Triton warmup complete in 0.000s.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:36 [kernel_warmup.py:53] Triton kernel warmup finished in 0.065s.
+(Worker_TP0 pid=13881) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   3%|▎         | 1/35 [00:00<00:04,  7.34it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   6%|▌         | 2/35 [00:00<00:04,  7.57it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   9%|▊         | 3/35 [00:00<00:04,  7.60it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  11%|█▏        | 4/35 [00:00<00:04,  7.72it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  14%|█▍        | 5/35 [00:00<00:03,  7.69it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  17%|█▋        | 6/35 [00:00<00:03,  7.66it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  20%|██        | 7/35 [00:00<00:03,  7.76it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  23%|██▎       | 8/35 [00:01<00:03,  7.68it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  26%|██▌       | 9/35 [00:01<00:03,  7.76it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  29%|██▊       | 10/35 [00:01<00:03,  7.75it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  31%|███▏      | 11/35 [00:01<00:03,  7.77it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  34%|███▍      | 12/35 [00:01<00:02,  7.76it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  37%|███▋      | 13/35 [00:01<00:02,  7.78it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  40%|████      | 14/35 [00:01<00:02,  7.77it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  43%|████▎     | 15/35 [00:01<00:02,  7.74it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  46%|████▌     | 16/35 [00:02<00:02,  7.73it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  49%|████▊     | 17/35 [00:02<00:02,  7.77it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████▏    | 18/35 [00:02<00:02,  7.58it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  54%|█████▍    | 19/35 [00:02<00:02,  7.81it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  57%|█████▋    | 20/35 [00:02<00:01,  8.00it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  60%|██████    | 21/35 [00:02<00:01,  8.07it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 22/35 [00:02<00:01,  7.79it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  66%|██████▌   | 23/35 [00:02<00:01,  7.97it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  69%|██████▊   | 24/35 [00:03<00:01,  8.10it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  71%|███████▏  | 25/35 [00:03<00:01,  8.22it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  74%|███████▍  | 26/35 [00:03<00:01,  8.16it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  77%|███████▋  | 27/35 [00:03<00:01,  7.93it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 28/35 [00:03<00:00,  8.11it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  83%|████████▎ | 29/35 [00:03<00:00,  8.18it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▌ | 30/35 [00:03<00:00,  8.12it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  89%|████████▊ | 31/35 [00:03<00:00,  8.11it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  91%|█████████▏| 32/35 [00:04<00:00,  8.14it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  94%|█████████▍| 33/35 [00:04<00:00,  8.19it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  97%|█████████▋| 34/35 [00:04<00:00,  8.18it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 35/35 [00:06<00:00,  1.45it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 35/35 [00:06<00:00,  5.54it/s]
+(Worker_TP0 pid=13881) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):   3%|▎         | 1/35 [00:00<00:05,  6.45it/s]Capturing CUDA graphs (decode, FULL):   9%|▊         | 3/35 [00:00<00:02, 10.93it/s]Capturing CUDA graphs (decode, FULL):  14%|█▍        | 5/35 [00:00<00:02, 12.33it/s]Capturing CUDA graphs (decode, FULL):  20%|██        | 7/35 [00:00<00:02, 13.31it/s]Capturing CUDA graphs (decode, FULL):  26%|██▌       | 9/35 [00:00<00:01, 13.95it/s]Capturing CUDA graphs (decode, FULL):  31%|███▏      | 11/35 [00:00<00:01, 14.38it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:01, 14.65it/s]Capturing CUDA graphs (decode, FULL):  43%|████▎     | 15/35 [00:01<00:01, 14.81it/s]Capturing CUDA graphs (decode, FULL):  49%|████▊     | 17/35 [00:01<00:01, 15.04it/s]Capturing CUDA graphs (decode, FULL):  54%|█████▍    | 19/35 [00:01<00:01, 15.21it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:01<00:00, 15.37it/s]Capturing CUDA graphs (decode, FULL):  66%|██████▌   | 23/35 [00:01<00:00, 15.56it/s]Capturing CUDA graphs (decode, FULL):  71%|███████▏  | 25/35 [00:01<00:00, 15.76it/s]Capturing CUDA graphs (decode, FULL):  77%|███████▋  | 27/35 [00:01<00:00, 16.00it/s]Capturing CUDA graphs (decode, FULL):  83%|████████▎ | 29/35 [00:01<00:00, 16.26it/s]Capturing CUDA graphs (decode, FULL):  89%|████████▊ | 31/35 [00:02<00:00, 16.19it/s]Capturing CUDA graphs (decode, FULL):  94%|█████████▍| 33/35 [00:02<00:00, 16.09it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:02<00:00, 16.24it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:02<00:00, 14.96it/s]
+(Worker_TP1 pid=13883) INFO 11-19 04:20:46 [worker.py:950] Free memory on device (60.54/60.96 GiB) on startup. Desired GPU memory utilization is (0.7, 42.67 GiB). Actual usage: 0.6 GiB for weights, 0.2 GiB for peak activation, 0.59 GiB for non-torch memory, 0.29 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=43856086016` (40.84 GiB) to fit into requested memory, or `--kv-cache-memory=63044629504` (58.71 GiB) to fully utilize NPU free memory. Current KV cache memory: 41.28 GiB. After warmup: torch reserved memory 42.36 GiB, torch allocated memory 41.91 GiB.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:46 [gpu_model_runner.py:6929] Graph capturing finished in 10 secs, took 0.29 GiB
+(Worker_TP0 pid=13881) INFO 11-19 04:20:46 [worker.py:950] Free memory on device (60.54/60.96 GiB) on startup. Desired GPU memory utilization is (0.7, 42.67 GiB). Actual usage: 0.6 GiB for weights, 0.2 GiB for peak activation, 0.59 GiB for non-torch memory, 0.29 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=43858961408` (40.85 GiB) to fit into requested memory, or `--kv-cache-memory=63045035008` (58.72 GiB) to fully utilize NPU free memory. Current KV cache memory: 41.28 GiB. After warmup: torch reserved memory 42.36 GiB, torch allocated memory 41.91 GiB.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:46 [cpu_binding.py:799] CPU binding skipped: non-ARM CPU detected.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:46 [cpu_binding.py:799] CPU binding skipped: non-ARM CPU detected.
+(EngineCore pid=13859) INFO 11-19 04:20:46 [core.py:372] init engine (profile, create kv cache, warmup model) took 25.10 s (compilation: 9.52 s)
+(EngineCore pid=13859) INFO 11-19 04:20:46 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=13859) INFO 11-19 04:20:46 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=13859) INFO 11-19 04:20:46 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'])
+(EngineCore pid=13859) INFO 11-19 04:20:46 [utils.py:225] No quantization signature detected from model files for "/mnt/moark-models/Qwen3-0.6B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(EngineCore pid=13859) INFO 11-19 04:20:46 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=13859) INFO 11-19 04:20:46 [ascend_config.py:333] The number of redundant experts is 0
+INFO 11-19 04:20:46 [hf.py:642] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 66.22it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](Worker_TP0 pid=13881) INFO 11-19 04:20:46 [acl_graph.py:301] ACL graph replay is active (logged once).
+Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  7.77it/s, est. speed input: 7.77 toks/s, output: 124.29 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  7.77it/s, est. speed input: 7.77 toks/s, output: 124.29 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  7.75it/s, est. speed input: 7.77 toks/s, output: 124.29 toks/s]
+{"phase": "warmup_generate", "text": " Answer! I'm a bit confused about the problem. Let me try to understand"}
+{"phase": "round_begin", "round": 0, "free_before": 18590539776}
+(EngineCore pid=13859) INFO 11-19 04:20:48 [scheduler.py:2600] setting pause state to PAUSED_NEW
+(EngineCore pid=13859) INFO 11-19 04:20:48 [block_pool.py:854] Successfully reset prefix cache
+[Gloo] Rank [Gloo] Rank 0 is connected to 11 peer ranks.  is connected to Expected number of connected peer ranks is : 11 peer ranks. 
+Expected number of connected peer ranks is : 1
+(Worker_TP0 pid=13881) INFO 11-19 04:20:48 [sleep_mem_optimized.py:678] Lightweight multi-NPU sleep via destroy/restore (destroyed_pgs=7).
+(Worker_TP0 pid=13881) INFO 11-19 04:20:48 [sleep_mem_optimized.py:200] Sleep mode released HCCL and attention workspace memory: 0.393 GiB.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:48 [camem.py:198] CaMem sleep: offloading 28/56 allocations (tags=('weights',))
+(Worker_TP1 pid=13883) INFO 11-19 04:20:48 [sleep_mem_optimized.py:678] Lightweight multi-NPU sleep via destroy/restore (destroyed_pgs=7).
+(Worker_TP1 pid=13883) INFO 11-19 04:20:48 [sleep_mem_optimized.py:200] Sleep mode released HCCL and attention workspace memory: 0.389 GiB.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:48 [camem.py:198] CaMem sleep: offloading 28/56 allocations (tags=('weights',))
+(Worker_TP0 pid=13881) INFO 11-19 04:20:50 [worker.py:272] Sleep mode (level=1) freed 42.54 GiB memory, 1.10 GiB memory is still in use.
+(Worker_TP1 pid=13883) INFO 11-19 04:20:51 [worker.py:272] Sleep mode (level=1) freed 42.54 GiB memory, 1.05 GiB memory is still in use.
+(EngineCore pid=13859) INFO 11-19 04:20:51 [abstract.py:346] It took 3.059346 seconds to fall asleep.
+{"phase": "after_sleep", "round": 0, "free_sleep": 64266436608, "freed_bytes": 45675896832, "freed_gib": 42.53899383544922}
+(Worker_TP1 pid=13883) INFO 11-19 04:20:51 [camem.py:233] CaMem wake_up: restoring 56/56 allocations (tags=all)
+(Worker_TP0 pid=13881) INFO 11-19 04:20:51 [camem.py:233] CaMem wake_up: restoring 56/56 allocations (tags=all)
+(Worker_TP1 pid=13883) INFO 11-19 04:20:52 [sleep_mem_optimized.py:720] Restored 7 HCCL process groups after sleep mode.
+(Worker_TP0 pid=13881) INFO 11-19 04:20:52 [sleep_mem_optimized.py:720] Restored 7 HCCL process groups after sleep mode.
+(EngineCore pid=13859) INFO 11-19 04:21:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:22:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:23:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:24:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:25:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:26:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:27:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:28:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:29:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:30:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:31:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:32:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:33:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:34:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:35:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:36:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:37:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:38:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:39:52 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:40:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:41:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:42:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:43:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:44:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:45:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:46:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:47:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:48:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:49:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=13859) INFO 11-19 04:50:53 [shm_broadcast.py:801] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] WorkerProc hit an exception.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] Traceback (most recent call last):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1047, in _execute_worker_rpc
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     output = func(*args, **kwargs)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 302, in wake_up
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.sleep_wakeup_manager.wakeup(tags)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 225, in wakeup
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.hccl.release_lifecycle_anchor()
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 428, in release_lifecycle_anchor
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     torch.distributed.barrier(
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     return func(*args, **kwargs)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4976, in barrier
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     work.wait()
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [Error]: The execution of the internal task times out. 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Rectify the fault based on the error information in the ascend log.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [PID: 13881] 2026-11-19-04:51:41.062.053 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. The number of training samples of each NPU is inconsistent.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Packet loss or other connectivity problems occur on the communication link.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] TraceBack (most recent call last):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The error from device(chipId:1, dieId:0), serial number is 2540, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The 0 stuck notify wait context info:(context_id=4, notify_id=2416).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] Traceback (most recent call last):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1047, in _execute_worker_rpc
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     output = func(*args, **kwargs)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 302, in wake_up
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.sleep_wakeup_manager.wakeup(tags)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 225, in wakeup
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.hccl.release_lifecycle_anchor()
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 428, in release_lifecycle_anchor
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     torch.distributed.barrier(
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     return func(*args, **kwargs)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4976, in barrier
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     work.wait()
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [Error]: The execution of the internal task times out. 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Rectify the fault based on the error information in the ascend log.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [PID: 13881] 2026-11-19-04:51:41.062.053 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. The number of training samples of each NPU is inconsistent.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Packet loss or other connectivity problems occur on the communication link.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] TraceBack (most recent call last):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The error from device(chipId:1, dieId:0), serial number is 2540, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The 0 stuck notify wait context info:(context_id=4, notify_id=2416).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+(Worker_TP0 pid=13881) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] Invocation of wake_up method failed
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] Traceback (most recent call last):
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1599, in _invoke_utility_method
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     result = get_result()
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]              ^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 1554, in <lambda>
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     and method(*self._convert_msgspec_args(method, args))
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/engine/core.py", line 928, in wake_up
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     self.model_executor.wake_up(tags)
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/executor/abstract.py", line 362, in wake_up
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 448, in collective_rpc
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     return future if non_block else future.result()
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]                                     ^^^^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 99, in result
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     return super().result()
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]            ^^^^^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     return self.__get_result()
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     raise self._exception
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 103, in _wait_for_response
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     response = self.aggregate(self.get_response())
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]                               ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 437, in get_response
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]     raise RuntimeError(
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] RuntimeError: Worker failed with error 'npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] [ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] [Error]: The execution of the internal task times out. 
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         Rectify the fault based on the error information in the ascend log.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] [PID: 13881] 2026-11-19-04:51:41.062.053 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] there are(is) 1 abnormal device(s):
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 3. The number of training samples of each NPU is inconsistent.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 4. Packet loss or other connectivity problems occur on the communication link.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] TraceBack (most recent call last):
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         The error from device(chipId:1, dieId:0), serial number is 2540, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         The 0 stuck notify wait context info:(context_id=4, notify_id=2416).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] there are(is) 1 abnormal device(s):
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609]         rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(EngineCore pid=13859) ERROR 11-19 04:51:41 [core.py:1609] ', please check the stack trace above for the root cause
+Traceback (most recent call last):
+  File "/data/sleep_mode_evidence/npu_sleep_evidence_smoke.py", line 140, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/data/sleep_mode_evidence/npu_sleep_evidence_smoke.py", line 104, in main
+    llm.wake_up()
+  File "/vllm-workspace/vllm/vllm/entrypoints/llm.py", line 841, in wake_up
+    self.llm_engine.wake_up(tags)
+  File "/vllm-workspace/vllm/vllm/v1/engine/llm_engine.py", line 381, in wake_up
+    self.engine_core.wake_up(tags)
+  File "/vllm-workspace/vllm/vllm/v1/engine/core_client.py", line 1017, in wake_up
+    self.call_utility("wake_up", tags)
+  File "/vllm-workspace/vllm/vllm/v1/engine/core_client.py", line 971, in call_utility
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python3.12.16/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+Exception: Call to wake_up method failed: Worker failed with error 'npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+[ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+[Error]: The execution of the internal task times out. 
+        Rectify the fault based on the error information in the ascend log.
+[PID: 13881] 2026-11-19-04:51:41.062.053 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+there are(is) 1 abnormal device(s):
+	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+        Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+3. The number of training samples of each NPU is inconsistent.
+4. Packet loss or other connectivity problems occur on the communication link.
+        Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+TraceBack (most recent call last):
+        The error from device(chipId:1, dieId:0), serial number is 2540, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+        The 0 stuck notify wait context info:(context_id=4, notify_id=2416).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+        A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+there are(is) 1 abnormal device(s):
+	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/10], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/1], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[0].
+        rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+', please check the stack trace above for the root cause
+[rank0]:[W1119 04:51:41.196286332 Logger.cpp:75] Warning: Failed to generate log message. (function operator())
+[rank0]:[E1119 04:51:41.196345528 ProcessGroupHCCL.cpp:2104] [Rank 0] HCCL watchdog thread terminated with exception: 
+[ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR02005 DIST internal error
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  [Rank 0] HCCL watchdog thread terminated with exception: 
+[ERROR] 2026-11-19-04:51:41 (PID:13881, Device:0, RankID:-1) ERR02005 DIST internal error
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] WorkerProc hit an exception.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] Traceback (most recent call last):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1047, in _execute_worker_rpc
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     output = func(*args, **kwargs)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 302, in wake_up
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.sleep_wakeup_manager.wakeup(tags)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 225, in wakeup
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.hccl.release_lifecycle_anchor()
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 428, in release_lifecycle_anchor
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     torch.distributed.barrier(
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     return func(*args, **kwargs)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4976, in barrier
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     work.wait()
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [ERROR] 2026-11-19-04:51:41 (PID:13883, Device:1, RankID:-1) ERR00100 PTA call acl api failed
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [Error]: The execution of the internal task times out. 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Rectify the fault based on the error information in the ascend log.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [PID: 13883] 2026-11-19-04:51:41.409.965 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/1], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/10], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[1].
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. The number of training samples of each NPU is inconsistent.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Packet loss or other connectivity problems occur on the communication link.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] TraceBack (most recent call last):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The error from device(chipId:2, dieId:0), serial number is 6762, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The 0 stuck notify wait context info:(context_id=4, notify_id=901).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/1], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/10], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[1].
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] Traceback (most recent call last):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1047, in _execute_worker_rpc
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     output = func(*args, **kwargs)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 302, in wake_up
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.sleep_wakeup_manager.wakeup(tags)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 225, in wakeup
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     self.hccl.release_lifecycle_anchor()
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/vllm-workspace/vllm-ascend/vllm_ascend/device_allocator/sleep_mem_optimized.py", line 428, in release_lifecycle_anchor
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     torch.distributed.barrier(
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     return func(*args, **kwargs)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4976, in barrier
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]     work.wait()
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [ERROR] 2026-11-19-04:51:41 (PID:13883, Device:1, RankID:-1) ERR00100 PTA call acl api failed
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [Error]: The execution of the internal task times out. 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Rectify the fault based on the error information in the ascend log.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] [PID: 13883] 2026-11-19-04:51:41.409.965 Communication_Error_Timeout(EI0002): A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/1], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/10], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[1].
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Possible Cause: 1. An exception occurs during the execution on some NPUs in the cluster. As a result, collective communication operation failed.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. The execution speed on some NPU in the cluster is too slow to complete a communication operation within the timeout interval. (The default timeout interval is 1800s. You can set the interval by using HCCL_EXEC_TIMEOUT.)
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. The number of training samples of each NPU is inconsistent.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Packet loss or other connectivity problems occur on the communication link.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         Solution: 1. If this error is reported on only some ranks, check other ranks for earlier errors and investigate the first reported error.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 2. If this error is reported on all ranks, verify that the collective operation type, data count and data type are consistent across all ranks.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 3. Check whether the error reporting time difference between ranks exceeds HCCL_EXEC_TIMEOUT (1800s by default). If so, investigate the execution gap between ranks or increase HCCL_EXEC_TIMEOUT if necessary.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 4. Check for CQE errors in the plog (grep -rn 'error cqe'). If so, check the network connection status.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 5. For detailed troubleshooting guidance, search for the keyword "EI0002" on https://www.hiascend.com/document/.
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] TraceBack (most recent call last):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The error from device(chipId:2, dieId:0), serial number is 6762, hccl fftsplus task timeout occurred during task execution, stream_id:39, sq_id:10, task_id:5, stuck notify num:1, timeout=1836s.[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1410]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         The 0 stuck notify wait context info:(context_id=4, notify_id=901).[FUNC:ProcessStarsHcclFftsPlusTimeoutErrorInfo][FILE:device_error_proc.cc][LINE:1418]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         A timeout occurs when the Notify register waits for execution. Waiting peer rank: unknown; task information: streamID:[39], taskID[5], tag[AllReduce_group_name_23], AlgType(level 0-1-2):[ring-ring-NHR].; communication operator information: 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] there are(is) 1 abnormal device(s):
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 	[TaskExecStage][HeartbeatAbnormal]Cluster Exception Location[IP/ID]:[10.254.4.8/1], Arrival Time:[Thu Nov 19 04:21:17 2026], Discoverer:[10.254.4.8/10], ExceptionType:[Heartbeat Lost Occurred], Possible Reason:1. Process has exited, 2. Network Disconnected
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] ; communicator: group:[group_name_23], user define information[sleep_lifecycle_anchor], rankSize[2], rankId[1].
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055]         rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+(Worker_TP1 pid=13883) ERROR 11-19 04:51:41 [multiproc_executor.py:1055] 
+INFO 11-19 04:51:42 [utils.py:632] [shutdown] Process manager: send sigterm to process EngineCore
+(EngineCore pid=13859) INFO 11-19 04:51:42 [core.py:1342] [shutdown] EngineCore: trigger received signal=SIGTERM
+(EngineCore pid=13859) INFO 11-19 04:51:42 [core.py:1493] [shutdown] EngineCore: start mode=abort timeout=0s
+(EngineCore pid=13859) INFO 11-19 04:51:42 [core.py:1524] [shutdown] EngineCore: request processing complete; starting resource teardown
+(EngineCore pid=13859) INFO 11-19 04:51:42 [core.py:1355] [shutdown] EngineCore: exiting busy loop
+(EngineCore pid=13859) INFO 11-19 04:51:42 [multiproc_executor.py:472] [shutdown] Executor: waiting for worker exit count=2
+(Worker_TP1 pid=13883) Process VllmWorker-1:
+(Worker_TP1 pid=13883) Traceback (most recent call last):
+(Worker_TP1 pid=13883)   File "/usr/local/python3.12.16/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+(Worker_TP1 pid=13883)     self.run()
+(Worker_TP1 pid=13883)   File "/usr/local/python3.12.16/lib/python3.12/multiprocessing/process.py", line 108, in run
+(Worker_TP1 pid=13883)     self._target(*self._args, **self._kwargs)
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 976, in worker_main
+(Worker_TP1 pid=13883)     worker.shutdown()
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 821, in shutdown
+(Worker_TP1 pid=13883)     self.worker.shutdown()
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 244, in shutdown
+(Worker_TP1 pid=13883)     self.worker.shutdown()
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 385, in shutdown
+(Worker_TP1 pid=13883)     shutdown_fn()
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm/vllm/v1/worker/gpu_model_runner.py", line 6576, in shutdown
+(Worker_TP1 pid=13883)     self._cleanup_profiling_kv_cache()
+(Worker_TP1 pid=13883)   File "/vllm-workspace/vllm/vllm/v1/worker/gpu_model_runner.py", line 6594, in _cleanup_profiling_kv_cache
+(Worker_TP1 pid=13883)     torch.accelerator.synchronize()
+(Worker_TP1 pid=13883)   File "/usr/local/python3.12.16/lib/python3.12/site-packages/torch/accelerator/__init__.py", line 262, in synchronize
+(Worker_TP1 pid=13883)     torch._C._accelerator_synchronizeDevice(device_index)
+(Worker_TP1 pid=13883) RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:714 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507048
+(Worker_TP1 pid=13883) [ERROR] 2026-11-19-04:51:42 (PID:13883, Device:1, RankID:-1) ERR00100 PTA call acl api failed
+(Worker_TP1 pid=13883) [Error]: The execution of the internal task times out. 
+(Worker_TP1 pid=13883)         Rectify the fault based on the error information in the ascend log.
+(Worker_TP1 pid=13883) EE9999: Internal error!
+(Worker_TP1 pid=13883) EE9999[PID: 13883] 2026-11-19-04:51:42.118.806 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=fftsplus timeout[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:76]
+(Worker_TP1 pid=13883) TraceBack (most recent call last):
+(Worker_TP1 pid=13883) 
+(EngineCore pid=13859) INFO 11-19 04:51:42 [multiproc_executor.py:479] [shutdown] Executor: all workers exited gracefully
+WARNING 11-19 04:51:47 [utils.py:652] [shutdown] Process manager: force killing remaining processes count=1
+WARNING 11-19 04:51:47 [utils.py:657] [shutdown] Process manager: force killing remaining process EngineCore pid 13859

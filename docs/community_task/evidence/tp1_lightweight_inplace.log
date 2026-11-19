@@ -1,0 +1,145 @@
+{"phase": "start", "tp": 1, "model": "/mnt/moark-models/Qwen3-0.6B", "visible": "1", "additional_config": {"weight_nz_mode": 0, "rl_config": {"enabled": true, "sleep_mode_extra_cleanup": true, "sleep_hccl_policy": "lightweight", "sleep_acl_graph_policy": "inplace", "sleep_allow_fallback": true}}}
+INFO 11-19 04:16:42 [__init__.py:52] Available plugins for group vllm.platform_plugins:
+INFO 11-19 04:16:42 [__init__.py:54] - ascend -> vllm_ascend:register
+INFO 11-19 04:16:42 [__init__.py:57] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:13: FutureWarning: triton.language.extra.cann.extension.atan2 is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.atan2 instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.atan2")
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:35: FutureWarning: triton.language.extra.cann.extension.isfinited is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.isfinited instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.isfinited")
+/usr/local/python3.12.16/lib/python3.12/site-packages/triton/language/extra/cann/extension/math_ops.py:49: FutureWarning: triton.language.extra.cann.extension.finitef is deprecated and will be removed in the next release; use triton.language.extra.cann.libdevice.finitef instead.
+  @_deprecated(replacement="triton.language.extra.cann.libdevice.finitef")
+INFO 11-19 04:16:42 [__init__.py:272] Platform plugin ascend is activated
+INFO 11-19 04:16:42 [platform.py:74] Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=0.
+{"phase": "device_probe", "torch": "2.10.0+cpu", "npu_count": 1}
+INFO 11-19 04:16:49 [patch_indexer_kv_dtype.py:102] Patched AttentionConfig.indexer_kv_dtype to accept 'int8' (DeepSeek V4 Ascend indexer K cache dtype).
+INFO 11-19 04:16:49 [patch_kv_cache_dtype.py:117] Patched CacheConfig.cache_dtype to accept 'int8' and 'mxfp8' (Ascend KV cache dtypes).
+INFO 11-19 04:16:49 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 11-19 04:16:49 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+INFO 11-19 04:16:49 [api_utils.py:286] non-default args: {'dtype': 'bfloat16', 'max_model_len': 1024, 'distributed_executor_backend': 'uni', 'eplb_config': EPLBConfig(window_size=1000, step_interval=3000, num_redundant_experts=0, log_balancedness=False, log_balancedness_interval=1, use_async=True, policy='default', communicator=None), 'gpu_memory_utilization': 0.7, 'disable_log_stats': True, 'enable_sleep_mode': True, 'additional_config': {'weight_nz_mode': 0, 'rl_config': {'enabled': True, 'sleep_mode_extra_cleanup': True, 'sleep_hccl_policy': 'lightweight', 'sleep_acl_graph_policy': 'inplace', 'sleep_allow_fallback': True}}, 'model': '/mnt/moark-models/Qwen3-0.6B'}
+WARNING 11-19 04:16:49 [indexer_topk.py:29] Failed to import the DeepSelect extension (vllm._deepselect_C): No module named 'vllm._deepselect_C'
+INFO 11-19 04:16:49 [model.py:692] Resolved architecture: Qwen3ForCausalLM
+INFO 11-19 04:16:49 [model.py:2030] Using max model len 1024
+INFO 11-19 04:16:49 [scheduler.py:288] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 11-19 04:16:49 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'])
+INFO 11-19 04:16:49 [utils.py:225] No quantization signature detected from model files for "/mnt/moark-models/Qwen3-0.6B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+WARNING 11-19 04:16:49 [platform.py:731] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+INFO 11-19 04:16:49 [platform.py:945] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+INFO 11-19 04:16:49 [ascend_config.py:332] Dynamic EPLB is False
+INFO 11-19 04:16:49 [ascend_config.py:333] The number of redundant experts is 0
+INFO 11-19 04:16:49 [ascend_config.py:773] FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.
+INFO 11-19 04:16:49 [utils.py:1538] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+INFO 11-19 04:16:49 [compilation.py:336] Enabled custom fusions: norm_quant, act_quant
+WARNING 11-19 04:16:52 [warnings.py:112] /usr/local/python3.12.16/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=11036) is multi-threaded, use of fork() may lead to deadlocks in the child.
+INFO 11-19 04:16:52 [ascend_config.py:332] Dynamic EPLB is False
+INFO 11-19 04:16:52 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=11316) INFO 11-19 04:16:52 [core.py:123] Initializing a V1 LLM engine (v0.30.0) with config: model='/mnt/moark-models/Qwen3-0.6B', speculative_config=None, tokenizer='/mnt/moark-models/Qwen3-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1024, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, per_request_spec_decode_metrics='none', kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=/mnt/moark-models/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::qwen4_exp_ple_short_conv', 'vllm::qwen4_exp_qsa_with_output', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update', 'vllm::mla_forward', 'vllm::dsa_forward', 'vllm::minimax_m3_fused_sparse_forward'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, enable_jit_warmup=True, moe_backend='auto', sparse_indexer_topk_backend='auto', linear_backend='auto', linear_backend_per_quant=None)
+(EngineCore pid=11316) WARNING 11-19 04:16:59 [patch_triton.py:332] NPU Triton causal_conv1d_update is unavailable (cannot import name 'causal_conv1d_update_npu' from 'vllm_ascend.ops.triton.mamba.causal_conv1d' (/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/mamba/causal_conv1d.py)); falling back to the PyTorch implementation, which syncs per request and therefore stalls ACL graph capture at decode-FULL.
+(EngineCore pid=11316) INFO 11-19 04:17:00 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=11316) INFO 11-19 04:17:00 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=11316) INFO 11-19 04:17:09 [parallel_state.py:1827] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_ebe70038e1e44abdb1cd54d25a01b2b9 backend=hccl
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=11316) INFO 11-19 04:17:09 [parallel_state.py:2267] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, ETP rank 0, EP rank N/A, EPLB rank N/A
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[rank0]:[W1119 04:17:09.090766442 NPUCachingAllocator.cpp:204] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+(EngineCore pid=11316) INFO 11-19 04:17:09 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(EngineCore pid=11316) INFO 11-19 04:17:09 [model_runner_v1.py:4389] Starting to load model /mnt/moark-models/Qwen3-0.6B...
+(EngineCore pid=11316) INFO 11-19 04:17:09 [platform.py:1487] FA3 will not be enabled when rl_config.enable_training_consistency is false. Note that Ascend NPU will use its registered plugin backend instead.
+(EngineCore pid=11316) INFO 11-19 04:17:09 [compilation.py:1114] Using OOT custom backend for compilation.
+(EngineCore pid=11316) INFO 11-19 04:17:09 [compilation.py:1114] Using OOT custom backend for compilation.
+(EngineCore pid=11316) INFO 11-19 04:17:10 [weight_utils.py:895] Filesystem type for checkpoints: NFS4. Checkpoint size: 1.40 GiB. Available RAM: 230.40 GiB.
+(EngineCore pid=11316) INFO 11-19 04:17:10 [weight_utils.py:857] Prefetching checkpoint files into page cache started (in background, num_threads=8, block_size=16777216 bytes)
+(EngineCore pid=11316) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=11316) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.71it/s]
+(EngineCore pid=11316) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.71it/s]
+(EngineCore pid=11316) 
+(EngineCore pid=11316) INFO 11-19 04:17:10 [default_loader.py:430] Loading weights took 0.31 seconds
+(EngineCore pid=11316) INFO 11-19 04:17:10 [weight_utils.py:829] Prefetching checkpoint files: 10% (1/1)
+(EngineCore pid=11316) INFO 11-19 04:17:10 [weight_utils.py:852] Prefetching checkpoint files into page cache finished in 0.33s
+(EngineCore pid=11316) INFO 11-19 04:17:11 [model_runner_v1.py:4476] Loading model weights took 1.1397 GB
+(EngineCore pid=11316) INFO 11-19 04:17:11 [model_runner_v1.py:4563] Model runner load_model total time: 1.81 seconds
+(EngineCore pid=11316) INFO 11-19 04:17:11 [interface.py:635] Setting kv cache block size to 128 for CUSTOM backend.
+(EngineCore pid=11316) INFO 11-19 04:17:11 [utils.py:320] Using LBNHC KV cache layout.
+(EngineCore pid=11316) INFO 11-19 04:17:13 [compiler_interface.py:279] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post7', 'enable_npugraph_ex': False, 'enable_static_kernel': False, 'enable_super_kernel': False}
+(EngineCore pid=11316) INFO 11-19 04:17:13 [backends.py:1094] Using cache directory: /root/.cache/vllm/torch_compile_cache/f0f7648c11/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=11316) INFO 11-19 04:17:13 [backends.py:1155] Dynamo bytecode transform time: 2.36 s
+(EngineCore pid=11316) INFO 11-19 04:17:20 [backends.py:393] Compiling a graph for compile range (1, 8192) takes 4.69 s
+(EngineCore pid=11316) INFO 11-19 04:17:21 [decorators.py:719] saved AOT compiled function to /root/.cache/vllm/torch_compile_cache/torch_aot_compile/42fdd69c879e762bdefd71a11b637e50fb436f2728eb5e62df6103ec37cd3da4/rank_0_0/model
+(EngineCore pid=11316) INFO 11-19 04:17:21 [monitor.py:53] torch.compile took 10.13 s in total
+(EngineCore pid=11316) INFO 11-19 04:17:24 [monitor.py:81] Initial profiling/warmup run took 2.54 s
+(EngineCore pid=11316) INFO 11-19 04:17:25 [worker.py:660] Available KV cache memory: 41.17 GiB
+(EngineCore pid=11316) INFO 11-19 04:17:25 [kv_cache_utils.py:2395] NPU KV cache size: 385,408 tokens, Maximum concurrency for 1,024 tokens per request: 376.38x
+(EngineCore pid=11316) INFO 11-19 04:17:26 [kernel_warmup.py:44] Starting Triton kernel warmup.
+(EngineCore pid=11316) INFO 11-19 04:17:26 [kernel_warmup.py:36] rejection_sampler Triton warmup complete in 0.000s.
+(EngineCore pid=11316) [WARNING] AutoBlockify disabled for kernel 'token_bin_counts_and_mask_kernel'. Unsafe ops: atomic operations. Enabling may cause correctness issues. The compiler keeps AutoBlockify disabled for this kernel.
+(EngineCore pid=11316) INFO 11-19 04:17:29 [kernel_warmup.py:36] penalties Triton warmup complete in 2.359s.
+(EngineCore pid=11316) INFO 11-19 04:17:29 [kernel_warmup.py:36] rms Triton warmup complete in 0.000s.
+(EngineCore pid=11316) INFO 11-19 04:17:29 [kernel_warmup.py:36] indexer Triton warmup complete in 0.000s.
+(EngineCore pid=11316) INFO 11-19 04:17:29 [kernel_warmup.py:53] Triton kernel warmup finished in 2.359s.
+(EngineCore pid=11316) INFO 11-19 04:17:29 [gpu_model_runner.py:6883] Rank 0: Torch profiler disabled for CUDA graph capture
+(EngineCore pid=11316) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   6%|▌         | 2/35 [00:00<00:02, 14.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  11%|█▏        | 4/35 [00:00<00:02, 14.66it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  17%|█▋        | 6/35 [00:00<00:01, 14.80it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  23%|██▎       | 8/35 [00:00<00:01, 14.95it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  29%|██▊       | 10/35 [00:00<00:01, 14.60it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  34%|███▍      | 12/35 [00:00<00:01, 14.76it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  40%|████      | 14/35 [00:00<00:01, 14.91it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  46%|████▌     | 16/35 [00:01<00:01, 14.93it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████▏    | 18/35 [00:01<00:01, 14.89it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  57%|█████▋    | 20/35 [00:01<00:01, 14.88it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 22/35 [00:01<00:00, 14.94it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  69%|██████▊   | 24/35 [00:01<00:00, 14.94it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  74%|███████▍  | 26/35 [00:01<00:00, 14.97it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 28/35 [00:01<00:00, 15.01it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▌ | 30/35 [00:02<00:00, 14.95it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  91%|█████████▏| 32/35 [00:02<00:00, 14.97it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  97%|█████████▋| 34/35 [00:02<00:00, 14.96it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 35/35 [00:04<00:00,  7.26it/s]
+(EngineCore pid=11316) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):   3%|▎         | 1/35 [00:00<00:04,  7.33it/s]Capturing CUDA graphs (decode, FULL):   9%|▊         | 3/35 [00:00<00:02, 13.66it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:01, 17.14it/s]Capturing CUDA graphs (decode, FULL):  26%|██▌       | 9/35 [00:00<00:01, 18.93it/s]Capturing CUDA graphs (decode, FULL):  34%|███▍      | 12/35 [00:00<00:01, 20.54it/s]Capturing CUDA graphs (decode, FULL):  43%|████▎     | 15/35 [00:00<00:00, 21.72it/s]Capturing CUDA graphs (decode, FULL):  51%|█████▏    | 18/35 [00:00<00:00, 22.81it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:01<00:00, 23.71it/s]Capturing CUDA graphs (decode, FULL):  69%|██████▊   | 24/35 [00:01<00:00, 24.50it/s]Capturing CUDA graphs (decode, FULL):  77%|███████▋  | 27/35 [00:01<00:00, 25.17it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:01<00:00, 25.91it/s]Capturing CUDA graphs (decode, FULL):  94%|█████████▍| 33/35 [00:01<00:00, 26.77it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:01<00:00, 23.04it/s]
+(EngineCore pid=11316) INFO 11-19 04:17:36 [gpu_model_runner.py:6929] Graph capturing finished in 7 secs, took 0.34 GiB
+(EngineCore pid=11316) INFO 11-19 04:17:36 [worker.py:950] Free memory on device (60.54/60.96 GiB) on startup. Desired GPU memory utilization is (0.7, 42.67 GiB). Actual usage: 1.14 GiB for weights, 0.22 GiB for peak activation, 0.14 GiB for non-torch memory, 0.34 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=43680001536` (40.68 GiB) to fit into requested memory, or `--kv-cache-memory=62868700672` (58.55 GiB) to fully utilize NPU free memory. Current KV cache memory: 41.17 GiB. After warmup: torch reserved memory 43.1 GiB, torch allocated memory 42.34 GiB.
+(EngineCore pid=11316) INFO 11-19 04:17:36 [cpu_binding.py:799] CPU binding skipped: non-ARM CPU detected.
+(EngineCore pid=11316) INFO 11-19 04:17:36 [core.py:372] init engine (profile, create kv cache, warmup model) took 25.35 s (compilation: 10.13 s)
+(EngineCore pid=11316) INFO 11-19 04:17:36 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=11316) INFO 11-19 04:17:36 [ascend_config.py:333] The number of redundant experts is 0
+(EngineCore pid=11316) INFO 11-19 04:17:37 [kernel.py:416] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'], gelu_and_mul_sparse=['native'])
+(EngineCore pid=11316) INFO 11-19 04:17:37 [utils.py:225] No quantization signature detected from model files for "/mnt/moark-models/Qwen3-0.6B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(EngineCore pid=11316) INFO 11-19 04:17:37 [ascend_config.py:332] Dynamic EPLB is False
+(EngineCore pid=11316) INFO 11-19 04:17:37 [ascend_config.py:333] The number of redundant experts is 0
+INFO 11-19 04:17:37 [hf.py:642] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 67.61it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore pid=11316) INFO 11-19 04:17:39 [acl_graph.py:301] ACL graph replay is active (logged once).
+Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.84s/it, est. speed input: 0.54 toks/s, output: 8.71 toks/s]Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.84s/it, est. speed input: 0.54 toks/s, output: 8.71 toks/s]Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.84s/it, est. speed input: 0.54 toks/s, output: 8.71 toks/s]
+{"phase": "warmup_generate", "text": " Answer! I'm a bit confused about the problem. Let me try to understand"}
+{"phase": "round_begin", "round": 0, "free_before": 18296664064}
+(EngineCore pid=11316) INFO 11-19 04:17:40 [scheduler.py:2600] setting pause state to PAUSED_NEW
+(EngineCore pid=11316) INFO 11-19 04:17:40 [block_pool.py:854] Successfully reset prefix cache
+(EngineCore pid=11316) INFO 11-19 04:17:40 [hccl_suspend.py:143] Loaded HCCL suspend/resume from /usr/local/Ascend/cann-9.2.1/lib64/libhccl.so
+(EngineCore pid=11316) WARNING 11-19 04:17:40 [warnings.py:112] /usr/local/python3.12.16/lib/python3.12/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+(EngineCore pid=11316) INFO 11-19 04:17:42 [sleep_mem_optimized.py:688] Suspended 7 HCCL communicators (lightweight).
+(EngineCore pid=11316) INFO 11-19 04:17:42 [sleep_mem_optimized.py:200] Sleep mode released HCCL and attention workspace memory: -0.029 GiB.
+(EngineCore pid=11316) INFO 11-19 04:17:42 [camem.py:198] CaMem sleep: offloading 62/90 allocations (tags=('weights',))
+(EngineCore pid=11316) INFO 11-19 04:17:44 [worker.py:272] Sleep mode (level=1) freed 42.79 GiB memory, 1.13 GiB memory is still in use.
+(EngineCore pid=11316) INFO 11-19 04:17:44 [abstract.py:346] It took 4.119196 seconds to fall asleep.
+{"phase": "after_sleep", "round": 0, "free_sleep": 64242991104, "freed_bytes": 45946327040, "freed_gib": 42.79085159301758}
+(EngineCore pid=11316) INFO 11-19 04:17:44 [camem.py:233] CaMem wake_up: restoring 90/90 allocations (tags=all)
+(EngineCore pid=11316) INFO 11-19 04:17:46 [sleep_mem_optimized.py:714] Resumed 1 HCCL communicators after lightweight sleep.
+(EngineCore pid=11316) INFO 11-19 04:17:46 [sleep_mem_optimized.py:182] Sleep cycle report: {'round': 1, 'tp_size': 1, 'hccl_policy_requested': 'lightweight', 'hccl_action_actual': 'suspend', 'acl_policy_requested': 'inplace', 'acl_action_actual': 'inplace_keep', 'hbm_free_before_bytes': 18296664064, 'hbm_free_after_sleep_bytes': 18265108480, 'hbm_freed_bytes': 0, 'capture_model_called': False, 'wake_completed': True, 'notes': 'suspended_comms=7'}
+(EngineCore pid=11316) INFO 11-19 04:17:46 [abstract.py:364] It took 1.691963 seconds to wake up tags {'kv_cache', 'weights'}.
+(EngineCore pid=11316) INFO 11-19 04:17:46 [scheduler.py:2600] setting pause state to UNPAUSED
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 1327.73it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 13.44it/s, est. speed input: 67.20 toks/s, output: 215.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 13.42it/s, est. speed input: 67.20 toks/s, output: 215.00 toks/s]
+{"phase": "after_wake_generate", "round": 0, "text": ". What is the name of the person who is the most important in the world", "free_after": 18244947968}
+{"phase": "round_begin", "round": 1, "free_before": 18244947968}
+(EngineCore pid=11316) INFO 11-19 04:17:46 [scheduler.py:2600] setting pause state to PAUSED_NEW
+(EngineCore pid=11316) INFO 11-19 04:17:46 [block_pool.py:854] Successfully reset prefix cache
+(EngineCore pid=11316) INFO 11-19 04:17:46 [sleep_mem_optimized.py:688] Suspended 7 HCCL communicators (lightweight).
+(EngineCore pid=11316) INFO 11-19 04:17:46 [sleep_mem_optimized.py:200] Sleep mode released HCCL and attention workspace memory: 0.000 GiB.
+(EngineCore pid=11316) INFO 11-19 04:17:46 [camem.py:198] CaMem sleep: offloading 62/90 allocations (tags=('weights',))
+(EngineCore pid=11316) INFO 11-19 04:17:48 [worker.py:272] Sleep mode (level=1) freed 42.82 GiB memory, 1.15 GiB memory is still in use.
+(EngineCore pid=11316) INFO 11-19 04:17:48 [abstract.py:346] It took 1.777787 seconds to fall asleep.
+{"phase": "after_sleep", "round": 1, "free_sleep": 64220798976, "freed_bytes": 45975851008, "freed_gib": 42.8183479309082}
+(EngineCore pid=11316) INFO 11-19 04:17:48 [camem.py:233] CaMem wake_up: restoring 90/90 allocations (tags=all)
+(EngineCore pid=11316) INFO 11-19 04:17:49 [sleep_mem_optimized.py:714] Resumed 1 HCCL communicators after lightweight sleep.
+(EngineCore pid=11316) INFO 11-19 04:17:49 [sleep_mem_optimized.py:182] Sleep cycle report: {'round': 2, 'tp_size': 1, 'hccl_policy_requested': 'lightweight', 'hccl_action_actual': 'suspend', 'acl_policy_requested': 'inplace', 'acl_action_actual': 'inplace_keep', 'hbm_free_before_bytes': 18244947968, 'hbm_free_after_sleep_bytes': 18244947968, 'hbm_freed_bytes': 0, 'capture_model_called': False, 'wake_completed': True, 'notes': 'suspended_comms=7'}
+(EngineCore pid=11316) INFO 11-19 04:17:49 [abstract.py:364] It took 1.669000 seconds to wake up tags {'kv_cache', 'weights'}.
+(EngineCore pid=11316) INFO 11-19 04:17:49 [scheduler.py:2600] setting pause state to UNPAUSED
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 1615.68it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 16.09it/s, est. speed input: 80.49 toks/s, output: 257.52 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 16.06it/s, est. speed input: 80.49 toks/s, output: 257.52 toks/s]
+{"phase": "after_wake_generate", "round": 1, "text": ". What is the name of the person who is the most important in the world", "free_after": 18245169152}
+{"phase": "last_cycle_report", "report": null}
+{"phase": "done", "tp": 1}
+INFO 11-19 04:17:51 [utils.py:632] [shutdown] Process manager: send sigterm to process EngineCore
+(EngineCore pid=11316) INFO 11-19 04:17:51 [core.py:1342] [shutdown] EngineCore: trigger received signal=SIGTERM
+(EngineCore pid=11316) INFO 11-19 04:17:51 [core.py:1493] [shutdown] EngineCore: start mode=abort timeout=0s
+(EngineCore pid=11316) INFO 11-19 04:17:51 [core.py:1524] [shutdown] EngineCore: request processing complete; starting resource teardown
+(EngineCore pid=11316) INFO 11-19 04:17:51 [core.py:1355] [shutdown] EngineCore: exiting busy loop
+(EngineCore pid=11316) WARNING 11-19 04:17:51 [parallel_state.py:2469] torch.accelerator.empty_host_cache() only available in Pytorch >=2.9
+WARNING 11-19 04:17:52 [core_client.py:791] [shutdown] MPClient: engine core exited unexpectedly; starting cleanup

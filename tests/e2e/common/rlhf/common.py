@@ -174,6 +174,7 @@ def server(
     port: int = 8770,
     timeout: float = 180.0,
     dummy_weights: bool = False,
+    additional_config: str | dict | None = None,
 ):
     """Launch a vLLM server with the dev router; yield its base URL.
 
@@ -182,12 +183,22 @@ def server(
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+        additional_config: Optional JSON string or dict for ``--additional-config``.
+            Defaults to ``{"weight_nz_mode": 0}``.
     """
+    import json
+
     env = {
         **os.environ,
         "VLLM_SERVER_DEV_MODE": "1",
         "HF_HUB_OFFLINE": "1",
     }
+    if additional_config is None:
+        additional_config_str = '{"weight_nz_mode": 0}'
+    elif isinstance(additional_config, dict):
+        additional_config_str = json.dumps(additional_config)
+    else:
+        additional_config_str = str(additional_config)
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
     cmd = [
         sys.executable,
@@ -200,7 +211,7 @@ def server(
         "--served-model-name",
         "m",
         "--additional-config",
-        '{"weight_nz_mode": 0}',
+        additional_config_str,
         *(base + (extra_args or [])),
     ]
     # Establish the test process's NPU device context while the card is still
