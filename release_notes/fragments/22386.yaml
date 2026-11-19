@@ -2,4 +2,3 @@ pr: 22386
 entries:
   - category: bugfix
     text: Fixed layerwise KV transfer with the memcache backend inflating external pool memory usage by up to 3.9x on hybrid-attention models (e.g. ~242 GiB instead of ~62 GiB for Qwen3.6-35B-A3B with 128k inputs and TP2), which made otherwise sufficient pools run out of space. External pool regions are now sized to each attention group's actual layer payload. No configuration change is required.
-    model: qwen3.6-35b-a3b
