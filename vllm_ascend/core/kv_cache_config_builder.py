@@ -133,7 +133,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """
         bytes_per_block = self._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
         if bytes_per_block is None:
-            return super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+            return _attach_transfer_and_speculation_metadata(
+                vllm_config,
+                super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks),
+            )
         return get_ascend_kv_cache_config_from_groups(
             vllm_config,
             kv_cache_groups,
@@ -476,13 +479,9 @@ def get_ascend_kv_cache_config_from_groups(
 ) -> KVCacheConfig:
     """Materialize an Ascend layout from the memory budget Core resolved.
 
-    Attach ``kv_transfer_config`` onto the built config: ``KVCacheConfig`` has
-    no native field, and the PD prefill-producer role read back by the kv-cache
-    coordinator (see ``patch_kv_cache_coordinator.py``) must ride on the config
-    object - the coordinator factory receives ``KVCacheConfig`` but not
-    ``VllmConfig``. The attribute survives the scheduler-side ``copy.deepcopy``
-    in ``generate_scheduler_kv_cache_config`` and is dropped by worker pickle
-    IPC, which never reads it.
+    The transfer and speculation metadata is attached by
+    ``_attach_transfer_and_speculation_metadata`` before returning; see it for
+    why the PD role must ride on the config object.
     """
     qwen_config = (
         None
@@ -539,6 +538,26 @@ def get_ascend_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    return _attach_transfer_and_speculation_metadata(vllm_config, kv_cache_config)
+
+
+def _attach_transfer_and_speculation_metadata(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> KVCacheConfig:
+    """Keep transfer and speculation metadata on every materialization path.
+
+    Attach ``kv_transfer_config`` onto the built config: ``KVCacheConfig`` has
+    no native field, and the PD prefill-producer role read back by the kv-cache
+    coordinator (see ``patch_kv_cache_coordinator.py``) must ride on the config
+    object - the coordinator factory receives ``KVCacheConfig`` but not
+    ``VllmConfig``. The attribute survives the scheduler-side ``copy.deepcopy``
+    in ``generate_scheduler_kv_cache_config`` and is dropped by worker pickle
+    IPC, which never reads it. The hybrid cache coordinator treats a config
+    without the role as standalone and would skip the EAGLE replay block drop
+    used for external cache loads, so the upstream default materializer's
+    result carries it too.
+    """
     kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":

@@ -272,6 +272,40 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
     assert result.kv_transfer_config is kv_transfer_config
 
 
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
+        None,
+    ],
+)
+def test_public_builder_mounts_kv_transfer_config_on_default_path(monkeypatch, kv_transfer_config):
+    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    # A generic layout matches no Ascend divisor, so the public builder
+    # returns through the upstream default materializer. The PD consumer
+    # role must ride on that result too: the hybrid coordinator treats a
+    # config without it as standalone and would skip the EAGLE replay block
+    # drop used for external cache loads.
+    sentinel_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="llama")),
+        kv_transfer_config=kv_transfer_config,
+    )
+    monkeypatch.setattr(
+        DefaultKVCacheConfigBuilder,
+        "get_kv_cache_config_from_groups",
+        lambda self, vllm_config, groups, num_blocks: sentinel_config,
+    )
+    result = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+        vllm_config, [KVCacheGroupSpec(["fa-layer"], FA_SPEC, False)], 8
+    )
+    assert result is sentinel_config
+    assert result.kv_transfer_config is kv_transfer_config
+
+
 # ---------------------------------------------------------------------------
 # Recording fake managers for the lookup paths (fix ② / ③)
 # ---------------------------------------------------------------------------
