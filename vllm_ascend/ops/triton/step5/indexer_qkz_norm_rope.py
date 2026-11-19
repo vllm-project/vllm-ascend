@@ -278,7 +278,9 @@ def _norm_rope_tile_npu(
             (1, 2), (1, 4), (1, 8), (1, 16), (2, 2), (2, 4), (2, 8), (2, 16), (2, 32), (4, 16), (4, 32)
         )
     ],
-    key=["M_q", "M_k", "head_dim", "rotary_dim"],
+    # Token counts are intentionally excluded: tune once per layer shape and
+    # reuse the selected configuration for all subsequent token counts.
+    key=["head_dim", "rotary_dim"],
 )
 @triton.jit
 def _indexer_qkz_norm_rope_kernel(

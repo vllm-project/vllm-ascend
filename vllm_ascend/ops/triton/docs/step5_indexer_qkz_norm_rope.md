@@ -116,15 +116,14 @@
   and the static head loops derive from them; fixed per layer shape) and
   from Triton's value/alignment classes of the runtime integer arguments
   (`M_q`, `M_k`, the strides; classes `==1`, multiples of 16, other). The
-  steady-state set is therefore a small, bounded set of variants per layer
-  shape rather than one per request. The autotuner keys on
-  (`M_q`, `M_k`, `head_dim`, `rotary_dim`) — i.e. per token-count bucket —
-  which selects `ROWS_PER_PROGRAM_Q`/`KZ` tuning cases (a retune, not a
-  recompile); the config list spans `(1, 2)..(4, 32)` rows-per-program so
-  single-token decode and full prefill tiles land on different tiles. The
-  tuning constants are inherited from the validated deployment kernel;
-  `do_not_specialize` is not used (the classes are few, fixed in serving,
-  and the alignment specialization feeds vectorization).
+  autotuner keys only on `head_dim` and `rotary_dim`, deliberately excluding
+  token counts: the first call at each layer shape benchmarks the config
+  list once, and all subsequent token counts reuse that selection instead
+  of retuning per batch. The selected configuration therefore depends on
+  the first batch seen by the process; this is a performance trade-off, not
+  a numerical difference. `do_not_specialize` is not used (the classes are
+  few, fixed in serving, and the alignment specialization feeds
+  vectorization).
 - In-place behavior: none. Inputs are read-only (strided reads are
   supported); outputs are freshly allocated. The op is registered with
   `mutates_args=[]`.
