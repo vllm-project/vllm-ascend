@@ -164,7 +164,7 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV��a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
@@ -308,7 +308,7 @@ Preemption cannot be avoided completely since KV cache usage always has a limit.
 
 ### 23. How do I choose between single-node and multi-node deployment?
 
-Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64GB cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
+Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 �� 64GB cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
 
 ### 24. What quantization method should I use?
 
@@ -318,4 +318,44 @@ Single-node deployment is recommended when the model fits within the memory of a
 
 ### 25. What is the difference between FIA and PA operators for attention?
 
-FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob �� future FIA optimizations will make this parameter obsolete.
+
+### 26. Why does `npu-smi info` hang inside an Atlas 950DT container? { #atlas-950dt-urma-provider }
+
+On some Atlas 950DT hosts, the driver path
+`/usr/local/Ascend/driver/lib64/driver/urma` is an absolute symbolic link to
+`/usr/lib64/urma`. Mounting the driver directory alone leaves this link broken
+inside the container if its target is missing. In this configuration,
+`npu-smi info` can hang even when it succeeds on the host.
+
+Check the link and its target on the host:
+
+```bash
+readlink /usr/local/Ascend/driver/lib64/driver/urma
+ls -l /usr/lib64/urma/
+```
+
+Compare them with the container, replacing `vllm-ascend` with your container name:
+
+```bash
+docker exec vllm-ascend readlink /usr/local/Ascend/driver/lib64/driver/urma
+docker exec vllm-ascend ls -l /usr/lib64/urma/
+```
+
+If the link points to `/usr/lib64/urma`, the host directory contains the URMA
+provider libraries, and that directory is missing inside the container, add this
+option to `docker run` and recreate the container:
+
+```bash
+-v /usr/lib64/urma:/usr/lib64/urma:ro \
+```
+
+An existing mount of `/usr/lib64` to `/usr/lib64` also exposes this directory, so
+it does not need the additional mount. Other driver layouts may not need it.
+
+After recreating the container, check that the command exits with code `0` and
+reports the expected NPUs with Health `OK`:
+
+```bash
+docker exec vllm-ascend timeout 25s npu-smi info
+```
