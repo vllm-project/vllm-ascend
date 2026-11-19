@@ -951,8 +951,8 @@ hardware_notes:
   ascend_910c:
     title: Single-host deployment on A3
     body: >-
-      Use 128g of container shared memory. For PD separation, use the paired
-      Prefill, Decode and proxy commands in the single-host deployment table. Select the hardware and its ASCEND variant together.
+      Select W4A8 and a PD worker preset for pooling or long context (128g shm).
+      For image-and-text 10K, use the tutorial's four-rank Decode launcher in the table below.
     link:
       label: Single-host PD configurations
       href: '#single-host-pd-configurations'
@@ -960,8 +960,8 @@ hardware_notes:
   ascend_950dt:
     title: Single-host deployment on 950DT
     body: >-
-      Use 500g of container shared memory. For PD separation, use the paired
-      Prefill, Decode and proxy commands in the single-host deployment table. Select the hardware and its ASCEND variant together.
+      Select W4A8-MXFP and a PD worker preset, then choose the image-and-text, pooling or
+      long-context Point. The table below opens each worker command directly (500g shm).
     link:
       label: Single-host PD configurations
       href: '#single-host-pd-configurations'
@@ -1130,24 +1130,18 @@ guide_sections:
 
     A3 uses devices 0–7 for Prefill and 8–15 for Decode with 128g of container shared memory.
     950DT uses devices 0–3 for Prefill and 4–7 for Decode with 500g of container shared memory.
-    The PD presets use the W4A8 checkpoints below. FP8 and BF16 have no
-    documented Ascend PD configuration here. Select hardware and variant together:
-
-    - [A3 W4A8 Prefill](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_prefill) and [Decode](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_decode)
-    - [950DT W4A8-MXFP Prefill](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill) and [Decode](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode)
-
-    For shared-host PD,
-    choose the Prefill worker and Decode worker presets under Tensor Parallel.
-    Set the same workload point on both. Each preset starts one role.
-    The hardware tabs below include Docker setup, role commands, proxy and request checks. Run the three-tier storage setup before
-    starting either role for pooling.
+    Open a topology in the table to select the hardware, quantized checkpoint, worker and workload.
+    To select them manually, choose **Tensor Parallel**, the **Prefill** or **Decode** worker preset,
+    and the same **Point** for both roles. The command panel shows one role at a time.
+    For A3 image-and-text 10K, open the tutorial and select **A3 series** for the complete launch scripts.
+    For pooling, complete the storage setup in Sections 4.3 and 5.5 before starting the workers.
 
     | Procedure | A3 Prefill | A3 Decode | 950DT Prefill | 950DT Decode |
     | --- | --- | --- | --- | --- |
-    | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | TP2 PP4 DP1 (EP2) | TP2 DP4 (EP8) | TP2 DP2 (EP4) | TP2 DP2 (EP4) |
-    | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | TP4 PP2 DP1 (EP4) | TP2 DP4 (EP8) | TP2 PP2 DP1 (EP2) | TP2 DP2 (EP4) |
-    | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | TP2 PP4 DP1 (EP2) | TP2 DP4 (EP8) | TP4 DP1 (EP4) | TP4 DP1 (EP4) |
-    | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | TP2 PP2 DP2 (EP4) | TP2 DP4 (EP8) | TP2 DP2 (EP4) | TP2 DP2 (EP4) |
+    | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=basic) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=basic) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=basic) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=basic) |
+    | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP4 PP2 DP1 (EP4) · tutorial](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP2 DP4 (EP8) · tutorial](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP2 PP2 DP1 (EP2)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=image_10k) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=image_10k) |
+    | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=long_context) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=long_context) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=long_context) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=long_context) |
+    | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | [TP2 PP2 DP2 (EP4)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=pooling) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_a3_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=pooling) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=pooling) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=pooling) |
 
     The 950DT Basic PD presets use the tutorial's `VLLM_VERSION=0.32.0` override with the
     `v0.32.0rc1-a5` image. If you switch images, unset this override so vLLM Ascend
