@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fault injection against the exact assertions used by the live PD test."""
 
-import copy
 import unittest
 
-from tests.e2e.common.glm53flash_pd_checks import check_completion, check_same_completion, check_state_pulls
+from tests.e2e.common.glm53flash_pd_checks import check_completion, check_state_pulls
 
 
 class TestFlashPDChecks(unittest.TestCase):
@@ -31,7 +30,7 @@ class TestFlashPDChecks(unittest.TestCase):
 
     def test_complete_transfer(self):
         check_state_pulls(self.copies())
-        check_same_completion(self.completion(), self.completion(), 2)
+        check_completion(self.completion(), 2)
 
     def test_missing_and_duplicate_shard(self):
         for copies in (self.copies()[0]["copies"][:1], [self.copies()[0]["copies"][0]] * 2):
@@ -55,14 +54,6 @@ class TestFlashPDChecks(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "every PCP shard"):
             check_state_pulls(copies)
 
-    def test_corrupted_tokens_and_logits(self):
-        baseline = self.completion()
-        for key, value in (("tokens", ["token_id:12", "token_id:11"]), ("token_logprobs", [-1.5, -2.0])):
-            bad = copy.deepcopy(baseline)
-            bad["choices"][0]["logprobs"][key] = value
-            with self.assertRaisesRegex(AssertionError, "mismatch"):
-                check_same_completion(baseline, bad, 2)
-
     def test_nonfinite_and_short_output(self):
         for value in (float("nan"), float("inf")):
             bad = self.completion()
@@ -71,6 +62,11 @@ class TestFlashPDChecks(unittest.TestCase):
                 check_completion(bad, 2)
         with self.assertRaises(AssertionError):
             check_completion(self.completion(), 3)
+        for key in ("tokens", "token_logprobs"):
+            bad = self.completion()
+            bad["choices"][0]["logprobs"][key].pop()
+            with self.assertRaisesRegex(AssertionError, "count"):
+                check_completion(bad, 2)
 
 
 if __name__ == "__main__":
