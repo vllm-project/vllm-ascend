@@ -121,7 +121,7 @@ def test_w1_1_r04_second_append_is_kept_and_seen_follows_store(tmp_path: Path):
             return state.received, state.received, state.fired_at, state.reason
 
     with patch(
-        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern",
+        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern_backend",
         return_value=Backend(),
     ):
         det = TokenRepeatDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
@@ -189,7 +189,7 @@ def test_w1_1_run_after_sample_cpu_folds_store_only(tmp_path: Path):
 
     backend = Backend()
     with patch(
-        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern",
+        "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern_backend",
         return_value=backend,
     ):
         runner = SimpleNamespace(tp_rank=0, input_batch=None)

@@ -73,7 +73,8 @@ class _PatternFixture(unittest.TestCase):
         RequestGuardStore.reset_for_tests()
         self.backend = Backend()
         self.loader = patch(
-            "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern", return_value=self.backend
+            "vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern_backend",
+            return_value=self.backend,
         )
         self.loader.start()
         self.addCleanup(self.loader.stop)
@@ -201,10 +202,10 @@ class ProductionPatternTests(_PatternFixture):
 
     def test_resource_failure_is_explicit(self):
         self.loader.stop()
-        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
+        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern_backend
 
         with self.assertRaisesRegex(ValueError, "requires"):
-            load_pattern(None, -1)
+            load_pattern_backend(None, -1)
 
     def test_old_completion_does_not_unpin_reused_id(self):
         store = RequestGuardStore.get()
@@ -492,10 +493,10 @@ class ProductionPatternTests(_PatternFixture):
         )
         self.det.check_all(None, ["a"])
         self.det.refresh_from_config()
-        self.loader.target.load_pattern.assert_called_once()
+        self.loader.target.load_pattern_backend.assert_called_once()
         self.det.rebind_runner(None)
-        self.assertEqual(self.loader.target.load_pattern.call_count, 2)
-        self.loader.target.load_pattern.side_effect = RuntimeError("extension unavailable")
+        self.assertEqual(self.loader.target.load_pattern_backend.call_count, 2)
+        self.loader.target.load_pattern_backend.side_effect = RuntimeError("extension unavailable")
         with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="WARNING"):
             self.det.rebind_runner(None)
         self.assertTrue(self.det.warmup_failed)
@@ -503,14 +504,14 @@ class ProductionPatternTests(_PatternFixture):
         self.assertFalse(self.manager.token_repeat_enabled())
         # Latched: refresh must not retry until disable/re-enable (or rebind clears latch).
         self.det.refresh_from_config()
-        self.assertEqual(self.loader.target.load_pattern.call_count, 3)
+        self.assertEqual(self.loader.target.load_pattern_backend.call_count, 3)
         self.assertIsNone(self.det._backend)
         # Disable then re-enable clears latch and retries.
         self.section["enabled"] = False
         self.det.refresh_from_config()
         self.assertFalse(self.det.warmup_failed)
-        self.loader.target.load_pattern.side_effect = None
-        self.loader.target.load_pattern.return_value = self.backend
+        self.loader.target.load_pattern_backend.side_effect = None
+        self.loader.target.load_pattern_backend.return_value = self.backend
         self.section["enabled"] = True
         self.det.refresh_from_config()
         self.assertFalse(self.det.warmup_failed)
@@ -518,7 +519,7 @@ class ProductionPatternTests(_PatternFixture):
         self.assertTrue(self.manager.token_repeat_enabled())
 
     def test_warmup_failure_skips_cpu_enqueue_until_reenable(self):
-        self.loader.target.load_pattern.side_effect = RuntimeError("no extension")
+        self.loader.target.load_pattern_backend.side_effect = RuntimeError("no extension")
         self.section["enabled"] = False
         self.det.refresh_from_config()
         with self.assertLogs("vllm_ascend.observability.runtime_guard.detector.token_repeat", level="WARNING"):
@@ -538,7 +539,7 @@ class ResourceValidationTests(unittest.TestCase):
 
         import numpy as np
 
-        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
+        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern_backend
 
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "tokenizer.json"
@@ -552,17 +553,17 @@ class ResourceValidationTests(unittest.TestCase):
                     constructor,
                 ),
                 patch(
-                    "vllm_ascend.observability.runtime_guard.native_pattern.vocab.build",
+                    "vllm_ascend.observability.runtime_guard.native_pattern.vocab.build_tables",
                     build,
                 ),
             ):
-                self.assertEqual(load_pattern(runner, -1), "loaded")
+                self.assertEqual(load_pattern_backend(runner, -1), "loaded")
                 build.assert_called_once_with(str(source))
                 constructor.assert_called_once_with(tables, think_end=None)
                 with self.assertRaisesRegex(ValueError, "outside"):
-                    load_pattern(runner, 16)
+                    load_pattern_backend(runner, 16)
                 with self.assertRaisesRegex(ValueError, "think_end"):
-                    load_pattern(runner, True)
+                    load_pattern_backend(runner, True)
 
     def test_rebind_uses_new_runtime_config_even_when_versions_match(self):
         """A new runner must not inherit the previous model's detector configuration."""
@@ -585,7 +586,7 @@ class ResourceValidationTests(unittest.TestCase):
         runners = [SimpleNamespace(ascend_config=SimpleNamespace(runtime_config=cfg)) for cfg in configs]
         try:
             with (
-                patch("vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern") as load,
+                patch("vllm_ascend.observability.runtime_guard.detector.pattern_backend.load_pattern_backend") as load,
                 patch(
                     "vllm_ascend.observability.runtime_guard.rank_gate.should_run_anomaly_check_on_rank",
                     return_value=True,
@@ -621,10 +622,10 @@ class NativePatternTests(_PatternFixture):
             ws=np.zeros(256, np.int16),
             run_char=np.full(256, -1, np.int32),
             marker=np.zeros(256, bool),
-            send=np.zeros(256, bool),
+            sentence_end=np.zeros(256, bool),
         )
 
-    def test_native_block_boundaries_tail_and_first_reason(self):
+    def test_native_block_boundaries_tail_and_first_alert(self):
         for length in (0, 63, 64, 65, 95, 96, 127, 128, 129):
             for width in (1, 17, 64, 129):
                 self.det.on_disabled()
@@ -695,7 +696,7 @@ class PatternParityTests(unittest.TestCase):
             ws=np.zeros(256, np.int32),
             run_char=np.full(256, -1, np.int32),
             marker=np.zeros(256, np.int32),
-            send=np.zeros(256, np.int32),
+            sentence_end=np.zeros(256, np.int32),
         )
 
     def test_parity_exact_period_and_clean(self):
@@ -728,12 +729,12 @@ class PatternParityTests(unittest.TestCase):
                             r_events.append((0, rr.fired_at, rr.reason, rr.rule))
                     self.assertEqual(n_events, r_events, (name, width))
 
-    def test_parity_titles_match_packaged_rules(self):
-        from vllm_ascend.observability.runtime_guard.native_pattern import REASONS, TITLES
+    def test_parity_labels_match_packaged_rules(self):
+        from vllm_ascend.observability.runtime_guard.native_pattern import REASONS, RULES
 
-        self.assertEqual(TITLES[1], "exact_x3")
-        self.assertEqual(REASONS[1], "vllm[32,2000]x3")
+        self.assertEqual(REASONS[1], "exact_x3")
+        self.assertEqual(RULES[1], "vllm[32,2000]x3")
         native = self.native_cls(self.tables)
         ref = self.ref_cls(self.tables)
-        self.assertEqual(native.titles, ref.titles)
         self.assertEqual(native.reasons, ref.reasons)
+        self.assertEqual(native.rules, ref.rules)

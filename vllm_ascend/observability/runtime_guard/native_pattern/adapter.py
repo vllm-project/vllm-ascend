@@ -40,7 +40,7 @@ class PatternDetector:
             think_end = operator.index(think_end)
             if not 0 <= think_end <= np.iinfo(np.int64).max:
                 raise ValueError("think_end must be a non-negative int64 token ID")
-        columns = ("norm", "chars", "ws", "run_char", "marker", "send")
+        columns = ("norm", "chars", "ws", "run_char", "marker", "sentence_end")
         arrays = []
         size = None
         bounds = np.iinfo(np.int32)
@@ -56,50 +56,50 @@ class PatternDetector:
             if int(array.min()) < bounds.min or int(array.max()) > bounds.max:
                 raise ValueError(f"{key} values must fit int32 without truncation")
             arrays.append(np.ascontiguousarray(array, dtype=np.int32))
-        rules = load_pattern_rules(rules_path)
-        self.titles = rules["titles"]
-        self.reasons = rules["reasons"]
+        compiled = load_pattern_rules(rules_path)
+        self.reasons = compiled["reasons"]
+        self.rules = compiled["rules"]
         self.native = Detector(
             *arrays,
             -1 if think_end is None else think_end,
-            rules["exact_params"],
-            int(rules["run_max_threshold"]),
-            rules["feature_windows"],
-            rules["atom_meta"],
-            rules["atom_thr"],
-            rules["persist"],
+            compiled["exact_params"],
+            int(compiled["run_max_threshold"]),
+            compiled["feature_windows"],
+            compiled["atom_meta"],
+            compiled["atom_thr"],
+            compiled["persist"],
         )
 
     def start(self):
         return self.native.start()
 
-    def result(self, st):
-        if st.failed:
+    def result(self, state):
+        if state.failed:
             raise RuntimeError("failed detector state; discard it")
-        if st.reason < 0:
+        if state.rule_idx < 0:
             return None
-        return Result(True, st.fired_at, self.titles[st.reason], self.reasons[st.reason])
+        return Result(True, state.fired_at, self.reasons[state.rule_idx], self.rules[state.rule_idx])
 
-    def progress(self, st):
+    def progress(self, state):
         """Exceptional-path receipt, not a retry/rollback promise.
 
         A batch can commit earlier slots before a later slot raises. Query each
         state to recover its committed prefix/first alert without consuming any
         token. A failed native block has no trustworthy partial counters.
         """
-        if st.failed:
+        if state.failed:
             return None
-        title = self.titles[st.reason] if st.reason >= 0 else ""
-        rule = self.reasons[st.reason] if st.reason >= 0 else ""
-        return (st.received, st.t, st.fired_at, title, rule)
+        reason = self.reasons[state.rule_idx] if state.rule_idx >= 0 else ""
+        rule = self.rules[state.rule_idx] if state.rule_idx >= 0 else ""
+        return (state.received, state.t, state.fired_at, reason, rule)
 
     def feed_events(self, states, token_lists):
-        """Return ``(slot, fired_at, title, rule)`` for new alerts only."""
+        """Return ``(slot, fired_at, reason, rule)`` for new alerts only."""
         return [
-            (slot, fired_at, self.titles[reason], self.reasons[reason])
-            for slot, fired_at, reason in self.native.feed_events(states, token_lists)
+            (slot, fired_at, self.reasons[rule_idx], self.rules[rule_idx])
+            for slot, fired_at, rule_idx in self.native.feed_events(states, token_lists)
         ]
 
-    def finish(self, st):
-        self.native.finish(st)
-        return self.result(st) or Result()
+    def finish(self, state):
+        self.native.finish(state)
+        return self.result(state) or Result()

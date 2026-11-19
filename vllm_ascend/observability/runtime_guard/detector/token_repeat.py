@@ -135,13 +135,13 @@ class TokenRepeatDetector(ConfigBackedDetector):
         """Prepare model-specific CPU tables at enable time, outside detection batches."""
         if not self.enabled or self._backend is not None or self._warmup_failed:
             return
-        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern
+        from vllm_ascend.observability.runtime_guard.detector.pattern_backend import load_pattern_backend
         from vllm_ascend.observability.runtime_guard.rank_gate import should_run_anomaly_check_on_rank
 
         if self._runner is not None and not should_run_anomaly_check_on_rank(self._runner):
             return
         try:
-            self._backend = load_pattern(self._runner, self._think_end)
+            self._backend = load_pattern_backend(self._runner, self._think_end)
             self._warmup_failed = False
         except Exception as exc:
             # Optional detection must not break model initialization or the bus.

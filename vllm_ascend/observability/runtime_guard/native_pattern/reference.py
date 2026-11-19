@@ -186,7 +186,7 @@ class _RefState:
     nx: int = 0
     answer: int = -1
     fired_at: int = -1
-    reason: int = -1
+    rule_idx: int = -1
     done: bool = False
     failed: bool = False
     n4: Ngrams = field(default_factory=lambda: Ngrams(4))
@@ -209,7 +209,7 @@ class _RefState:
     streak: list[int] = field(default_factory=list)
 
     def __post_init__(self):
-        self.seen = bytearray(self.tables.nbits // 8 + 1)
+        self.seen = bytearray(self.tables.norm_id_span // 8 + 1)
         self.streak = [0] * self.tables.num_rules
         for r in (self.sep, self.chars, self.ws, self.repeat, self.marker, self.duplicate):
             r.push(0)
@@ -237,7 +237,7 @@ class _RefState:
     def features(self) -> list[float]:
         if self.failed:
             raise RuntimeError("failed detector state; discard it")
-        w = self.tables.feat_win
+        w = self.tables.feature_windows
         sep_w = w[8]
         return [
             self.n4.counts[0].share(self.nx, w[0]),
@@ -279,7 +279,7 @@ class _RefState:
                     self.signature[k] = min(self.signature[k], _u64(h * (SEEDS[k] | 1) + SEEDS[k]))
                 if self.sentence_len == 256:
                     self.close_sentence()
-            if int(tables.send[id_]):
+            if int(tables.sentence_end[id_]):
                 self.close_sentence()
             self.raw.push(id_)
             self.sep.add(int(norm == -1))
@@ -316,7 +316,7 @@ class _RefState:
         for i in range(n_rules):
             self.streak[i] = self.streak[i] + 1 if ok[i] else 0
             if self.streak[i] >= rules.persist[i]:
-                self.reason = i
+                self.rule_idx = i
                 self.fired_at = self.t
                 self.done = True
                 break
@@ -348,18 +348,18 @@ class _Tables:
         "ws",
         "run_char",
         "marker",
-        "send",
+        "sentence_end",
         "think_end",
-        "nbits",
+        "norm_id_span",
         "exact0",
         "exact1",
         "run_max_threshold",
-        "feat_win",
+        "feature_windows",
         "feature",
         "persist",
         "num_rules",
-        "titles",
         "reasons",
+        "rules",
     )
 
     def __init__(self, tables, think_end, rules):
@@ -368,14 +368,14 @@ class _Tables:
         self.ws = np.asarray(tables["ws"], dtype=np.int32)
         self.run_char = np.asarray(tables["run_char"], dtype=np.int32)
         self.marker = np.asarray(tables["marker"], dtype=np.int32)
-        self.send = np.asarray(tables["send"], dtype=np.int32)
+        self.sentence_end = np.asarray(tables["sentence_end"], dtype=np.int32)
         self.think_end = -1 if think_end is None else int(think_end)
-        self.nbits = int(self.norm.max()) + 1
+        self.norm_id_span = int(self.norm.max()) + 1
         ep = rules["exact_params"]
         self.exact0 = (int(ep[0, 0]), int(ep[0, 1]), int(ep[0, 2]))
         self.exact1 = (int(ep[1, 0]), int(ep[1, 1]), int(ep[1, 2]))
         self.run_max_threshold = int(rules["run_max_threshold"])
-        self.feat_win = [int(x) for x in rules["feature_windows"]]
+        self.feature_windows = [int(x) for x in rules["feature_windows"]]
         meta = rules["atom_meta"]
         thr = rules["atom_thr"]
         self.feature = []
@@ -393,8 +393,8 @@ class _Tables:
             self.feature.append({"n_atoms": n_atoms, "atoms": atoms})
         self.persist = [int(x) for x in rules["persist"]]
         self.num_rules = len(self.persist)
-        self.titles = rules["titles"]
         self.reasons = rules["reasons"]
+        self.rules = rules["rules"]
 
 
 class ReferenceDetector:
@@ -405,63 +405,63 @@ class ReferenceDetector:
             if isinstance(think_end, (bool, np.bool_)):
                 raise TypeError("think_end must be an integer token ID or None")
             think_end = operator.index(think_end)
-        rules = load_pattern_rules(rules_path)
-        self.titles = rules["titles"]
-        self.reasons = rules["reasons"]
-        self._tables = _Tables(tables, think_end, rules)
+        compiled = load_pattern_rules(rules_path)
+        self.reasons = compiled["reasons"]
+        self.rules = compiled["rules"]
+        self._tables = _Tables(tables, think_end, compiled)
 
     def start(self):
         return _RefState(self._tables)
 
-    def result(self, st):
-        if st.failed:
+    def result(self, state):
+        if state.failed:
             raise RuntimeError("failed detector state; discard it")
-        if st.reason < 0:
+        if state.rule_idx < 0:
             return None
-        return Result(True, st.fired_at, self.titles[st.reason], self.reasons[st.reason])
+        return Result(True, state.fired_at, self.reasons[state.rule_idx], self.rules[state.rule_idx])
 
-    def progress(self, st):
-        if st.failed:
+    def progress(self, state):
+        if state.failed:
             return None
-        title = self.titles[st.reason] if st.reason >= 0 else ""
-        rule = self.reasons[st.reason] if st.reason >= 0 else ""
-        return (st.received, st.t, st.fired_at, title, rule)
+        reason = self.reasons[state.rule_idx] if state.rule_idx >= 0 else ""
+        rule = self.rules[state.rule_idx] if state.rule_idx >= 0 else ""
+        return (state.received, state.t, state.fired_at, reason, rule)
 
     def feed_events(self, states, token_lists):
         if len(states) != len(token_lists):
             raise ValueError("batch sizes")
         if len(set(id(s) for s in states)) != len(states):
             raise ValueError("duplicate state in feed_events")
-        for st in states:
-            if st is None:
+        for state in states:
+            if state is None:
                 raise ValueError("state must not be None")
-            if st.tables is not self._tables:
+            if state.tables is not self._tables:
                 raise ValueError("state belongs to another detector")
-            if st.failed:
+            if state.failed:
                 raise RuntimeError("failed detector state; discard it")
         events = []
-        for slot, (st, tokens) in enumerate(zip(states, token_lists)):
-            was_done = st.done
-            if not st.done:
+        for slot, (state, tokens) in enumerate(zip(states, token_lists)):
+            was_done = state.done
+            if not state.done:
                 try:
                     for token in tokens:
-                        st.push(token)
-                        if st.done:
+                        state.push(token)
+                        if state.done:
                             break
                 except Exception:
-                    st.failed = True
+                    state.failed = True
                     raise
-            if not was_done and st.fired_at >= 0:
-                events.append((slot, st.fired_at, self.titles[st.reason], self.reasons[st.reason]))
+            if not was_done and state.fired_at >= 0:
+                events.append((slot, state.fired_at, self.reasons[state.rule_idx], self.rules[state.rule_idx]))
         return events
 
-    def finish(self, st):
-        if st.tables is not self._tables:
+    def finish(self, state):
+        if state.tables is not self._tables:
             raise ValueError("state belongs to another detector")
-        if st.failed:
+        if state.failed:
             raise RuntimeError("failed detector state; discard it")
-        if not st.done and st.pending:
-            st.compute_pending()
-        st.pending.clear()
-        st.done = True
-        return self.result(st) or Result()
+        if not state.done and state.pending:
+            state.compute_pending()
+        state.pending.clear()
+        state.done = True
+        return self.result(state) or Result()

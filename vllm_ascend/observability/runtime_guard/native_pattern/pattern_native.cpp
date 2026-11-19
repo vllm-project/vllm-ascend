@@ -147,19 +147,19 @@ struct Rules {
   std::array<int32_t, 3> exact0{{32, 500, 5}}, exact1{{32, 2000, 3}};
   int32_t run_max_threshold = 500;
   // Feature share windows in f[0]..f[8] order (from pattern.json).
-  std::array<int32_t, NUM_FEATURES> feat_win{{1024, 512, 512, 1024, 2048, 1024, 1024, 16, 256}};
+  std::array<int32_t, NUM_FEATURES> feature_windows{{1024, 512, 512, 1024, 2048, 1024, 1024, 16, 256}};
   std::vector<FeatureRule> feature;
   std::vector<int32_t> persist;  // length = 2 exact + run_max + feature.size()
   int num_rules() const { return static_cast<int>(persist.size()); }
 };
 
 struct Tables {
-  std::vector<int32_t> norm, chars, ws, run_char, marker, send;
+  std::vector<int32_t> norm, chars, ws, run_char, marker, sentence_end;
   int64_t think_end;
   Rules rules;
   // A valid int32 norm ID can be INT32_MAX. Widen before adding one;
   // the bitmap's size is a count, not another signed token ID.
-  size_t nbits;
+  size_t norm_id_span;
 };
 
 struct State {
@@ -167,7 +167,7 @@ struct State {
   std::array<int32_t, BLOCK> pending{};
   int n_pending = 0;
   int64_t t = 0, nx = 0, answer = -1, fired_at = -1;
-  int reason = -1;
+  int rule_idx = -1;
   bool done = false;
   bool failed = false;  // A partially computed block must never be reused.
   Ngrams n4{4}, n8{8};
@@ -181,7 +181,7 @@ struct State {
   std::array<std::array<uint64_t, 4>, 512> sentence_history{};
   std::vector<int> streak;
   explicit State(std::shared_ptr<const Tables> tab)
-      : tables(std::move(tab)), seen(tables->nbits / 8 + 1, 0), streak(tables->rules.num_rules(), 0) {
+      : tables(std::move(tab)), seen(tables->norm_id_span / 8 + 1, 0), streak(tables->rules.num_rules(), 0) {
     for (auto r : {&sep, &chars, &ws, &repeat, &marker, &duplicate}) r->push(0);
     signature.fill(UINT64_MAX);
   }
@@ -205,7 +205,7 @@ struct State {
   }
   std::array<double, 9> features() const {
     if (failed) throw std::runtime_error("failed detector state; discard it");
-    const auto& w = tables->rules.feat_win;
+    const auto& w = tables->rules.feature_windows;
     const int64_t sep_w = w[8];
     return {n4.counts[0].share(nx, w[0]),
             n4.counts[1].share(nx, w[1]),
@@ -247,7 +247,7 @@ struct State {
         for (int k = 0; k < 4; ++k) signature[k] = std::min(signature[k], h * (seeds[k] | 1) + seeds[k]);
         if (sentence_len == 256) close_sentence();
       }
-      if (tables->send[id]) close_sentence();
+      if (tables->sentence_end[id]) close_sentence();
       raw.push(id);
       sep.add(norm == -1);
       chars.add(ch);
@@ -271,7 +271,7 @@ struct State {
     const Rules& rules = tables->rules;
     const int n_rules = rules.num_rules();
     std::vector<char> ok(static_cast<size_t>(n_rules), 0);
-    // Evaluation order determines the first alert reason (matches pattern.json).
+    // Evaluation order determines the first alert rule_idx (matches pattern.json).
     ok[0] = exact(raw, n, rules.exact0[0], rules.exact0[1], rules.exact0[2]);
     if (!ok[0]) ok[1] = exact(raw, n, rules.exact1[0], rules.exact1[1], rules.exact1[2]);
     ok[2] = run_max >= rules.run_max_threshold;
@@ -288,7 +288,7 @@ struct State {
     for (int i = 0; i < n_rules; ++i) {
       streak[i] = ok[i] ? streak[i] + 1 : 0;
       if (streak[i] >= rules.persist[i]) {
-        reason = i;
+        rule_idx = i;
         fired_at = t;
         done = true;
         break;
@@ -323,8 +323,9 @@ struct Detector {
   // The Python wrapper performs range-checked conversion. Direct native
   // callers must not silently truncate float/int64/unsigned lookup tables.
   using Array = py::array;
-  Detector(Array norm, Array chars, Array ws, Array rc, Array marker, Array send, int64_t think, Array exact_params,
-           int64_t run_max_threshold, Array feature_windows, Array atom_meta, Array atom_thr, Array persist) {
+  Detector(Array norm, Array chars, Array ws, Array run_char, Array marker, Array sentence_end, int64_t think_end,
+           Array exact_params, int64_t run_max_threshold, Array feature_windows, Array atom_meta, Array atom_thr,
+           Array persist) {
     auto copy = [](const Array& x) {
       if (x.ndim() != 1) throw std::invalid_argument("lookup tables must be one-dimensional");
       if (!x.dtype().is(py::dtype::of<int32_t>()) || !(x.flags() & py::array::c_style))
@@ -348,17 +349,18 @@ struct Detector {
     tables->norm = copy(norm);
     tables->chars = copy(chars);
     tables->ws = copy(ws);
-    tables->run_char = copy(rc);
+    tables->run_char = copy(run_char);
     tables->marker = copy(marker);
-    tables->send = copy(send);
+    tables->sentence_end = copy(sentence_end);
     auto size = tables->norm.size();
     if (!size || tables->chars.size() != size || tables->ws.size() != size || tables->run_char.size() != size ||
-        tables->marker.size() != size || tables->send.size() != size)
+        tables->marker.size() != size || tables->sentence_end.size() != size)
       throw std::invalid_argument("lookup table sizes");
     for (auto id : tables->norm)
       if (id < -1) throw std::invalid_argument("normalized id");
-    tables->nbits = static_cast<size_t>(int64_t(*std::max_element(tables->norm.begin(), tables->norm.end())) + 1);
-    tables->think_end = think;
+    tables->norm_id_span =
+        static_cast<size_t>(int64_t(*std::max_element(tables->norm.begin(), tables->norm.end())) + 1);
+    tables->think_end = think_end;
 
     require_i32(exact_params, "exact_params", 2);
     if (exact_params.shape(0) != 2 || exact_params.shape(1) != 3)
@@ -377,7 +379,7 @@ struct Detector {
       const int32_t* fw = static_cast<const int32_t*>(feature_windows.data());
       for (int i = 0; i < NUM_FEATURES; ++i) {
         if (fw[i] < 1) throw std::invalid_argument("feature_windows");
-        tables->rules.feat_win[i] = fw[i];
+        tables->rules.feature_windows[i] = fw[i];
       }
     }
 
@@ -461,8 +463,8 @@ struct Detector {
         }
       }
       // An input iterator can finish a state without an alert. Terminal
-      // state alone must not fabricate an event with reason == -1.
-      if (!was_done && s.fired_at >= 0) events.append(py::make_tuple(i, s.fired_at, s.reason));
+      // state alone must not fabricate an event with rule_idx == -1.
+      if (!was_done && s.fired_at >= 0) events.append(py::make_tuple(i, s.fired_at, s.rule_idx));
     }
     return events;
   }
@@ -472,7 +474,7 @@ PYBIND11_MODULE(_pattern_native, m) {
   py::class_<State, std::shared_ptr<State>>(m, "State")
       .def_readonly("t", &State::t)
       .def_readonly("fired_at", &State::fired_at)
-      .def_readonly("reason", &State::reason)
+      .def_readonly("rule_idx", &State::rule_idx)
       .def_readonly("failed", &State::failed)
       .def_property_readonly("received", [](const State& s) {
         if (s.failed) throw std::runtime_error("failed detector state; accepted prefix unknown");
@@ -483,9 +485,10 @@ PYBIND11_MODULE(_pattern_native, m) {
                     Detector::Array, int64_t, Detector::Array, int64_t, Detector::Array, Detector::Array,
                     Detector::Array, Detector::Array>(),
            py::arg("norm").noconvert(), py::arg("chars").noconvert(), py::arg("ws").noconvert(),
-           py::arg("rc").noconvert(), py::arg("marker").noconvert(), py::arg("send").noconvert(), py::arg("think"),
-           py::arg("exact_params").noconvert(), py::arg("run_max_threshold"), py::arg("feature_windows").noconvert(),
-           py::arg("atom_meta").noconvert(), py::arg("atom_thr").noconvert(), py::arg("persist").noconvert())
+           py::arg("run_char").noconvert(), py::arg("marker").noconvert(), py::arg("sentence_end").noconvert(),
+           py::arg("think_end"), py::arg("exact_params").noconvert(), py::arg("run_max_threshold"),
+           py::arg("feature_windows").noconvert(), py::arg("atom_meta").noconvert(), py::arg("atom_thr").noconvert(),
+           py::arg("persist").noconvert())
       .def("start", &Detector::start)
       .def("finish", &Detector::finish)
       .def("feed_events", &Detector::feed_events);

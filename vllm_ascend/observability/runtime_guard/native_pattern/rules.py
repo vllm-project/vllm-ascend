@@ -62,14 +62,15 @@ def _as_float(value: Any, field: str) -> float:
     return float(value)
 
 
-def _as_title_reason(row: dict[str, Any], field: str) -> tuple[str, str]:
-    title = row.get("title")
-    reason = row.get("reason")
-    if not isinstance(title, str) or not title:
-        raise ValueError(f"pattern.json {field}.title must be a non-empty string")
+def _as_reason_rule(row: dict[str, Any], field: str) -> tuple[str, str]:
+    """Map JSON title/reason onto Incident vocabulary (reason/rule)."""
+    reason = row.get("title")  # short on-call label
+    rule = row.get("reason")  # long rule id
     if not isinstance(reason, str) or not reason:
+        raise ValueError(f"pattern.json {field}.title must be a non-empty string")
+    if not isinstance(rule, str) or not rule:
         raise ValueError(f"pattern.json {field}.reason must be a non-empty string")
-    return title, reason
+    return reason, rule
 
 
 def load_pattern_rules(path: str | None = None) -> dict[str, Any]:
@@ -99,8 +100,8 @@ def _load_pattern_rules_cached(cfg_path: str) -> dict[str, Any]:
     if not isinstance(exact, list) or len(exact) != 2:
         raise ValueError("pattern.json exact must be a list of length 2")
     exact_params = np.zeros((2, 3), dtype=np.int32)
-    titles: list[str] = []
-    reasons: list[str] = []
+    reasons: list[str] = []  # Incident detail.reason (JSON title)
+    rules: list[str] = []  # Incident detail.rule (JSON reason)
     persist_vals: list[int] = []
     for i, row in enumerate(exact):
         if not isinstance(row, dict):
@@ -109,18 +110,18 @@ def _load_pattern_rules_cached(cfg_path: str) -> dict[str, Any]:
         exact_params[i, 1] = _as_int(row.get("pmax"), f"exact[{i}].pmax", min_value=1)
         exact_params[i, 2] = _as_int(row.get("copies"), f"exact[{i}].copies", min_value=2)
         persist_vals.append(_as_int(row.get("persist"), f"exact[{i}].persist", min_value=1))
-        title, reason = _as_title_reason(row, f"exact[{i}]")
-        titles.append(title)
+        reason, rule = _as_reason_rule(row, f"exact[{i}]")
         reasons.append(reason)
+        rules.append(rule)
 
     run_max = data.get("run_max")
     if not isinstance(run_max, dict):
         raise ValueError("pattern.json run_max must be an object")
     run_thr = _as_int(run_max.get("threshold"), "run_max.threshold", min_value=1)
     persist_vals.append(_as_int(run_max.get("persist"), "run_max.persist", min_value=1))
-    title, reason = _as_title_reason(run_max, "run_max")
-    titles.append(title)
+    reason, rule = _as_reason_rule(run_max, "run_max")
     reasons.append(reason)
+    rules.append(rule)
 
     feature_rules = data.get("feature_rules")
     if not isinstance(feature_rules, list) or not (1 <= len(feature_rules) <= _MAX_FEATURE_RULES):
@@ -151,19 +152,19 @@ def _load_pattern_rules_cached(cfg_path: str) -> dict[str, Any]:
             atom_meta[i, 1 + j * 2 + 1] = op
             atom_thr[i, j] = thr
         persist_vals.append(_as_int(rule.get("persist"), f"feature_rules[{i}].persist", min_value=1))
-        title, reason = _as_title_reason(rule, f"feature_rules[{i}]")
-        titles.append(title)
+        reason, rule_id = _as_reason_rule(rule, f"feature_rules[{i}]")
         reasons.append(reason)
+        rules.append(rule_id)
 
     num_rules = 2 + 1 + n_feat
-    if len(titles) != num_rules or len(reasons) != num_rules or len(persist_vals) != num_rules:
+    if len(reasons) != num_rules or len(rules) != num_rules or len(persist_vals) != num_rules:
         raise ValueError("pattern.json rule metadata length mismatch")
-    if len(set(titles)) != len(titles):
-        raise ValueError("pattern.json titles must be unique")
+    if len(set(reasons)) != len(reasons):
+        raise ValueError("pattern.json titles (Incident reasons) must be unique")
 
     return {
-        "titles": tuple(titles),
         "reasons": tuple(reasons),
+        "rules": tuple(rules),
         "persist": np.ascontiguousarray(persist_vals, dtype=np.int32),
         "exact_params": np.ascontiguousarray(exact_params),
         "run_max_threshold": run_thr,

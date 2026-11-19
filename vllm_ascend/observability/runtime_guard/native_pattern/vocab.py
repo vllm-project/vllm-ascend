@@ -65,7 +65,7 @@ def _byte_decoder():
     return {chr(c): b for b, c in zip(bs, cs)}
 
 
-def build(tokenizer_json):
+def build_tables(tokenizer_json):
     from tokenizers import Tokenizer
     from tokenizers.models import BPE
 
@@ -90,7 +90,7 @@ def build(tokenizer_json):
     ws = np.zeros(V, np.int16)
     run_char = np.full(V, -1, np.int32)
     marker = np.zeros(V, bool)
-    send = np.zeros(V, bool)
+    sentence_end = np.zeros(V, bool)
     ids = {}  # normalised string -> id (0 unused)
     for i in range(V):
         piece = tk.id_to_token(i)
@@ -107,7 +107,7 @@ def build(tokenizer_json):
             chars[i] = 1
             continue
         chars[i] = min(len(s), 32767)
-        send[i] = any(c in ".?!。？！\n" for c in s)
+        sentence_end[i] = any(c in ".?!。？！\n" for c in s)
         ws[i] = min(sum(c.isspace() for c in s), 32767)
         if s and not s[0].isspace() and s == s[0] * len(s):
             run_char[i] = ord(s[0])
@@ -121,5 +121,5 @@ def build(tokenizer_json):
         "ws": ws,
         "run_char": run_char,
         "marker": marker,
-        "send": send,
+        "sentence_end": sentence_end,
     }

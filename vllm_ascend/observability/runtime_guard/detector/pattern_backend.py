@@ -42,7 +42,7 @@ class PatternBackend(Protocol):
     def finish(self, state: Any) -> PatternResult: ...
 
 
-def load_pattern(runner: Any, think_end: int) -> PatternBackend:
+def load_pattern_backend(runner: Any, think_end: int) -> PatternBackend:
     """Build tables once during detector warmup; never read a separately deployed NPZ."""
     if isinstance(think_end, bool) or not isinstance(think_end, int) or think_end < -1:
         raise ValueError("think_end must be -1 (chat) or a token ID")
@@ -68,7 +68,7 @@ def load_pattern(runner: Any, think_end: int) -> PatternBackend:
 
     started = perf_counter()
     try:
-        tables = pattern_vocab.build(str(source))
+        tables = pattern_vocab.build_tables(str(source))
     except ImportError as exc:
         raise RuntimeError(
             "token_repeat pattern backend requires a compiled vllm-ascend install (native_pattern / tokenizers)"

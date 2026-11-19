@@ -21,9 +21,9 @@ from dataclasses import dataclass
 
 from vllm_ascend.observability.runtime_guard.native_pattern.rules import load_pattern_rules
 
-_RULES = load_pattern_rules()
-TITLES = _RULES["titles"]
-REASONS = _RULES["reasons"]
+_COMPILED = load_pattern_rules()
+REASONS = _COMPILED["reasons"]  # short on-call labels (JSON title)
+RULES = _COMPILED["rules"]  # long rule ids (JSON reason)
 
 
 @dataclass
