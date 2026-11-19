@@ -254,6 +254,14 @@ class MoECommPolicy(Enum):
     ALLGATHER = auto()
 
 
+class OwnerPrefixScanPolicy(Enum):
+    """Peer scan strategy for owner-local Top-K selection."""
+
+    SERIAL = auto()
+    PARALLEL_MULTI_WAVE = auto()
+    PARALLEL_MULTI_RANK = auto()
+
+
 class QuantizationBackendFamily(Enum):
     """Quantization configuration implementation families."""
 
@@ -294,8 +302,7 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
-    # Stack tuning policy: adaptive peer counts are validated on A3 only.
-    prefer_parallel_owner_prefix: bool = False
+    owner_prefix_scan_policy: OwnerPrefixScanPolicy = OwnerPrefixScanPolicy.SERIAL
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
     minimax_m3_gbsa_bf16_softmax_precision: int = 0
@@ -399,7 +406,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
-            prefer_parallel_owner_prefix=True,
+            owner_prefix_scan_policy=OwnerPrefixScanPolicy.PARALLEL_MULTI_WAVE,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -443,6 +450,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            owner_prefix_scan_policy=OwnerPrefixScanPolicy.PARALLEL_MULTI_RANK,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,

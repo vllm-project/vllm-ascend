@@ -5,13 +5,13 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import OwnerPrefixScanPolicy, get_current_hardware_profile
 from vllm_ascend.ops.triton.sparse_index_remap import _sort
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 # Bound the paired-sort live set to the Kimi Top-K shape.
 MAX_FUSED_TOPK = 2048
-MIN_PARALLEL_OWNER_WORLD_SIZE = 5
+MIN_MULTI_WAVE_WORLD_SIZE = 5
 PACK_ROWS_PER_PROGRAM = 8
 PACK_COL_BLOCK = 256
 MERGE_RANKS_PER_GROUP = 4
@@ -619,10 +619,10 @@ def merge_packed_candidates(
         programs = min(rows, cores)
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
         if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
-            # Parallel scans amortize their setup across peers and multiple rows per core.
-            parallel_peers = (
-                get_current_hardware_profile().prefer_parallel_owner_prefix
-                and world_size >= MIN_PARALLEL_OWNER_WORLD_SIZE
+            policy = get_current_hardware_profile().owner_prefix_scan_policy
+            parallel_peers = (policy is OwnerPrefixScanPolicy.PARALLEL_MULTI_RANK and world_size > 1) or (
+                policy is OwnerPrefixScanPolicy.PARALLEL_MULTI_WAVE
+                and world_size >= MIN_MULTI_WAVE_WORLD_SIZE
                 and rows > cores
             )
             entries = block if parallel_peers else 2 * block

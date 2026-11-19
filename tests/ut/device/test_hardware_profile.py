@@ -16,6 +16,7 @@ from vllm_ascend.device.hardware_profile import (
     DeviceAddressingMode,
     HardwareCapability,
     MoECommPolicy,
+    OwnerPrefixScanPolicy,
     QuantizationBackendFamily,
     WeightFormat,
     WeightLayoutPolicy,
@@ -282,16 +283,16 @@ def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_pre
 
 
 @pytest.mark.parametrize(
-    "device_type,expected_parallel",
+    "device_type,policy",
     [
-        (AscendDeviceType.A2, False),
-        (AscendDeviceType.A3, True),
-        (AscendDeviceType.A5, False),
-        (AscendDeviceType._310P, False),
+        (AscendDeviceType.A2, OwnerPrefixScanPolicy.SERIAL),
+        (AscendDeviceType.A3, OwnerPrefixScanPolicy.PARALLEL_MULTI_WAVE),
+        (AscendDeviceType.A5, OwnerPrefixScanPolicy.PARALLEL_MULTI_RANK),
+        (AscendDeviceType._310P, OwnerPrefixScanPolicy.SERIAL),
     ],
 )
-def test_owner_prefix_stack_tuning_policy(device_type, expected_parallel):
-    assert get_hardware_profile(device_type).prefer_parallel_owner_prefix is expected_parallel
+def test_owner_prefix_stack_tuning_policy(device_type, policy):
+    assert get_hardware_profile(device_type).owner_prefix_scan_policy is policy
 
 
 def test_current_hardware_profile_uses_device_config() -> None:

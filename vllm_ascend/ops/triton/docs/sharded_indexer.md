@@ -63,8 +63,10 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_p
 ## Owner-prefix scan
 
 The A3 hardware profile selects parallel peer scans when the group has at least
-five ranks and there are more rows than vector cores. Other cases scan one peer
-at a time. A row with a dominant peer can also switch to the serial scan.
+five ranks and there are more rows than vector cores. A5 selects parallel scans
+for every multi-rank group, including single-row queries. A single rank always
+uses the serial specialization. Other device profiles use serial scans. Within
+the parallel specialization, a row with a dominant peer can still scan serially.
 
 For each owner pivot, the parallel scan counts the peer entries that rank ahead
 of it (higher score, then lower global ID). If the pivot wins, that count becomes

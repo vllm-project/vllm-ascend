@@ -64,7 +64,7 @@ def make_inputs(rows, world, owner, interleave, distribution, edge):
     "rows,world,owner,interleave,distribution,edge",
     [
         pytest.param(1, 1, 0, 1, "random", False, id="single-rank"),
-        pytest.param(1, 8, 3, 768, "random", False, id="single-row"),
+        pytest.param(1, 2, 1, 768, "random", False, id="single-row-two-ranks"),
         pytest.param(144, 8, 0, 768, "random", False, id="multi-wave"),
         pytest.param(49, 17, 16, 1, "ties", True, id="tied-scores-padded-peers"),
         pytest.param(49, 8, 0, 768, "own_high", False, id="all-owner-winners"),
