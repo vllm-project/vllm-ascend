@@ -1875,7 +1875,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    """Select FA3 for Qwen DFlash2 targets/drafts and MiniMax DSpark drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1889,14 +1889,45 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+
+    from vllm.compilation import backends
+
+    model_tag = backends.model_tag
+    if model_tag not in ("backbone", "dflash_head", "dspark_head"):
         return False
+
+    is_dflash = model_tag in ("backbone", "dflash_head")
+    if is_dflash:
+        if (
+            spec.method != "dflash"
+            or getattr(spec.target_model_config, "architecture", None) != "Qwen3_5ForConditionalGeneration"
+            or not getattr(config, "use_v2_model_runner", False)
+            or "DFlash2DraftModel" not in (spec.draft_model_config.architectures or ())
+            or not 0 < selector.head_size <= 256
+            or (selector.kv_cache_dtype == "float16" and selector.dtype != torch.float16)
+            or (selector.kv_cache_dtype == "bfloat16" and selector.dtype != torch.bfloat16)
+        ):
+            return False
+    elif not (
+        spec.method == "dspark"
+        and config.model_config is not None
+        and _uses_minimax_fa3(config)
+        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+        and not getattr(config.quant_config, "enable_c8_quant", False)
+    ):
+        # Keep MiniMax's cache guards separate: a Qwen draft can have a quantized target.
+        return False
+
     parallel = config.parallel_config
-    return (
-        selector.attn_type == AttentionType.DECODER
-        and selector.dtype in (torch.float16, torch.bfloat16)
-        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
-        and not any(
+    return not (
+        selector.attn_type != AttentionType.DECODER
+        or selector.dtype not in (torch.float16, torch.bfloat16)
+        or selector.kv_cache_dtype not in (None, "auto", "float16", "bfloat16")
+        or parallel.pipeline_parallel_size != 1
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.decode_context_parallel_size != 1
+        or getattr(spec, "enable_adaptive_verification", False)
+        or any(
             getattr(selector, flag, False)
             for flag in (
                 "has_sink",
@@ -1909,13 +1940,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and parallel.pipeline_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
-        and parallel.decode_context_parallel_size == 1
-        and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and not getattr(config.quant_config, "enable_c8_quant", False)
-        and not getattr(spec, "enable_adaptive_verification", False)
-        and util.find_spec("flash_attn_npu_3") is not None
+        or util.find_spec("flash_attn_npu_3") is None
     )
 
 

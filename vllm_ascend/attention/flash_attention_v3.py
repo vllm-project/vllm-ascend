@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
@@ -100,9 +99,18 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.device = device
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
+        speculative = vllm_config.speculative_config
+        self.is_speculative = speculative is not None
+        self.is_speculative_target = self.is_speculative and not all(
+            vllm_config.compilation_config.static_forward_context[name].is_draft_layer for name in layer_names
+        )
+        self.use_graph_buffers = (
+            self.is_speculative
+            and vllm_config.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and (self.is_speculative_target or not speculative.enforce_eager)
+        )
         self.capture_query_len = None
         if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-            speculative = vllm_config.speculative_config
             self.capture_query_len = 1 + (speculative.num_speculative_tokens if speculative else 0)
         self.block_size = kv_cache_spec.block_size
         # Deduplicate layer parameters so identical layers share one tiling call.
@@ -141,15 +149,19 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendFlashAttentionMetadata:
+        # Load the optional extension only in workers selecting this backend.
+        from flash_attn_npu_3 import get_scheduler_metadata
+
         common = common_attn_metadata
         num_reqs = common.num_reqs
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
-        active_reqs = max(
-            1,
-            int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens)),
-        )
+        offsets_cpu = common.query_start_loc_cpu[: num_reqs + 1]
+        # Draft token counts can include padding; target offsets can include
+        # dummy requests. Limit the active prefix by both host-side counts.
+        query_extent = min(common.num_actual_tokens, int(offsets_cpu[-1]))
+        active_reqs = max(1, int(torch.searchsorted(offsets_cpu, query_extent)))
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
         query_start_loc = common.query_start_loc[: active_reqs + 1]
@@ -167,6 +179,13 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             if is_graph_capture_size
             else common.max_query_len
         )
+        if self.is_speculative:
+            # Draft query lengths can produce buckets outside capture_sizes.
+            is_graph_capture_size = self.use_graph_buffers
+            max_query_len = common.max_query_len
+            if self.is_speculative_target and is_graph_capture_size:
+                bound = self.capture_query_len
+                max_query_len = num_input_tokens if bound is None else max(max_query_len, bound)
         if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
@@ -318,6 +337,9 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # Both runners can profile the model before attention metadata exists.
         if attn_metadata is None:
             return output.fill_(0)
+
+        from flash_attn_npu_3 import flash_attn_with_kvcache
+
         if key is not None and value is not None:
             num_tokens = attn_metadata.num_actual_tokens
             self.do_kv_cache_update(

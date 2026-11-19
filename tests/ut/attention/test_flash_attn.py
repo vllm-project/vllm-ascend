@@ -260,6 +260,119 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
     assert select(dflash2_config, selector)
 
 
+@pytest.fixture
+def qwen_dflash2_fa3(monkeypatch, dflash2_config):
+    from vllm_ascend import platform
+    from vllm_ascend.device.hardware import AscendDeviceType
+    from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+    config = dflash2_config
+    spec = config.speculative_config
+    spec.target_model_config = SimpleNamespace(
+        architecture="Qwen3_5ForConditionalGeneration",
+        hf_config=SimpleNamespace(architectures=["Qwen3_5ForConditionalGeneration"]),
+        hf_text_config=SimpleNamespace(model_type="qwen3_5_text"),
+    )
+    spec.draft_model_config.hf_config = SimpleNamespace(architectures=["DFlash2DraftModel"])
+    config.model_config = spec.target_model_config
+    config.use_v2_model_runner = True
+    config.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    spec.enable_adaptive_verification = False
+    runtime = SimpleNamespace(
+        config=config,
+        spec=spec,
+        target=spec.target_model_config,
+        draft=spec.draft_model_config,
+        parallel=config.parallel_config,
+        hardware="A2",
+        installed=True,
+        selector=AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto"),
+    )
+    monkeypatch.setattr(
+        platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType[runtime.hardware])
+    )
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
+    find_spec = platform.util.find_spec
+    monkeypatch.setattr(
+        platform.util,
+        "find_spec",
+        lambda name: (object() if runtime.installed else None) if name == "flash_attn_npu_3" else find_spec(name),
+    )
+
+    def select(tag="dflash_head"):
+        monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
+        backend = platform.NPUPlatform._select_attn_backend_cls(runtime.selector)
+        if backend.endswith(".AscendFlashAttentionBackend"):
+            assert backend == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+        return backend.rsplit(".", 1)[-1]
+
+    runtime.select = select
+    return runtime
+
+
+@pytest.mark.parametrize(
+    "hardware,tag,eager,draft_scope,expected",
+    [
+        ("A2", "dflash_head", False, False, "AscendFlashAttentionBackend"),
+        ("A3", "dflash_head", True, True, "AscendFlashAttentionBackend"),
+        ("A2", "backbone", False, False, "AscendFlashAttentionBackend"),
+        ("A3", "backbone", True, True, "AscendFlashAttentionBackend"),
+        ("A5", "dflash_head", False, False, "AscendAttentionBackend"),
+        ("A2", "dflash2_candidate_selector", False, False, "AscendAttentionBackend"),
+    ],
+)
+def test_qwen_dflash2_selects_target_and_draft(qwen_dflash2_fa3, hardware, tag, eager, draft_scope, expected):
+    r = qwen_dflash2_fa3
+    r.hardware, r.spec.enforce_eager = hardware, eager
+    if draft_scope:
+        r.config.model_config = r.draft
+    assert r.select(tag) == expected
+
+
+@pytest.mark.parametrize("tag", ["backbone", "dflash_head"])
+def test_qwen_dflash2_fa3_selection_does_not_import_operator(qwen_dflash2_fa3, monkeypatch, tag):
+    # Importing the extension can initialize a device; defer it to the worker.
+    monkeypatch.setattr(
+        "vllm_ascend.platform.import_module",
+        Mock(side_effect=AssertionError("Backend selection must not import the FA3 operator")),
+    )
+    assert qwen_dflash2_fa3.select(tag) == "AscendFlashAttentionBackend"
+
+
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("target", "architecture", "Qwen3ForCausalLM"),
+        ("target", "architecture", "Qwen3_5MoeForConditionalGeneration"),
+        ("target", "architecture", "MiniMaxM3SparseForCausalLM"),
+        ("draft", "architectures", ["Qwen3DFlashForCausalLM"]),
+        ("spec", "method", "mtp"),
+        ("config", "use_v2_model_runner", False),
+        ("spec", "enable_adaptive_verification", True),
+        ("parallel", "pipeline_parallel_size", 2),
+        ("parallel", "prefill_context_parallel_size", 2),
+        ("parallel", "decode_context_parallel_size", 2),
+        ("selector", "kv_cache_dtype", "fp8"),
+        ("selector", "kv_cache_dtype", "float16"),
+        ("selector", "dtype", torch.float32),
+        ("selector", "has_sink", True),
+        ("selector", "use_batch_invariant", True),
+        (None, "installed", False),
+    ],
+)
+def test_qwen_dflash2_unsupported_settings_keep_existing_backend(qwen_dflash2_fa3, section, field, value):
+    r = qwen_dflash2_fa3
+    if section == "selector":
+        r.selector = r.selector._replace(**{field: value})
+    else:
+        setattr(getattr(r, section) if section else r, field, value)
+    assert r.select() == "AscendAttentionBackend"
+    assert r.select("backbone") == "AscendAttentionBackend"
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

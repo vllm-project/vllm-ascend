@@ -255,6 +255,89 @@ def test_v2_flash_attn_uses_exact_lengths_after_rejection_and_reordering(monkeyp
         torch.testing.assert_close(metadata.block_tables[:num_reqs, 0], torch.tensor(order, dtype=torch.int32))
 
 
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_qwen_fa3_metadata_keeps_rejected_lengths_on_device(monkeypatch, mode):
+    import sys
+
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+    from vllm_ascend.attention.flash_attention_v3 import (
+        AscendFlashAttentionImpl,
+        AscendFlashAttentionMetadataBuilder,
+    )
+
+    names = [f"draft.layers.{i}" for i in range(6)]
+    impl = AscendFlashAttentionImpl(8, 128, 128**-0.5, num_kv_heads=1)
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=mode,
+            cudagraph_capture_sizes=[8, 16],
+            static_forward_context={name: SimpleNamespace(impl=impl, is_draft_layer=True) for name in names},
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+        speculative_config=SimpleNamespace(method="dflash", num_speculative_tokens=5, enforce_eager=False),
+        model_config=SimpleNamespace(max_model_len=1024),
+    )
+    kv_spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    builder = AscendFlashAttentionMetadataBuilder(kv_spec, names, config, torch.device("cpu"))
+    tiling = MagicMock(side_effect=lambda **_: torch.empty(16, dtype=torch.int32))
+    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", SimpleNamespace(get_scheduler_metadata=tiling))
+    speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
+    speculator.vllm_config, speculator.draft_max_seq_len, speculator.dcp_size = config, 1024, 1
+    speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.zeros(5, dtype=torch.int32),
+        seq_lens=torch.zeros(4, dtype=torch.int32),
+        positions=torch.zeros(24, dtype=torch.int64),
+    )
+    speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
+    speculator.attn_groups = [[SimpleNamespace(layer_names=names, get_metadata_builder=lambda _: builder)]]
+    speculator.kv_cache_config = KVCacheConfig(
+        num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=kv_spec)]
+    )
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.zeros(4, 8, dtype=torch.int32)],
+        slot_mappings=torch.arange(24, dtype=torch.int32).view(1, -1),
+    )
+    addresses = set()
+    # Real device lengths change after rejection; CPU values are deliberately only upper bounds.
+    for step, (lengths, order) in enumerate([([100, 198], [0, 1]), ([207, 109], [1, 0]), ([216], [1])], 1):
+        active = len(lengths)
+        speculator.input_buffers.seq_lens[:active] = torch.tensor(lengths, dtype=torch.int32)
+        boundaries = speculator.input_buffers.query_start_loc
+        boundaries.fill_(active * 6)
+        boundaries[: active + 1].copy_(torch.arange(active + 1, dtype=torch.int32) * 6)
+        speculator.block_tables.input_block_tables[0][:active, 0] = torch.tensor(order, dtype=torch.int32)
+        desc = BatchExecutionDescriptor(cg_mode=mode.decode_mode(), num_tokens=18, num_reqs=3)
+
+        def forbid_host_lengths(*_args, **_kwargs):
+            raise AssertionError("exact draft lengths must remain on device")
+
+        with monkeypatch.context() as no_host:
+            for operation in ("tolist", "item", "cpu"):
+                no_host.setattr(torch.Tensor, operation, forbid_host_lengths)
+            with dflash_module.build_attn_metadata_wrapper():
+                by_layer = speculator._build_uniform_attn_metadata(
+                    batch_desc=desc,
+                    num_reqs=active,
+                    num_query_per_req=6,
+                    seq_lens_cpu_upper_bound=torch.tensor([130, 230, 0, 0], dtype=torch.int32),
+                    step=6,
+                    causal={0: False},
+                )
+        metadata = by_layer[names[0]]
+        assert all(by_layer[name] is metadata for name in names)
+        assert tiling.call_count == step
+        assert metadata.seq_lens.data_ptr() == speculator.input_buffers.seq_lens.data_ptr()
+        torch.testing.assert_close(metadata.seq_lens, torch.tensor(lengths, dtype=torch.int32))
+        torch.testing.assert_close(metadata.block_tables[:, 0], torch.tensor(order, dtype=torch.int32))
+        assert tiling.call_args.kwargs["batch_size"] == active
+        addresses.add(next(iter(metadata.scheduler_metadata.values())).data_ptr())
+    if mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        assert len(addresses) == 1
+
+
 def test_patch_swaps_upstream_selector_walk_kernel():
     import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as upstream
 

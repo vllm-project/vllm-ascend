@@ -29,7 +29,9 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -2237,6 +2239,63 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
     runner, _, _ = _device_length_runner(model_type)
     del runner.attn_groups
     assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+def _qwen_dflash2_device_length_runner():
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    runner, output, batch = _device_length_runner()
+    runner.model_config.architecture = "Qwen3_5ForConditionalGeneration"
+    runner.model_config.hf_text_config.model_type = "qwen3_5_text"
+    runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.speculative_config.parallel_drafting = True
+    runner.speculative_config.enable_adaptive_verification = False
+    runner.speculator = SimpleNamespace(attn_backends={"draft.0": AscendFA3Backend})
+    runner.attn_groups = [
+        [SimpleNamespace(backend=backend)] for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend)
+    ]
+    return runner, output, batch
+
+
+@pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(blocked):
+    runner, output, batch = _qwen_dflash2_device_length_runner()
+    if blocked == "draft_backend":
+        runner.speculator.attn_backends["draft.0"] = AscendAttentionBackend
+    elif blocked == "target_backend":
+        runner.attn_groups[0][0].backend = AscendMLABackend
+    elif blocked == "model_state":
+        runner.model_state = object()
+    elif blocked == "pp":
+        runner.parallel_config.pipeline_parallel_size = 2
+    elif blocked == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
+    eligible = blocked is None
+    assert runner._can_skip_spec_cpu_length_sync() is eligible
+    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
+    runner.num_computed_tokens_cpu.fill_(-1)
+    runner.num_computed_tokens_stream = Mock()
+    with (
+        patch.object(GPUModelRunner, "postprocess_sampled") as update_device,
+        patch("torch.cuda.current_stream"),
+        patch("torch.npu.stream", return_value=nullcontext()),
+    ):
+        runner.postprocess_sampled(None, None, 2, 1)
+    update_device.assert_called_once()
+    runner._update_seq_lens_cpu(output, batch.req_ids)
+    assert runner.num_computed_tokens_stream.wait_stream.call_count == int(not eligible)
+    assert runner.num_computed_tokens_event.record.call_count == int(not eligible)
+    assert runner.num_computed_tokens_event.synchronize.call_count == int(not eligible)
+    # Only cached requests consume the snapshot; new/prefill rows retain host state.
+    assert runner.req_states.num_computed_tokens_cpu.tolist() == ([1, 2, 0, 0] if eligible else [98, 2, 0, 0])
+    assert runner.input_buffers.seq_lens_cpu[0] == (3 if eligible else 100)
+    if eligible:
+        assert runner.num_computed_tokens_cpu.tolist() == [-1] * 4
+    else:
+        torch.testing.assert_close(runner.num_computed_tokens_cpu, runner.req_states.num_computed_tokens.gpu)
 
 
 @pytest.mark.parametrize(
