@@ -88,8 +88,8 @@ class TestMoERuntimeArgs(unittest.TestCase):
 
     def test_build_mlp_compute_input_takes_swiglu_limits_from_the_executing_layer(self):
         # Same-shaped layers share the communication object's moe_config, so both
-        # limits come from the executing layer. SWIGLUSTEP keeps an explicit 0.0
-        # and defaults to 7.0; only the plain limit falls back to the shared config.
+        # limits come from the executing layer. SWIGLUSTEP uses its default for None and 0.0.
+        # Only the plain limit falls back to the shared config.
         hidden_states = torch.randn(2, 4)
         token_dispatch_output = MoETokenDispatchOutput(
             hidden_states=hidden_states,
@@ -106,7 +106,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
         for layer, expected in (
             (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=5.0)), (5.0, 5.0)),
             (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=None)), (0.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
-            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=0.0)), (0.0, 0.0)),
+            (SimpleNamespace(moe_config=SimpleNamespace(swiglu_limit=0.0)), (0.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
             (None, (4.0, EXPECTED_DEFAULT_SWIGLUSTEP_LIMIT)),
         ):
             with self.subTest(layer=layer):

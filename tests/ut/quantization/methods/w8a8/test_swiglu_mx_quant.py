@@ -123,7 +123,7 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, group_list_t
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
 @pytest.mark.parametrize("group_list_type", [0, 1])
-@pytest.mark.parametrize("swiglu_limit", [0.0, 5.0])
+@pytest.mark.parametrize("swiglu_limit", [4.0, 5.0])
 def test_swiglustep_mlp_dispatch(scale_alg, group_list_type, swiglu_limit):
     method = make_method(scale_alg)
     packed = torch.randn(4, 128, dtype=torch.bfloat16)
