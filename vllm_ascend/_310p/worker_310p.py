@@ -144,7 +144,7 @@ class NPUWorker310(NPUWorker):
         logger.info_once("Skip warm-up atb ops for 310P device.")
 
     def _init_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
+        device = self._resolve_device()
         torch.npu.set_device(device)
 
         # This lazy import avoids torch_npu re-initialization in patch

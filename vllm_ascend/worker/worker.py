@@ -612,7 +612,7 @@ class NPUWorker(GPUWorker):
             return self.cache_config.resolved_gpu_memory_utilization
         return utilization
 
-    def _init_device(self):
+    def _resolve_device(self) -> torch.device:
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
@@ -659,8 +659,12 @@ class NPUWorker(GPUWorker):
             )
 
         visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-        device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
+        return torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
+    def _init_device(self):
+        device = self._resolve_device()
+        visible_device_index = device.index
+        assert visible_device_index is not None
         torch.npu.set_device(device)
 
         if enable_custom_op():
