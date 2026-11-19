@@ -547,8 +547,8 @@ class MooncakeBaseConnectorScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         raise NotImplementedError
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
-        """Return prompt tokens that will be loaded from a remote producer."""
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
+        """Return remote prompt tokens, allowing subclasses to defer admission."""
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
