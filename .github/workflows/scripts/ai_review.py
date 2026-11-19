@@ -154,7 +154,7 @@ class Orchestrator:
 
     def author_in_allowlist(self) -> bool:
         author = self._gh("pr", "view", str(self.pr), "--json", "author", "-q", ".author.login")
-        path = os.path.join(self.workspace, ".github", "ai-review", "allowlist.txt")
+        path = os.path.join(self.workspace, ".github", "agent-review", "allowlist.txt")
         with open(path) as f:
             entries = parse_allowlist(f.read())
         return author in entries

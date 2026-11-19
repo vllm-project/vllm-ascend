@@ -8,6 +8,7 @@ module own the review rules for it.
 
 ```
 instructions.md        # output protocol; maintained by all maintainers
+allowlist.txt          # POC gray-release authors; maintainers (empty = off)
 L1/checklist.md        # cross-domain global rules; all maintainers
 domains.yaml           # coarse registry: path globs -> domain; maintainers
 L2/<domain>/           # ONE directory per domain; owned by that domain's
