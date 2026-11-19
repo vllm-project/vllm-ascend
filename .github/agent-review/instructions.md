@@ -23,7 +23,7 @@ Every reply MUST be a single PR comment consisting of:
    signature block. Otherwise do not emit the PASS marker.
 4. **Signature block** as the last line of the comment:
 
-   ```
+   ```text
    <!-- ai-review: state=reviewing | round=2/5 | total=6 | head=abc1234def0 -->
    ```
 
