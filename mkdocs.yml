@@ -295,6 +295,7 @@ nav:
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/device_selection.md
+        - user_guide/configuration/unified_output_directory.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
         - user_guide/configuration/runtime_config.md

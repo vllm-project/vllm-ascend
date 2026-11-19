@@ -15,6 +15,7 @@ This section provides comprehensive documentation for using vLLM Ascend in produ
 
 ## Configuration
 
+- **[Unified Output Directory](configuration/unified_output_directory.md)** — Configure paths for logs, caches, and diagnostic outputs
 - **[Environment Variables](configuration/env_vars.md)** — Configure vLLM Ascend via environment variables
 - **[Additional Configuration](configuration/additional_config.md)** — Additional configuration options
 - **[runtime_config](configuration/runtime_config.md)** — Runtime Guard JSON configuration reference
