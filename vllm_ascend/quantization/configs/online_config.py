@@ -43,24 +43,32 @@ recipes need FP8 matmul support that Ascend A2/A3 does not provide.
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from vllm.config.quantization import (
     QuantizationConfigArgs,
     resolve_quantization_config,
 )
+from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt8StaticChannelSym,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 
 from vllm_ascend.quantization.methods.online.int8 import (
     AscendInt8PerChannelOnlineLinearMethod,
     AscendInt8PerChannelOnlineMoEMethod,
 )
+from vllm_ascend.quantization.utils import is_fused_moe_layer
 from vllm_ascend.utils import ASCEND_ONLINE_QUANT_METHODS
 
 __all__ = [
@@ -68,48 +76,15 @@ __all__ = [
     "build_ascend_online_quant_config",
 ]
 
-# Weight QuantKey -> Ascend online method class. Only keys that have an Ascend
-# execution path are listed; everything else is rejected with a message that
-# explains which hardware would be needed.
-_ASCEND_ONLINE_LINEAR_METHODS: dict[Any, type] = {}
-_ASCEND_ONLINE_MOE_METHODS: dict[Any, type] = {}
-
-
-def _method_tables() -> tuple[dict[Any, type], dict[Any, type]]:
-    """Build the QuantKey -> Ascend online method tables.
-
-    Deferred because they need the QuantKey singletons from
-    ``vllm.model_executor.layers.quantization.utils.quant_utils``, which drags
-    in the kernel registry. The tables are built once and cached.
-    """
-    if _ASCEND_ONLINE_LINEAR_METHODS and _ASCEND_ONLINE_MOE_METHODS:
-        return _ASCEND_ONLINE_LINEAR_METHODS, _ASCEND_ONLINE_MOE_METHODS
-
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kInt8StaticChannelSym,
-    )
-
-    _ASCEND_ONLINE_LINEAR_METHODS[kInt8StaticChannelSym] = AscendInt8PerChannelOnlineLinearMethod
-    _ASCEND_ONLINE_MOE_METHODS[kInt8StaticChannelSym] = AscendInt8PerChannelOnlineMoEMethod
-    return _ASCEND_ONLINE_LINEAR_METHODS, _ASCEND_ONLINE_MOE_METHODS
-
-
-def _is_moe_layer(layer: torch.nn.Module) -> bool:
-    from vllm_ascend.quantization.utils import is_fused_moe_layer
-
-    return is_fused_moe_layer(layer)
-
-
-def _is_moe_layer_cls(layer_cls: type) -> bool:
-    """Class-level counterpart of :func:`_is_moe_layer`.
-
-    vLLM resolves online targets from the layer type
-    (``resolve_quant_method_cls(type(layer), prefix)``), so the Ascend scheme
-    lookup has to answer the same question without an instance.
-    """
-    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
-
-    return issubclass(layer_cls, (MoERunner, RoutedExperts))
+# Weight QuantKey -> Ascend online method class, one table per layer kind. Only
+# keys with an Ascend execution path are listed; everything else is rejected
+# with a message that explains which hardware would be needed.
+_ASCEND_ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
+    kInt8StaticChannelSym: AscendInt8PerChannelOnlineLinearMethod,
+}
+_ASCEND_ONLINE_MOE_METHODS: dict[QuantKey, type] = {
+    kInt8StaticChannelSym: AscendInt8PerChannelOnlineMoEMethod,
+}
 
 
 def _unquantized_method(layer: torch.nn.Module):
@@ -119,15 +94,10 @@ def _unquantized_method(layer: torch.nn.Module):
 
         return AscendUnquantizedLinearMethod()
 
-    if _is_moe_layer(layer):
+    if is_fused_moe_layer(layer):
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
 
         return AscendUnquantizedFusedMoEMethod(getattr(layer, "moe_config", None))
-
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        UnquantizedEmbeddingMethod,
-        VocabParallelEmbedding,
-    )
 
     if isinstance(layer, VocabParallelEmbedding):
         return UnquantizedEmbeddingMethod()
@@ -197,11 +167,10 @@ class AscendOnlineQuantizationConfig(OnlineQuantizationConfig):
                 "dynamically per token."
             )
 
-        linear_methods, moe_methods = _method_tables()
-        if _is_moe_layer_cls(layer_cls):
-            methods = moe_methods
+        if issubclass(layer_cls, (MoERunner, RoutedExperts)):
+            methods = _ASCEND_ONLINE_MOE_METHODS
         elif issubclass(layer_cls, LinearBase):
-            methods = linear_methods
+            methods = _ASCEND_ONLINE_LINEAR_METHODS
         else:
             return None
 
