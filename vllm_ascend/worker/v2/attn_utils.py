@@ -1479,28 +1479,50 @@ def create_kv_cache_runtime_views(
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
+            raw_cache = backing[start : start + span]
+            block_stride = descriptor.block_stride
+            if isinstance(spec, MambaSpec):
+                # KDA states are indexed by manager block.
+                caches[name] = create_cache_component_views(
+                    raw_cache, [(num_blocks, *shape) for shape in spec.shapes], spec.dtypes, block_stride
+                )
+                continue
+
             shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
+            get_runtime_dtypes = getattr(group.backend, "get_runtime_dtypes", None)
+            if get_runtime_dtypes is not None:
+                dtypes = get_runtime_dtypes(spec)
+            else:
+                dtypes = (spec.dtype,)
+                if getattr(spec, "scale_dim", 0):
+                    dtypes += (spec.scale_dtype,)
+
+            if shapes and shapes[0][0] != num_blocks:
+                runtime_blocks = shapes[0][0]
+                if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
+                    raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+                kernel_blocks_per_manager = runtime_blocks // num_blocks
+                if block_stride != spec.page_size_bytes:
+                    raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+                if block_stride % kernel_blocks_per_manager:
+                    raise ValueError("Physical pages must split into whole kernel slots.")
+                block_stride //= kernel_blocks_per_manager
             # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
             # views with the content dimension expressed in dtype elements.
             cache_shapes = [
                 (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
+                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True)
             ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
-            if issubclass(group.backend, DeepseekV41CacheBackend):
+            components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
+            format_views = getattr(group.backend, "format_runtime_views", None)
+            if format_views is not None:
+                caches[name] = format_views(spec, components)
+            elif issubclass(group.backend, DeepseekV41CacheBackend):
                 caches[name] = components[0] if len(components) == 1 else tuple(components)
             else:
                 caches[name] = components
@@ -1544,6 +1566,50 @@ def unified_allocate_kv_cache(
     )
 
 
+def _uses_k3_unified_cache(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    kernel_block_sizes: list[int],
+) -> bool:
+    """Select resident KDA and standard single-backing MLA configurations."""
+    if (
+        vllm_config.kv_transfer_config is not None
+        or vllm_config.speculative_config is not None
+        or vllm_config.cache_config.use_replayssm
+        or KVPPConfig.from_vllm_config(vllm_config).size != 1
+    ):
+        return False
+
+    descriptors = kv_cache_config.kv_cache_tensors
+    if not descriptors or len({descriptor.size for descriptor in descriptors}) != 1:
+        return False
+    if any(descriptor.host_resident for descriptor in descriptors):
+        return False
+
+    if len(kernel_block_sizes) < len(kv_cache_config.kv_cache_groups):
+        return False
+    specs = _get_layer_kv_cache_specs(kv_cache_config)
+    if not all(
+        isinstance(spec, MambaSpec) or _uses_single_raw_mla_cache(vllm_config, name, spec)
+        for name, spec in specs.items()
+    ):
+        return False
+
+    block_strides = {name: descriptor.block_stride for descriptor in descriptors for name in descriptor.layers}
+    shared_layers = get_shared_kv_cache_layers(vllm_config)
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        kernel_block_size = kernel_block_sizes[group_id]
+        for name in group.layer_names:
+            spec = specs[name]
+            if name in shared_layers or isinstance(spec, MambaSpec):
+                continue
+            if kernel_block_size <= 0 or spec.block_size % kernel_block_size:
+                return False
+            if spec.block_size != kernel_block_size and block_strides[name] != spec.page_size_bytes:
+                return False
+    return True
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1564,6 +1630,8 @@ def allocate_kv_cache_main(
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
     if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
+    if model_type == "kimi_linear" and _uses_k3_unified_cache(vllm_config, kv_cache_config, kernel_block_sizes):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
