@@ -39,9 +39,9 @@ def make_runner(tokens=16384, pcp=16, requests=64, query=4, replicated=False, dc
     "tokens,pcp,requests,query,replicated,expected",
     [
         (16384, 1, 64, 4, False, 16384),
-        (16384, 16, 64, 4, False, 1152),
-        (16384, 16, 512, 4, False, 3072),
-        (17, 4, 2, 1, False, 9),
+        (16384, 16, 64, 4, False, 1392),
+        (16384, 16, 512, 4, False, 3968),
+        (17, 4, 2, 1, False, 10),
         (17, 16, 64, 4, False, 17),
         (16384, 16, 64, 9, True, 16384),
     ],
@@ -57,7 +57,7 @@ def test_no_draft_preserves_target_decode_requests():
     runner = make_runner(requests=2048)
     runner.speculative_config = None
     runner.vllm_config.speculative_config = None
-    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 6144
+    assert get_pcp_profile_num_tokens(runner.vllm_config, runner.max_num_tokens, runner.max_num_reqs) == 7040
 
 
 def test_non_model_draft_keeps_global_budget():
@@ -102,7 +102,7 @@ def test_local_dummy_preserves_actual_upstream_request_count(tokens, requests):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-@pytest.mark.parametrize("replicated,expected", [(False, 3072), (True, 16384)])
+@pytest.mark.parametrize("replicated,expected", [(False, 3968), (True, 16384)])
 def test_profile_temporarily_sets_budget_and_restores_on_failure(fail, replicated, expected):
     runner = make_runner(requests=512, replicated=replicated)
     runner.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
@@ -153,7 +153,7 @@ def test_mc2_reservation_compares_the_selected_profile_budget(capacity, reserve)
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
 @pytest.mark.parametrize("split_grid", [False, True])
-@pytest.mark.parametrize("graph_tokens,expected", [(512, 3048), (4096, 4096)])
+@pytest.mark.parametrize("graph_tokens,expected", [(512, 3486), (4096, 4096)])
 def test_profile_budget_covers_prefill_graphs(mode, split_grid, graph_tokens, expected):
     runner = make_runner(pcp=8, requests=500, query=1)
     config = runner.vllm_config
@@ -175,7 +175,7 @@ def test_profile_budget_ignores_inactive_prefill_graphs(eager, mode):
     config.model_config.enforce_eager = eager
     config.compilation_config.cudagraph_mode = mode
     config.compilation_config.prefill_cudagraph_capture_token_sizes = [4096]
-    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3048
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3486
 
 
 def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
@@ -185,7 +185,7 @@ def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
     config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     config.compilation_config.prefill_cudagraph_capture_token_sizes = []
     config.compilation_config.cudagraph_capture_sizes = [8192]
-    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3048
+    assert get_pcp_profile_num_tokens(config, runner.max_num_tokens, runner.max_num_reqs) == 3486
 
 
 @pytest.mark.parametrize(
@@ -197,14 +197,16 @@ def test_empty_prefill_grid_does_not_use_draft_graph_sizes():
         (8, 2, 1, [225, 16159], [True, True]),
         (16, 2, 1, [961, 15423], [True, True]),
         (8, 2, 256, [256, 16128], [False, True]),
+        (16, 2, 8, [8, 16352], [False, True]),
     ],
 )
-def test_dcp_budget_covers_actual_pcp_partitions(pcp, requests, query, lens, prefills):
-    runner = make_runner(pcp=pcp, requests=requests, query=query, dcp=pcp)
+@pytest.mark.parametrize("dcp,shard_decode", [(1, False), (1, True), (8, False)])
+def test_budget_covers_actual_pcp_partitions(pcp, requests, query, lens, prefills, shard_decode, dcp):
+    runner = make_runner(pcp=pcp, requests=requests, query=query, dcp=dcp)
     manager = PCPManager.__new__(PCPManager)
     manager.pcp_world_size = pcp
-    manager.dcp_world_size = pcp
-    manager.shard_decode_requests = False
+    manager.dcp_world_size = dcp
+    manager.shard_decode_requests = shard_decode
     per_rank_tokens = [
         sum(
             count
