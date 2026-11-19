@@ -945,8 +945,14 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
 
 @pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
 @pytest.mark.parametrize("is_draft", [False, True])
-def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
+@pytest.mark.parametrize("draft_arch", ["Glm5NextForCausalLM", "Glm5NextMTPModel"])
+def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft, draft_arch):
+    text = SimpleNamespace(layer_types=["linear_attention"])
     config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="Glm5NextForCausalLM", hf_text_config=text),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(architecture=draft_arch, hf_text_config=text)
+        ),
         kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
         compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
@@ -963,7 +969,8 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
     monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
     monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
-    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
+    uses_qkv_tp = input_proj_tp_size > 1 and (not is_draft or draft_arch == "Glm5NextForCausalLM")
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) == (not uses_qkv_tp)
 
 
 @pytest.mark.parametrize("v2", [False, True])
@@ -987,4 +994,10 @@ def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, dra
     monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
     monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
     monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: False)
-    assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model=draft) is draft
+    vc = SimpleNamespace(
+        speculative_config=None,
+        model_config=SimpleNamespace(
+            architecture="Glm5NextForCausalLM", hf_text_config=SimpleNamespace(layer_types=["linear_attention"])
+        ),
+    )
+    assert utils.should_skip_allreduce_across_dp_group(vc, is_draft_model=draft) is draft

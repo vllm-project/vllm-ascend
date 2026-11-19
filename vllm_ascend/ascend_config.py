@@ -1515,13 +1515,18 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        from vllm_ascend.utils import model_uses_kimi_kda
+        from vllm_ascend.utils import model_supports_qkv_iproj_tp, model_uses_kimi_kda
 
         projection_tp = self.gproj_tensor_parallel_size > 1 or (
             self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
         )
         shared_tp = self.shared_expert_tensor_parallel_size > 1
         if self.qkv_iproj_tensor_parallel_size > 1:
+            if not model_supports_qkv_iproj_tp(vc.model_config):
+                raise ValueError(
+                    f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size} requires KDA input "
+                    f"projection TP. {vc.model_config.architecture} has no supported QKV projection."
+                )
             parallel = vc.parallel_config
             if (
                 parallel.tensor_parallel_size != 1
