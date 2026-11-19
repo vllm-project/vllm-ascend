@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import prepare_dflash_inpu
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.utils import vllm_version_is
 
 ACCURACY_CASES = [
     {
@@ -632,6 +633,10 @@ def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_fr
         case["sample_from_anchor"] = True
         case["num_speculative_steps"] = case["num_query_per_req"]
     data = _build_inputs(case, "npu")
-    prepare_dflash_inputs(*_impl_args(data, case))
+    args = _impl_args(data, case)
+    if not vllm_version_is("0.33.0"):
+        # vLLM main takes block_stride after block_size. These cache pages are contiguous.
+        args.insert(18, case["block_size"])
+    prepare_dflash_inputs(*args)
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
