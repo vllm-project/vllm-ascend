@@ -55,6 +55,7 @@
     | [Gemma4](../../tutorials/models/Gemma4.md) | 🔵 | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Hy3-preview](../../tutorials/models/Hy3-preview.md) | 🔴 | A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Hy4-preview (Experimental)](../../tutorials/models/Hy4-preview.md) | 🔵 | A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
+    | [InternLM2-20B-Chat](../../tutorials/models/InternLM2-20B-Chat.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
     | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [MiniMax-M2.5/2.7](../../tutorials/models/MiniMax-M2.md) | 🔴 | A2/A3 | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
     | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) | ✅ | A2/A3 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |

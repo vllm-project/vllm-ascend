@@ -924,10 +924,15 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
     from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
+        SCALED_ROPE_OP_NAMES,
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
+        AscendDynamicNTKAlphaRotaryEmbedding,
+        AscendDynamicNTKScalingRotaryEmbedding,
         AscendGemma4RotaryEmbedding,
+        AscendLlama3RotaryEmbedding,
         AscendMRotaryEmbedding,
+        AscendNTKScalingRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
     )
@@ -946,6 +951,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RotaryEmbedding": AscendRotaryEmbedding,
         "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
+        "DynamicNTKScalingRotaryEmbedding": AscendDynamicNTKScalingRotaryEmbedding,
+        "DynamicNTKAlphaRotaryEmbedding": AscendDynamicNTKAlphaRotaryEmbedding,
+        "NTKScalingRotaryEmbedding": AscendNTKScalingRotaryEmbedding,
+        "Llama3RotaryEmbedding": AscendLlama3RotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
@@ -1017,6 +1026,15 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RoutedExperts": AscendRoutedExperts310,
             }
         )
+        # 310P replaces the rotary forward above because the generic one selects
+        # `npu_mrope` when Triton is absent, and that kernel does not cover 310P.
+        # The scaled variants delegate to the generic forward, so leaving them
+        # registered would route them to the same unsupported kernel. They differ
+        # from `RotaryEmbedding` only in how the cos/sin cache is built, so
+        # dropping the registrations keeps them on `forward_native`, which is what
+        # they used before the registrations existed.
+        for scaled_rope_op in SCALED_ROPE_OP_NAMES:
+            REGISTERED_ASCEND_OPS.pop(scaled_rope_op, None)
     else:
         from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 

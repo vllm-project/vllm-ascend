@@ -66,6 +66,41 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_scaled_rope_registration_is_skipped_on_310p(device_type):
+    """310P must keep `forward_native` for the scaled rotary variants.
+
+    They delegate to `AscendRotaryEmbedding.forward_oot`, which selects
+    `npu_mrope` when Triton is absent, and that kernel does not cover 310P. The
+    profile replaces `RotaryEmbedding` and `MRotaryEmbedding` with its own
+    forward but cannot do the same for these, since the 310P forward reads
+    globally published cos/sin slices rather than `self.cos_sin_cache`. Leaving
+    them unregistered is what they did before the registrations existed.
+    """
+    from vllm_ascend.ops.rotary_embedding import SCALED_ROPE_OP_NAMES
+
+    with (
+        mock.patch.object(utils, "_ASCEND_CUSTOMOP_IS_REIGISTERED", False),
+        mock.patch.object(utils, "REGISTERED_ASCEND_OPS", {}),
+        mock.patch.object(utils, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot") as register,
+    ):
+        utils.register_ascend_customop()
+        registered_names = {call.kwargs["name"] for call in register.call_args_list}
+
+        if device_type == AscendDeviceType._310P:
+            for name in SCALED_ROPE_OP_NAMES:
+                assert name not in utils.REGISTERED_ASCEND_OPS, f"{name} must not be registered on 310P"
+                assert name not in registered_names, f"{name} was handed to register_oot on 310P"
+            # The plain and multimodal rotary ops keep their own 310P overrides.
+            assert "RotaryEmbedding" in utils.REGISTERED_ASCEND_OPS
+            assert "MRotaryEmbedding" in utils.REGISTERED_ASCEND_OPS
+        else:
+            for name in SCALED_ROPE_OP_NAMES:
+                assert name in utils.REGISTERED_ASCEND_OPS, f"{name} must stay registered on {device_type}"
+                assert name in registered_names
+
+
 def test_cp_decode_stream_is_cached_and_separate_from_chunked_prefill():
     decode_stream, prefill_stream = object(), object()
     with (
