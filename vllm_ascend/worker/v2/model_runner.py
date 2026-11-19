@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -96,6 +97,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
@@ -107,6 +109,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -174,6 +177,12 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+            offload_config = vllm_config.offload_config
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group
@@ -489,6 +498,7 @@ class NPUModelRunner(GPUModelRunner):
         # P also needs persistent prompt draft KV until D acknowledges its
         # transfer. It must never alias target layerwise scratch buffers.
         persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+        persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
@@ -837,7 +847,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens
-        profile_tokens = self._get_pcp_profile_num_tokens()
+        profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
@@ -1293,27 +1303,6 @@ class NPUModelRunner(GPUModelRunner):
             yield
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
-
-    def _get_pcp_profile_num_tokens(self) -> int:
-        """Keep replicated draft requests when profiling PCP-local prefill.
-
-        Initial memory profiling precedes KV/PCP-manager initialization.
-        Block drafters retain the global budget: their context-KV precompute
-        processes all target hidden states, independently of short queries.
-        """
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size <= 1:
-            return self.max_num_tokens
-        query_per_req = 1
-        spec = self.speculative_config
-        if spec is not None:
-            # Use shared config, not the last PP rank's speculator instance:
-            # every pipeline stage must profile the same target token shape.
-            if spec.method not in ("mtp", "eagle", "eagle3"):
-                return self.max_num_tokens
-            query_per_req = 1 + spec.num_speculative_tokens
-        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
-        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

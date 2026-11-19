@@ -70,12 +70,16 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     SpeculativeConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    MLAPrefillBackend = None
+    MLAPrefillSelectorConfig = None
     AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
@@ -504,6 +508,15 @@ class NPUPlatform(Platform):
             cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
 
     @classmethod
+    def get_mla_prefill_backend_cls(cls, mla_selector_config: MLAPrefillSelectorConfig) -> type[MLAPrefillBackend]:
+        # Ascend's AscendSFAImpl/AscendMLAImpl handles the full MLA forward
+        # pass (including prefill) via impl.forward(), so return the no-op
+        # Ascend backend instead of the CUDA capability-based selection.
+        from vllm_ascend.attention.mla_prefill import AscendMLAPrefillBackend
+
+        return AscendMLAPrefillBackend
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -863,8 +876,12 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         return
 
     sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
-    sparse_freq = sparse_config.get("sparse_attention_freq") or []
-    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    if sparse_config:
+        sparse_freq = sparse_config.get("sparse_attention_freq") or []
+        sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    else:
+        layer_types = getattr(text_config, "layer_types", None) or ()
+        sparse_layer_ids = {i for i, layer_type in enumerate(layer_types) if layer_type == "minimax_m3_sparse"}
     gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
     if not gqa_layer_ids:
         return
