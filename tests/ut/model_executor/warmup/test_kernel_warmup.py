@@ -15,8 +15,10 @@ from tests.ut.model_executor.warmup.helpers import (
     make_mock_vllm_config,
     make_registry,
 )
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.triton import rms_norm
-from vllm_ascend.ops.triton.dcp import dcp_warmup
+from vllm_ascend.ops.triton.dcp import dcp_a2a, dcp_warmup
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 
 # The package __init__ re-exports the function of the same name, so resolve
@@ -212,6 +214,45 @@ def _dcp_warmup_keys(registry):
 
 
 @pytest.mark.parametrize(
+    "device_type,dtype,expected_mode",
+    [
+        (AscendDeviceType.A3, torch.bfloat16, 0),
+        (AscendDeviceType.A5, torch.bfloat16, 1),
+        (AscendDeviceType.A5, torch.float16, None),
+    ],
+)
+@pytest.mark.parametrize("tokens", [1, 33])
+def test_runtime_combine_matches_registered_warmup(device_type, dtype, expected_mode, tokens, monkeypatch):
+    monkeypatch.setattr(dcp_a2a, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    heads, dim, ranks = 12, 512, 8
+    registry = _register_dcp_warmup(
+        dtype=dtype,
+        local_heads=heads,
+        head_dim=dim,
+        scatter_size=ranks,
+        pcp_size=1,
+        max_tokens=33,
+        from_stats=False,
+        mla=True,
+    )
+    recv = torch.empty((ranks, heads, tokens, dim + 4), dtype=dtype, device="meta")
+    output = torch.empty((tokens, heads, dim), dtype=dtype, device="meta")
+    launch = MagicMock()
+    dcp_a2a._launch_fused_dcp_lse_combine(recv, output, dim, 1, False, None, None, 24, launch)
+    launch.assert_called_once()
+    head_scatter = dcp_a2a._fused_dcp_lse_combine_head_scatter_kernel
+    scalar = dcp_a2a._fused_dcp_lse_combine_kernel
+    expected = scalar if expected_mode is None else head_scatter
+    assert launch.call_args.args[0] is expected
+    assert launch.call_args.kwargs.get("MODE") == expected_mode
+    registered = _dcp_warmup_keys(registry)
+    assert {owner.kernel for owner in registered} & {scalar, head_scatter} == {expected}
+    owner = next(owner for owner in registered if owner.kernel is expected)
+    modes = {dict(key.inputs).get("MODE") for key in registered[owner]}
+    assert modes == {expected_mode}
+
+
+@pytest.mark.parametrize(
     "dtype,local_heads,head_dim,scatter_size,pcp_size,from_stats,mla,max_tokens",
     [
         (torch.bfloat16, 8, 512, 8, 1, True, False, 4097),
@@ -282,7 +323,8 @@ def test_registration_is_scoped_deduplicated_and_allocates_nothing():
         with registry.activate():
             dcp_warmup.register_dcp_warmup(**kwargs)
             dcp_warmup.register_dcp_warmup(**kwargs)
-    assert len(registry) == 8
+    expected = {owner.kernel for owner in dcp_warmup._DCP_KERNELS} - {dcp_a2a._fused_dcp_lse_combine_kernel}
+    assert {owner.kernel for owner in registry._registrations} == expected
     assert all(len(registrations) == 1 for registrations in registry._registrations.values())
     for original, keys in _dcp_warmup_keys(registry).items():
         kernel = MagicMock()

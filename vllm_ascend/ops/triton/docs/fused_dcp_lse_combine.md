@@ -10,8 +10,8 @@
   1. Validate a contiguous receive buffer `[P, local_scatter_size, replicated_size, D + lse_pack_dim]`, infer the output's token/head shape from `scatter_dim`, and optionally validate the local tensors.
   2. Launch `min(output_rows, get_vectorcore_num())` Triton programs. The scalar kernel loops over rows, finds the largest valid LSE across the ranks and optional local contribution, then loops over ranks again to accumulate weighted output in FP32.
   3. Ignore non-finite LSE and mask its output before multiplication, preventing a zero weight times NaN from contaminating the result. Normalize once, store the output, and optionally append merged LSE.
-  4. On eligible BF16 head-scatter shapes `_fused_dcp_lse_combine_batched_kernel` processes eight rows per tile. It streams ranks to keep one `[BLOCK_ROWS, BLOCK_D]` FP32 accumulator live and masks the last partial tile.
-- **Supported modes**: A3 and A5 share scalar and batched kernels selected by dtype, shape and strides. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
+  4. For eligible BF16 head-scatter inputs, the row-weighted kernel decodes each LSE once and reuses the rank weights across the feature dimension.
+- **Supported modes**: Input layout determines eligibility for head-scatter combine. The device profile supplies the head-scatter kernel's compile-time mode. The wrapper runs after DCP exchange in eager execution; the enclosing registered custom op supplies a FakeTensor implementation for tracing.
 
 ## Parameters
 
@@ -28,22 +28,46 @@
 ## Constraints
 
 - `recv` must be contiguous on NPU. Its packed dimension must equal `D + 1` for FP32 or `D + 4` for BF16/FP16. `local_output` and `local_lse` must be supplied together and match the post-scatter output shape.
-- `return_lse=True` requires an FP32 receive buffer. The batched path requires `return_lse=False`; all other valid combinations use the scalar kernel.
-- Batching requires BF16, `scatter_dim=1`, `D <= 512`, at least `4 * get_vectorcore_num()` output rows, and unit feature stride when `local_output` is present. Rank count has no hardware-specific upper bound.
-- `BLOCK_D = next_power_of_2(D)` and `BLOCK_ROWS = 8`. Both local and received-only modes stream ranks. Unrolling is bounded by the live-element budget; multibuffering is disabled. This is an inference operator without a backward pass.
+- `return_lse=True` requires an FP32 receive buffer. This is an inference operator without a backward pass.
 
 ## Origin and Differences
 
 - **Origin**: Developed for the vllm-ascend DCP path to merge the payload produced by [`pack_dcp_output_lse`](pack_dcp_output_lse.md) after HCCL exchange.
 - **Differences**:
-    - NPU adaptation for performance: the shared kernel batches rows while streaming rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
+    - NPU adaptation for performance: the row-weighted kernel streams rank contributions, limiting live FP32 accumulator storage. The scalar path retains the broader shape and dtype support.
     - Modified for vllm-ascend DCP flows: an optional local contribution is included exactly once after the received ranks; the wrapper can return a merged FP32 LSE for a later merge.
+
+## Head-scatter implementation
+
+BF16 head scatter uses the optimized kernel when `D <= 512`, the caller requests
+only the output, and the optional local output has unit feature stride. Other
+supported inputs use the scalar kernel.
+
+Each program owns a contiguous interval. A3 processes one row at a time
+because multirow LSE loads can lower to nested scalar loops. A5 loads each
+LSE field across eight rows and all ranks, improving memory throughput.
+The final tile masks rows outside the output. Other profiles use single-row mode.
+
+Runtime and warmup use the same launch builder. The device profile supplies
+`MODE` at compile time. `DCP_SIZE`, `BLOCK_D` and `HAS_LOCAL` specialize the
+rank vector, feature width and optional local contribution. Sizes and strides
+use Triton's ordinary scalar specialization.
 
 ## Test Cases
 
-The single-card nightly test compares the result against an independent FP32 softmax-weighted reference and the scalar kernel. It covers DCP sizes 1/2/8 and wider values for pack-only fallback, head dimensions 96/256/512, both scatter axes, strided local tensors, invalid LSE, shared dispatch boundaries, and a partial eight-row tile. The combine comparison uses `assert_dcp_close`: at least 99% of elements meet the dtype's mixed tolerance, and the maximum absolute error also meets its limit. Defined nonfinite LSE sentinels are checked separately for exact equality. The multi-card test runs the registered operator with a real HCCL exchange.
+The single-card suite checks pack and combine against an FP32 reference.
+Four head-scatter cases also compare independently packed inputs to a CPU FP64
+reduction. They cover a single rank and feature, received-only inputs, both
+local layouts, masked rank and feature lanes, and invalid or extreme LSE.
+Outputs must be finite, at least 99% of elements must satisfy
+`abs_error <= 2e-5 + 0.004 * abs(reference)`, and maximum absolute error must
+be at most 0.02.
+
+The warmup tests check that runtime and registration select the same mode.
+The multi-card test exercises the registered operator with HCCL exchange.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
-pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
+pytest -q tests/ut/model_executor/warmup/test_kernel_warmup.py
+pytest -q tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```
