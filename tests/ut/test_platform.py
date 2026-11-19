@@ -453,6 +453,85 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
         assert compilation_config.splitting_ops == []
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
+)
+def test_setup_compile_backend_keeps_static_kernel_flags_under_piecewise(mode):
+    """Under PIECEWISE, npugraph_ex compiles each piece (force_eager) and can
+    carry the static/super kernel passes, so the user's flags must survive."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=mode,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is True
+    assert ascend_cfg["enable_static_kernel"] is True
+    assert ascend_cfg["enable_super_kernel"] is True
+
+
+def test_setup_compile_backend_disables_static_kernel_flags_without_cudagraph():
+    """Without cudagraphs there is no capture context, so the static/super
+    kernel flags must be force-disabled."""
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        splitting_ops=["vllm::mla_forward"],
+        cudagraph_capture_sizes=[8, 16],
+    )
+    config = SimpleNamespace(
+        compilation_config=compilation_config,
+        additional_config={
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": True,
+            }
+        },
+        model_config=SimpleNamespace(enforce_eager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            all2all_backend="allgather_reducescatter",
+            use_sequence_parallel_moe=False,
+        ),
+        _set_cudagraph_sizes=lambda: None,
+    )
+
+    _setup_compile_backend(config, compile_backend="test_backend")
+
+    ascend_cfg = config.additional_config["ascend_compilation_config"]
+    assert ascend_cfg["enable_npugraph_ex"] is False
+    assert ascend_cfg["enable_static_kernel"] is False
+    assert ascend_cfg["enable_super_kernel"] is False
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():
