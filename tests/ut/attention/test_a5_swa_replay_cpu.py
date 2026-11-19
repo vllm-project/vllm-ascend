@@ -21,7 +21,7 @@ def _load_metadata_builder(real_visible_lens=False):
     builder = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == "AscendDSAV41MetadataBuilder")
     build = next(n for n in builder.body if isinstance(n, ast.FunctionDef) and n.name == "build")
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
-    body = [future]
+    body: list[ast.stmt] = [future]
     if real_visible_lens:
         body.append(
             next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == "build_replay_swa_visible_lens")
