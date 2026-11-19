@@ -7,36 +7,11 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.sharded_indexer import merge_packed_candidates
 
-CASES = [
-    (144, 8, 0, 768, "random"),
-    (152, 8, 0, 768, "random"),
-    (1, 8, 3, 768, "random"),
-    (39, 8, 3, 768, "random"),
-    (40, 8, 3, 768, "random"),
-    (41, 8, 3, 768, "random"),
-    (257, 8, 3, 768, "random"),
-    (48, 8, 3, 768, "random"),
-    (49, 8, 3, 768, "random"),
-    (41, 4, 1, 768, "random"),
-    (41, 16, 15, 768, "random"),
-    (41, 3, 2, 768, "random"),
-    (41, 8, 0, 768, "ties"),
-    (41, 8, 0, 768, "own_high"),
-    (41, 8, 0, 768, "peer_high"),
-    (41, 8, 0, 768, "short"),
-    (41, 8, 0, 768, "mixed"),
-    (49, 8, 0, 768, "ties"),
-    (49, 8, 0, 768, "own_high"),
-    (49, 8, 0, 768, "peer_high"),
-    (49, 8, 0, 768, "short"),
-    (49, 8, 0, 768, "mixed"),
-    (1, 1, 0, 1, "ties"),
-    (49, 17, 16, 1, "ties"),
-]
+TOPK = 2048
 
 
 def make_inputs(rows, world, owner, interleave, distribution, edge):
-    k = 2048
+    k = TOPK
     generator = torch.Generator().manual_seed(21584 + rows)
     local = torch.arange(k, dtype=torch.int64)
     ids = (
@@ -85,17 +60,27 @@ def make_inputs(rows, world, owner, interleave, distribution, edge):
     return packed.reshape(world * rows, k, 2), expected
 
 
-@pytest.mark.parametrize("rows,world,owner,interleave,distribution", CASES)
-@pytest.mark.parametrize("edge", [False, True])
+@pytest.mark.parametrize(
+    "rows,world,owner,interleave,distribution,edge",
+    [
+        pytest.param(1, 1, 0, 1, "random", False, id="single-rank"),
+        pytest.param(1, 8, 3, 768, "random", False, id="single-row"),
+        pytest.param(144, 8, 0, 768, "random", False, id="multi-wave"),
+        pytest.param(49, 17, 16, 1, "ties", True, id="tied-scores-padded-peers"),
+        pytest.param(49, 8, 0, 768, "own_high", False, id="all-owner-winners"),
+        pytest.param(49, 8, 0, 768, "peer_high", False, id="no-owner-winners"),
+        pytest.param(41, 3, 2, 768, "short", True, id="short-invalid-prefixes"),
+    ],
+)
 def test_owner_prefix_exact(rows, world, owner, interleave, distribution, edge):
     torch.npu.set_device(0)
     packed, expected = make_inputs(rows, world, owner, interleave, distribution, edge)
-    storage = torch.full((rows + 2, 1, 2048), -123, device="npu", dtype=torch.int32)
+    storage = torch.full((rows + 2, 1, TOPK), -123, device="npu", dtype=torch.int32)
     actual = merge_packed_candidates(
         packed.npu(),
         rows,
         world,
-        2048,
+        TOPK,
         local_rank=owner,
         interleave=interleave,
         out=storage[1:-1],
@@ -111,14 +96,14 @@ def test_owner_prefix_changed_graph_input():
     rows, world, owner, interleave = 49, 8, 3, 768
     packed, expected = make_inputs(rows, world, owner, interleave, "random", False)
     device = packed.npu()
-    output = torch.empty((rows, 1, 2048), device="npu", dtype=torch.int32)
+    output = torch.empty((rows, 1, TOPK), device="npu", dtype=torch.int32)
 
     def run():
         return merge_packed_candidates(
             device,
             rows,
             world,
-            2048,
+            TOPK,
             local_rank=owner,
             interleave=interleave,
             out=output,

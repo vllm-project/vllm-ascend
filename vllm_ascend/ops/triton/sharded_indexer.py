@@ -11,6 +11,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 
 # Bound the paired-sort live set to the Kimi Top-K shape.
 MAX_FUSED_TOPK = 2048
+MIN_PARALLEL_OWNER_WORLD_SIZE = 5
 PACK_ROWS_PER_PROGRAM = 8
 PACK_COL_BLOCK = 256
 MERGE_RANKS_PER_GROUP = 4
@@ -261,11 +262,9 @@ def _merge_owner_prefix(
         lower = tl.where(tl.sum(before_tail.to(tl.float32), 0) == 0.0, upper, 0)
         peer_peak = tl.max(tl.where(peer_valid, peer_score, -float("inf")), 0)
         # A peer head beyond the owner's observed score span hints at skew.
-        # This chooses a probe only; exact counts still establish all bounds.
+        # Probe the first owner entry and scan serially on skewed rows.
         skewed = (peer_peak - head_score) > (head_score - tail_score)
         pivot = tl.where(skewed, 0, tl.minimum(tl.full((), K // WORLD, tl.int32), upper - 1))
-        # Three interpolation probes are followed by enough bisections for
-        # every possible boundary. Estimates affect work only, never selection.
         iteration = tl.full((), 0, tl.int32)
         if PARALLEL_PEERS:
             # Counts through K are exact in fp32; keep peer state in vector
@@ -620,14 +619,14 @@ def merge_packed_candidates(
         programs = min(rows, cores)
         block = MAX_FUSED_TOPK  # The supported fused shape already is a power of two.
         if presorted and owner_sharded and local_rank is not None and 0 <= local_rank < world_size and local_k == topk:
-            tile = min(block, triton.next_power_of_2(max(1, 2 * block // world_size)))
-            # Parallel setup amortizes across several peers and multiple rows/core.
-            # Small worlds, single-wave batches and other policies keep the original.
+            # Parallel scans amortize their setup across peers and multiple rows per core.
             parallel_peers = (
-                get_current_hardware_profile().prefer_parallel_owner_prefix and world_size > 4 and rows > cores
+                get_current_hardware_profile().prefer_parallel_owner_prefix
+                and world_size >= MIN_PARALLEL_OWNER_WORLD_SIZE
+                and rows > cores
             )
-            if parallel_peers:
-                tile = min(block, triton.next_power_of_2(max(1, block // world_size)))
+            entries = block if parallel_peers else 2 * block
+            tile = min(block, triton.next_power_of_2(max(1, entries // world_size)))
             _merge_owner_prefix[(programs,)](
                 packed,
                 output,
