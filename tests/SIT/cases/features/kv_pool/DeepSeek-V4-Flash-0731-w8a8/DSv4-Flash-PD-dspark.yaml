@@ -6,6 +6,7 @@ npu_per_node: 16
 dp_load_balancing: external
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   VLLM_USE_V2_MODEL_RUNNER: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_RPC_TIMEOUT: "3600000"
