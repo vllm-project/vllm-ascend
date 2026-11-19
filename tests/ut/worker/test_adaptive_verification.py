@@ -1,6 +1,7 @@
 import importlib
 from contextlib import nullcontext
 from functools import partial
+from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -150,6 +151,7 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
+    prepare_inputs_signature = signature(upstream_dflash.prepare_dflash_inputs)
     prepare_inputs = Mock()
     monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_inputs)
 
@@ -181,9 +183,10 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
         )
 
     prepare_inputs.assert_called_once()
-    assert prepare_inputs.call_args.args[17] == 32  # Manager block size.
-    assert prepare_inputs.call_args.args[22] == 5  # Query tokens per draft request.
-    assert prepare_inputs.call_args.args[28] == expected_reqs
+    args = prepare_inputs_signature.bind(*prepare_inputs.call_args.args, **prepare_inputs.call_args.kwargs).arguments
+    assert args["block_size"] == 32
+    assert args["num_query_per_req"] == 5
+    assert args["num_reqs_override"] == expected_reqs
     assert dispatch.call_args.args[1:3] == (expected_reqs, dp_reqs * 5)
     draft_sync = dispatch.call_args.kwargs["dp_sync_state"]
     assert draft_sync is not None
