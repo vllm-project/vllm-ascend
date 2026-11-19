@@ -255,12 +255,6 @@ class NPUWorker(WorkerBase):
         assert self.worker_sentinel is not None
         return self.worker_sentinel.handle_command(ft_request)
 
-    def get_kv_cache_recovery_plan(self):
-        """Return the completed plan for this retry round to EngineCore."""
-        if self.worker_sentinel is None or self.worker_sentinel.retry_cache_plan is None:
-            raise RuntimeError("Missing completed HBM retry cache plan")
-        return self.worker_sentinel.retry_cache_plan
-
     def uninstall_static_kernel(self):
         import fcntl
         import os
