@@ -1396,6 +1396,17 @@ class NPUModelRunner(GPUModelRunner):
                 for backend in backends
             )
 
+        # FA3 consumes rejection-corrected device lengths, so its draft does
+        # not need the CPU snapshot. Check initialized backends without importing
+        # the optional FA3 package or confusing it with the same-named fa_v1 class.
+        draft_backends = getattr(self.speculator, "attn_backends", {})
+        if draft_backends and all(
+            getattr(backend, "__module__", None) == "vllm_ascend.attention.flash_attention_v3"
+            and backend.__name__ == "AscendFlashAttentionBackend"
+            for backend in draft_backends.values()
+        ):
+            return True
+
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
 
