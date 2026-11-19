@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-#ifndef HI_SPARSE_RESOLVE_RESIDENCY_TILING_H
-#define HI_SPARSE_RESOLVE_RESIDENCY_TILING_H
+#ifndef HISPARSE_RESOLVE_RESIDENCY_TILING_H
+#define HISPARSE_RESOLVE_RESIDENCY_TILING_H
 
 #include <cstdint>
 
@@ -8,7 +8,10 @@
 
 namespace optiling {
 
-BEGIN_TILING_DATA_DEF(HiSparseResolveResidencyTilingData)
+// One resolve-only launch serves the HiSparse native kernel on every SoC
+// (invalidation runs as a shared Triton kernel).
+
+BEGIN_TILING_DATA_DEF(HisparseResolveResidencyTilingData)
 TILING_DATA_FIELD_DEF(uint64_t, rows);
 TILING_DATA_FIELD_DEF(uint64_t, topk);
 TILING_DATA_FIELD_DEF(uint64_t, hotSlots);
@@ -37,9 +40,9 @@ TILING_DATA_FIELD_DEF(uint64_t, byteMissMask);
 TILING_DATA_FIELD_DEF(uint32_t, ubBytes);
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(HiSparseResolveResidency, HiSparseResolveResidencyTilingData)
+REGISTER_TILING_DATA_CLASS(HisparseResolveResidency, HisparseResolveResidencyTilingData)
 
-struct HiSparseResolveResidencyCompileInfo {};
+struct HisparseResolveResidencyCompileInfo {};
 }  // namespace optiling
 
-#endif  // HI_SPARSE_RESOLVE_RESIDENCY_TILING_H
+#endif  // HISPARSE_RESOLVE_RESIDENCY_TILING_H
