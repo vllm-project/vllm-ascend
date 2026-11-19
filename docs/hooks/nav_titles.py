@@ -195,6 +195,10 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
+    "user_guide/feature_guide/decoder_append_prefill.md": {
+        "en": "Decoder Append-Prefill",
+        "zh": "解码端追加预填充",
+    },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
     "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
         "en": "Encoder Cache CPU Offload",

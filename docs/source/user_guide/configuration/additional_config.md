@@ -41,7 +41,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
-| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
+| `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, Decoder Append-Prefill, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
 | `runtime_config_hot_reload`         | bool | `false` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
@@ -172,6 +172,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | ---- | ---- | ------- | ----------- |
 | `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
+| `decoder_append_prefill_enable` | bool | `False` | Whether to enable local prefix-cache admission for Decoder Append-Prefill on PD-disaggregated D nodes (`kv_role` is `kv_consumer`). Requires `--enable-prefix-caching` on the Decoder and `--enable-decoder-append-prefill` on the proxy. See [Decoder Append-Prefill](../feature_guide/decoder_append_prefill.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 | `dyntra_lb_config` | dict | `{}` | Configuration options for DyntraLB load balancing on PD-disaggregated decode nodes. |
