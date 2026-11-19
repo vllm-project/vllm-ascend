@@ -97,7 +97,7 @@ templates:
       - --kv-cache-dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1,"enable_flashcomm1": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -166,7 +166,7 @@ templates:
       - --kv-cache-dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable": false,"multistream_overlap_shared_expert": true, "enable_fused_mc2":1,"enable_flashcomm1": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -301,6 +301,8 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --attention_config.indexer_kv_dtype
+      - "int8"
+      - --kv-cache-dtype
       - "int8"
       - --additional-config
       - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true,"enable_flashcomm1": true}'
