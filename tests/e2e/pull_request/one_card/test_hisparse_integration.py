@@ -234,21 +234,18 @@ def test_resolver_strides_padding_graph(device_row_count, compact_attention):
             states_n,
             16,
             16,
-            None,
             stats,
             attn,
             8,
             requests_n,
             source_n,
             4,
-            None,
             counts,
             sh,
             sd,
             sc,
             resident_n,
             4,
-            0,
             valid_rows,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
@@ -385,21 +382,18 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream):
             states,
             hot_size,
             union,
-            None,
             stats,
             None,
             block,
             requests,
             table,
             block,
-            None,
             counts,
             sh,
             sd,
             sc,
             resident,
             block,
-            0,
             None,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
@@ -498,22 +492,20 @@ def test_random_request_unions(capture):
             states,
             hot_size,
             hot_size,
-            miss,
             stats,
             None,
             block,
             requests,
             source_n,
             block,
-            None,
             counts,
             sh,
             sd,
             sc,
             resident,
             block,
-            0,
             None,
+            miss_mask=miss,
         )
         ops.hisparse_gather_compact(host, hot, sh, sd, sc)
 
@@ -686,6 +678,7 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             owner = SimpleNamespace(
                 resident_source_index=group,
                 request_state_indices=states,
+                hot_backing=source,
                 hot=view,
                 host_cache=payload[span].view(host_rows, width),
                 eager_host_mirror=True,
@@ -716,8 +709,13 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
             num_lookahead_tokens=1,
             kernel_config=SimpleNamespace(enable_jit_warmup=False),
+            compilation_config=SimpleNamespace(
+                static_forward_context={
+                    name: SimpleNamespace(hisparse_cache=handle) for name, handle in zip(names, handles)
+                }
+            ),
         )
-        worker.initialize(handles, list(names), source, 1, host_blocks, source.device, [registered])
+        worker.initialize(handles, list(names), 1, host_blocks, source.device, [registered])
         sources = _DirectMirrorSources.bind(worker, SimpleNamespace(draft_attn_layer_names={"draft"}))
         assert sources is not None
         connector = HiSparseConnector.__new__(HiSparseConnector)
