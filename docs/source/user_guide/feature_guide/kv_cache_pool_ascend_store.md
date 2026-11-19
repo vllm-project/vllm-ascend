@@ -82,6 +82,39 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
+### Lazy Store Initialization
+
+On HDK versions earlier than 26.1, when fabric memory is enabled
+(`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and the serving stack runs one of the
+[model families](#affected-model-families) listed below, creating the KV Pool
+store eagerly during worker construction hangs the vLLM service during
+startup: the store, together with its fabric-memory transfer engine and memory
+registration, is set up before the model's KV caches are registered, and with
+these model families the initialization never completes. Lazy store
+initialization defers the store setup so the service starts normally.
+
+When lazy init is enabled, the store is not created during backend
+construction. Instead, it is set up on the first `put()` call and guarded by a
+lock, so later `put()` calls reuse the same store. Before the first `put()`,
+`exists()` treats keys as missing so the first store request can reach
+`put()`; pool lookups that happen before initialization therefore report a
+miss and the affected requests fall back to recompute once — a safe
+degradation, not an error.
+
+Lazy initialization is requested automatically — no configuration is needed —
+for the following model families when the Mooncake backend runs under fabric
+memory:
+
+#### Affected Model Families
+
+| Model family | When lazy init is requested |
+| :--- | :--- |
+| DeepSeek V4 compressed models (checkpoint carries `compress_ratios`) | Always, for the whole model family. |
+| GLM-5.x sparse-indexer (SFA) models with an int8 or fp8 KV cache | Whenever the packed C8 KV cache path is active. On v0.26-based releases this path is enabled by `c8_enable_reshape_optim`; on newer releases it is the native default for int8/fp8 KV cache dtype and the switch no longer exists. |
+
+All other models — dense models, and sparse-indexer models with other KV cache
+dtypes — keep the previous eager store setup unchanged.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
