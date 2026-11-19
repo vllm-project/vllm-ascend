@@ -1,0 +1,4 @@
+pr: 22491
+entries:
+  - category: bugfix
+    text: Fixed incorrect responses and premature stopping on synchronous Mooncake prefix cache hits during prefill.
