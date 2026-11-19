@@ -116,9 +116,9 @@ def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
         envs.VLLM_MOE_SKIP_PADDING
         and use_v2_model_runner(vllm_config)
         # Skip the MoE GEMMs of padding tokens by assigning these tokens to a no-local expert
-        # Thus, it requires EP and TP > 1.
+        # Thus, the EP group needs more than one rank.
         and parallel.enable_expert_parallel
-        and parallel.tensor_parallel_size > 1
+        and get_ep_group().world_size > 1
         # At layer initialization, choose fixed `padding_token_expert_id` for each rank,
         # based on the expert placement in "linear" strategy.
         and parallel.expert_placement_strategy == "linear"
@@ -127,9 +127,8 @@ def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
         and not parallel.enable_eplb
         # Force routing bypasses padding filtering in the expert selector.
         and not ascend_config.enable_force_eplb
-        # PP/PCP > 1 is currently unsupported in `deepseek_v41`.
+        # Keep this optimization scoped to PP=1 and DCP=1.
         and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
         # Check the low-token regime too: a model that switches to MC2 on decode is ineligible.
         and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
     )
@@ -1050,11 +1049,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             else None
         )
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
-        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        parallel = vllm_config.parallel_config
+        self.use_sequence_parallel = parallel.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
         skip_padding_tokens_in_moe = _can_skip_padding_tokens_in_moe(vllm_config)
         self.use_global_moe_padding_mask = (
-            skip_padding_tokens_in_moe and vllm_config.parallel_config.data_parallel_size == 1
+            skip_padding_tokens_in_moe and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
         )
         if skip_padding_tokens_in_moe:
             for layer in self.layers[self.start_layer : self.end_layer]:
@@ -1696,7 +1696,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
-            # DP>1 gathers the source mask in MoE, using the same SP shard as the inputs.
+            # Cross-DP or cross-PCP MoE gathers the same SP shard as the inputs.
             if not self.use_global_moe_padding_mask and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(

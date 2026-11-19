@@ -686,7 +686,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
         elif self.padding_token_expert_id is not None:
-            if self.moe_config.dp_size > 1:
+            if self.moe_config.dp_size > 1 or self.moe_config.pcp_size > 1:
                 prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                 assert isinstance(prepare_finalize, PrepareAndFinalizeWithAllGather)
                 padding_mask = prepare_finalize.get_routing_padding_mask()

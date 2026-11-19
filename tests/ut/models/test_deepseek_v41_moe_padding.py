@@ -19,11 +19,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
         (None, None, None),
         ("env", "VLLM_MOE_SKIP_PADDING", False),
         ("runner", "v2", False),
-        ("parallel", "prefill_context_parallel_size", 2),
         ("parallel", "decode_context_parallel_size", 2),
         ("parallel", "pipeline_parallel_size", 2),
         ("parallel", "enable_expert_parallel", False),
-        ("parallel", "tensor_parallel_size", 1),
         ("parallel", "expert_placement_strategy", "round_robin"),
         ("parallel", "enable_eplb", True),
         ("ascend", "mix_placement", True),
@@ -33,17 +31,18 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
         ("communication", "method", MoECommType.ALLTOALL),
     ],
 )
-@pytest.mark.parametrize("sequence_parallel", [False, True])
-@pytest.mark.parametrize("dp_size", [1, 2])
-def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, sequence_parallel, dp_size):
+@pytest.mark.parametrize(
+    "dp_size,pcp_size,tp_size",
+    [(1, 1, 1), (1, 1, 8), (2, 1, 1), (2, 1, 4), (1, 4, 1), (2, 4, 1), (2, 2, 2)],
+)
+def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, dp_size, pcp_size, tp_size):
     parallel = SimpleNamespace(
-        use_sequence_parallel_moe=sequence_parallel,
         data_parallel_size=dp_size,
-        prefill_context_parallel_size=1,
+        prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=1,
         pipeline_parallel_size=1,
         enable_expert_parallel=True,
-        tensor_parallel_size=8,
+        tensor_parallel_size=tp_size,
         expert_placement_strategy="linear",
         enable_eplb=False,
     )
@@ -51,6 +50,8 @@ def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option
     if section in ("parallel", "ascend"):
         setattr({"parallel": parallel, "ascend": ascend}[section], option, value)
     config = SimpleNamespace(parallel_config=parallel, speculative_config=None)
+    ep_size = dp_size * pcp_size * tp_size
+    monkeypatch.setattr(model_module, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
     monkeypatch.setattr(model_module.envs, "VLLM_MOE_SKIP_PADDING", section != "env")
     monkeypatch.setattr(model_module, "use_v2_model_runner", lambda config: section != "runner")
     monkeypatch.setattr(model_module, "get_ascend_config", lambda: ascend)
@@ -59,8 +60,9 @@ def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option
         "select_moe_comm_method",
         lambda num_tokens, config: value if section == "communication" else MoECommType.ALLGATHER,
     )
-    assert model_module._can_skip_padding_tokens_in_moe(config) is (section is None)
-    if section is None:
+    enabled = section is None and ep_size > 1
+    assert model_module._can_skip_padding_tokens_in_moe(config) is enabled
+    if enabled:
         config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
         assert model_module._can_skip_padding_tokens_in_moe(config)
 

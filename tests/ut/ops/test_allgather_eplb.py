@@ -151,6 +151,41 @@ def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
     )
 
 
+def test_dp_pcp_mask_uses_pcp_major_order_without_sp(monkeypatch):
+    from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
+
+    context = SimpleNamespace(
+        additional_kwargs={"max_tokens_across_dp": 3, "max_tokens_across_pcp": 3},
+        is_padding=torch.tensor([False, True]),
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
+
+    def gather_dp(rows, dim):
+        peer = [20, 21, 22] if rows.ndim == 2 else [1, 1, 0]
+        return torch.cat((rows, rows.new_tensor(peer).reshape_as(rows)), dim=dim)
+
+    def gather_pcp(rows, dim):
+        peer = [30, 31, 0, 40, 41, 42] if rows.ndim == 2 else [0, 0, 0, 1, 1, 1]
+        return torch.cat((rows, rows.new_tensor(peer).reshape_as(rows)), dim=dim)
+
+    dp_gather = MagicMock(side_effect=gather_dp)
+    pcp_gather = MagicMock(side_effect=gather_pcp)
+    monkeypatch.setattr(prepare_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=pcp_gather))
+    config = SimpleNamespace(
+        is_sequence_parallel=False, dp_size=2, pcp_size=2, dp_group=SimpleNamespace(all_gather=dp_gather)
+    )
+    prepare = PrepareAndFinalizeWithAllGather(config)
+    logits = torch.tensor([[10.0], [11.0]])
+    prepared = prepare.prepare(logits, logits)
+    padding = prepare.get_routing_padding_mask()
+    assert prepared.router_logits[~padding, 0].tolist() == [10, 20, 21, 40, 41, 42]
+    assert prepare.get_routing_padding_mask() is padding
+    assert dp_gather.call_count == pcp_gather.call_count == 3
+
+
 @pytest.mark.parametrize(
     "device,comm",
     [
