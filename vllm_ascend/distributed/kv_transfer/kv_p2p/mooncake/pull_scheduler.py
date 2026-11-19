@@ -34,7 +34,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import (
     MooncakeHeartbeatThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
-    QUANT_FLASHMLA_LAYOUT_CAPABILITY,
     MooncakeConnectorMetadata,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
@@ -172,12 +171,7 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             try:
                 msg = decoder.decode(payload[0])
                 if msg and msg[0] == GET_META_MSG:
-                    if self.has_quant_flashmla_layout and msg[1:] != (QUANT_FLASHMLA_LAYOUT_CAPABILITY,):
-                        # An older consumer would ignore the new layout field.
-                        logger.warning("Mooncake consumer lacks QuantFlashMLA layout validation")
-                        sock.send_multipart((identity, b"", b""))
-                    else:
-                        sock.send_multipart((identity, b"", self.encoded_metadata))
+                    sock.send_multipart((identity, b"", self.encoded_metadata))
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))

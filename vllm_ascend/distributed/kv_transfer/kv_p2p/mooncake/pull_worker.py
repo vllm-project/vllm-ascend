@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from math import prod
 from typing import Any
 
 import msgspec
@@ -34,7 +35,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeTransferAddressMixin,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
-    QUANT_FLASHMLA_LAYOUT_CAPABILITY,
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
@@ -243,7 +243,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
         matched_local_layer_indices: set[int] = set()
-        local_quant_flashmla_layers = set(self.local_metadata.quant_flashmla_layers)
         # Local spec and remote sequence layout -> topology-derived candidate
         # groups before the per-layer KVPP owner filter.
         raw_tp_rank_groups_by_spec: dict[tuple[int, bool, tuple[int, ...]], list[list[int]]] = {}
@@ -254,7 +253,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             remote_layer_index_by_name = {
                 layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
             }
-            remote_quant_flashmla_layers = set(pp_metadata.quant_flashmla_layers)
             # remote_layer_index -> TP-major/PCP-minor flattened worker ranks
             # that physically own this layer.
             owner_worker_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
@@ -270,13 +268,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 if remote_layer_index is None:
                     continue
 
-                local_quant_flashmla = layer_name in local_quant_flashmla_layers
-                remote_quant_flashmla = layer_name in remote_quant_flashmla_layers
-                if local_quant_flashmla != remote_quant_flashmla:
-                    raise ValueError(
-                        f"Mooncake QuantFlashMLA page layout mismatch for layer {layer_name!r}: "
-                        f"producer={remote_quant_flashmla}, consumer={local_quant_flashmla}"
-                    )
                 layer_pair = (local_layer_index, remote_layer_index)
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
@@ -1018,6 +1009,24 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
+                    if (
+                        isinstance(spec, MLAAttentionSpec)
+                        and not isinstance(spec, AscendSFAIndexerCacheSpec)
+                        and len(local_base_addrs) == 1
+                    ):
+                        local_shape = self.block_shapes[local_layer_index][cache_index]
+                        remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
+                        # Token-interleaved byte-wide MLA keeps its NHD shape in the descriptor.
+                        # Component-major pages publish a flat shape even at the same byte length.
+                        if local_shape != remote_shape and any(
+                            len(shape) == 3 and shape[1] == 1 and prod(shape) == local_block_len
+                            for shape in (local_shape, remote_shape)
+                        ):
+                            raise ValueError(
+                                f"Mooncake MLA page layout mismatch for layer "
+                                f"{self.layer_names[local_layer_index]!r}: "
+                                f"local={local_shape}, remote={remote_shape}"
+                            )
                     block_ids_to_transfer = (
                         contiguous_block_ids_by_request
                         if local_block_stride == remote_block_stride == local_block_len
@@ -1306,7 +1315,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((b"get_meta_msg", QUANT_FLASHMLA_LAYOUT_CAPABILITY)),
+                self.encoder.encode((b"get_meta_msg",)),
                 path,
             )
             metadata_bytes = ensure_zmq_recv(sock, path)
