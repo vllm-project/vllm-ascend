@@ -1613,6 +1613,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize."""
+        # Both cached-prefill callers consume packed dense K/V in FIA. The
+        # launcher returns None when the existing gather path is required.
         if HAS_TRITON and key.device.type == "npu":
             from vllm_ascend.ops.triton.c8_prefill import try_fused_c8_prefill
 
