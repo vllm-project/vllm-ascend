@@ -28,6 +28,7 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
@@ -2257,14 +2258,19 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(result_k_pe, k_pe)
 
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_for_fused_fa_quant(self, mock_format_cast):
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_process_weights_for_fused_fa_quant(self, _mock_profile, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
 
         self.impl.fa_quant_layer = True
-        self.impl.q_proj = MagicMock()
+        quant_method = AscendLinearMethod(object.__new__(AscendW8A8LinearMethod))
+        self.impl.q_proj = MagicMock(quant_method=quant_method)
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
-        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.q_proj.weight_scale.data = torch.randn(128)
+        self.impl.fused_qkv_a_proj = MagicMock(quant_method=quant_method)
         self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
         self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64)
 
@@ -2284,10 +2290,11 @@ class TestAscendMLAImpl(TestBase):
 
     def _setup_mlapo_weight_prep_mocks(self):
         self.impl.enable_mlapo = True
-        self.impl.q_proj = MagicMock()
+        quant_method = AscendLinearMethod(object.__new__(AscendW8A8LinearMethod))
+        self.impl.q_proj = MagicMock(quant_method=quant_method)
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
-        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.q_proj.weight_scale.data = torch.randn(128)
+        self.impl.fused_qkv_a_proj = MagicMock(quant_method=quant_method)
         self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
         self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64)
         self.impl.q_lora_rank = 32
@@ -2296,7 +2303,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl.vllm_config.kv_transfer_config.is_kv_consumer = False
 
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_for_fused_mlapo(self, mock_format_cast):
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_process_weights_for_fused_mlapo(self, _mock_profile, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
 
         self.impl.fa_quant_layer = False
@@ -2312,7 +2323,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertFalse(hasattr(self.impl, "quant_kscale"))
 
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_for_fused_mlapo_with_fa_quant(self, mock_format_cast):
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_process_weights_for_fused_mlapo_with_fa_quant(self, _mock_profile, mock_format_cast):
         mock_format_cast.return_value = torch.randn(128, 128)
 
         self.impl.fa_quant_layer = True
@@ -2337,10 +2352,11 @@ class TestAscendMLAImpl(TestBase):
         mock_format_cast.return_value = torch.randn(128, 128)
 
         self.impl.enable_mlapo = True
-        self.impl.fused_qkv_a_proj = MagicMock()
+        quant_method = AscendLinearMethod(object.__new__(AscendW8A8MXFP8DynamicLinearMethod))
+        self.impl.fused_qkv_a_proj = MagicMock(quant_method=quant_method)
         self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
         self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64, 128, 128)
-        self.impl.q_proj = MagicMock()
+        self.impl.q_proj = MagicMock(quant_method=quant_method)
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32

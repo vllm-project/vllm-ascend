@@ -349,6 +349,7 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow(page
     scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y}
     impl = SimpleNamespace(
         use_flashmla=True,
+        use_quant_flashmla=False,
         _flashmla_writer_buffers=None,
         W_UV=torch.empty(1),
         dtype=torch.bfloat16,
