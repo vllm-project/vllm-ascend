@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+
 from vllm_ascend.models.qwen4_exp import qsa
 
 

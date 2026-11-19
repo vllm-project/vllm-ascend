@@ -19,6 +19,7 @@ import torch_npu  # noqa: F401
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
+
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
