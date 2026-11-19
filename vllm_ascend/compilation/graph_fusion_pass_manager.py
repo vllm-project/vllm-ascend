@@ -73,6 +73,10 @@ class GraphFusionPassManager:
 
             self.passes.append(MulsAddFusionPass(config))
         fuse_gemm_comms = enable_sp(config)
+        import os as _os
+
+        if _os.environ.get("VLLM_ASCEND_DISABLE_MMRS_PASS", "0") == "1":
+            fuse_gemm_comms = False
         if fuse_gemm_comms and profile.supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
             from .passes.mm_reduce_scatter_fusion_pass import MatmulReduceScatterFusionPass
 
