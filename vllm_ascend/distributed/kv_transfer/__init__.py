@@ -88,10 +88,10 @@ def register_connector():
         "MooncakeD2RHConnectorV1",
     )
 
-    KVConnectorFactory.register_connector(
+    _register_with_class_name_alias(
         "MooncakeConnectorV2",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector",
-        "MooncakeConnectorV2",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector",
+        "MooncakeSFACompatibleConnector",
     )
 
     KVConnectorFactory.register_connector(

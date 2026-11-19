@@ -64,7 +64,10 @@ def registration():
 def test_registered_v2_selects_requested_protocol(extra, expected):
     classes = facade()
     module, name = registration()["MooncakeConnectorV2"]
-    assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector"
+    assert module == "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector"
+    assert name == "MooncakeSFACompatibleConnector"
+    classes["init_ascend_config"] = lambda _config: SimpleNamespace(sparse_kv_offload_config=None)
+    execute("kv_p2p/mooncake_sfa/connector.py", classes)
     config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
     role, cache = object(), object()
     with (

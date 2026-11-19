@@ -48,6 +48,20 @@ def _bool_env(name: str, default: bool) -> bool:
 # begin-env-vars-definition
 
 
+def _strict_binary_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be either '0' or '1', got {value!r}")
+    return value == "1"
+
+
+def _positive_int_env(name: str, default: str = "1") -> int:
+    value = int(os.getenv(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1, got {value}")
+    return value
+
+
 env_variables: dict[str, Callable[[], Any]] = {
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
@@ -92,6 +106,25 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Reusable 2 MiB-aligned NPU staging chunks for Host KV transfers.
+    # Default: 16; integer values are clamped to >= 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW", "16"))
+    ),
+    # Enable staging-bank pipelining; 0 keeps synchronous landing.
+    # Default: 0; valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE": lambda: _strict_binary_env("VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE"),
+    # Pipeline banks/workers; effective count is capped by the staging window.
+    # Default: 4; integer values are clamped to >= 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS": lambda: max(1, int(os.getenv("VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS", "4"))),
+    # Copy streams per bank; effective count is capped by slots per bank.
+    # Default: 1; valid values: integers >= 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK": lambda: _positive_int_env(
+        "VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK"
+    ),
+    # Diagnostic device synchronization after READs; affects pipeline timing.
+    # Default: 0; valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE": lambda: _strict_binary_env("VLLM_ASCEND_DSA_PD_MOONCAKE_READ_PROBE"),
 }
 
 # end-env-vars-definition
