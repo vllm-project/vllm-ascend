@@ -61,6 +61,80 @@ def test_tail_slot_mapping_long_positions_padding_and_graph(capacity, use_graph)
         assert torch.all(common.slot_mapping == -1)
 
 
+@pytest.mark.parametrize(
+    "query,block_ids,actual,tokens,negative_position",
+    [
+        pytest.param([0], [], 0, 0, False, id="empty"),
+        pytest.param([0], [], 0, 769, False, id="padding_only"),
+        pytest.param([0, 0, 0], [5, 2], 0, 257, False, id="zero_length_requests"),
+        pytest.param([0, 257, 769], [5, 2], 769, 1026, False, id="cross_tile"),
+        pytest.param([0, 3, 5, 7], [5, 0, 0], 3, 9, False, id="graph_padded_requests"),
+        pytest.param([0, 3, -1, -1], [5, 0, 0], 3, 9, False, id="negative_boundaries"),
+        pytest.param([0, 3, 5], [0, 2], 5, 12, False, id="null_block"),
+        pytest.param([0, 3, 5], [5, 2], 5, 9, True, id="negative_and_zero_positions"),
+    ],
+)
+@pytest.mark.parametrize("capacity", [4, 8])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_tail_slot_mapping_boundaries_and_buffer_reuse(
+    query, block_ids, actual, tokens, negative_position, capacity, use_graph
+):
+    # Extra positions and guard storage check the caller's logical token bound.
+    host_positions = torch.arange(tokens + 11, dtype=torch.int64) + 2**31 + 5999
+    host_positions[actual:] = -19
+    if negative_position:
+        host_positions[:2] = torch.tensor([-1, 0])
+    host_blocks = torch.full((len(block_ids), 3), 99, dtype=torch.int32)
+    host_blocks[:, 0] = torch.tensor(block_ids, dtype=torch.int32)
+    common = SimpleNamespace(
+        positions=host_positions.npu(),
+        query_start_loc=torch.tensor(query, dtype=torch.int32, device="npu"),
+        block_table_tensor=host_blocks.npu(),
+        slot_mapping=torch.full((tokens + 11,), 12345, dtype=torch.int32, device="npu"),
+        num_actual_tokens=actual,
+        num_input_tokens=tokens,
+        num_reqs=len(block_ids),
+    )
+    storage = torch.full((tokens + 19,), 42, dtype=torch.int64, device="npu")
+    output = storage[3:]
+    run = lambda: build_tail_slot_mapping(common, capacity, output)
+    graph = None
+    if use_graph and tokens:
+        run()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            run()
+    for step in (0, 1):
+        positions = host_positions.clone()
+        positions[:actual] = torch.where(positions[:actual] >= 0, positions[:actual] + step * 8192, -1)
+        blocks = host_blocks.clone()
+        blocks[:, 0] += (blocks[:, 0] != 0).int() * step
+        common.positions.copy_(positions)
+        common.block_table_tensor.copy_(blocks)
+        storage.fill_(42)
+        if graph is None:
+            result = run()
+            assert result.numel() == tokens
+            assert result.untyped_storage().data_ptr() == output.untyped_storage().data_ptr()
+        else:
+            graph.replay()
+        expected = [-1] * tokens
+        bounds = [min(actual if boundary < 0 else boundary, actual) for boundary in query]
+        for request_id, block_id in enumerate(blocks[:, 0].tolist()):
+            for row in range(bounds[request_id], bounds[request_id + 1]):
+                position = int(positions[row])
+                if block_id != 0 and position >= 0:
+                    expected[row] = block_id * capacity + position % capacity
+        assert output[:tokens].cpu().tolist() == expected
+        assert torch.all(storage[:3] == 42)
+        assert torch.all(storage[3 + tokens :] == 42)
+        torch.testing.assert_close(common.positions.cpu(), positions, rtol=0, atol=0)
+        torch.testing.assert_close(common.block_table_tensor.cpu(), blocks, rtol=0, atol=0)
+        assert common.query_start_loc.cpu().tolist() == query
+        assert torch.all(common.slot_mapping == 12345)
+
+
 def _cache_views(storage, dtype, page_bytes):
     item_bytes = torch.empty((), dtype=dtype).element_size()
     cache = storage.view(dtype).as_strided(
