@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import socket
 import threading
 import time
 from dataclasses import replace
@@ -32,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     ACK_MSG,
     DONE_RECVING_MSG,
     DRAIN_REPORT_INTERVAL_SECONDS,
+    SWEEP_BATCH_SIZE,
     MooncakePullConnectorScheduler,
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
@@ -440,76 +442,190 @@ def test_sweeper_drain_report_is_rate_limited(
 ) -> None:
     """The awaiting-drain diagnostic is a stall report, not a per-second tick.
 
-    The finished queue also fills briefly between a DONE arriving and the
-    next scheduler step, so the report fires at most once per
-    DRAIN_REPORT_INTERVAL_SECONDS and only after the accumulation has lasted
-    that long. The clock deliberately starts far from zero (a real
-    ``time.monotonic`` value), so an implementation that compares against
-    zero would report on the very first observation and fail here.
+    The clock starts at the first observation of an accumulation (a realistic
+    `time.monotonic` value, i.e. uptime, not zero), so a transient DONE-to-step
+    overlap is never reported, and it restarts whenever the queue is observed
+    empty.
     """
     thread = make_sending_thread()
-    interval = DRAIN_REPORT_INTERVAL_SECONDS
-    start = 1000.0
-    clock = MagicMock(return_value=start)
+    clock = MagicMock(return_value=1000.0)
     monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
     thread.add_delayed_request("done-entry")
     thread._handle_finished_request("done-entry")
     assert thread.finished_requests.qsize() == 1
 
+    def drain_reports() -> list:
+        return [r for r in caplog.records if "await scheduler drain" in r.message]
+
     with caplog.at_level(logging.INFO, logger="vllm"):
-        thread._sweep_expired_requests()  # stall clock starts, no report
-        assert not [r for r in caplog.records if "await scheduler drain" in r.message]
+        thread._sweep_expired_requests()  # first observation: arms the clock only
+        assert not drain_reports()
 
-        clock.return_value = start + interval  # first report
+        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS / 3  # +10s: inside interval
         thread._sweep_expired_requests()
-        clock.return_value = start + interval + interval / 3  # inside interval
-        thread._sweep_expired_requests()
-        reports = [r for r in caplog.records if "await scheduler drain" in r.message]
-        assert len(reports) == 1
+        assert not drain_reports()
 
-        clock.return_value = start + 2 * interval  # interval elapsed
+        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS  # +40s: interval elapsed
         thread._sweep_expired_requests()
-        reports = [r for r in caplog.records if "await scheduler drain" in r.message]
-        assert len(reports) == 2
+        assert len(drain_reports()) == 1
 
-    # An empty queue restarts the stall clock: after the queue drains and
-    # sweeps keep observing it empty, a fresh accumulation is not reported
-    # on its first observation even though the old report is long past.
-    assert thread.get_and_clear_finished_requests() == {"done-entry"}
-    clock.return_value = start + 5 * interval
+        clock.return_value += DRAIN_REPORT_INTERVAL_SECONDS / 3  # +50s: inside interval
+        thread._sweep_expired_requests()
+        assert len(drain_reports()) == 1
+
+    # Observing an empty queue resets the clock; refilling restarts it.
+    while not thread.finished_requests.empty():
+        thread.finished_requests.get_nowait()
     thread._sweep_expired_requests()
-    caplog.clear()
-    thread.add_delayed_request("done-entry-2")
-    thread._handle_finished_request("done-entry-2")
+    thread.finished_requests.put("done-entry")
+
     with caplog.at_level(logging.INFO, logger="vllm"):
-        thread._sweep_expired_requests()  # fresh stall, first observation
-        assert not [r for r in caplog.records if "await scheduler drain" in r.message]
+        clock.return_value += 100.0
+        thread._sweep_expired_requests()  # re-arms instead of firing immediately
+        assert len(drain_reports()) == 1
 
 
-def test_recv_timeout_drives_the_sweeper(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The recv timeout, not the scheduler hook, must drive lease expiry.
+def test_sweeper_report_takes_over_when_archival_stops(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The stall report takes over as soon as archiving stops.
 
-    This is the wiring under test: `_run_busy_loop` previously swallowed
-    `zmq.Again` with a bare `continue`, so an idle engine never reaped an
-    entry D had dropped from its heartbeat roster.
+    While entries keep expiring, the archive line (carrying the queue depth)
+    owns the diagnostics and the stall clock is armed only once. When
+    archiving stops but the backlog remains, the clock is already past the
+    interval, so the rate-limited report must fire on the very next sweep and
+    then resume the normal cadence.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=1000.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("first")
+
+    def drain_reports() -> list:
+        return [r for r in caplog.records if "await scheduler drain" in r.message]
+
+    with caplog.at_level(logging.INFO, logger="vllm"):
+        clock.return_value = 1031.0
+        thread._sweep_expired_requests()  # archives "first", arms the clock at 1031
+        assert not drain_reports()
+
+        thread.add_delayed_request("second")  # expires at 1061
+        clock.return_value = 1081.0
+        thread._sweep_expired_requests()  # archives "second"; clock stays at 1031
+        assert not drain_reports()
+
+        clock.return_value = 1091.0
+        thread._sweep_expired_requests()  # nothing expires now; backlog remains
+        assert len(drain_reports()) == 1  # fires immediately: clock is 60s old
+
+        clock.return_value = 1100.0
+        thread._sweep_expired_requests()  # inside the new interval
+        assert len(drain_reports()) == 1
+
+
+def test_sweeper_caps_archival_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mass-expiry backlog is archived in bounded batches per 1s tick.
+
+    Holding state_lock for the whole backlog would stall the DONE/heartbeat
+    handlers sharing it, so one sweep archives at most SWEEP_BATCH_SIZE
+    entries and the remainder wait for the next tick.
     """
     thread = make_sending_thread()
     clock = MagicMock(return_value=0.0)
     monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
-    thread.add_delayed_request("orphaned")
+    total = SWEEP_BATCH_SIZE + 6
+    for i in range(total):
+        thread.add_delayed_request(f"bulk-{i}")
     clock.return_value = 31.0
-    socket = MagicMock()
-    socket.recv_multipart.side_effect = [zmq.Again(), _StopLoop()]  # type: ignore[attr-defined]
 
-    with pytest.raises(_StopLoop):
-        thread._run_busy_loop(socket)
+    # Assert the queue/ledger directly: get_and_clear_finished_requests runs
+    # its own uncapped expiry scan, which would mask the per-tick cap.
+    thread._sweep_expired_requests()
+    assert thread.finished_requests.qsize() == SWEEP_BATCH_SIZE
+    assert len(thread.delayed_free_requests) == total - SWEEP_BATCH_SIZE
 
-    # Assert the queue directly: the drain helper at the end of this test
-    # runs the same expiry scan, so only the queue state proves the recv
-    # timeout performed the sweep itself.
-    assert thread.finished_requests.qsize() == 1
-    assert thread.get_and_clear_finished_requests() == {"orphaned"}
+    thread._sweep_expired_requests()
+    assert thread.finished_requests.qsize() == total
     assert not thread.delayed_free_requests
+
+
+def test_sending_thread_sweeps_on_real_recv_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real zmq.Again cadence must drive the sweeper without any peer.
+
+    Binds a real ROUTER socket with RCVTIMEO=1s and runs the busy loop; no
+    producer/decode peer exists, so every recv timeout takes the Again
+    branch. A lease that expires while the loop runs must be archived by the
+    sweeper alone, on the real timing path (no mocks on the loop itself).
+    """
+    with socket.socket() as probe:  # pick a free port
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    thread = MooncakeSchedulerSendingThread(
+        host="127.0.0.1",
+        port=port,
+        engine_id="engine-p",
+        metadata={0: make_transfer_metadata()},
+        tp_size=1,
+        pp_size=1,
+        pcp_size=1,
+        dcp_size=1,
+        use_kv_pp=False,
+        ready_event=threading.Event(),
+        kv_lease_duration=30,
+    )
+    # Capture the real clock BEFORE the module-wide patch below: `pull_scheduler.time`
+    # is the `time` module itself, so the mock would freeze this test's own deadline.
+    real_monotonic = time.monotonic
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("orphaned")
+    thread.start()
+    try:
+        assert thread.ready_event.wait(timeout=5)
+        clock.return_value = 130.0  # lease (30s) expires while the loop runs
+        deadline = real_monotonic() + 5
+        while real_monotonic() < deadline and thread.delayed_free_requests:
+            time.sleep(0.05)
+        if thread.delayed_free_requests:
+            pytest.fail("sweeper did not archive the expired entry within 5s; the recv-timeout driver did not fire")
+        assert thread.get_and_clear_finished_requests() == {"orphaned"}
+    finally:
+        thread.shutdown()
+    assert not thread.is_alive()
+
+
+def test_heartbeat_after_sweep_does_not_double_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A late heartbeat for an ID the sweeper already archived is a no-op.
+
+    Sweep and heartbeat race on the same ID. Once the sweeper archived it,
+    `_mark_finished_locked` takes its documented "unknown IDs are therefore
+    stale or duplicate DONEs" path: for an ID in neither ledger it returns
+    False without touching `finished_requests`. In `_handle_heartbeat` that
+    lands in the `unknown` branch, which only bumps a counter and emits a
+    DEBUG summary line - no ledger or roster state changes - so the late
+    heartbeat neither re-queues the ID nor raises. This test asserts no
+    duplicate archival; heartbeat debug-log counters are out of scope. If
+    the `_mark_finished_locked` contract ever changes to raise, this test
+    fails and the race semantics must be revisited.
+    """
+    thread = make_sending_thread()
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread.add_delayed_request("raced")
+    clock.return_value = 20.0
+    thread._handle_heartbeat(["raced"])  # extends into renewed_requests
+    assert "raced" in thread.renewed_requests
+    clock.return_value = 90.0
+
+    thread._sweep_expired_requests()  # archives the renewed entry
+    assert thread.finished_requests.qsize() == 1
+
+    thread._handle_heartbeat(["raced"])  # late heartbeat for the same ID
+
+    assert thread.finished_requests.qsize() == 1  # no duplicate
+    assert thread.get_and_clear_finished_requests() == {"raced"}
+    assert not thread.delayed_free_requests
+    assert not thread.renewed_requests
 
 
 def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(

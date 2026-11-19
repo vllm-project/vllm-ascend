@@ -1,4 +1,12 @@
 pr: 22422
 entries:
   - category: bugfix
-    text: Fixed `MooncakeConnectorV2` producers retaining expired KV-lease entries indefinitely when a decode instance crashed, was aborted, or lost its completion notification; the KV lease bound stopped applying and stale entries accumulated until the engine was restarted. Expired entries are now reclaimed even when the decode instance is gone, and a rate-limited `Mooncake delayed-free sweeper` warning reports entries that are still waiting to be released.
+    text: >-
+      Fixed `MooncakeConnectorV2` producers retaining expired KV-lease entries indefinitely when a decode
+      instance crashed, was aborted, or lost its completion notification; the KV lease bound stopped applying
+      and stale entries accumulated until the engine was restarted. Expired entries are now archived into the
+      pending-release queue even when the decode instance is gone, in bounded batches per recv timeout, and a
+      rate-limited `Mooncake delayed-free sweeper` warning reports entries that are still waiting to be
+      released. Note this only advances connector bookkeeping: the KV blocks themselves are freed by the
+      scheduler drain (a real worker output, or an idle-step drain if available), so memory recovery still
+      depends on that path.
