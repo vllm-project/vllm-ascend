@@ -2223,7 +2223,7 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
-def _qwen_dflash2_device_length_runner(draft_backend):
+def _qwen_dflash2_device_length_runner(draft_backend, dense_backend=AscendAttentionBackend):
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
     runner, output, batch = _device_length_runner()
@@ -2237,7 +2237,9 @@ def _qwen_dflash2_device_length_runner(draft_backend):
     runner.speculative_config.enable_adaptive_verification = False
     runner.speculator = SimpleNamespace(attn_backends={"draft.0": draft_backend})
     runner.attn_groups = [
-        [SimpleNamespace(backend=backend)] for backend in (AscendAttentionBackend, AscendGDNFusedAttentionBackend)
+        [SimpleNamespace(backend=dense_backend, layer_names=["target.dense"])],
+        [SimpleNamespace(backend=draft_backend, layer_names=["draft.0"])],
+        [SimpleNamespace(backend=AscendGDNFusedAttentionBackend, layer_names=["target.gdn"])],
     ]
     return runner, output, batch
 
@@ -2249,20 +2251,43 @@ def test_qwen_dflash2_keeps_length_sync_without_fa3(monkeypatch):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
-@pytest.mark.parametrize("blocked", [None, "draft_backend", "target_backend", "model_state", "pp", "kv_transfer"])
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, blocked):
-    runner, output, batch = _qwen_dflash2_device_length_runner(fa3_backend.AscendFlashAttentionBackend)
-    if blocked == "draft_backend":
-        runner.speculator.attn_backends["draft.0"] = AscendFlashAttentionBackend
-    elif blocked == "target_backend":
-        runner.attn_groups[0][0].backend = AscendMLABackend
-    elif blocked == "model_state":
+@pytest.mark.parametrize(
+    "case",
+    [
+        "fia_gdn",
+        "fa3_gdn",
+        "gdn_only",
+        "fa3_only",
+        "draft_backend",
+        "target_backend",
+        "model_state",
+        "pp",
+        "kv_transfer",
+    ],
+)
+def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, case):
+    fa3 = fa3_backend.AscendFlashAttentionBackend
+    dense_backend = AscendAttentionBackend if case == "fia_gdn" else fa3
+    runner, output, batch = _qwen_dflash2_device_length_runner(fa3, dense_backend)
+    if case == "fa3_gdn":
+        runner.speculator.attn_backends["draft.1"] = fa3
+        runner.attn_groups[0][0].layer_names.insert(0, "draft.1")
+    elif case == "gdn_only":
+        runner.attn_groups.pop(0)
+    elif case == "fa3_only":
+        runner.attn_groups.pop()
+    elif case == "draft_backend":
+        runner.speculator.attn_backends["draft.1"] = AscendFlashAttentionBackend
+        runner.attn_groups.append([SimpleNamespace(backend=AscendFlashAttentionBackend, layer_names=["draft.1"])])
+    elif case == "target_backend":
+        runner.attn_groups.append([SimpleNamespace(backend=AscendMLABackend, layer_names=["target.mla"])])
+    elif case == "model_state":
         runner.model_state = object()
-    elif blocked == "pp":
+    elif case == "pp":
         runner.parallel_config.pipeline_parallel_size = 2
-    elif blocked == "kv_transfer":
+    elif case == "kv_transfer":
         runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
-    eligible = blocked is None
+    eligible = case in ("fia_gdn", "fa3_gdn")
     assert runner._can_skip_spec_cpu_length_sync() is eligible
     runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
     runner.num_computed_tokens_cpu.fill_(-1)

@@ -1383,24 +1383,22 @@ class NPUModelRunner(GPUModelRunner):
             if fa3_backend is None:
                 return False
             draft_backends = getattr(self.speculator, "attn_backends", {})
-            backends = [group.backend for groups in getattr(self, "attn_groups", []) for group in groups]
+            # A runner group can contain both target and draft layers.
+            target_backends = {
+                group.backend
+                for groups in getattr(self, "attn_groups", [])
+                for group in groups
+                if any(name not in draft_backends for name in group.layer_names)
+            }
             parallel = self.parallel_config
             return (
                 spec.parallel_drafting
                 and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                 and bool(draft_backends)
                 and all(backend is fa3_backend for backend in draft_backends.values())
-                and AscendAttentionBackend in backends
-                and AscendGDNFusedAttentionBackend in backends
-                and all(
-                    backend
-                    in (
-                        AscendAttentionBackend,
-                        AscendGDNFusedAttentionBackend,
-                        fa3_backend,
-                    )
-                    for backend in backends
-                )
+                and (AscendAttentionBackend in target_backends or fa3_backend in target_backends)
+                and AscendGDNFusedAttentionBackend in target_backends
+                and target_backends.issubset((AscendAttentionBackend, fa3_backend, AscendGDNFusedAttentionBackend))
                 and parallel.pipeline_parallel_size == 1
                 and parallel.prefill_context_parallel_size == 1
                 and parallel.decode_context_parallel_size == 1
