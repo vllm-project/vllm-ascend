@@ -11,8 +11,11 @@ from vllm_ascend.ops.triton.qwen4_exp import hc as hc_module
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     _HC_GATE_MIX_BLOCK_SIZE,
     _HC_GATE_MIX_ROWS_PER_BLOCK,
+    _hc_combine_norm_kernel,
+    _hc_combine_norm_row_wise_kernel,
     _hc_gate_mix_kernel,
     _hc_gate_mix_row_block_kernel,
+    hc_combine_norm,
     hc_gate_mix,
 )
 
@@ -191,4 +194,138 @@ def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatc
         hc_gate_mix(x, gate, HC_COUNT)
         torch.npu.synchronize()
 
+        assert len(compile_events) == 1, (rows, compile_events)
+
+
+def _legacy_combine_norm(
+    residual: torch.Tensor,
+    block_output: torch.Tensor,
+    injection_logits: torch.Tensor | None,
+    norm_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, group_dim = block_output.shape
+    combined = residual.new_empty(residual.shape)
+    normalized = residual.new_empty(residual.shape)
+    injection_ptr = residual if injection_logits is None else injection_logits
+    injection_stride = 0 if injection_logits is None else injection_logits.stride(0)
+    _hc_combine_norm_kernel[(rows * HC_COUNT,)](
+        residual,
+        block_output,
+        injection_ptr,
+        norm_weight,
+        combined,
+        normalized,
+        residual.stride(0),
+        block_output.stride(0),
+        injection_stride,
+        combined.stride(0),
+        normalized.stride(0),
+        GROUP_DIM=group_dim,
+        HC_COUNT=HC_COUNT,
+        HAS_INJECTION=injection_logits is not None,
+        WEIGHT_SHARED=norm_weight.numel() == group_dim,
+        BLOCK_SIZE=triton.next_power_of_2(group_dim),
+        EPS=eps,
+    )
+    return combined, normalized
+
+
+@pytest.mark.skipif(
+    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
+)
+@pytest.mark.parametrize(
+    ("rows", "row_strided", "has_injection"),
+    (
+        (512, False, False),
+        (513, True, True),
+    ),
+)
+@torch.inference_mode()
+def test_hc_combine_norm_row_wise_matches_legacy_kernel(
+    rows: int,
+    row_strided: bool,
+    has_injection: bool,
+) -> None:
+    residual = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=row_strided)
+    block_output = _make_input(rows, GROUP_DIM, row_strided=row_strided)
+    injection_logits = _make_input(rows, HC_COUNT, row_strided=row_strided) if has_injection else None
+    norm_weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
+    eps = 1e-6
+
+    actual = hc_combine_norm(residual, block_output, injection_logits, norm_weight, eps, HC_COUNT)
+    legacy = _legacy_combine_norm(residual, block_output, injection_logits, norm_weight, eps)
+    expected_combined = hc_module._fallback_hc_combine(residual, block_output, injection_logits, HC_COUNT)
+    expected_normalized = hc_module._fallback_grouped_gemma_rmsnorm(expected_combined, norm_weight, eps, HC_COUNT)
+    torch.npu.synchronize()
+
+    for actual_output, legacy_output, expected_output in zip(actual, legacy, (expected_combined, expected_normalized)):
+        torch.testing.assert_close(actual_output, legacy_output, atol=0, rtol=0)
+        assert_dcp_close(actual_output, expected_output)
+
+
+@pytest.mark.skipif(
+    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
+)
+@torch.inference_mode()
+def test_hc_combine_norm_row_wise_npugraph_replay() -> None:
+    rows = 2049
+    residual = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
+    block_output = _make_input(rows, GROUP_DIM, row_strided=True)
+    injection_logits = _make_input(rows, HC_COUNT, row_strided=True)
+    norm_weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
+    eps = 1e-6
+    for _ in range(3):
+        hc_combine_norm(residual, block_output, injection_logits, norm_weight, eps, HC_COUNT)
+    torch.npu.synchronize()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
+        captured = hc_combine_norm(residual, block_output, injection_logits, norm_weight, eps, HC_COUNT)
+
+    for _ in range(2):
+        residual.copy_(_make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True))
+        block_output.copy_(_make_input(rows, GROUP_DIM, row_strided=True))
+        injection_logits.copy_(_make_input(rows, HC_COUNT, row_strided=True))
+        expected = hc_combine_norm(residual, block_output, injection_logits, norm_weight, eps, HC_COUNT)
+        graph.replay()
+        torch.npu.synchronize()
+        for captured_output, expected_output in zip(captured, expected):
+            torch.testing.assert_close(captured_output, expected_output, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    get_current_hardware_profile().qwen4exp_hc_combine_norm_row_wise_min_rows is None,
+    reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
+)
+@torch.inference_mode()
+def test_hc_combine_norm_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
+    max_rows = 521
+    residual_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
+    block_backing = _make_input(max_rows, GROUP_DIM, row_strided=True)
+    injection_backing = _make_input(max_rows, HC_COUNT, row_strided=True)
+    norm_weight = torch.randn(HYPER_HIDDEN_SIZE, device="npu", dtype=DTYPE) * 0.1
+    isolated_kernel = triton.jit(_hc_combine_norm_row_wise_kernel.fn)
+    compile_events = []
+    original_compile = isolated_kernel._do_compile
+
+    def record_compile(*args, **kwargs):
+        compile_events.append(args[0])
+        return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(isolated_kernel, "_do_compile", record_compile)
+    monkeypatch.setattr(hc_module, "_hc_combine_norm_row_wise_kernel", isolated_kernel)
+
+    for rows in (512, 513, 520, 521):
+        hc_combine_norm(
+            residual_backing[:rows],
+            block_backing[:rows],
+            injection_backing[:rows],
+            norm_weight,
+            1e-6,
+            HC_COUNT,
+        )
+        torch.npu.synchronize()
         assert len(compile_events) == 1, (rows, compile_events)
