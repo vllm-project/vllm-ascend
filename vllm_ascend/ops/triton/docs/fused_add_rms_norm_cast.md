@@ -1,16 +1,23 @@
-# Step5 fused residual add and RMSNorm
+# Fused residual add, RMSNorm, and BF16 cast
 
 ## Description
 
-- **Function** — Fuse the optional residual update, RMSNorm and BF16
-  conversion around attention in the Step5 decoder.
+- **Function** — Fuse an optional FP32 residual add, FP32 RMSNorm, and the
+  output cast from FP32 to BF16 in one Triton kernel. The kernel writes the
+  normalized activation directly in BF16, eliminating a separate Cast launch.
+- **Motivation** — With `fp32_residual_connection` enabled, Step5 keeps the
+  running residual in FP32 and casts the normalized activation to BF16 before
+  attention and the feed-forward network (FFN). The fused kernel performs that
+  cast while preserving the FP32 residual.
 - **Formula** — For each row, compute `s = fp32(x) + residual` when the residual is
   supplied, or `s = x` otherwise, and
   `normed = bf16(s * rsqrt(mean(s * s) + eps) * scale)`, where
   `scale = weight + 1` for zero-centered weights and `weight` otherwise.
-- **Algorithm flow** — Assign contiguous row ranges to vector cores. Load
-  weights once per core, mask padded columns, and write the normalized output. Write an updated
-  residual only when the input residual is present.
+- **Algorithm flow** — Assign contiguous row ranges to vector cores, load norm
+  weights once per core, and mask padded columns. Promote the activation to
+  FP32 on load, add the residual if present, and compute RMSNorm in FP32. The
+  store to the BF16 output performs the cast. Write an updated FP32 residual
+  only when the input residual is present.
 - **Supported modes** — Ascend A5 with Triton in FP32 residual mode.
 
 ## Parameters
@@ -22,7 +29,7 @@
 | `weight` | Input | RMSNorm weights | FP32 | Contiguous vector of hidden size |
 | `eps` | Attribute | RMSNorm epsilon | Python float | Scalar |
 | `zero_centered` | Attribute | Add one to each norm weight | Python bool | Scalar |
-| `normed` | Output | Activation for attention or the FFN | BF16 | Same shape as `x` |
+| `normed` | Output | Normalized activation cast to BF16 for attention or the FFN | BF16 | Same shape as `x` |
 | `residual_out` | Output | Updated residual or `x` if residual is absent | FP32 | Same shape as `x` |
 
 ## Constraints
@@ -43,14 +50,16 @@
 
 - **Origin** — Ported from the Step5 Ascend fused residual-add/RMSNorm Triton
   implementation.
-- **Differences** — This integration uses contiguous tensors and retains the
-  FP32 residual/BF16 activation path, matching the decoder dispatch contract.
+- **Integration** — The decoder uses the fused BF16 output in place of its
+  separate post-RMSNorm cast. The wrapper accepts contiguous inputs and returns
+  the running residual in FP32.
 
 ## Test Cases
 
-The reference uses the original optional FP32 add, A5 RMSNorm (or the Step5 eager
-formula for plain weights), and BF16 cast. The residual must match exactly.
-At least 99% of BF16 elements must satisfy the mixed tolerance with
+The reference performs the optional FP32 add, A5 RMSNorm (or the Step5 eager
+formula for plain weights), and a separate BF16 cast. Tests require BF16 output
+even for FP16 input and an exact match for the FP32 residual. At least 99% of
+BF16 output elements must satisfy the mixed tolerance with
 `rtol = atol = 2^-6`, and the maximum absolute error must be at most 1.
 
 ```bash
