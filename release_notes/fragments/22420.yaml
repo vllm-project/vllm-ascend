@@ -1,0 +1,5 @@
+pr: 22420
+entries:
+  - category: bugfix
+    text: Fixed incorrect DeepSeek-V4.1 outputs when SWA bounded replay is
+      enabled and speculative decoding is disabled.
