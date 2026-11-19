@@ -38,7 +38,9 @@ def test_dsa_gate_reuses_stream_and_waits_at_each_consumer(monkeypatch):
         def wait():
             trace.append((name, current))
             assert send_ref() is not None
-            received_ref().fill_(1)
+            target = received_ref()
+            assert target is not None
+            target.fill_(1)
 
         return SimpleNamespace(wait=wait)
 
