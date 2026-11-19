@@ -40,10 +40,17 @@ Prepare the UB endpoint configuration directory used by `ascend_local_comm_res_p
 
 ### 4.1 Docker Image Installation
 
-Run the following on each 950DT products host. Set the model path to the FP8 checkpoint and use the Hy4-Flash adaptation image below.
+Choose the Hy4-Flash image for your container environment:
+
+| Image Variant | Image |
+| --- | --- |
+| Default | [quay.io/ascend/vllm-ascend:hy4-flash-a5](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=hy4-flash-a5) |
+| openEuler | [quay.io/ascend/vllm-ascend:hy4-flash-a5-openeuler](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=hy4-flash-a5-openeuler) |
+
+Run the following on each 950DT products host. Set the model path to the FP8 checkpoint. The example uses the openEuler image; set `IMAGE` to `quay.io/ascend/vllm-ascend:hy4-flash-a5` for the default image.
 
 ```bash
-export IMAGE="quay.io/atlas-ci/vllm-atlas-temp:hy4-flash-a5-openeuler-44498364094-1-arm64-temp"
+export IMAGE="quay.io/ascend/vllm-ascend:hy4-flash-a5-openeuler"
 export CONTAINER_NAME=hy4_flash
 export MODEL_DIR="<HY4_FLASH_FP8_PATH>"
 export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
