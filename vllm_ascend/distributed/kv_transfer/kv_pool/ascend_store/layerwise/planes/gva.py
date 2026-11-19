@@ -135,7 +135,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
                 effective_block_size = worker.grouped_block_size[group_id]
-                alloc_size = worker._global_group_alloc_size(group_id)
+                alloc_size = worker._layerwise_group_alloc_size(group_id)
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
 
                 save_start_block = request.save_start_token // effective_block_size
