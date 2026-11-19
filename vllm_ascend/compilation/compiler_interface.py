@@ -71,22 +71,38 @@ def fusion_pass_compile(
 
 
 def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
-    num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-    uniform_decode_query_len = num_spec_tokens + 1
-    max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
+    speculative_config = vllm_config.speculative_config
+    num_spec_tokens = speculative_config.num_speculative_tokens if speculative_config else 0
+    target_query_len = num_spec_tokens + 1
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    target_max_num_tokens = max_num_seqs * target_query_len
     compilation_config = vllm_config.compilation_config
-    capture_sizes = set(compilation_config.cudagraph_capture_sizes)
+    capture_sizes = {
+        size for size in compilation_config.cudagraph_capture_sizes if target_query_len <= size <= target_max_num_tokens
+    }
+
+    # DSpark captures its draft graph with num_spec_tokens tokens per
+    # request, while the target verification graph uses
+    # num_spec_tokens + 1. Include both concrete graph-size families in the
+    # StaticKernel symbol allowlist.
+    query_lengths = {target_query_len}
+    if speculative_config is not None and speculative_config.method == "dspark" and num_spec_tokens > 0:
+        query_lengths.add(num_spec_tokens)
+
     if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
         # V2 uniform decode capture rounds token counts up to the query length.
         # With MTP5, for example, configured size 56 captures 60 tokens. Keep
         # the raw sizes as well for routines that do not perform this rounding.
         max_capture_size = compilation_config.max_cudagraph_capture_size
-        capture_sizes.update(
-            rounded
-            for size in compilation_config.cudagraph_capture_sizes
-            if (rounded := round_up(size, uniform_decode_query_len)) <= max_capture_size
-        )
-    return sorted(x for x in capture_sizes if max_num_tokens >= x >= uniform_decode_query_len)
+        for query_len in query_lengths:
+            query_max_num_tokens = max_num_seqs * query_len
+            capture_sizes.update(
+                rounded
+                for size in compilation_config.cudagraph_capture_sizes
+                if (rounded := round_up(size, query_len)) <= min(max_capture_size, query_max_num_tokens)
+            )
+
+    return sorted(capture_sizes)
 
 
 def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
