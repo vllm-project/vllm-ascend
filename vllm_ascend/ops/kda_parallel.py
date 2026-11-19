@@ -33,15 +33,17 @@ def get_kda_state_shape(vllm_config, upstream_get_shape):
 
 class KDAColumnParallelLinear(ColumnParallelLinear):
     def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
-        self.pcp_group = get_pcp_group() if tp_group is None else None
-        self.tp_group = get_tp_group() if tp_group is None else tp_group
-        super().__init__(
-            input_size,
-            output_size,
-            tp_rank=get_kda_parallel_rank() if tp_group is None else tp_group.rank_in_group,
-            tp_size=(self.tp_group.world_size * self.pcp_group.world_size if tp_group is None else tp_group.world_size),
-            **kwargs,
-        )
+        if tp_group is None:
+            self.tp_group = get_tp_group()
+            self.pcp_group = get_pcp_group()
+            rank = get_kda_parallel_rank()
+            size = self.tp_group.world_size * self.pcp_group.world_size
+        else:
+            self.tp_group = tp_group
+            self.pcp_group = None
+            rank = tp_group.rank_in_group
+            size = tp_group.world_size
+        super().__init__(input_size, output_size, tp_rank=rank, tp_size=size, **kwargs)
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
