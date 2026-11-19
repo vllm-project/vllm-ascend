@@ -1501,6 +1501,9 @@ class KVPoolWorker(BaseKVPoolWorker):
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter()
+            if self.backend_name == "mooncake" and self.kv_role == "kv_producer":
+                # The direct GET can overwrite the same pages as pending NPU block zeroing.
+                torch.npu.current_stream().synchronize()
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
             self._record_kv_connector_operation(
                 "load_get",

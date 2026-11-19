@@ -20,7 +20,7 @@ import threading
 import unittest
 from itertools import product
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -1567,8 +1567,10 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.register_buffer.assert_called_once()
 
     def test_start_load_kv_sync(self):
-        worker = self._make_worker(extra_config={"load_async": False})
-        worker.m_store.get = MagicMock(return_value=[0])
+        worker = self._make_worker(kv_role="kv_producer", extra_config={"backend": "mooncake", "load_async": False})
+        operations = MagicMock()
+        operations.get.return_value = [0]
+        worker.m_store.get = operations.get
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
 
@@ -1582,8 +1584,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.start_load_kv(meta)
-        worker.m_store.get.assert_called_once()
+        with patch("torch.npu.current_stream", return_value=operations):
+            worker.start_load_kv(meta)
+        self.assertEqual(operations.method_calls, [call.synchronize(), call.get(ANY, ANY, ANY)])
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
