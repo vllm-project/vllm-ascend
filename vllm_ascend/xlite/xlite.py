@@ -311,7 +311,11 @@ class XliteWrapper:
             xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
             xlite_attn_metadata.cached_lens = cached_lens.tolist()
-            xlite_attn_metadata.is_prefills = [False] * num_decodes + [True] * num_prefills
+            # The pinned xlite (0.1.0rc3) declares is_prefills; older wheels baked
+            # into some CI runner images do not, so mypy rejects this unchanged line.
+            xlite_attn_metadata.is_prefills = (  # type: ignore[attr-defined]
+                [False] * num_decodes + [True] * num_prefills
+            )
             xlite_attn_metadata.block_tables_cpu = attn_metadata.block_tables.cpu().tolist()
             if positions.ndim == 2:
                 xlite_attn_metadata.positions = positions[:, : attn_metadata.num_actual_tokens].contiguous()
@@ -338,7 +342,7 @@ class XliteWrapper:
                     self.freq_cis,
                     h,
                     stream,
-                    xlite_deepstack_input_embeds,
+                    xlite_deepstack_input_embeds,  # type: ignore[arg-type]
                 )
                 if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
                     self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
