@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 
 import torch
 import vllm.envs as envs
@@ -19,7 +19,6 @@ from vllm.distributed import (
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.model_executor.model_loader.utils import get_model_cls
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -63,7 +62,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
-    get_engine_transfer_config,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
@@ -647,50 +645,12 @@ class BaseKVPoolWorker(ABC):
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
-        Resolve 2MB-aligned registration regions for KV cache views.
-
-        Partial hits share Mooncake V2's configured regions when present;
-        otherwise, register each storage from its first aligned address and
-        verify that it covers the views. The legacy hybrid path rounds view
-        starts down within their shared, aligned allocation.
+        In hybrid scenario, where a KVCacheTensor is shared by multiple layers,
+        but sometimes, layers cannot be evenly distributed among multiple groups,
+        the layers sharing the KVCacheTensor may not completely occupy all the space of the KVCacheTensor.
+        This results in the calculated start address not being the previously aligned address.
+        Therefore, we down-align the start address to meet the 2MB alignment requirement.
         """
-        if self.enable_partial_hash_hits:
-            transfer = get_engine_transfer_config(self.vllm_config, self.kv_cache_config)
-            _has_mooncake_v2_connector = (
-                transfer is not None
-                and getattr(transfer, "kv_connector", None) == "MultiConnector"
-                and any(
-                    child.get("kv_connector") == "MooncakeConnectorV2"
-                    for child in transfer.kv_connector_extra_config.get("connectors", ())
-                )
-            )
-            if _has_mooncake_v2_connector:
-                from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
-                    collect_configured_register_regions,
-                )
-
-                regions = collect_configured_register_regions(self.kv_cache_config, self.kv_caches)
-                registered_regions.clear()
-                registered_regions.update(
-                    {ptr: (ptr, ptr + size) for ptr, size in zip(regions.ptrs, regions.lengths, strict=True)}
-                )
-                return
-            registered_regions.clear()
-            alignment = 2 * 1024 * 1024
-            for caches in self.kv_caches.values():
-                for view in self._as_cache_tuple(caches):
-                    storage = view.untyped_storage()
-                    raw, size = storage.data_ptr(), storage.nbytes()
-                    aligned = cdiv(raw, alignment) * alignment
-                    span = (
-                        1 + sum((n - 1) * stride for n, stride in zip(view.shape, view.stride()))
-                    ) * view.element_size()
-                    if any(stride <= 0 for stride in view.stride()) or not aligned <= view.data_ptr() < raw + size:
-                        raise ValueError("KV view is outside the aligned allocation")
-                    if view.data_ptr() + span > raw + size:
-                        raise ValueError("Strided KV view exceeds its allocation")
-                    registered_regions[raw] = (aligned, raw + size)
-            return
         if not self.use_hybrid:
             return
         alignment = 2 * 1024 * 1024
@@ -1106,6 +1066,43 @@ class BaseKVPoolWorker(ABC):
             return [key]
         return self._expand_lookup_keys_by_rank([key], group_id)
 
+    def _iter_present_lookup_candidates(self, keys: list[str], variant_counts: list[int]) -> Iterator[int]:
+        """Yield a candidate's index when all of its rank keys exist."""
+        if not keys:
+            return
+        values = self.m_store.exists(keys)
+        if values is None or len(values) != len(keys):
+            raise ValueError("Incomplete Store existence response")
+        offset = 0
+        for index, count in enumerate(variant_counts):
+            end = offset + count
+            if count and all(value == 1 for value in values[offset:end]):
+                yield index
+            offset = end
+
+    def _tail_key_boundaries(
+        self,
+        coordinator: AscendStoreCoordinator,
+        hashes: Sequence[BlockHash],
+        hit: int,
+        pool: ExternalCachedBlockPool,
+    ) -> tuple[TailKeyBoundary, ...]:
+        """Find the stored key for each group's last recoverable physical page."""
+        boundaries = []
+        hit_index = hit // self.hash_block_size - 1
+        for group in coordinator.cacheable_group_ids:
+            page = coordinator.group_effective_block_sizes[group]
+            # A later key in this page can contain all Attention bytes
+            # needed at hit. Mamba managers require an exact state key.
+            page_end = min(((hit - 1) // page + 1) * page // self.hash_block_size, len(hashes))
+            for index in range(hit_index, page_end):
+                if pool.contains(group, hashes[index]):
+                    boundaries.append(TailKeyBoundary(group, (index + 1) * self.hash_block_size))
+                    break
+            else:
+                raise ValueError(f"No recoverable tail value for group {group} at {hit}")
+        return tuple(boundaries)
+
     def _lookup_with_coordinator(
         self,
         token_len: int,
@@ -1122,7 +1119,7 @@ class BaseKVPoolWorker(ABC):
         if coordinator.enable_partial_hash_hits:
             # Query hash keys, then let Core's cache managers arbitrate a joint
             # recoverable boundary. IO later restores the containing pages.
-            keys, candidates, widths = [], [], []
+            keys, candidates, variant_counts = [], [], []
             hashes = block_hashes[: token_len // self.hash_block_size]
             for group in coordinator.cacheable_group_ids:
                 prefix = self.token_database._get_key_prefix(group)
@@ -1134,17 +1131,10 @@ class BaseKVPoolWorker(ABC):
                     )
                     keys.extend(variants)
                     candidates.append((group, block_hash_to_bytes(value)))
-                    widths.append(len(variants))
+                    variant_counts.append(len(variants))
             if not keys:
                 return StoreLookupResult(0)
-            values = self.m_store.exists(keys)
-            if values is None or len(values) != len(keys):
-                raise ValueError("Incomplete Store existence response")
-            present, offset = set(), 0
-            for candidate, width in zip(candidates, widths, strict=True):
-                if width and all(value == 1 for value in values[offset : offset + width]):
-                    present.add(candidate)
-                offset += width
+            present = {candidates[index] for index in self._iter_present_lookup_candidates(keys, variant_counts)}
             pool = ExternalCachedBlockPool(self.hash_block_size, present)
             core_hashes = _HBMPrefixBlockHashes(hashes, hbm_hit_tokens // self.hash_block_size)
             _, hit = coordinator.find_longest_cache_hit(core_hashes, coordinator.align_lookup_length(token_len), pool)
@@ -1156,28 +1146,14 @@ class BaseKVPoolWorker(ABC):
                 )
             if hit <= hbm_hit_tokens:
                 return StoreLookupResult(hit)
-            boundaries = []
-            hit_index = hit // self.hash_block_size - 1
-            for group in coordinator.cacheable_group_ids:
-                page = coordinator.group_effective_block_sizes[group]
-                # A later key in this page can contain all Attention bytes
-                # needed at hit. Mamba managers require an exact state key.
-                page_end = min(((hit - 1) // page + 1) * page // self.hash_block_size, len(hashes))
-                for index in range(hit_index, page_end):
-                    if pool.contains(group, hashes[index]):
-                        boundaries.append(TailKeyBoundary(group, (index + 1) * self.hash_block_size))
-                        break
-                else:
-                    raise ValueError(f"No recoverable tail value for group {group} at {hit}")
-            return StoreLookupResult(hit, tuple(boundaries))
+            return StoreLookupResult(hit, self._tail_key_boundaries(coordinator, hashes, hit, pool))
 
         def query_group_hits(
             group_id: int,
-            group_block_hashes: Sequence[BlockHash | str],
+            _group_block_hashes: Sequence[BlockHash | str],
             lookup_mask: Sequence[bool] | None,
         ) -> list[BlockHash | str]:
             group_block_size = coordinator.group_effective_block_sizes[group_id]
-            present: list[BlockHash | str] = []
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
 
             keys: list[str] = []
@@ -1195,14 +1171,7 @@ class BaseKVPoolWorker(ABC):
                 chunk_hashes.append(chunk_hash)
                 variant_counts.append(len(variants))
 
-            if keys:
-                res = self.m_store.exists(keys)  # type: ignore[assignment]
-                offset = 0
-                for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
-                    values = res[offset : offset + count]  # type: ignore[index]
-                    if values and all(value == 1 for value in values):
-                        present.append(chunk_hash)
-                    offset += count
+            present = [chunk_hashes[index] for index in self._iter_present_lookup_candidates(keys, variant_counts)]
 
             logger.debug(
                 "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
