@@ -697,9 +697,7 @@ def build_attn_metadata(
                     # Preserve live prefixes for graph-padded inputs without
                     # reading device lengths back on the host.
                     metadata.qsa_num_live_requests = num_actual_reqs
-                    metadata.qsa_num_live_tokens = int(
-                        variant_common.query_start_loc_cpu[num_actual_reqs]
-                    )
+                    metadata.qsa_num_live_tokens = int(variant_common.query_start_loc_cpu[num_actual_reqs])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
