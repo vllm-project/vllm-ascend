@@ -5,7 +5,7 @@
 The checksum/reset behavior comes from the paired vLLM's
 ``vllm.model_executor.model_loader.weight_checksum`` (PR #51350); these tests
 only cover the NPUWorker wiring: method presence, rank-key prefixes, model
-access for both runner shapes, and the weight_nz_mode warning.
+access for both runner shapes, shared-weight protection, and the weight_nz_mode warning.
 """
 
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import torch.nn as nn
-from vllm.config import ParallelConfig
+from vllm.config import LoadConfig, ParallelConfig
 
 from vllm_ascend._310p.worker_310p import NPUWorker310
 from vllm_ascend.worker import worker as npu_worker_module
@@ -49,6 +49,7 @@ def mock_ascend_config(monkeypatch):
 
 def _make_worker(dp_rank: int) -> NPUWorker:
     worker = object.__new__(NPUWorker)
+    worker.load_config = LoadConfig()
     worker.parallel_config = ParallelConfig(data_parallel_size=2, data_parallel_rank=dp_rank)
     # Dense DP resets data_parallel_rank to 0 in each engine.
     worker.parallel_config.reconfigure_for_independent_dp_rank()
@@ -77,15 +78,30 @@ def test_compute_weight_checksums_prefixes_keys(mock_parallel_groups):
     assert all(all(c in "0123456789abcdef" for c in digest) for digest in checksums.values())
 
 
-def test_reset_weights_zeroes_params_not_buffers(mock_parallel_groups, mock_ascend_config):
+@pytest.mark.parametrize("load_format, extra_config", [("auto", {}), ("ipc_cache", {"mode": "copy"})])
+def test_reset_weights_zeroes_params_not_buffers(load_format, extra_config, mock_ascend_config):
     model = _TinyModel()
     worker = _make_worker(dp_rank=0)
+    worker.load_config = LoadConfig(load_format=load_format, model_loader_extra_config=extra_config)
     worker.model_runner = cast(Any, SimpleNamespace(get_model=lambda: model))
 
     worker.reset_weights()
 
     assert torch.all(model.linear.weight == 0)
     assert model.scale.item() == 2.0
+
+
+@pytest.mark.parametrize("extra_config", [{}, {"mode": "zero_copy"}])
+def test_reset_weights_rejects_daemon_owned_weights(extra_config, mock_ascend_config):
+    model = _TinyModel()
+    worker = _make_worker(dp_rank=0)
+    worker.load_config = LoadConfig(load_format="ipc_cache", model_loader_extra_config=extra_config)
+    worker.model_runner = cast(Any, SimpleNamespace(model=model))
+
+    with pytest.raises(ValueError, match="reset_weights is unsupported with daemon-owned zero_copy weights"):
+        worker.reset_weights()
+
+    assert torch.all(model.linear.weight == 1)
 
 
 def test_reset_weights_warns_under_nz_mode(mock_parallel_groups, monkeypatch):

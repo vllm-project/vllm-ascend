@@ -1155,6 +1155,7 @@ class NPUWorker(WorkerBase):
         return {prefix + name: digest for name, digest in digests.items()}
 
     def reset_weights(self) -> None:
+        require_private_weights(self.load_config, "reset_weights")
         if get_ascend_config().weight_nz_mode:
             logger.warning(
                 "weight_nz_mode is enabled: weight transfer update is unavailable, "
