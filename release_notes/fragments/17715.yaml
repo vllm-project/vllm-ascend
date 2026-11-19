@@ -3,6 +3,14 @@ entries:
   - category: feature
     text: >-
       Added native Messages and synchronous Responses API forwarding to the
-      disaggregated prefill proxy, including prefiller cache usage reporting.
-      Responses requests must provide explicit conversation history;
-      background mode and previous_response_id are not supported.
+      disaggregated prefill proxy example, including prefiller cache usage reporting.
+      Use these routes for evaluation and testing; Responses requires explicit
+      conversation history and does not support background mode or previous_response_id.
+  - category: feature
+    text: >-
+      With matching Ascend backends, native Messages and Responses requests in the
+      example proxy can retry decode recomputation through the load balancer.
+      Text replies can continue from visible output with the remaining token
+      budget. Interrupted structured replies can restart, with partial
+      structured events held back until the attempt finishes. Server tools can
+      run again on a retry.

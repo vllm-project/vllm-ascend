@@ -1,3 +1,4 @@
+# mypy: disable-error-code="operator, union-attr"
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -5,6 +6,7 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -532,7 +534,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -542,6 +544,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         max_in_flight_tokens=4096,
     )
     required_bytes = _ascend_max_memory_usage_bytes_from_groups(
+        DefaultKVCacheConfigBuilder(),
         vllm_config,
         groups,
     )
@@ -580,7 +583,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         *owners,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=135168),
+        model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -608,7 +611,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     gdn_blocks_each = required_blocks(gdn_groups[:1])
 
     blocks_before = required_blocks(groups)
-    bytes_before = _ascend_max_memory_usage_bytes_from_groups(vllm_config, groups)
+    bytes_before = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, groups)
 
     merged = _merge_mamba_state_groups(groups, 13)
 
@@ -629,7 +632,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
-    bytes_after = _ascend_max_memory_usage_bytes_from_groups(vllm_config, merged)
+    bytes_after = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
     assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
 
@@ -809,7 +812,12 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)
     assert expected is not None
-    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(SimpleNamespace(), groups) == expected
+    assert (
+        AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(
+            SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen4_exp"))), groups
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
@@ -818,6 +826,17 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
+
+    if vllm_version_is("0.33.0"):
+        import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
+
+        QSARawKeyCache = qsa_module.QSAKeyStateCache
+        QSAIndexerBackend = qsa_module.QSAStateBackend
+    else:
+        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
+
+        QSARawKeyCache = qsa_module.QSARawKeyCache
+        QSAIndexerBackend = qsa_module.QSAIndexerBackend
 
     groups = [
         KVCacheGroupSpec(
@@ -852,7 +871,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec
-    backend = qsa.qsa_cache.QSAStateBackend
+    backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
@@ -863,7 +882,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
-    layer = qsa.qsa_cache.QSACompressedKeyCache(
+    layer = qsa.qsa_indexer.QSACompressedKeyCache(
         head_size=spec.head_size,
         dtype=spec.dtype,
         prefix=name,
@@ -876,7 +895,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     bind_kv_cache_to_layers({name: caches[name]}, {name: layer})
     assert layer.kv_cache is caches[name]
     raw_name = groups[1].layer_names[0]
-    raw_layer = qsa.qsa_cache.QSAKeyStateCache(
+    raw_layer = QSARawKeyCache(
         head_size=20,
         dtype=spec.dtype,
         prefix=raw_name,
@@ -913,7 +932,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     )
     # One real request owns all eight tokens; avoid the device-only mapping kernel.
     common._token_to_req_indices_cache = torch.zeros(8, dtype=torch.int32)
-    monkeypatch.setattr(qsa.qsa_cache, "build_qsa_metadata", qsa.qsa_cache._build_qsa_metadata_torch)
+    monkeypatch.setattr(qsa.qsa_indexer, "build_qsa_metadata", qsa.qsa_indexer._build_qsa_metadata_torch)
     metadata = builder.build(0, common)
     torch.testing.assert_close(metadata.block_table, virtual)
     # Cross the manager-block boundary: flattened storage addresses must agree

@@ -128,6 +128,8 @@ def installed_runtime():
 
 
 async def _body(response) -> bytes:
+    if not hasattr(response, "body_iterator"):
+        return response.body
     chunks = []
     async for chunk in response.body_iterator:
         chunks.append(chunk if isinstance(chunk, bytes) else bytes(chunk))
@@ -338,34 +340,46 @@ def test_stream_usage_is_patched_across_http_chunk_boundaries(installed_runtime,
     assert all(entry.active_tokens == 0 for entry in scheduler.decoders.values())
 
 
-def test_messages_does_not_retry_when_body_has_no_choices(installed_runtime):
+def test_messages_does_not_retry_when_user_stop_sequence_is_recomputed(installed_runtime):
     scheduler, prefill, decode = installed_runtime
-    decode.chunks = [json.dumps({"type": "message", "stop_reason": "recomputed", "content": "done"}).encode()]
+    decode.chunks = [
+        json.dumps(
+            {
+                "type": "message",
+                "stop_reason": "stop_sequence",
+                "stop_sequence": "recomputed",
+                "content": [{"type": "text", "text": "done"}],
+            }
+        ).encode()
+    ]
 
     async def run():
         response = await proxy.handle_completions_impl(
             "/messages",
-            _request({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+            _request({"model": "m", "messages": [{"role": "user", "content": "hi"}], "stop_sequences": ["recomputed"]}),
         )
         return json.loads(await _body(response))
 
     body = asyncio.run(run())
 
-    assert body["stop_reason"] == "recomputed"
-    assert body["content"] == "done"
+    assert body["stop_reason"] == "stop_sequence"
+    assert body["stop_sequence"] == "recomputed"
+    assert body["content"] == [{"type": "text", "text": "done"}]
     assert len(prefill.posts) == 1
     assert scheduler.request_num == 0
 
 
-def test_incomplete_nonstream_tail_is_forwarded(installed_runtime):
-    _scheduler_obj, _prefill, decode = installed_runtime
+def test_incomplete_nonstream_body_returns_error(installed_runtime):
+    scheduler, _prefill, decode = installed_runtime
     decode.chunks = [b'{"type":"message"', b', "cut":']
 
     async def run():
         response = await proxy.handle_completions_impl("/messages", _request({"model": "m"}))
-        return await _body(response)
+        assert response.status_code == 502
+        return json.loads(await _body(response))
 
-    assert asyncio.run(run()) == b'{"type":"message", "cut":'
+    assert asyncio.run(run())["type"] == "error"
+    assert scheduler.request_num == 0
 
 
 def test_chat_completions_still_uses_choices_and_openai_cached_tokens(installed_runtime):

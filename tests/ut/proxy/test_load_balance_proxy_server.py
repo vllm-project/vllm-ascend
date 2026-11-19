@@ -25,9 +25,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROXY_SCRIPT = REPO_ROOT / "examples" / "disaggregated_prefill_v1" / "load_balance_proxy_server_example.py"
 
-MOCK_PREFILL_PORT = 19001
-MOCK_DECODE_PORT = 19002
-PROXY_PORT = 19080
+
+def _worker_port(port: int) -> int:
+    """Offset fixed ports per xdist worker so parallel workers never share ports.
+
+    pytest-xdist sets PYTEST_XDIST_WORKER (e.g. "gw3") in worker processes;
+    without it (serial runs) the base ports are used unchanged.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker.startswith("gw"):
+        try:
+            return port + int(worker[2:]) * 100
+        except ValueError:
+            pass
+    return port
+
+
+# The 100-port step exceeds the largest gap between any two of the fixed
+# ports below, so no two logical ports of different workers can collide.
+MOCK_PREFILL_PORT = _worker_port(19001)
+MOCK_DECODE_PORT = _worker_port(19002)
+PROXY_PORT = _worker_port(19080)
 MODEL = "test-model"
 
 
@@ -172,6 +190,7 @@ def _create_mock_backend_app():
             return self._default
 
     queue = ScriptQueue()
+    received_requests: list[dict] = []
 
     def _dec_val(v):
         if isinstance(v, dict) and set(v.keys()) == {"__b64__"}:
@@ -187,7 +206,12 @@ def _create_mock_backend_app():
         data = await req.json()
         items = [_dec_val(it) for it in data.get("items", [])]
         queue.set([ScriptItem(**it) if isinstance(it, dict) else it for it in items])
+        received_requests.clear()
         return {"ok": True}
+
+    @app.get("/__requests__")
+    async def received():
+        return received_requests
 
     async def _gen_stream(item: ScriptItem):
         emitted = 0
@@ -203,8 +227,10 @@ def _create_mock_backend_app():
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/completions")
+    @app.post("/v1/messages")
     @app.post("/v1/responses")
     async def handle(req: Request):
+        received_requests.append({"body": await req.json(), "request_id": req.headers.get("X-Request-Id")})
         item = queue.pop()
         if item.kind == "json":
             if isinstance(item.body, dict):
@@ -370,7 +396,7 @@ def test_decode_5xx(proxy_server):
 
 def test_decode_connection_failure(proxy_server):
     """Decode connection failure returns 502."""
-    dead_port = 19081
+    dead_port = _worker_port(19081)
     _kill_port(dead_port)
     time.sleep(0.5)
     dead_proc = subprocess.Popen(
@@ -388,7 +414,7 @@ def test_decode_connection_failure(proxy_server):
             "--decoder-hosts",
             "127.0.0.1",
             "--decoder-ports",
-            "19999",
+            str(_worker_port(19999)),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -502,7 +528,7 @@ def test_concurrent_requests(proxy_server):
 def test_instances_add_remove(proxy_server):
     """Add and remove a decode instance via /instances/add and /instances/remove."""
     test_file = str(Path(__file__).resolve())
-    temp_port = 19003
+    temp_port = _worker_port(19003)
     _kill_port(temp_port)
     temp_proc = subprocess.Popen(
         [sys.executable, test_file, "--mock-backend", str(temp_port)],
@@ -551,6 +577,147 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+@pytest.mark.parametrize("api", ("messages", "responses"))
+@pytest.mark.parametrize("streaming", (False, True))
+def test_native_recompute_retries_over_http(proxy_server, api, streaming):
+    request: dict[str, Any]
+    response: dict[str, Any]
+    finish: dict[str, Any]
+    stream_error: dict[str, Any]
+    if api == "messages":
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 20}
+        response = {"id": "winner", "type": "message", "stop_reason": "end_turn", "content": []}
+        finish = {"type": "message_stop"}
+        stream_error = {"type": "error", "error": {"type": "api_error", "message": "ascend_pd_recompute_before_output"}}
+    else:
+        request = {"model": MODEL, "input": "hello", "max_output_tokens": 20}
+        response = {"id": "winner", "object": "response", "status": "completed", "output": []}
+        finish = {"type": "response.completed", "sequence_number": 1, "response": response}
+        stream_error = {
+            "type": "error",
+            "code": "ascend_pd_recompute_before_output",
+            "message": "ascend_pd_recompute_before_output",
+            "sequence_number": 0,
+        }
+    request["stream"] = streaming
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {"kind": "json", "body": {"kv_transfer_params": {"do_remote_prefill": True, "remote_block_ids": [block]}}}
+            for block in (1, 2)
+        ],
+    )
+    if streaming:
+        failed = b"event: error\ndata: " + json.dumps(stream_error).encode() + b"\n\n"
+        final = b"data: " + json.dumps(finish).encode() + b"\n\n"
+        _set_script(
+            MOCK_DECODE_PORT,
+            [{"kind": "stream", "chunks": [failed[:13], failed[13:]]}, {"kind": "stream", "chunks": [final]}],
+        )
+    else:
+        error_response = {"error": {"message": "ascend_pd_recompute_before_output", "code": 500}}
+        _set_script(
+            MOCK_DECODE_PORT,
+            [{"kind": "json", "status": 500, "body": error_response}, {"kind": "json", "body": response}],
+        )
+    with httpx.Client(timeout=5) as client:
+        result = client.post(f"{proxy_server}/v1/{api}", json=request)
+        health = client.get(f"{proxy_server}/healthcheck")
+        prefill = client.get(f"http://127.0.0.1:{MOCK_PREFILL_PORT}/__requests__").json()
+        decode = client.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+    assert result.status_code == 200
+    if streaming:
+        assert result.content == final
+        assert result.headers["content-type"] == "text/event-stream; charset=utf-8"
+    else:
+        assert result.json() == response
+        assert result.headers["content-type"] == "application/json"
+    assert health.json()["request_num"] == 0
+    assert len(prefill) == len(decode) == 2
+    assert [attempt["request_id"] for attempt in prefill] == [attempt["request_id"] for attempt in decode]
+    assert len({attempt["request_id"] for attempt in decode}) == 2
+    assert [attempt["body"]["kv_transfer_params"]["remote_block_ids"] for attempt in decode] == [[1], [2]]
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+@pytest.mark.parametrize("structured", [False, True])
+def test_native_partial_recompute_continues_over_http(proxy_server, api, streaming, structured):
+    from tests.ut.proxy.test_load_balance_proxy_recompute import (
+        _assert_resumed_response,
+        _events,
+        _recompute_error,
+        _structured_options,
+        _text_result,
+        _text_stream,
+        native_request,
+    )
+
+    request = native_request(api, streaming)
+    request["model"] = MODEL
+    if structured:
+        request.update(_structured_options(api, "schema"))
+    partial = _text_result(api, "first-attempt", '{"key":' if structured else "prefix ", 5)
+    final = _text_result(api, "final-attempt", '{"key":"suffix"}' if structured else "suffix", 2, input_tokens=58)
+    progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {"kind": "json", "body": {"kv_transfer_params": {"do_remote_prefill": True, "remote_block_ids": [block]}}}
+            for block in (1, 2)
+        ],
+    )
+    if streaming:
+        _set_script(
+            MOCK_DECODE_PORT,
+            [
+                {"kind": "stream", "chunks": _text_stream(api, partial, recompute=progress)},
+                {"kind": "stream", "chunks": _text_stream(api, final)},
+            ],
+        )
+    elif structured:
+        _set_script(
+            MOCK_DECODE_PORT,
+            [
+                {"kind": "json", "status": 500, "body": _recompute_error(api, progress, streaming=False)},
+                {"kind": "json", "body": final},
+            ],
+        )
+    else:
+        partial["kv_transfer_params"] = {"ascend_pd_recompute": "ascend_pd_recompute_after_output", **progress}
+        _set_script(MOCK_DECODE_PORT, [{"kind": "json", "body": obj} for obj in (partial, final)])
+    with httpx.Client(timeout=5) as client:
+        result = client.post(f"{proxy_server}/v1{api}", json=request)
+        health = client.get(f"{proxy_server}/healthcheck")
+        prefill = client.get(f"http://127.0.0.1:{MOCK_PREFILL_PORT}/__requests__").json()
+        decode = client.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+    assert result.status_code == 200
+    events = _events(result.content) if streaming else None
+    if structured:
+        assert b"first-attempt" not in result.content
+        if not streaming:
+            key = "content" if api == "/messages" else "output"
+            assert result.json()[key] == final[key]
+        elif api == "/messages":
+            assert events[-1]["type"] == "message_stop"
+            assert json.loads(events[2]["delta"]["text"]) == {"key": "suffix"}
+        else:
+            assert events[-1]["type"] == "response.completed"
+            assert events[-1]["response"]["output"] == final["output"]
+    else:
+        usage = _assert_resumed_response(api, events, result.content, "prefix suffix", ("prefix ", "suffix"))
+        assert usage["output_tokens"] == 7
+    assert health.json()["request_num"] == 0
+    assert len(prefill) == len(decode) == 2
+    assert [entry["request_id"] for entry in prefill] == [entry["request_id"] for entry in decode]
+    budget_key, history_key = ("max_tokens", "messages") if api == "/messages" else ("max_output_tokens", "input")
+    assert decode[-1]["body"][budget_key] == 112
+    assert decode[-1]["body"][history_key] == prefill[-1]["body"][history_key]
+    if structured:
+        assert decode[-1]["body"][history_key] == request[history_key]
+    assert [attempt["body"]["kv_transfer_params"]["remote_block_ids"] for attempt in decode] == [[1], [2]]
 
 
 @pytest.mark.parametrize("streaming", [False, True])

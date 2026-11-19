@@ -1,0 +1,6 @@
+pr: 19460
+entries:
+  - category: feature
+    text: >-
+      Added entropy verification support for Model Runner V2 speculative decoding.
+      Enable it through additional_config.rejection_sampler_config.enable_entropy_verify.

@@ -247,8 +247,6 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
     with pytest.raises(NotImplementedError):
         scheduler.update_connector_output(MagicMock())
     with pytest.raises(NotImplementedError):
-        scheduler.get_num_new_matched_tokens(MagicMock(), 0)
-    with pytest.raises(NotImplementedError):
         scheduler.update_state_after_alloc(MagicMock(), MagicMock(), 0)
     with pytest.raises(NotImplementedError):
         scheduler.build_connector_meta(MagicMock())
@@ -272,6 +270,7 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
+        block_hashes=["full-prompt-hash"],
     )
 
     scheduler.on_new_request(request)
@@ -282,3 +281,35 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
+    # Keep the two list literals in separate statements. A conditional
+    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
+    if truncated:
+        assert request.block_hashes == [(1, 2)]
+    else:
+        assert request.block_hashes == ["full-prompt-hash"]
+
+
+@pytest.mark.parametrize(
+    ("need_truncate", "computed", "expected"),
+    [
+        (False, 0, (32, True)),
+        (False, 16, (16, True)),
+        (False, 32, (0, False)),
+        (True, 0, (31, True)),
+        (True, 31, (0, False)),
+        (True, 32, (0, False)),
+    ],
+)
+def test_shared_remote_prefill_tokens(need_truncate, computed, expected):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.need_truncate = need_truncate
+    request = make_request(kv_transfer_params={"do_remote_prefill": True})
+
+    assert scheduler.get_num_new_matched_tokens(request, computed) == expected
+    assert request.kv_transfer_params["num_computed_tokens"] == computed
+
+
+@pytest.mark.parametrize("params", [None, {}, {"do_remote_decode": True}])
+def test_shared_local_request_has_no_remote_tokens(params):
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    assert scheduler.get_num_new_matched_tokens(make_request(kv_transfer_params=params), 0) == (0, False)

@@ -7,13 +7,19 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.request import RequestStatus
 
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
+from vllm_ascend.core.pd_recompute import (
+    PD_RECOMPUTE_ARG,
+    PD_RECOMPUTE_INTERRUPTED,
+    PD_RECOMPUTE_RETRY,
+    PD_RECOMPUTE_VERSION,
+)
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
     AsyncRecomputeScheduler,
@@ -107,6 +113,7 @@ def test_preempt_without_offload_hook_sends_request_back_to_p(connector):
         request_id="req-1",
         client_index=2,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -138,6 +145,7 @@ def test_preempt_offload_failure_sends_request_back_to_p():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -213,6 +221,7 @@ def test_preempt_without_computed_kv_still_uses_recompute_fallback():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=0,
+        sampling_params=None,
     )
 
     scheduler.finish_requests = MagicMock(return_value=[request])
@@ -241,6 +250,7 @@ def test_preempt_offload_exception_uses_recompute_fallback():
         request_id="req-1",
         client_index=0,
         num_computed_tokens=17,
+        sampling_params=None,
     )
     scheduler.finish_requests = MagicMock(return_value=[request])
 
@@ -280,6 +290,44 @@ def test_recomputed_output_precedes_regular_output():
         "regular-request",
     ]
     assert outputs[0].outputs[0].stop_reason == "recomputed"
+
+
+@pytest.mark.parametrize(
+    "mode, token_count, expected_signal",
+    [
+        (PD_RECOMPUTE_VERSION, 0, PD_RECOMPUTE_RETRY),
+        (PD_RECOMPUTE_VERSION, 3, PD_RECOMPUTE_INTERRUPTED),
+        (None, 3, None),
+    ],
+)
+def test_recomputed_output_marks_native_api_interruptions(mode, token_count, expected_signal):
+    scheduler = _make_preempt_scheduler()
+    request = SimpleNamespace(
+        request_id="request-to-recompute",
+        client_index=2,
+        sampling_params=SimpleNamespace(extra_args={PD_RECOMPUTE_ARG: mode} if mode is not None else None),
+        num_output_tokens=token_count,
+        num_prompt_tokens=19,
+        max_tokens=10,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+    scheduler._finish_recomputed_request(request)
+    with patch.object(Scheduler, "update_from_output", return_value={}):
+        outputs = scheduler.update_from_output(
+            SimpleNamespace(recomputed_reqs=scheduler._recomputed_reqs),
+            MagicMock(),
+        )
+
+    scheduler.finish_requests.assert_called_once_with(request.request_id, RequestStatus.FINISHED_ABORTED)
+    output = outputs[2].outputs[0]
+    assert output.request_id == request.request_id
+    assert not output.new_token_ids
+    assert output.finish_reason == (FinishReason.ERROR if expected_signal else FinishReason.STOP)
+    assert output.stop_reason == "recomputed"
+    transfer = {PD_RECOMPUTE_ARG: expected_signal} if expected_signal else None
+    if expected_signal == PD_RECOMPUTE_INTERRUPTED:
+        transfer.update(output_tokens=3, remaining_tokens=7, input_tokens=19)
+    assert output.kv_transfer_params == transfer
 
 
 def test_recompute_scheduler_variants_keep_offload_preemption():

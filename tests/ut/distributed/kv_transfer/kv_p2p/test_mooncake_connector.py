@@ -18,6 +18,13 @@ import torch
 import zmq
 from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
+
+# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
+# main; the v0.33.0 lane still ships them in `kv_cache_utils`.
+from vllm.v1.core.kv_cache_planning import (
+    get_kv_cache_config_from_groups,
+    is_kv_cache_spec_uniform,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -33,6 +40,7 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
+    GroupTransferInfo,
     KVCacheRecvingThread,
     KVCacheSendingThread,
     KVCacheTaskTracker,
@@ -52,20 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
-
-# vLLM #61183 moved these KV-cache planning helpers to `kv_cache_planning` on
-# main; the v0.32.0 lane still ships them in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import (
-        get_kv_cache_config_from_groups,
-        is_kv_cache_spec_uniform,
-    )
-else:
-    from vllm.v1.core.kv_cache_planning import (
-        get_kv_cache_config_from_groups,
-        is_kv_cache_spec_uniform,
-    )
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -2998,7 +2993,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3012,7 +3007,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_selects_aligned_prompt_state_block(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3026,7 +3021,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3040,7 +3035,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_get_transfer_block_ids_rejects_short_aligned_state_metadata(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -3052,7 +3047,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_uses_compressed_prompt_len(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=32,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3065,7 +3060,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3078,7 +3073,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_clips_sliding_window_group(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3091,7 +3086,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_get_swa_transfer_block_ids_drops_zero_from_sliding_window_tail(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=2,
                 is_state_group=False,
@@ -3104,7 +3099,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_transfer_block_ids_trims_mtp_before_swa_zero_filter(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3118,7 +3113,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -3137,7 +3132,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_clips_sliding_window_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3156,7 +3151,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_before_swa_tail_clip(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            GroupTransferInfo(
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -3176,10 +3171,10 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
     def test_request_finished_respects_kv_group_layout(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=32, blocks_per_window=0, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=3, is_state_group=False),
-            types.SimpleNamespace(tokens_per_block=16, blocks_per_window=0, is_state_group=True),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=0, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=32, blocks_per_window=0, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=3, is_state_group=False),
+            GroupTransferInfo(tokens_per_block=16, blocks_per_window=0, is_state_group=True),
         ]
         blocks = (
             [100, 101, 102, 103, 104, 105],
@@ -5434,6 +5429,45 @@ def test_unused_remote_ports_are_notified_once_by_primary_receiver(primary, has_
     for _ in range(2):
         receiver._send_done_signal_to_free_remote_port("r", "default-peer", ports)
     assert sent == ([("r", "idle-peer", 7000, ports)] if primary and has_ports else [])
+
+
+@pytest.mark.parametrize("awaiting_kvs", [False, True])
+@pytest.mark.parametrize("transfer_failed", [False, True])
+def test_receive_completion_contract_is_preserved(awaiting_kvs, transfer_failed):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver._is_failed_recv_request = MagicMock(side_effect=[False, transfer_failed])
+    receiver._transfer_kv_cache_all_groups = MagicMock()
+    receiver._mark_request_task_done = MagicMock(return_value=True)
+    receiver.pending_reformat_lock = threading.Lock()
+    receiver.pending_reformat = {"r": object()}
+    receiver.proc_not_transfer_request_lock = threading.Lock()
+    receiver.proc_not_transfer_request = {}
+    receiver._reformat_pending_kv_caches = MagicMock()
+    receiver._clear_failed_recv_request = MagicMock()
+    receiver.task_tracker = MagicMock()
+    receiver.request_queue = MagicMock()
+    receiver._send_done_signal_to_free_remote_port = MagicMock()
+    receiver._send_done_recv_signal = MagicMock()
+    meta = {
+        "request_id": "r",
+        "remote_request_id": "remote-r",
+        "remote_host": "host",
+        "remote_handshake_port": 1,
+        "remote_port_send_num": {},
+        "all_task_done": True,
+        "awaiting_kvs": awaiting_kvs,
+    }
+    receiver._handle_request(meta)
+    if transfer_failed:
+        receiver._reformat_pending_kv_caches.assert_not_called()
+    else:
+        receiver._reformat_pending_kv_caches.assert_called_once_with("r")
+    if awaiting_kvs:
+        receiver.task_tracker.update_done_task_count.assert_called_once_with("r")
+    else:
+        receiver.task_tracker.update_done_task_count.assert_called_once_with("r", report_completion=False)
+    receiver.request_queue.task_done.assert_called_once()
+    receiver._send_done_recv_signal.assert_called_once()
 
 
 @pytest.mark.parametrize("pulls", [1, 2, 4])

@@ -71,7 +71,7 @@ order listed below. Outputs retain their corresponding input device and dtype.
   preparation helper is not a replacement implementation of the CANN indexer.
 - **Differences**: Fuse concatenation, zero initialization, and length clamping
   into one kernel for contiguous inputs. A sentinel provides effective work
-  when a DSA-CP shard has no completed pooled keys, avoiding the A3 CANN
+  when a request has no completed pooled keys, avoiding the A3 CANN
   empty-work output-initialization path. Small metadata tiles avoid expensive
   wide int64 vector lowering on A3. No CANN package files are modified.
 

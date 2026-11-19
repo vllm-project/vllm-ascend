@@ -1,0 +1,5 @@
+pr: 21584
+entries:
+  - category: performance
+    text: Reduce FP32 candidate packing latency with exact radix sorting shared with BF16 on Ascend A3.
+    hardware: [A3]

@@ -280,8 +280,8 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     )
 
 
-@pytest.mark.parametrize("speculative", [False, True])
-def test_decode_forward_does_not_reconcat_qkv(speculative):
+@pytest.mark.parametrize("speculative,adaptive", [(False, False), (True, False), (True, True)])
+def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
     layer = _make_layer()
     packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     metadata = _make_mixed_metadata()
@@ -302,7 +302,15 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
+        use_upstream_recurrent=adaptive,
+        use_upstream_conv=adaptive,
     )
+    if adaptive:
+        metadata.spec_state_indices_tensor = torch.arange(1, 9, dtype=torch.int32).reshape(2, 4)
+        conv_metadata = metadata.spec_decode_metadata.spec_causal_conv1d
+        conv_metadata.query_start_loc = torch.tensor([0, 1, 4], dtype=torch.int32)
+        conv_metadata.num_accepted_tokens = torch.tensor([3, 2], dtype=torch.int32)
+        metadata.spec_decode_metadata.actual_seq_lengths = torch.tensor([0, 1, 3], dtype=torch.int32)
     output = torch.empty(4, 1, 2)
     context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
@@ -318,10 +326,19 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
             torch.testing.assert_close(kwargs["num_accepted_tokens"], torch.tensor([1, 2], dtype=torch.int32))
         return v.clone()
 
+    def upstream_recurrent(q, k, v, **kwargs):
+        torch.testing.assert_close(q[0], packed[:, :2].reshape(4, 1, 2))
+        torch.testing.assert_close(k[0], packed[:, 2:4].reshape(4, 1, 2))
+        torch.testing.assert_close(v[0], packed[:, 4:].reshape(4, 1, 2))
+        assert kwargs["ssm_state_indices"] is metadata.spec_state_indices_tensor
+        assert kwargs["cu_seqlens"] is conv_metadata.query_start_loc
+        assert kwargs["num_accepted_tokens"].tolist() == [3, 2]
+        return v.clone(), kwargs["initial_state"]
+
     # Reject the inherited concat helper for all real decode inputs.
     original = layer.rearrange_mixed_qkv.side_effect
-    layer.rearrange_mixed_qkv.side_effect = (
-        lambda x: original(x) if x is None else pytest.fail("decode used inherited QKV concat")
+    layer.rearrange_mixed_qkv.side_effect = lambda x: (
+        original(x) if x is None else pytest.fail("decode used inherited QKV concat")
     )
     with (
         override_forward_context(context),
@@ -333,16 +350,26 @@ def test_decode_forward_does_not_reconcat_qkv(speculative):
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
+        patch(
+            "vllm_ascend.ops.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
+        ) as varlen_conv,
         patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=recurrent),
+        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
     if speculative:
+        selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(
-            conv.call_args.kwargs["num_accepted_tokens"],
-            torch.tensor([1, 2], dtype=torch.int32),
+            selected_conv.call_args.kwargs["num_accepted_tokens"],
+            torch.tensor([3, 2] if adaptive else [1, 2], dtype=torch.int32),
         )
+    if adaptive:
+        conv.assert_not_called()
+        varlen_conv.assert_called_once()
+    else:
+        varlen_conv.assert_not_called()
 
 
 @pytest.mark.parametrize("mixed,head_dim", [(False, 16), (True, 16), (False, 2)])
@@ -416,3 +443,90 @@ def test_prefill_conv_layout_for_pure_and_mixed_batches(mixed, head_dim):
     else:
         update_mock.assert_not_called()
     torch.testing.assert_close(output, packed[:, 2 * head_dim :].reshape(3, 1, head_dim))
+
+
+@pytest.mark.parametrize("padded_state", [True, False])
+def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> None:
+    """A page-padded state cache must not be materialized by plain indexing."""
+    head_dim = 2
+    layer = _make_layer()
+    if padded_state:
+        # Logical state rows sitting inside pages that carry padding lanes,
+        # mirroring the non-contiguous hybrid KV-cache view on MRv2.
+        backing = torch.zeros(2, 1, head_dim, 2 * head_dim)
+        ssm_state = backing[..., :head_dim]
+    else:
+        ssm_state = torch.zeros(2, 1, head_dim, head_dim)
+    layer.kv_cache = (torch.zeros(2, 1, 3 * head_dim), ssm_state)
+
+    metadata = _make_mixed_metadata()
+    metadata.num_decodes = metadata.num_decode_tokens = 0
+    metadata.num_prefill_tokens = 3
+    metadata.prefill_query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
+    conv_meta.query_start_loc = metadata.prefill_query_start_loc
+    conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
+    conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
+
+    packed = torch.arange(9 * head_dim, dtype=torch.float32).reshape(3, 3 * head_dim)
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    output = torch.empty(3, 1, head_dim)
+
+    def gather_state(state, indices, has_initial_state):
+        gathered = state.index_select(0, indices.to(torch.long))
+        zero_rows = ~has_initial_state.to(torch.bool)
+        gathered[zero_rows] = 0
+        return gathered
+
+    def scatter_state(state, indices, source):
+        state.index_copy_(0, indices.to(torch.long), source)
+
+    def conv(x, *args, **kwargs):
+        assert kwargs["head_num"] == 0
+        return x.clone()
+
+    with (
+        override_forward_context(context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 3, 1), torch.ones(1, 3, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=conv),
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
+        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
+        patch(
+            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+            side_effect=lambda **kw: (
+                kw["v"].clone(),
+                torch.full_like(kw["initial_state"], 7.0),
+            ),
+        ),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(3, 1), torch.zeros(3, 1), output)
+
+    torch.testing.assert_close(output, packed[:, 2 * head_dim :].reshape(3, 1, head_dim))
+    if padded_state:
+        # Only the selected prefill row is read and written; the padding lanes
+        # and every other page stay untouched.
+        gather_mock.assert_called_once()
+        assert gather_mock.call_args.args[0] is ssm_state
+        scatter_mock.assert_called_once()
+        assert scatter_mock.call_args.args[0] is ssm_state
+        clear_mock.assert_not_called()
+        torch.testing.assert_close(backing[1, 0, :, :head_dim], torch.full((head_dim, head_dim), 7.0))
+        assert torch.count_nonzero(backing[1, 0, :, head_dim:]) == 0
+        assert torch.count_nonzero(backing[0]) == 0
+    else:
+        gather_mock.assert_not_called()
+        scatter_mock.assert_not_called()
+        clear_mock.assert_called_once()
+        torch.testing.assert_close(ssm_state[1], torch.full((1, head_dim, head_dim), 7.0))

@@ -6,11 +6,70 @@ from unittest.mock import Mock
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
     assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
     assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
+
+
+def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        upstream_projection,
+    )
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    layer._main_fused_norm_rope_eligible = Mock(return_value=False)
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
+    upstream_projection.assert_called_once_with(qkv, positions)
+
+
+def test_indexer_query_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("query", "key"))
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "project_qk",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_n_heads = 2
+    layer.index_head_dim = 4
+    layer.index_kv_heads = 1
+    layer.index_qk_proj = Mock(return_value=(torch.empty((2, 12)), None))
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer.project_qk(hidden_states, positions) == ("query", "key")
+    upstream_projection.assert_called_once_with(hidden_states, positions)
+
+
+def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value="keys")
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "normalize_compressed_keys",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_head_dim = 4
+    layer.rotary_emb = SimpleNamespace(mrope_section=[1, 1, 0])
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    pooled = torch.empty((2, 4))
+    first_positions = torch.arange(6).reshape(2, 3)
+
+    assert layer.normalize_compressed_keys(pooled, first_positions) == "keys"
+    upstream_projection.assert_called_once_with(pooled, first_positions)
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
@@ -46,7 +105,8 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     )
 
     selected = torch.zeros((2, 3), dtype=torch.int32)
-    indexer = Mock(return_value=selected)
+    # Main's indexer returns (selection, prepared main outputs).
+    indexer = Mock(return_value=selected if vllm_version_is("0.33.0") else (selected, None))
     indexer.output_width = 3
     indexer.raw_key_cache = SimpleNamespace(prefix=side_prefix)
     layer.indexer = indexer
@@ -81,8 +141,9 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     update_args = layer.impl.do_kv_cache_update.call_args.args
     torch.testing.assert_close(update_args[1], projected_k.view(2, 1, 4))
     torch.testing.assert_close(update_args[2], projected_v.view(2, 1, 4))
-    layer.impl.forward_qsa.assert_called_once()
-    forward_args = layer.impl.forward_qsa.call_args.args
+    assert layer.impl.forward_qsa.call_count + layer.impl.forward.call_count == 1
+    forward_call = layer.impl.forward_qsa if vllm_version_is("0.33.0") else layer.impl.forward
+    forward_args = forward_call.call_args.args
     torch.testing.assert_close(forward_args[1], projected_q.view(2, 2, 4))
 
 

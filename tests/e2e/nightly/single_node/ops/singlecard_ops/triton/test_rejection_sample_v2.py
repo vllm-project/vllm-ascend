@@ -4,8 +4,10 @@
 
 import gc
 
+import numpy as np
 import pytest
 import torch
+from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
 from vllm_ascend.device.device_config import get_ascend_device_type
@@ -143,6 +145,7 @@ def test_synthetic_rejection_sample(
             **inputs,
             num_speculative_steps=num_speculative_steps,
             synthetic_conditional_rates=synthetic_conditional_rates,
+            use_entropy_verify=False,
         )
         # num_sampled includes the resampled/bonus token.
         num_accepted_chunks.append(num_sampled - 1)
@@ -212,10 +215,16 @@ def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_bloc
         padded_inputs["draft_logits"] = None
 
     sampled, num_sampled = rejection_sample(
-        **padded_inputs, num_speculative_steps=num_speculative_steps, use_block_verification=use_block_verification
+        **padded_inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        use_entropy_verify=False,
     )
     baseline_sampled, baseline_num_sampled = rejection_sample(
-        **inputs, num_speculative_steps=num_speculative_steps, use_block_verification=use_block_verification
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        use_entropy_verify=False,
     )
 
     assert torch.equal(num_sampled, baseline_num_sampled)
@@ -275,7 +284,9 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
         # rejection lands exactly on the placeholder.
         draft_rows[:, 1] = 7
 
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=num_speculative_steps)
+    sampled, num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=num_speculative_steps, use_entropy_verify=False
+    )
 
     # Only draft step 0 can be accepted, plus one resampled token.
     assert (num_sampled <= 2).all(), "Accepted a draft token past a placeholder."
@@ -313,7 +324,7 @@ def test_block_verification_preserves_target_distribution(num_speculative_steps,
         # coupling: reusing u would produce [0.2, 0.175, 0.625] at position 0.
         inputs["draft_sampled"].zero_()
     sampled, num_sampled = rejection_sample(
-        **inputs, num_speculative_steps=num_speculative_steps, use_block_verification=True
+        **inputs, num_speculative_steps=num_speculative_steps, use_block_verification=True, use_entropy_verify=False
     )
     sampled = sampled.cpu()
     num_sampled = num_sampled.cpu()
@@ -356,6 +367,7 @@ def test_placeholder_recovers_from_target(placeholder_step, method, has_draft_lo
         num_speculative_steps=3,
         use_block_verification=method == "block",
         synthetic_conditional_rates=torch.ones(3, device="npu") if method == "synthetic" else None,
+        use_entropy_verify=False,
     )
     assert (num_sampled == placeholder_step + 1).all()
     if temperature == 0.0:
@@ -376,8 +388,10 @@ def test_block_verification_extends_accepted_prefix():
     target = torch.tensor([0.4, 0.3, 0.3], device="npu")
     draft = torch.tensor([0.5, 0.2, 0.3], device="npu")
     inputs = _build_rejection_sample_inputs(target.log(), draft.log(), 3, 1.0, num_trials=8192)
-    _, standard_counts = rejection_sample(**inputs, num_speculative_steps=3)
-    _, block_counts = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+    _, standard_counts = rejection_sample(**inputs, num_speculative_steps=3, use_entropy_verify=False)
+    _, block_counts = rejection_sample(
+        **inputs, num_speculative_steps=3, use_block_verification=True, use_entropy_verify=False
+    )
     # Exact mean accepted lengths for these distributions are approximately
     # 2.439 (standard) and 2.509 (block); leave room for sampling noise.
     assert block_counts.float().mean().item() > standard_counts.float().mean().item() + 0.02
@@ -414,7 +428,9 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
         temperature=torch.tensor([1.0, 0.6, 0.0, 1.0], device="npu"),
         seed=torch.arange(4, dtype=torch.int64, device="npu"),
     )
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+    sampled, num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=3, use_block_verification=True, use_entropy_verify=False
+    )
     assert num_sampled.cpu().tolist() == lengths
     for row, length in enumerate(lengths):
         assert (sampled[row, :length] == expected_ids[row]).all()
@@ -438,7 +454,9 @@ def test_block_verification_single_bonus_only_request(has_draft_logits, temperat
     if not has_draft_logits:
         inputs["draft_logits"] = None
 
-    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+    sampled, num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=3, use_block_verification=True, use_entropy_verify=False
+    )
 
     assert num_sampled.cpu().tolist() == [1]
     assert sampled[:, 0].cpu().tolist() == [1]
@@ -461,8 +479,165 @@ def test_block_verification_keeps_greedy_results(has_draft_logits):
     drafts[:, 1:] = 2
     drafts[::3, 1] = 0
     drafts[1::3, 2] = -1
-    expected, expected_counts = rejection_sample(**inputs, num_speculative_steps=3)
-    sampled, counts = rejection_sample(**inputs, num_speculative_steps=3, use_block_verification=True)
+    expected, expected_counts = rejection_sample(**inputs, num_speculative_steps=3, use_entropy_verify=False)
+    sampled, counts = rejection_sample(
+        **inputs, num_speculative_steps=3, use_block_verification=True, use_entropy_verify=False
+    )
     torch.testing.assert_close(counts, expected_counts)
     valid = torch.arange(4, device="npu")[None, :] < counts[:, None]
     torch.testing.assert_close(sampled[valid], expected[valid])
+
+
+def _accepted_prefix(target_probs, draft_probs, draft_tokens, uniforms, *, thresholds=None):
+    """Return accepted draft count, excluding the recovery/bonus token.
+
+    Inputs contain only draft rows. A missing draft distribution is one-hot.
+    Placeholder and zero-probability proposals stop the scan.
+    """
+    target_probs = np.asarray(target_probs, dtype=np.float32)
+    draft_probs = None if draft_probs is None else np.asarray(draft_probs, dtype=np.float32)
+    uniforms = np.asarray(uniforms, dtype=np.float32)
+    thresholds = np.ones(len(draft_tokens), dtype=np.float32) if thresholds is None else thresholds
+    for step, token in enumerate(draft_tokens):
+        if token < 0:
+            return step
+        q = np.float32(1) if draft_probs is None else draft_probs[step, token]
+        if q <= 0 or target_probs[step, token] / q < np.float32(thresholds[step] * uniforms[step]):
+            return step
+    return len(draft_tokens)
+
+
+def _entropy_thresholds(probs, posterior_threshold=0.95, posterior_alpha=0.4):
+    probs = np.asarray(probs, dtype=np.float32)
+    entropy = -np.sum(probs * np.log(probs + np.float32(1e-10)), axis=-1, dtype=np.float32)
+    return np.minimum(np.exp(-entropy * np.float32(posterior_alpha)), np.float32(posterior_threshold))
+
+
+@triton.jit
+def _export_verification_uniforms(out, seeds, pos, mapping, NUM_ROWS: tl.constexpr):
+    # Export exactly the MRV2 random stream to an independent acceptance oracle.
+    row = tl.program_id(0)
+    req = tl.load(mapping + row).to(tl.int64)
+    seed = tl.load(seeds + req)
+    position = tl.load(pos + row).to(tl.int32)
+    value = tl.max(tl.rand(tl.randint(seed, position), tl.arange(0, 1)).to(tl.float32), 0)
+    tl.store(out + row, tl.maximum(value, 4.6566127342e-10))
+
+
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+@torch.inference_mode()
+def test_entropy_verify_ragged_requests(has_draft_logits, temperature):
+    logits = torch.tensor([-float("inf"), 0.0, -float("inf")], device="npu")
+    inputs = _build_rejection_sample_inputs(logits, logits, 3, temperature, 3)
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    else:
+        # The last request proposes token 1 although its draft probability is zero.
+        inputs["draft_logits"][1, :, :] = torch.tensor([0.0, -float("inf"), -float("inf")], device="npu")
+    # Requests: 3 drafts with an interior placeholder, bonus only, 1 draft.
+    lengths = [4, 1, 2]
+    inputs["cu_num_logits"] = torch.tensor([0, 4, 5, 7], dtype=torch.int32, device="npu")
+    inputs["idx_mapping"] = torch.tensor([2, 0, 1], dtype=torch.int32, device="npu")
+    inputs["expanded_idx_mapping"] = torch.tensor([2, 2, 2, 2, 0, 1, 1], dtype=torch.int32, device="npu")
+    inputs["expanded_local_pos"] = torch.tensor([0, 1, 2, 3, 0, 0, 1], dtype=torch.int32, device="npu")
+    inputs["target_logits"] = inputs["target_logits"][: sum(lengths)]
+    inputs["pos"] = inputs["pos"][: sum(lengths)]
+    inputs["draft_sampled"] = torch.tensor([0, 1, -1, 1, 0, 0, 1], dtype=torch.int64, device="npu")
+    sampled, counts = rejection_sample(
+        **inputs,
+        num_speculative_steps=3,
+        use_entropy_verify=True,
+    )
+    assert counts.cpu().tolist() == [2, 1, 1 if has_draft_logits and temperature > 0 else 2]
+    valid = torch.arange(4, device="npu")[None, :] < counts[:, None]
+    assert (sampled[valid] == 1).all()
+
+
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_entropy_parameters_and_per_position_thresholds(has_draft_logits, dtype):
+    num_trials, steps = 256, 3
+    temperature = 0.7
+    # Alternating entropy makes reusing the first threshold distinguishable.
+    p = torch.tensor([[0.9, 0.1], [0.5, 0.5], [0.2, 0.8]], device="npu")
+    q = torch.tensor([[0.8, 0.2]] * steps, device="npu")
+    inputs = _build_rejection_sample_inputs(p[0].log(), q[0].log() * temperature, steps, temperature, num_trials)
+    inputs["target_logits"] = torch.cat([p, p[-1:]]).log().to(dtype).repeat(num_trials, 1)
+    inputs["draft_logits"] = (
+        (q.log() * temperature).to(dtype)[None].repeat(num_trials, 1, 1) if has_draft_logits else None
+    )
+    inputs["draft_sampled"].zero_()
+    uniforms = torch.empty_like(inputs["pos"], dtype=torch.float32)
+    _export_verification_uniforms[(uniforms.numel(),)](
+        uniforms, inputs["seed"], inputs["pos"], inputs["expanded_idx_mapping"], NUM_ROWS=uniforms.numel()
+    )
+    u = uniforms.cpu().numpy().reshape(num_trials, steps + 1)[:, :steps]
+    target_probs = inputs["target_logits"][:steps].float().softmax(-1).cpu().numpy()
+    draft_probs = (
+        (inputs["draft_logits"][0].float() / temperature).softmax(-1).cpu().numpy() if has_draft_logits else None
+    )
+
+    def reference(thresholds):
+        return np.array(
+            [_accepted_prefix(target_probs, draft_probs, [0] * steps, draws, thresholds=thresholds) + 1 for draws in u]
+        )
+
+    expected_counts = []
+    for threshold, alpha in ((1.0, 0.0), (0.6, 0.0), (0.95, 0.4), (0.95, 1.2)):
+        thresholds = _entropy_thresholds(target_probs, threshold, alpha)
+        expected = reference(thresholds)
+        sampled, counts = rejection_sample(
+            **inputs,
+            num_speculative_steps=steps,
+            use_entropy_verify=True,
+            posterior_threshold=threshold,
+            posterior_alpha=alpha,
+        )
+        np.testing.assert_array_equal(counts.cpu().numpy(), expected)
+        accepted = torch.arange(steps + 1, device="npu")[None, :] < counts[:, None] - 1
+        assert (sampled[accepted] == 0).all()
+        expected_counts.append(expected)
+        if alpha == 0.4:
+            # Check that this corpus detects reusing the first threshold.
+            assert np.any(expected != reference(np.full_like(thresholds, thresholds[0])))
+    # Ignoring either parameter must fail, rather than silently pass a no-op test.
+    assert np.any(expected_counts[0] != expected_counts[1])
+    assert np.any(expected_counts[2] != expected_counts[3])
+
+
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@torch.inference_mode()
+def test_entropy_verify_reduces_all_vocab_blocks(has_draft_logits):
+    # Three vocabulary blocks require both a cross-block sum and padding masks.
+    vocab_size, num_trials = 16385, 128
+    target = torch.full((vocab_size,), -float("inf"), device="npu")
+    draft = target.clone()
+    token_ids = torch.tensor([0, 8192, 16384], device="npu")
+    target[token_ids] = torch.tensor([0.2, 0.3, 0.5], device="npu").log()
+    draft[token_ids] = torch.tensor([0.8, 0.1, 0.1], device="npu").log()
+    inputs = _build_rejection_sample_inputs(target, draft, 1, 1.0, num_trials)
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    inputs["draft_sampled"].zero_()
+    uniforms = torch.empty_like(inputs["pos"], dtype=torch.float32)
+    _export_verification_uniforms[(uniforms.numel(),)](
+        uniforms, inputs["seed"], inputs["pos"], inputs["expanded_idx_mapping"], NUM_ROWS=uniforms.numel()
+    )
+    sampled, counts = rejection_sample(
+        **inputs, num_speculative_steps=1, use_entropy_verify=True, posterior_threshold=1.0, posterior_alpha=1.0
+    )
+    # Only these three entries have mass; use an independent sparse reference.
+    p = target.softmax(-1)[token_ids].cpu().numpy()[None, :]
+    q = draft.softmax(-1)[token_ids].cpu().numpy()[None, :] if has_draft_logits else None
+    draws = uniforms.cpu().numpy().reshape(num_trials, 2)[:, :1]
+
+    def reference(thresholds):
+        return np.array([_accepted_prefix(p, q, [0], u, thresholds=thresholds) + 1 for u in draws])
+
+    expected = reference(_entropy_thresholds(p, 1.0, 1.0))
+    np.testing.assert_array_equal(counts.cpu().numpy(), expected)
+    assert (sampled[counts == 2, 0] == 0).all()
+    # Ensure these draws would expose a reduction that uses only the first block.
+    assert np.any(expected != reference(_entropy_thresholds(p[:, :1], 1.0, 1.0)))

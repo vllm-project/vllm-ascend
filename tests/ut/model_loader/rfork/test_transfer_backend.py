@@ -702,6 +702,7 @@ def _make_register_memory_region_backend(
     snapshot_blocks,
     stale_blocks=(),
     unregister_error=False,
+    register_outcome="ok",
 ):
     registrations: list[tuple[int, int, int, int]] = []
     unregistered_calls = []
@@ -719,6 +720,12 @@ def _make_register_memory_region_backend(
 
     def batch_register_memory_ex(items):
         registrations.extend(item.values for item in items)
+        if register_outcome == "raise":
+            raise RuntimeError("mock registration raised")
+        if register_outcome == "none":
+            return None
+        if register_outcome == "error":
+            return SimpleNamespace(is_error=lambda: True, to_string=lambda: "mock registration error")
         return _Ret()
 
     def batch_unregister_memory(addresses):
@@ -824,6 +831,58 @@ def test_register_memory_region_skips_empty_batch_after_excluding_all_weights(mo
     assert backend._registered_transferable_tensors == []
     assert backend.registered_weight_blocks == []
     assert registrations == []
+
+
+def _single_block_snapshot(storage):
+    return [
+        {
+            "address": storage.data_ptr(),
+            "size": storage.numel() * storage.element_size(),
+            "state": "active_allocated",
+        }
+    ]
+
+
+@pytest.mark.parametrize("register_outcome", ["raise", "error", "none"])
+def test_register_memory_region_rolls_back_attempted_addresses_when_registration_fails(monkeypatch, register_outcome):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, registrations, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        register_outcome=register_outcome,
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # Roll back attempted registrations even when the engine never confirmed them.
+    assert registrations == [(storage.data_ptr(), 40, storage.data_ptr(), 40)]
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.weight_manifest is None
+    assert backend.registered_weight_blocks == []
+    assert backend.registered_memory_addresses == []
+    assert backend._registered_transferable_tensors is None
+
+
+def test_register_memory_region_retains_owners_when_rollback_also_fails(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, _, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        unregister_error=True,
+        register_outcome="error",
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # Keep addresses and tensor owners pinned when rollback fails so cleanup can retry safely.
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.registered_memory_addresses == [storage.data_ptr()]
+    assert backend.registered_weight_blocks == [(storage.data_ptr(), 40)]
+    assert backend.weight_manifest is not None and "weight" in backend.weight_manifest
+    assert backend._registered_transferable_tensors is not None
+    assert [name for name, _ in backend._registered_transferable_tensors] == ["weight"]
 
 
 def test_read_weights_from_seed_rejects_missing_registration_cache(monkeypatch):
@@ -942,6 +1001,108 @@ def _format_seed_info(weight, formats):
         },
         formats=formats,
     )
+
+
+class _UnregisterResult:
+    def __init__(self, error, code=None):
+        self._error = error
+        self._code = code
+
+    def is_error(self):
+        return self._error
+
+    def get_code(self):
+        return self._code
+
+    def to_string(self):
+        return f"error={self._error} code={self._code}"
+
+
+def _not_found_backend(batch_unregister_memory):
+    backend = RForkTransferBackend()
+    backend.transfer_engine = SimpleNamespace(batch_unregister_memory=batch_unregister_memory)
+    backend.registered_weight_blocks = [(101, 16), (202, 16)]
+    backend.registered_memory_addresses = [101, 202]
+    backend._registered_transferable_tensors = [("weight", torch.ones(1))]
+    backend._not_found_error_code = "not-found"
+    return backend
+
+
+def test_unregister_retries_per_address_after_not_found_result():
+    calls = []
+
+    def batch_unregister_memory(addresses):
+        calls.append(list(addresses))
+        if len(addresses) > 1:
+            return _UnregisterResult(True, "not-found")
+        return _UnregisterResult(False)
+
+    backend = _not_found_backend(batch_unregister_memory)
+
+    assert backend.unregister_memory_region()
+    assert calls == [[101, 202], [101], [202]]
+    assert backend.registered_memory_addresses == []
+    assert backend.registered_weight_blocks == []
+    assert backend._registered_transferable_tensors is None
+
+
+def test_unregister_keeps_addresses_that_fail_after_not_found_result():
+    calls = []
+
+    def batch_unregister_memory(addresses):
+        calls.append(list(addresses))
+        if len(addresses) > 1:
+            return _UnregisterResult(True, "not-found")
+        if addresses == [202]:
+            return _UnregisterResult(True, "busy")
+        return _UnregisterResult(False)
+
+    backend = _not_found_backend(batch_unregister_memory)
+
+    assert not backend.unregister_memory_region()
+    assert calls == [[101, 202], [101], [202]]
+    assert backend.registered_memory_addresses == [202]
+    assert backend.registered_weight_blocks == [(101, 16), (202, 16)]
+    assert backend._registered_transferable_tensors is not None
+
+
+def test_unregister_requires_error_code_to_interpret_not_found():
+    calls = []
+
+    def batch_unregister_memory(addresses):
+        calls.append(list(addresses))
+        return _UnregisterResult(True, "not-found")
+
+    backend = _not_found_backend(batch_unregister_memory)
+    backend._not_found_error_code = None
+
+    assert not backend.unregister_memory_region()
+    assert calls == [[101, 202]]
+    assert backend.registered_memory_addresses == [101, 202]
+
+
+def test_can_reuse_shared_weights_requires_every_weight_to_be_shared(tensor_runtime, monkeypatch):
+    layout = tensor_runtime.tensor_layout
+    transfer = tensor_runtime.transfer_backend
+    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(layout, "is_transferable_tensor", lambda tensor: True)
+    monkeypatch.setattr(transfer, "find_non_npu_state_tensors", lambda model: [])
+
+    storage = torch.arange(8, dtype=torch.float32)
+    shared = storage[:4]
+    shared_only = torch.nn.Module()
+    shared_only.weight = torch.nn.Parameter(shared)
+    mixed = torch.nn.Module()
+    mixed.shared = torch.nn.Parameter(shared)
+    mixed.own = torch.nn.Parameter(torch.arange(4, dtype=torch.float32))
+    excluded = [(storage.data_ptr(), shared.numel() * shared.element_size())]
+    backend = tensor_runtime.RForkTransferBackend()
+
+    assert not backend.can_reuse_shared_weights(shared_only, True, [])
+    assert backend.can_reuse_shared_weights(shared_only, True, excluded)
+    assert not backend.can_reuse_shared_weights(mixed, True, excluded)
+    monkeypatch.setattr(transfer, "find_non_npu_state_tensors", lambda model: ["cpu.weight"])
+    assert not backend.can_reuse_shared_weights(shared_only, True, excluded)
 
 
 @pytest.mark.parametrize(

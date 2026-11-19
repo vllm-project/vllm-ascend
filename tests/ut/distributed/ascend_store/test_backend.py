@@ -20,7 +20,6 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
@@ -29,6 +28,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_backend_class,
+    resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
@@ -37,13 +37,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
     MmcDirect,
     _inject_device_ub_qos,
     _validate_device_ub_qos,
     make_full_key,
-    make_hit_check_keys,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
@@ -79,7 +79,7 @@ class TestBackendABC(unittest.TestCase):
 class TestBackendDeviceBinding(unittest.TestCase):
     def test_memcache_scheduler_factory_does_not_create_npu_context(self):
         npu = MagicMock()
-        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5], data_parallel_size=1)
+        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
         store = MagicMock()
         store.init.return_value = 0
         with (
@@ -166,6 +166,20 @@ class TestBackendRegistry(unittest.TestCase):
     def test_get_backend_class_returns_none_for_unknown_backend(self):
         self.assertIsNone(get_backend_class("nonexistent"))
         self.assertIsNone(get_backend_class("yuanrong").layerwise_data_plane)
+
+    def test_resolve_backend_defaults_to_mooncake_and_accepts_mixed_case(self):
+        for extra_config, expected in (
+            ({}, ("mooncake", MooncakeBackend)),
+            ({"backend": "Mooncake"}, ("mooncake", MooncakeBackend)),
+            ({"backend": "MEMCACHE"}, ("memcache", MemcacheBackend)),
+        ):
+            with self.subTest(extra_config=extra_config):
+                self.assertEqual(resolve_backend(extra_config), expected)
+
+    def test_resolve_backend_preserves_rejection_of_unknown_and_padded_names(self):
+        for backend_name in ("unknown", " Mooncake "):
+            with self.subTest(backend=backend_name):
+                self.assertEqual(resolve_backend({"backend": backend_name}), (backend_name.lower(), None))
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
@@ -1247,7 +1261,7 @@ class TestMemcacheQosInjection(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
         ):
-            MemcacheBackend(SimpleNamespace(data_parallel_size=1), device_id=0, extra_config={"qos_priority": 2})
+            MemcacheBackend(MagicMock(), device_id=0, extra_config={"qos_priority": 2})
             self.assertEqual(os.environ.get(self._ENV), "2")
 
 
@@ -1427,10 +1441,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 # =========================================================================
 # Memcache layerwise backend capabilities
 # =========================================================================
-_LAYERWISE_KEY_FUNCTIONS = (
-    "make_full_key",
-    "make_hit_check_keys",
-)
+_LAYERWISE_KEY_FUNCTIONS = ("make_full_key",)
 
 _LAYERWISE_STORE_METHODS = (
     "batch_get_key_info",
@@ -1475,6 +1486,15 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
     pool_scheduler implementations.
     """
 
+    @staticmethod
+    def _bound_builder(num_groups: int, pp_size: int = 1) -> LayerwiseKeyBuilder:
+        """The builder MemcacheBackend.bind_layerwise_keys binds for this layout."""
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return make_full_key("model", group, block_hash, head, num_groups, stage, pp_size)
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
     def test_full_key_single_group_keeps_pr_11585_format(self):
         self.assertEqual(
             make_full_key("model", 0, "hash0", 3, 1),
@@ -1489,7 +1509,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_partial_key_format(self):
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3),
+            self._bound_builder(1).make_partial_key("model", "r1", 0, 1, 20, 3),
             "model@partial@r1@0@1@20@3",
         )
 
@@ -1499,11 +1519,11 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@2@pp1@hash0@3",
         )
         self.assertEqual(
-            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            self._bound_builder(1, 2).make_partial_key("model", "r1", 0, 1, 20, 3, 1),
             "model@partial@r1@0@1@20@pp1@3",
         )
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 2, 1, 2),
+            self._bound_builder(1, 2).make_hit_check_keys(0, "hash0", 2),
             [
                 "model@pp0@hash0@0",
                 "model@pp0@hash0@1",
@@ -1514,18 +1534,18 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 
     def test_hit_check_keys_single_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 0, "hash0", 4, 1),
+            self._bound_builder(1).make_hit_check_keys(0, "hash0", 4),
             ["model@hash0@0", "model@hash0@1", "model@hash0@2", "model@hash0@3"],
         )
 
     def test_hit_check_keys_multi_group_one_key_per_rank(self):
         self.assertEqual(
-            make_hit_check_keys("model", 1, "hash0", 2, 3),
+            self._bound_builder(3).make_hit_check_keys(1, "hash0", 2),
             ["model@1@hash0@0", "model@1@hash0@1"],
         )
 
     def test_hit_check_keys_empty_when_no_ranks(self):
-        self.assertEqual(make_hit_check_keys("model", 0, "hash0", 0, 1), [])
+        self.assertEqual(self._bound_builder(1).make_hit_check_keys(0, "hash0", 0), [])
 
     def test_full_key_and_hit_check_key_share_rank_format(self):
         """The hit-check key of rank r must equal that rank's full key."""
@@ -1533,7 +1553,7 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             for rank in range(3):
                 with self.subTest(num_groups=num_groups, rank=rank):
                     self.assertEqual(
-                        make_hit_check_keys("model", 0, "hash0", 3, num_groups)[rank],
+                        self._bound_builder(num_groups).make_hit_check_keys(0, "hash0", 3)[rank],
                         make_full_key("model", 0, "hash0", rank, num_groups),
                     )
 
@@ -1541,95 +1561,6 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 # =========================================================================
 # MemcacheBackend (mocked store)
 # =========================================================================
-class TestMemcacheDPInitBarrier(unittest.TestCase):
-    def setUp(self):
-        stack = ExitStack()
-        self.addCleanup(stack.close)
-        self.store = MagicMock()
-        self.store.init.return_value = 0
-        self.group = SimpleNamespace(cpu_group=object())
-        self.get_dp_group = stack.enter_context(patch.object(memcache_module, "get_dp_group", return_value=self.group))
-        self.barrier = stack.enter_context(patch.object(memcache_module.torch.distributed, "barrier"))
-        stack.enter_context(patch.object(MemcacheBackend, "set_device"))
-        stack.enter_context(patch.object(memcache_module, "_validate_device_ub_qos"))
-        stack.enter_context(patch.object(memcache_module.time, "sleep"))
-        stack.enter_context(
-            patch.object(sys.modules["memcache_hybrid"], "DistributedObjectStore", return_value=self.store, create=True)
-        )
-
-    def make_backend(self, dp_init_barrier=True, dp_size=8, init_bm=True, lazy_init=False):
-        return MemcacheBackend(
-            SimpleNamespace(data_parallel_size=dp_size),
-            device_id=0,
-            init_bm=init_bm,
-            lazy_init=lazy_init,
-            dp_init_barrier=dp_init_barrier,
-        )
-
-    def test_default_waits_on_cpu_group_after_successful_init(self):
-        calls = MagicMock()
-        calls.attach_mock(self.store.init, "init")
-        calls.attach_mock(self.barrier, "barrier")
-        backend = self.make_backend()
-        self.assertIs(backend.store, self.store)
-        self.assertEqual(
-            calls.mock_calls,
-            [unittest.mock.call.init(0, init_bm=True), unittest.mock.call.barrier(group=self.group.cpu_group)],
-        )
-
-    def test_explicit_enable(self):
-        self.make_backend(dp_init_barrier=True)
-        self.barrier.assert_called_once_with(group=self.group.cpu_group)
-
-    def test_disabled_single_dp_and_metadata_clients_skip_barrier(self):
-        for kwargs in ({"dp_init_barrier": False}, {"dp_size": 1}, {"init_bm": False}):
-            with self.subTest(**kwargs):
-                self.make_backend(**kwargs)
-                self.get_dp_group.assert_not_called()
-                self.barrier.assert_not_called()
-
-    def test_rejects_non_boolean_config_before_initialization(self):
-        for value in ("false", "true", 0, 1, None):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "memcache_dp_init_barrier.*boolean"):
-                self.make_backend(dp_init_barrier=value)
-        self.store.init.assert_not_called()
-        self.barrier.assert_not_called()
-
-    def test_failed_store_does_not_enter_barrier(self):
-        self.store.init.return_value = -1
-        with self.assertRaises(AssertionError):
-            self.make_backend()
-        self.get_dp_group.assert_not_called()
-        self.barrier.assert_not_called()
-
-    def test_store_exception_does_not_enter_barrier(self):
-        self.store.init.side_effect = RuntimeError("store init failed")
-        with self.assertRaisesRegex(RuntimeError, "store init failed"):
-            self.make_backend()
-        self.barrier.assert_not_called()
-
-    def test_lazy_initialization_does_not_synchronize(self):
-        with patch.object(memcache_module, "_is_device_sdma", return_value=True):
-            backend = self.make_backend(lazy_init=True)
-        self.store.init.assert_not_called()
-        self.barrier.assert_not_called()
-        backend.ensure_initialized()
-        backend.ensure_initialized()
-        self.store.init.assert_called_once_with(0, init_bm=True)
-        self.get_dp_group.assert_not_called()
-        self.barrier.assert_not_called()
-
-    def test_lazy_request_with_eager_backend_still_synchronizes(self):
-        with patch.object(memcache_module, "_is_device_sdma", return_value=False):
-            backend = self.make_backend(lazy_init=True)
-        self.assertFalse(backend._lazy_init)
-        self.store.init.assert_called_once_with(0, init_bm=True)
-        self.barrier.assert_called_once_with(group=self.group.cpu_group)
-        backend.ensure_initialized()
-        self.store.init.assert_called_once()
-        self.barrier.assert_called_once()
-
-
 class TestMemcacheBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -1638,7 +1569,6 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.device_id = 0
-            backend._dp_init_barrier = False
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True

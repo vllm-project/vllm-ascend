@@ -36,7 +36,7 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
-from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, DeepseekV41CacheLayer, scatter_cache_sk
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
@@ -53,7 +53,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp, normalize_deepseek_v41_config
+from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 
@@ -137,6 +137,11 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = kwargs["vllm_config"].compilation_config.static_forward_context
+        self.kv_transfer_cache_names = tuple(
+            name
+            for name, cache in context.items()
+            if name.startswith(f"{prefix}.") and isinstance(cache, DeepseekV41CacheLayer)
+        )
         context[self.v41_layer_name] = self
 
     forward = DeepseekV41Attention.forward
@@ -261,7 +266,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
             attn.packed_cache_ops.write_attention_cache(
-                cache.kv_cache[0],
+                cache.kv_cache,
                 slot_mapping,
                 values,
                 kind="win",
@@ -274,7 +279,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 torch.int32
             )
             slot_mapping.masked_fill_(~valid.unsqueeze(-1), -1)
-        scatter_cache_sk(cache.kv_cache[0], slot_mapping, values)
+        scatter_cache_sk(cache.kv_cache, slot_mapping, values)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
@@ -607,10 +612,7 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
                 break
             else:
                 if "attn_sink" in name:
-                    if enable_dsa_cp():
-                        narrow = loaded_weight
-                    else:
-                        narrow = loaded_weight[head_start:head_end]
+                    narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
                         params_dict[name].copy_(narrow)
                     loaded_params.add(name)

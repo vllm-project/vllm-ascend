@@ -19,7 +19,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 @pytest.fixture
 def state(monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: False)
     monkeypatch.setattr(replay_mod, "get_mrv2_in_profile_run", lambda: False)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=32),
@@ -179,20 +178,21 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
     prepared.assert_called_once_with()
 
 
+@pytest.mark.parametrize("world", [1, 2, 16])
 @pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens):
+def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens, world):
     state.num_tokens = 2
     state.num_actual_tokens = actual_tokens
     state.config.model_config = SimpleNamespace(max_model_len=16)
     state.slots = torch.arange(64).reshape(2, 32)
-    state.replay_pcp_context = SimpleNamespace(global_batch=object())
+    state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
     offsets = np.array([0, actual_tokens], dtype=np.int32)
     state.offsets[:2] = torch.from_numpy(offsets)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         replay_mod,
         "get_pcp_group",
-        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat((tensor, tensor), dim=dim)),
+        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat([tensor] * world, dim=dim)),
     )
     metadata = object()
 
@@ -200,10 +200,12 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
         # Exercise the same layout guard as the real PCP attention builder.
         # Gathered slots are invalid unless the common metadata owns a context,
         # including on ranks with no retained suffix queries.
-        assert uses_pcp_sharded_layout(common, True)
+        assert uses_pcp_sharded_layout(common, True) == (world > 1)
         assert common.pcp_context is state.replay_pcp_context
-        assert common.pcp_cache_group_idx == 1
-        assert common.slot_mapping.numel() == 4
+        assert common.pcp_cache_group_idx == (1 if world > 1 else None)
+        assert common.slot_mapping.tolist() == [32, 33] * world
+        if world == 1:
+            assert common.slot_mapping.data_ptr() == state.slots[1].data_ptr()
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
         return metadata
@@ -417,22 +419,37 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert gather_padding.call_count == int(sequence_parallel)
 
 
-def test_dsa_cp_pads_replay_without_adding_actual_rows(state, monkeypatch):
-    monkeypatch.setattr(replay_mod, "enable_dsa_cp", lambda: True)
-    state.config.parallel_config.tensor_parallel_size = 4
-    state.prepare(inputs(), CUDAGraphMode.NONE)
-    assert state.layers.num_actual_rows == 5
-    assert state.layers.rows.numel() == 8
-
-
-@pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])
-def test_request_reuse_refreshes_prompt_logprob_retention(state, monkeypatch, prompt_logprobs):
+@pytest.mark.parametrize(
+    ("sampling_params", "keeps_rows"),
+    [
+        pytest.param(None, False, id="no-sampling-params"),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=None, prompt_logprob_token_ids=None),
+            False,
+            id="generation",
+        ),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=0, prompt_logprob_token_ids=None),
+            True,
+            id="prompt-logprobs",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                prompt_logprobs=None,
+                prompt_logprob_token_ids=np.array([[1]], dtype=np.int32),
+            ),
+            True,
+            id="target-token-scoring",
+        ),
+    ],
+)
+def test_request_reuse_refreshes_prompt_scoring_retention(state, monkeypatch, sampling_params, keeps_rows):
     monkeypatch.setattr(AscendModelState, "add_request", lambda *args: None)
     model_state = EngramModelState.__new__(EngramModelState)
     model_state.decoder_replay_state = state
     model_state._replay_start_np = np.zeros(4, dtype=np.int32)
     state.keeps_rows[1] = True
-    request = SimpleNamespace(replay_start=7, sampling_params=SimpleNamespace(prompt_logprobs=prompt_logprobs))
+    request = SimpleNamespace(replay_start=7, sampling_params=sampling_params)
     model_state.add_request(1, request)
-    assert state.keeps_rows[1] == (prompt_logprobs is not None)
+    assert state.keeps_rows[1] == keeps_rows
     assert model_state._replay_start_np[1] == 7

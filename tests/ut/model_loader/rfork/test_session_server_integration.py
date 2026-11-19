@@ -72,6 +72,10 @@ def test_session_serves_real_metadata_and_closes_listener(live_session):
     assert info.weights == r.session.transfer_backend.weight_manifest
     assert info.formats == r.session.transfer_backend.weight_formats
     assert requests.get(f"{url}/health_check_with_key", params={"seed_key": "wrong"}, timeout=1).status_code == 400
+    assert (
+        requests.get(f"{url}/get_rfork_transfer_engine_info", params={"seed_key": "wrong"}, timeout=1).status_code
+        == 404
+    )
     r.session.planner.report_seed_once.assert_called_once_with(handle.port, seed_ip="127.0.0.1")
     assert r.session.shutdown()
     assert not handle.is_alive

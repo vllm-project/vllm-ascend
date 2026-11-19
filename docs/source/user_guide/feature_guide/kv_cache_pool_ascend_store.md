@@ -42,7 +42,7 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• Layerwise support requires `memcache_hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Software Dependencies | • Requires `memfabric-hybrid >= 1.3.0` and `memcache-hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
@@ -61,6 +61,26 @@ Pool objects written by the older contiguous-range implementation are incompatib
 For non-layerwise complete-block transfers, adjacent MLA components sharing one backing storage are coalesced into one descriptor per physical page, or one descriptor per logical block when the pages have no gaps. Padding is never copied. Layerwise transfers, partial-chunk configurations, align-state groups, decode-cache saving, TP mismatch, DCP and KVPP retain the component-segment fallback. Registration logs report each coalesced layer and its descriptor count.
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
+
+### Prefix Cache Retention
+
+Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.
+The Ascend hybrid HBM coordinator and AscendStore scheduler/worker use the parsed
+configuration. The former `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment variable
+was removed from vLLM and no longer configures retention.
+
+| Value | Sliding-window / Mamba checkpoint retention |
+| :--- | :--- |
+| `0` (upstream default) | Retain checkpoints required for prompt replay, without periodic checkpoints. |
+| Positive integer, e.g. `4096` | Also retain periodic checkpoints; the interval must be a multiple of the scheduler block size. |
+| `None` | Retain all reachable checkpoints densely. |
+
+Full-attention groups retain their dense prefix-cache behavior. The setting controls
+checkpoint retention, not the configured HBM or external pool capacity. To preserve
+dense retention when upgrading from the stale environment-variable reader, explicitly
+pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`.
+To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
+on the same instances that previously exported the environment variable.
 
 ## Scenario 1: Mooncake Backend
 
@@ -90,10 +110,10 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     ldd --version
     ```
 
-2. Install Mooncake:
+2. The vllm-ascend Docker images install Mooncake. Verify the installation:
 
     ```shell
-    python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
+    python3 -m pip show mooncake-transfer-engine-npu
     ```
 
 #### Step 2: Configure mooncake.json and Start mooncake_master
@@ -253,7 +273,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
         # parameters required for kv pool and Mooncake
         export PYTHONHASHSEED=0
         export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         if [ "$ROLE" == "prefill" ]; then
             KV_ROLE="kv_producer"
@@ -417,7 +436,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     # parameters required for kv pool and Mooncake
     export PYTHONHASHSEED=0
     export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     echo "Starting vLLM on Series: $HARDWARE_SERIES"
 
@@ -643,15 +661,6 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-<details markdown="1">
-<summary>MemCache DP Initialization Synchronization</summary>
-
-For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
-
-Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
-
-</details>
-
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
@@ -744,9 +753,11 @@ Set the same value on every rank in the DP group. With `MultiConnector`, place t
 
 #### Step 2: Software Installation
 
+The MemCache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
+
 ```shell
-pip install memfabric-hybrid
-pip install memcache-hybrid
+pip install "memfabric-hybrid>=1.3.0"
+pip install "memcache-hybrid>=1.3.0"
 ```
 
 #### Step 3: Configure Memcache Config File

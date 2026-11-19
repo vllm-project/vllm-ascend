@@ -1,7 +1,6 @@
 import contextlib
 import typing
 from dataclasses import dataclass
-from zlib import adler32
 
 import numpy as np
 import torch
@@ -30,8 +29,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -45,7 +45,6 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
-OFFLOAD_STORE_PORT_BASE = 8500
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -317,6 +316,25 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     return raw_host_bytes + alignment_reserve_bytes
 
 
+def resolve_sparse_kv_offload_store_url(
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+    data_parallel_index: int,
+) -> str:
+    """Build the MemFabric store endpoint of one sparse KV offload group.
+
+    Every TP rank of a group binds the same endpoint, while each data parallel
+    group uses its own port. The base port is configurable so that independent
+    services sharing a network namespace can be assigned distinct endpoints.
+    """
+    store_port = sparse_kv_offload_config.store_port_base + data_parallel_index
+    if not 1 <= store_port <= 65535:
+        raise ValueError(
+            "sparse_kv_offload_config.store_port_base plus the data parallel index "
+            f"must be a valid TCP port, got {store_port}."
+        )
+    return f"tcp://127.0.0.1:{store_port}"
+
+
 def allocate_kv_cache_tensors_for_sparse_kv_offload(
     k_tensor_size: int,
     v_tensor_size: int,
@@ -398,6 +416,33 @@ def reshape_kv_cache_tensors_for_sparse_kv_offload(
     return (k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v)
 
 
+def reset_sparse_kv_offload_request_owners(vllm_config: VllmConfig) -> None:
+    """Drain old plans and invalidate resident identities before ID reuse.
+
+    Called only when the positive int64 owner counter wraps. Keep all storage
+    addresses intact, since captured graphs hold pointers to these buffers.
+    The CPU full-KV pool remains valid; the next decode reloads resident KV.
+    """
+    manager = get_sparse_kv_offload_manager()
+    # Graph callbacks and planner copies can run on streams other than the
+    # runner's current stream. Finish them before touching pinned CPU state.
+    torch_npu.npu.synchronize()
+    for owners in getattr(manager, "lru_last_req_ids_cpu_list", ()):
+        owners.fill_(-1)
+    for layer in vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        owners = getattr(impl, "fused_overlap_last_req_ids", None)
+        if owners is not None:
+            owners.fill_(-1)
+    manager.fused_overlap_plan_owner_layer_id = None
+    manager.fused_overlap_plan_topk = None
+    manager.fused_overlap_plan_num_tokens = 0
+    manager.fused_overlap_plan_membership_map = None
+    # Make device invalidations visible before any captured graph is replayed
+    # on another stream. This synchronization is outside the normal hot path.
+    torch_npu.npu.synchronize()
+
+
 def update_sparse_kv_offload_metadata(
     num_tokens: int,
     num_reqs: int,
@@ -407,23 +452,28 @@ def update_sparse_kv_offload_metadata(
     query_start_loc: CpuGpuBuffer | torch.Tensor | np.ndarray,
     offload_req_ids_tensor: CpuGpuBuffer,
     offload_token_to_req: CpuGpuBuffer,
+    *,
+    request_identity: RequestIdentityRegistry,
+    is_dummy: bool = False,
 ) -> None:
     """Populate per-request identity tensors for the Sparse KV offload LRU.
 
-    Request ids are adler32 hashes of the scheduler request id,
-    rows are reset whenever the occupying request changes.
+    Owners identify request incarnations, not hashes or batch rows. Target and
+    draft calls must share the registry for the lifetime of their resident KV.
+    Padding is zero; dummy owners cannot alias real owners or the empty sentinel.
     """
-    offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
-    effective_num_reqs = min(num_reqs, len(req_ids))
-    req_id_values = np.asarray(
-        [
-            adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
-            for row, req_id in enumerate(req_ids[:effective_num_reqs])
-        ],
-        dtype=np.int64,
-    )
-    offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
-    offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
+    req_id_values: np.ndarray
+    if is_dummy:
+        req_id_values = np.arange(-2, -2 - num_reqs, -1, dtype=np.int64)
+    else:
+        if len(req_ids) < num_reqs:
+            raise ValueError("Sparse KV offload requires an ID for every active request")
+        active_req_ids = req_ids[:num_reqs]
+        if any(not isinstance(req_id, str) for req_id in active_req_ids):
+            raise TypeError("Sparse KV offload request IDs must be strings")
+        req_id_values = np.asarray(
+            [request_identity.get_or_create(req_id) for req_id in active_req_ids], dtype=np.int64
+        )
 
     if isinstance(query_start_loc, CpuGpuBuffer):
         query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1].numpy()
@@ -440,37 +490,13 @@ def update_sparse_kv_offload_metadata(
             "KV offload token_to_req metadata is shorter than the scheduled token batch: "
             f"metadata={token_to_req.shape[0]}, tokens={num_tokens}"
         )
+    offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
+    offload_req_ids_tensor.np[:num_reqs] = req_id_values
+    offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
     offload_token_to_req.np[:num_tokens] = token_to_req[:num_tokens]
     if num_tokens_padded > num_tokens:
         offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
     offload_token_to_req.copy_to_gpu(num_tokens_padded)
-
-
-def prepare_sparse_kv_offload_mtp_dummy_metadata(
-    num_tokens: int,
-    num_reqs: int,
-    query_start_loc_cpu: torch.Tensor,
-    req_ids_buffer: CpuGpuBuffer,
-    token_to_req_buffer: CpuGpuBuffer,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if not get_ascend_config().sparse_kv_offload_config.enabled:
-        return None, None
-    if req_ids_buffer is None or token_to_req_buffer is None:
-        raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
-
-    query_lens = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
-    if token_to_req.shape[0] < num_tokens:
-        token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
-
-    req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
-    req_ids_buffer.copy_to_gpu(num_reqs)
-    token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
-    token_to_req_buffer.copy_to_gpu(num_tokens)
-    return (
-        req_ids_buffer.gpu[:num_reqs],
-        token_to_req_buffer.gpu[:num_tokens],
-    )
 
 
 class SparseKVOffloadManager:
@@ -547,8 +573,10 @@ class SparseKVOffloadManager:
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        config.store_url = f"tcp://127.0.0.1:{store_port}"
+        config.store_url = resolve_sparse_kv_offload_store_url(
+            self.sparse_kv_offload_config,
+            parallel_config.data_parallel_index,
+        )
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
@@ -729,6 +757,14 @@ class SparseKVOffloadManager:
                 f"v_len={len(self.v_caches_cpu)}"
             )
         return self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
+
+    def get_topk_cache_components(self) -> set[tuple[str, int]]:
+        """Identify scratch views that must not be zeroed by logical KV block ID."""
+        return {
+            (layer_name, component_id)
+            for layer_name in self.offload_layer_names
+            for component_id in (OFFLOAD_TOPK_BUFFER_K_INDEX, OFFLOAD_TOPK_BUFFER_V_INDEX)
+        }
 
     def register_kv_caches(
         self,

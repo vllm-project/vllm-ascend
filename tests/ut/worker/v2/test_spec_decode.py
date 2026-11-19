@@ -41,6 +41,7 @@ def _make_config(
     architectures=None,
     use_gemma4_mtp=False,
     use_step3p5_mtp=False,
+    use_multi_module_mtp=False,
 ):
     """Create a minimal speculative decoding config for init_speculator tests."""
     speculative_config = SimpleNamespace(
@@ -52,7 +53,7 @@ def _make_config(
         uses_draft_model=MagicMock(return_value=False),
         use_gemma4_mtp=MagicMock(return_value=use_gemma4_mtp),
         use_step3p5_mtp=MagicMock(return_value=use_step3p5_mtp),
-        use_multi_module_mtp=MagicMock(return_value=False),
+        use_multi_module_mtp=MagicMock(return_value=use_multi_module_mtp),
         draft_model_config=SimpleNamespace(architectures=architectures or []),
     )
     return SimpleNamespace(speculative_config=speculative_config)
@@ -279,12 +280,22 @@ def test_init_speculator_routes_gemma4_mtp(monkeypatch):
     speculator_cls.assert_called_once_with(config, device)
 
 
-def test_init_speculator_skips_special_mtp():
-    """Step3.5 MTP bypasses the regular MTP speculator and stays unsupported."""
-    config = _make_config("mtp", use_step3p5_mtp=True)
+def test_init_speculator_routes_step3p5_mtp_to_multi_module(monkeypatch):
+    """Step3.5 MTP drafts route to the multi-module MTP speculator, not the
+    regular MTP path."""
+    config = _make_config(
+        "mtp",
+        use_step3p5_mtp=True,
+        use_multi_module_mtp=True,
+    )
+    speculator_cls = _mock_speculator_module(
+        monkeypatch,
+        "vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator",
+        "AscendMultiModuleMTPSpeculator",
+    )
+    device = torch.device("cpu")
 
-    with pytest.raises(
-        NotImplementedError,
-        match="mtp is not supported yet",
-    ):
-        init_speculator(config, torch.device("cpu"))
+    result = init_speculator(config, device)
+
+    assert result is speculator_cls.return_value
+    speculator_cls.assert_called_once_with(config, device)

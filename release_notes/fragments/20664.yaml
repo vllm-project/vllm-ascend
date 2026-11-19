@@ -1,0 +1,8 @@
+pr: 20664
+entries:
+  - category: bugfix
+    text: >-
+      Restored whole-batch KV save synchronization in AscendStoreConnector
+      by reverting the released-request save fence optimization.
+      KV pooling throughput may decrease because each step waits for the
+      entire previous save batch.

@@ -7,7 +7,6 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -19,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 
 def _is_device_sdma() -> bool:
@@ -101,25 +101,6 @@ def make_full_key(
     return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
 
 
-def make_hit_check_keys(
-    model_name: str,
-    group_id: int,
-    block_hash_hex: str,
-    num_ranks: int,
-    num_groups: int,
-    pp_size: int = 1,
-) -> list[str]:
-    """All-rank keys for scheduler-side hit check.
-
-    Returns one key per PP stage and head_or_tp_rank.
-    """
-    return [
-        make_full_key(model_name, group_id, block_hash_hex, rank, num_groups, pp_rank, pp_size)
-        for pp_rank in range(pp_size)
-        for rank in range(num_ranks)
-    ]
-
-
 def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
     """Inject the QoS from kv_connector_extra_config into MF_DEVICE_UB_QOS.
 
@@ -155,27 +136,15 @@ class MemcacheBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         num_groups = len(grouped_block_size)
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        parallel = vllm_config.parallel_config
+        pp_size = parallel.pipeline_parallel_size
+        pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
 
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size)
-
-    @classmethod
-    def make_partial_key(
-        cls,
-        model_name: str,
-        req_id: str,
-        group_id: int,
-        block_index: int,
-        end_token: int,
-        head_or_tp_rank: int,
-        pp_rank: int = 0,
-        pp_size: int = 1,
-    ) -> str:
-        pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
-        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     def __init__(
         self,
@@ -184,17 +153,12 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
         extra_config: dict[str, Any] | None = None,
-        dp_init_barrier: bool = True,
     ):
-        if not isinstance(dp_init_barrier, bool):
-            raise ValueError("memcache_dp_init_barrier in kv_connector_extra_config must be a boolean.")
         _inject_device_ub_qos(extra_config)
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
-        # Lazy initialization can be triggered independently by each DP rank.
-        self._dp_init_barrier = dp_init_barrier and parallel_config.data_parallel_size > 1 and not self._lazy_init
 
         self.store: Any | None = None
         self._store_initialized = False
@@ -250,12 +214,6 @@ class MemcacheBackend(Backend):
             raise
 
         assert res == 0
-        if self._init_bm and self._dp_init_barrier:
-            # Keep early ranks from entering NPU work while peers are still
-            # establishing MemCache channels. Metadata-only clients must not join.
-            logger.info("Waiting for all DP MemCache initializations")
-            torch.distributed.barrier(group=get_dp_group().cpu_group)
-            logger.info("All DP MemCache initializations completed")
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 

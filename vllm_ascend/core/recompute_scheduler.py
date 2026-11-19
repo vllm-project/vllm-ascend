@@ -46,6 +46,12 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
+from vllm_ascend.core.pd_recompute import (
+    PD_RECOMPUTE_ARG,
+    PD_RECOMPUTE_INTERRUPTED,
+    PD_RECOMPUTE_RETRY,
+    PD_RECOMPUTE_VERSION,
+)
 from vllm_ascend.utils import get_ascend_config
 
 
@@ -84,6 +90,7 @@ class RecomputeSchedulerConfig(SchedulerConfig):
 class RecomputeReqInfo:
     request_id: str
     client_index: int
+    pd_recompute: dict[str, str | int] | None = None
 
 
 @dataclass
@@ -183,10 +190,23 @@ class RecomputeScheduler(Scheduler):
         return True
 
     def _finish_recomputed_request(self, request: Request) -> None:
+        params = request.sampling_params
+        recompute: dict[str, str | int] | None = None
+        if params and (params.extra_args or {}).get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_VERSION:
+            output_tokens = request.num_output_tokens
+            recompute = {PD_RECOMPUTE_ARG: PD_RECOMPUTE_RETRY}
+            if output_tokens:
+                recompute = {
+                    PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED,
+                    "output_tokens": output_tokens,
+                    "remaining_tokens": request.max_tokens - output_tokens,
+                    "input_tokens": request.num_prompt_tokens,
+                }
         self._recomputed_reqs.append(
             RecomputeReqInfo(
                 request_id=request.request_id,
                 client_index=request.client_index,
+                pd_recompute=recompute,
             )
         )
         finished_reqs = self.finish_requests(
@@ -432,6 +452,12 @@ class RecomputeScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -895,14 +921,6 @@ class RecomputeScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
@@ -983,7 +1001,6 @@ class RecomputeScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1046,8 +1063,9 @@ class RecomputeScheduler(Scheduler):
                 EngineCoreOutput(
                     request_id=req_info.request_id,
                     new_token_ids=[],
-                    finish_reason=FinishReason.STOP,
+                    finish_reason=FinishReason.ERROR if req_info.pd_recompute else FinishReason.STOP,
                     stop_reason="recomputed",
+                    kv_transfer_params=req_info.pd_recompute,
                 )
             )
         for client_index, recomputed_outputs in recomputed_by_client.items():

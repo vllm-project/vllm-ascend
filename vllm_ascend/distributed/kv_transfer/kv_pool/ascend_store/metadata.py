@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -275,6 +275,24 @@ def infer_group_block_sizes(
             spec = next(iter(spec.kv_cache_specs.values()))
         block_sizes.append(spec.block_size)
     return block_sizes
+
+
+def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[int]:
+    """Return IDs of Mamba cache groups whose states are not TP-replicated."""
+    if kv_cache_config is None:
+        return set()
+    group_ids: set[int] = set()
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            if not isinstance(spec, MambaSpec):
+                continue
+            tp_replicated = getattr(spec, "tp_replicated", False)
+            if not tp_replicated:
+                group_ids.add(group_id)
+    return group_ids
 
 
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
@@ -787,6 +805,27 @@ class LoadSpec:
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
 
+    @property
+    def pool_hit_tokens(self) -> int:
+        """External pool coverage in tokens.
+
+        Prefers the raw store-skip hit when the store reported one, else the
+        cached hit length. Load-range planning and save-range clamping share
+        this resolution; policies that must ignore the raw hit (eagle drafts,
+        hybrid groups that are not all cacheable) keep guards at call sites.
+        """
+        return self.kvpool_store_skip_tokens if self.kvpool_store_skip_tokens is not None else self.kvpool_cached_tokens
+
+    def clamp_save_start(self, start_block: int, block_size: int) -> int:
+        """Clamp ``start_block`` up past blocks the pool hit already covers.
+
+        No-op unless the hit is loadable (``can_load``): an unloadable hit
+        never trims the save range.
+        """
+        if not self.can_load:
+            return start_block
+        return max(start_block, self.pool_hit_tokens // block_size)
+
 
 @dataclass(init=False)
 class RequestTracker:
@@ -1238,9 +1277,6 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.requests: list[ReqMeta] = []
         self.preempted_req_ids = preempted_req_ids
         self.loading_req_ids = loading_req_ids or set()
-        # Requests whose blocks became reusable since the previous step
-        # (finished + preempted); the worker fences their in-flight saves.
-        self.released_req_ids: set[str] = set(preempted_req_ids or ())
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata."""
