@@ -697,6 +697,8 @@ class AscendConfig:
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
+    # Opt-in A3/MRV2 graph-external SAS/QLI producers; disabled by default.
+    dsv41_metadata_overlap_A3_config: dict[str, Any] = dataclasses.field(default_factory=dict)
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
