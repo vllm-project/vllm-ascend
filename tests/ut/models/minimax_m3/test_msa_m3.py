@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -1676,7 +1677,7 @@ def _index_score_wrapper(*, with_return_choice: bool = True) -> MagicMock:
 
 
 @pytest.fixture
-def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
     """Install a CANN package with the fused TopK and enable it on the device."""
     ops = SimpleNamespace(msa_index_score=_index_score_wrapper())
     # ``from cann_ops_transformer.ops import msa_index_score`` resolves through
@@ -1693,7 +1694,11 @@ def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     msa_m3_npu_module._index_score_has_return_choice.cache_clear()
 
 
-def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_topk_fusion_is_enabled_on_a5_only(
+    monkeypatch: pytest.MonkeyPatch,
+    fused_index_ops: MagicMock,
+) -> None:
+    """Only A5 advertises the capability; the operator itself is stubbed here."""
     for device, expected in [
         (AscendDeviceType.A5, True),
         (AscendDeviceType.A3, False),
@@ -1705,6 +1710,7 @@ def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> N
             lambda device=device: get_hardware_profile(device),
         )
         assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is expected
+
 
 def test_topk_fusion_requires_the_new_operator(
     monkeypatch: pytest.MonkeyPatch,
