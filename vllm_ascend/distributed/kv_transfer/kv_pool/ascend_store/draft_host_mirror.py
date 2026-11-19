@@ -17,12 +17,12 @@ class BulkSaveParticipant(Protocol):
     def has_pending_bulk_save(self) -> bool: ...
 
 
-class HiSparseStoreSaveCoordinator:
+class HiSparseDraftHostMirrorSaveHook:
     def __init__(self, source: HiSparseConnectorWorker, stores: Sequence[BulkSaveParticipant]) -> None:
         self._source = source
         self._stores = tuple(stores)
 
-    def prepare(self) -> None:
+    def before_save(self) -> None:
         if any(store.has_pending_bulk_save() for store in self._stores):
             # Queue the mirror once, then let each child record its save event.
             # Sender threads wait for those events before reading Host bytes.

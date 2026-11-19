@@ -38,6 +38,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+    HiSparseDraftHostMirrorSaveHook,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -55,7 +58,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import HiSparseStoreSaveCoordinator
 
 
 class TestDSparkPrefixRegistration(unittest.TestCase):
@@ -1758,7 +1760,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
         from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import save_coordinator as host_mirror
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
 
         source = HiSparseConnector.__new__(HiSparseConnector)
 
@@ -1831,7 +1833,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         connector = AscendMultiConnector.__new__(AscendMultiConnector)
         # The parent prepares the shared Host mirror once before either Store saves.
         connector._connectors = [stores[0], source, stores[1]]
-        connector._configure_store_save_coordinator()
+        connector._configure_draft_host_mirror_save_hook()
 
         with (
             patch.object(host_mirror.torch.accelerator, "current_stream", return_value=compute_stream),
@@ -1875,7 +1877,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(mirror._post_forward_transfers, [page_transfer])
 
     def test_hisparse_bulk_save_records_event_without_draft_dma(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import save_coordinator as host_mirror
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
 
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
@@ -1890,7 +1892,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                     host_write_event=object(),
                 )
                 store = SimpleNamespace(has_pending_bulk_save=lambda: True)
-                coordinator = HiSparseStoreSaveCoordinator(mirror, [store])
+                save_hook = HiSparseDraftHostMirrorSaveHook(mirror, [store])
                 req = ReqMeta(req_id="r1", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
                 meta = AscendConnectorMetadata(set(), set())
                 meta.add_request(req)
@@ -1899,7 +1901,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                     patch.object(host_mirror.torch, "Event") as event,
                     patch.object(host_mirror.torch, "npu", create=True) as npu,
                 ):
-                    coordinator.prepare()
+                    save_hook.before_save()
                     worker.wait_for_save(meta)
 
                 if pending:
@@ -1914,7 +1916,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 self.assertFalse(mirror._draft_mirror_pending)
 
     def test_hisparse_bulk_save_rejects_incompatible_core_worker(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.save_coordinator import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
             finish_draft_host_mirror_for_save,
         )
 
@@ -1945,8 +1947,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         mirror = SimpleNamespace(_draft_mirror_pending=True)
         store = SimpleNamespace(has_pending_bulk_save=lambda: False)
-        coordinator = HiSparseStoreSaveCoordinator(mirror, [store])
-        coordinator.prepare()
+        save_hook = HiSparseDraftHostMirrorSaveHook(mirror, [store])
+        save_hook.before_save()
         worker.wait_for_save(meta)
         self.assertTrue(mirror._draft_mirror_pending)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
