@@ -343,7 +343,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         # Native Kimi-K3 checkpoints contain packed MXFP4 weights without
         # an activation recipe. Reuse the Ascend W4A8 backend, which performs
         # dynamic MXFP8 activation quantization at runtime.
-        if self._is_packed_mxfp4(weight_quant, input_quant, format):
+        if self._is_only_weight_mxfp4_packed(weight_quant, input_quant, format):
             assert self.quant_description is not None
             self.quant_description["group_size"] = weight_quant.group_size
             return "W4A8_MXFP"
@@ -399,7 +399,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
 
         raise NotImplementedError("No compressed-tensors compatible quantization type was found.")
 
-    def _is_packed_mxfp4(
+    def _is_only_weight_mxfp4_packed(
         self,
         weight_quant: "QuantizationArgs",
         input_quant: Optional["QuantizationArgs"],
