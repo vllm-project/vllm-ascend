@@ -113,13 +113,10 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         # FP8 weights are kept in ND layout (no FRACTAL_NZ cast), so the fused
         # gmm1+swiglu+quant path must use the FP8-capable v2 kernel instead of
-        # the weight-NZ kernel the int8 W8A8 scheme dispatches to.
+        # the weight-NZ kernel the int8 W8A8 scheme dispatches to (including
+        # the EPLB per-expert weight list path).
         activation = mlp_compute_input.activation
-        if (
-            not mlp_compute_input.fusion
-            or mlp_compute_input.dynamic_eplb
-            or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
-        ):
+        if not mlp_compute_input.fusion or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
             return super().apply_gmm1_act_quant(mlp_compute_input)
 
         hidden_states = mlp_compute_input.hidden_states
