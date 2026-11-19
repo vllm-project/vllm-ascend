@@ -78,6 +78,7 @@ def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runn
 
 
 class BaseModel(nn.Module):
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
     _aux_slot_base_cached = 0
     _aux_upstream_total_cached = 0
 
