@@ -25,13 +25,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
-    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
-        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
-        if self.layerwise_offload and request_tuple is not None:
-            # Verifier rows have no corresponding input KV/state to snapshot.
-            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
-        return super()._build_req_meta(request_tracker, *args, **kwargs)
-
     def __init__(
         self,
         vllm_config: VllmConfig,
