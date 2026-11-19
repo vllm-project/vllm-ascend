@@ -5,7 +5,7 @@ import importlib
 import inspect
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -20,8 +20,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "checkpoint_prepare",
     "checkpoint_restore",
     "_scoped_allocator_max_split",
-    "_init_workspace_and_model_runner",
-    "_make_model_runner",
     "handle_ft_command",
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
@@ -320,22 +318,49 @@ def xlite_worker_module(monkeypatch):
                     package.xlite_worker = previous_attribute
 
 
-def test_xlite_constructor_and_device_runner(worker_constructor, monkeypatch, xlite_worker_module):
+@pytest.mark.parametrize("xlite", [False, True], ids=["default", "xlite"])
+def test_init_device_selects_runner_and_orders_registration(
+    worker_constructor, monkeypatch, xlite_worker_module, xlite
+):
     xlite_worker = xlite_worker_module
-
-    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker)
-    assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
     device, runner = object(), object()
+    worker = construct_worker(worker_constructor, xlite_worker.XliteWorker if xlite else None)
+    worker.vllm_config.is_mm_encoder_only = False
+    if xlite:
+        assert xlite_worker.XliteWorker.__bases__ == (worker_constructor.module.NPUWorker,)
+        # Runner selection is the hook's job; the init_device skeleton stays inherited.
+        assert "init_device" not in vars(xlite_worker.XliteWorker)
+        assert "_make_model_runner" in vars(xlite_worker.XliteWorker)
+        factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
+        monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
+    else:
+        factory = Mock(return_value=runner, __name__="NPUModelRunner")
+        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
+        runner_module.NPUModelRunner = factory  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, runner_module.__name__, runner_module)
     init_device = Mock(return_value=device)
+    fla, workspace, usage = Mock(), Mock(), Mock()
+    ordered = Mock()
+    for name, mock in (
+        ("init_device", init_device),
+        ("register_fla", fla),
+        ("init_workspace", workspace),
+        ("make_runner", factory),
+        ("report_usage", usage),
+    ):
+        ordered.attach_mock(mock, name)
     monkeypatch.setattr(worker, "_init_device", init_device)
-    factory = Mock(return_value=runner, __name__="XliteModelRunnerV2")
-    monkeypatch.setattr(xlite_worker, "XliteModelRunnerV2", factory)
-    workspace, usage = Mock(), Mock()
-    monkeypatch.setattr(xlite_worker, "init_workspace_manager", workspace)
-    monkeypatch.setattr(xlite_worker, "report_usage_stats", usage)
+    monkeypatch.setattr(worker_constructor.module, "register_ascend_fla_customop", fla)
+    monkeypatch.setattr(worker_constructor.module, "init_workspace_manager", workspace)
+    monkeypatch.setattr(worker_constructor.module, "report_usage_stats", usage)
     worker.init_device()
-    init_device.assert_called_once_with()
-    workspace.assert_called_once_with(device, 1)
-    factory.assert_called_once_with(worker.vllm_config, device)
-    assert worker.model_runner is worker.xlite_runner is runner
-    usage.assert_called_once_with(worker.vllm_config)
+    assert ordered.mock_calls == [
+        call.init_device(),
+        call.register_fla(),
+        call.init_workspace(device, 1),
+        call.make_runner(worker.vllm_config, device),
+        call.report_usage(worker.vllm_config),
+    ]
+    assert worker.model_runner is runner
+    if xlite:
+        assert worker.xlite_runner is runner
