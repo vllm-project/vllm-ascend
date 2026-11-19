@@ -81,15 +81,18 @@ vllm serve Qwen/Qwen3.8-27B \
   }'
 ```
 
-Set `num_speculative_tokens` to the checkpoint block size minus one. Omit
-`draft_tensor_parallel_size` to inherit the target TP size; the two sizes must
-match for DSpine. Draft sampling defaults
+Set `num_speculative_tokens` to the checkpoint block size minus one.
+The shared DFlash loader uses the target's tensor-parallel runtime and LM head.
+Draft sampling defaults
 to `greedy`; use `draft_sample_method="probabilistic"` for probabilistic proposals.
 The adapter inherits the upstream candidate sampler, including proposal-cache
 updates, and uses the existing Ascend DFlash2 candidate walk. Probabilistic
 sampling uses the Ascend RNG, so a fixed seed need not reproduce CUDA drafts.
 
-Adaptive verification, fine-grained LM head TP, PCP vocabulary weight sharding,
+Set `enable_adaptive_verification` to `true` to use the inherited DFlash2
+acceptance estimator and Ascend MRV2 verification-budget handling.
+
+Fine-grained LM head TP, PCP vocabulary weight sharding,
 QuaRot targets, FP64 Gumbel sampling and batch-sharded draft logits are not
 supported. Exact transition scoring requires an unquantized LM head and
 unquantized refinement projections in ND format. Existing MRV2 DFlash
