@@ -1009,7 +1009,7 @@ notes:
       variants: [ascend_a3_w4a8]
       strategies: [single_node_tp]
     body: |
-      Run these scripts inside the prepared A3 container. Use separate terminals for Prefill, Decode and the proxy.
+      Use these scripts only with the **Image and text (10K, A3 PD)** preset. Run Prefill, Decode and the proxy in separate terminals inside the prepared A3 container.
 
       **Environment for Prefill and Decode** — run this block in both worker terminals.
 
@@ -1126,6 +1126,14 @@ notes:
           --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
           --decoder-hosts "${local_ip}" "${local_ip}" "${local_ip}" "${local_ip}" \
           --decoder-ports 25569 25579 25589 25599
+      ```
+
+      **Verify through the proxy** — once the proxy is listening, run this request in another terminal on the same host. Replace `<IMAGE_URL>` with an image URL both workers can access and `<TEXT_PROMPT>` with the text for your 10K sample.
+
+      ```bash
+      curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+          -H "Content-Type: application/json" \
+          -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
       ```
 
 hardware_notes:
