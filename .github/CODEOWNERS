@@ -278,3 +278,11 @@
 # SKIP(owner): /vllm_ascend/models/layer/attention/__init__.py
 # SKIP(owner): /vllm_ascend/worker/__init__.py
 # SKIP(owner): /vllm_ascend/worker/v2/__init__.py
+
+# AI review POC (RFC #21451): later entries win over /.github above
+/.github/agent-review/ @wangxiyuan
+/.github/workflows/ai_review.yml @wangxiyuan
+/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
+/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
+/.github/workflows/scripts/ai_review.py @wangxiyuan
+/.github/workflows/scripts/test_ai_review.py @wangxiyuan
