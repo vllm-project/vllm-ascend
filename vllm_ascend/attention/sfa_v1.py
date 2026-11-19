@@ -946,7 +946,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # finalized with the other users of the buffer after model construction.
         indexer_type = type(getattr(self.indexer, "impl", None))
         self.use_shardq = (
-            getattr(self.vllm_config.attention_config, "sparse_mla_shard_q", False) is True
+            ascend_config.enable_sparse_mla_shard_q
+            and getattr(self.vllm_config.attention_config, "sparse_mla_shard_q", False) is True
             and self.tp_size > 1
             and parallel.prefill_context_parallel_size == 1
             and parallel.decode_context_parallel_size == 1

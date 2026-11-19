@@ -543,6 +543,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_sparse_mla_shard_q)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         # 0 = let the MegaMoe operator auto-compute the receive capacity.
         self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
@@ -652,6 +653,7 @@ class TestAscendConfig(TestBase):
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
+            "enable_sparse_mla_shard_q": True,
             "xlite_graph_config": {"enabled": False, "full_mode": True},
             "finegrained_tp_config": {"lmhead_tensor_parallel_size": "0"},
             "mega_moe_max_tokens": 32768,
@@ -660,6 +662,7 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
         self.assertTrue(ascend_config.enable_force_eplb)
+        self.assertTrue(ascend_config.enable_sparse_mla_shard_q)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 32768)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
