@@ -1,0 +1,13 @@
+pr: 22430
+entries:
+  - category: performance
+    text: >-
+      MooncakeConnectorV2 now defaults to per-request KV receive completion, so
+      completed requests can enter decode while other requests are still transferring.
+      Long-context transfers avoid unused block grouping during address preparation;
+      end-to-end performance remains to be validated.
+  - category: config
+    text: >-
+      Decoder kv_connector_extra_config accepts pull_transfer_mode (default "request";
+      set "batch" for aggregated receives) and pull_max_workers (default 32).
+      No matching producer settings are required.
