@@ -1352,7 +1352,6 @@ revision.
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
-            "enable_fused_mc2":1,
             "enable_flashcomm1":false,
             "enable_shared_expert_dp":true
         }' \
@@ -1548,7 +1547,7 @@ revision.
       `recompute_scheduler_enable` path cannot perform bounded replay.
     - Both roles set `enable_flashcomm1` to `false`; on Prefill this is required
       for compatibility with SWA bounded replay. Prefill enables
-      `enable_fused_mc2` and `enable_shared_expert_dp`; Decode enables
+      `enable_shared_expert_dp`; Decode enables
       `multistream_overlap_shared_expert` instead.
     - `HCCL_IF_IP` and the socket interface variables must select the same
       high-speed service network used by the configured node IPs.
@@ -2472,7 +2471,6 @@ vllm serve "$MODEL_PATH" \
     --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
     --additional-config '{
         "enable_cpu_binding":true,
-        "enable_fused_mc2":1,
         "enable_flashcomm1":false,
         "enable_shared_expert_dp":true
     }' \
