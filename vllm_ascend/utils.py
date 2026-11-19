@@ -97,32 +97,28 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return max_num_tokens
-    query_per_req = 1
     spec = vllm_config.speculative_config
-    if spec is not None:
-        # Use shared config, not the last PP rank's speculator instance:
-        # every pipeline stage must profile the same target token shape.
-        if spec.method not in ("mtp", "eagle", "eagle3"):
-            return max_num_tokens
-        query_per_req = 1 + spec.num_speculative_tokens
-    # Cover replicated decodes and uneven whole-request decode sharding.
-    max_replicated_query = query_per_req
-    # DualChunkSwap rounds two chunks per request on each PCP rank.
-    padding_tokens = 2 * max_num_reqs
+    if spec is not None and spec.method not in ("mtp", "eagle", "eagle3"):
+        return max_num_tokens
+
+    # PCP: bound replicated decodes, including uneven whole-request sharding.
+    # Shared config keeps this bound identical across pipeline stages.
+    max_replicated_query = 1 + spec.num_speculative_tokens if spec is not None else 1
+    # PCP + DCP: also cover prefills that leave an empty PCP chunk.
+    # For n=2*PCP, (n-1)*ceil(tokens/n) >= tokens holds only up to (n-1)**2.
     if vllm_config.parallel_config.decode_context_parallel_size > 1:
-        # DCP replicates decodes and prefills that leave an empty PCP chunk.
-        # For n=2*PCP chunks, (n-1)*ceil(tokens/n) >= tokens holds only up
-        # to (n-1)**2 tokens. Bound replicated rows before sharding the rest.
-        max_replicated_query = max(query_per_req, (2 * pcp_size - 1) ** 2)
+        max_replicated_query = max(max_replicated_query, (2 * pcp_size - 1) ** 2)
     replicated_tokens = min(max_num_tokens, max_num_reqs * max_replicated_query)
     remaining_tokens = max_num_tokens - replicated_tokens
+    # DualChunkSwap rounds two chunks per request on each PCP rank.
     profile_tokens = min(
         max_num_tokens,
-        replicated_tokens + (remaining_tokens + pcp_size - 1) // pcp_size + padding_tokens,
+        replicated_tokens + (remaining_tokens + pcp_size - 1) // pcp_size + 2 * max_num_reqs,
     )
 
     from vllm.config import CUDAGraphMode
 
+    # Graph mode: the largest enabled prefill capture is a local lower bound.
     compilation_config = vllm_config.compilation_config
     if not vllm_config.model_config.enforce_eager and compilation_config.cudagraph_mode in (
         CUDAGraphMode.PIECEWISE,
