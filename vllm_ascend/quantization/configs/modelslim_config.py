@@ -47,6 +47,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     C8_MXFP_KV_CACHE_DTYPE,
     calc_split_factor,
+    is_deepseek_v41,
 )
 
 from ..methods import get_scheme_class
@@ -858,7 +859,10 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
-            scheme = create_scheme_for_layer(quant_type, prefix, "linear")
+            layer_type = "linear"
+            if quant_type == "W8A8_MXFP8" and is_deepseek_v41(vllm_config.model_config.hf_config):
+                layer_type = "ds_linear_mxfp8"
+            scheme = create_scheme_for_layer(quant_type, prefix, layer_type)
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 

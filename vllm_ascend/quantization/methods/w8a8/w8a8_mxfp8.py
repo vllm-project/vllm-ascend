@@ -75,13 +75,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         WeightSwitchGatherSpec("weight", gather_dim=1),
         WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
-    # DSA wo_a post-processing places PCP-sharded groups on dim 0:
-    # weight [n_local_groups, hidden, o_lora_rank],
-    # weight_scale [n_local_groups, k_packed, o_lora_rank, 2].
-    _wo_a_3d_output_gather_specs = (
-        WeightSwitchGatherSpec("weight", gather_dim=0),
-        WeightSwitchGatherSpec("weight_scale", gather_dim=0),
-    )
     supports_weight_switch = True
     supports_unaligned_tp_groups = True
 
@@ -91,22 +84,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
-
-    def _get_weight_switch_specs(
-        self,
-        layer: torch.nn.Module,
-        config: WeightSwitchConfig,
-    ) -> tuple[
-        tuple[WeightSwitchGatherSpec, ...],
-        tuple[WeightSwitchRepeatSpec, ...],
-        str,
-    ]:
-        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
-        # Ordinary transposed 2D output shards stay on dim 1. The 3D wo_a
-        # layout moves those groups to dim 0, matching the native DS path.
-        if shard_axis == "output" and getattr(layer, "dsa_wo_a_3d_layout", False):
-            return self._wo_a_3d_output_gather_specs, repeat_specs, shard_axis
-        return gather_specs, repeat_specs, shard_axis
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
@@ -298,19 +275,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-
-        # Set by models whose DSA consumes wo_a through
-        # npu_transpose_quant_batchmatmul, which needs ND weight
-        # [n_local_groups, hidden, o_lora_rank].
-        dsa_wo_a_3d_layout = getattr(layer, "dsa_wo_a_3d_layout", False)
-        if dsa_wo_a_3d_layout:
-            o_lora_rank = layer.o_lora_rank
-            n_local_groups = padded_weight.shape[0] // o_lora_rank
-            transposed_weight = padded_weight.reshape(n_local_groups, o_lora_rank, -1).transpose(1, 2).contiguous()
-            target_scale = reshaped_scale.reshape(n_local_groups, o_lora_rank, -1, 2).transpose(1, 2).contiguous()
-        else:
-            transposed_weight = padded_weight.transpose(0, 1).contiguous()
-            target_scale = reshaped_scale.transpose(0, 1)
+        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        target_scale = reshaped_scale.transpose(0, 1)
 
         layer._mxfp8_gmm_nz_layout = (
             getattr(layer, "_single_group_gmm_nz", False)
@@ -375,22 +341,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
-
-        if getattr(layer, "dsa_wo_a_3d_layout", False) and layer.weight.data.ndim == 3:
-            groups, hidden, rank = layer.weight.data.shape
-            weight_by_group = layer.weight.data.permute(1, 0, 2)
-            layer.weight.data = (
-                torch.empty_like(weight_by_group, memory_format=torch.contiguous_format)
-                .copy_(weight_by_group)
-                .view(hidden, groups * rank)
-            )
-            scale_by_group = layer.weight_scale.data.permute(1, 0, 2, 3)
-            scale_k_dim = scale_by_group.shape[0]
-            layer.weight_scale.data = (
-                torch.empty_like(scale_by_group, memory_format=torch.contiguous_format)
-                .copy_(scale_by_group)
-                .view(scale_k_dim, groups * rank, 2)
-            )
 
         if getattr(layer, "_mxfp8_gmm_nz_layout", False):
             restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
@@ -959,3 +909,58 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             # dimension, which requires contiguous HCCL inputs.
             layer.weight.data = layer.weight.data.contiguous()
             layer.weight_scale.data = layer.weight_scale.data.contiguous()
+
+
+@register_scheme("W8A8_MXFP8", "ds_linear_mxfp8")
+class AscendW8A8MXFP8DSV41FlashLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """MXFP8 linear method for ModelSlim DeepSeek V4.1 Flash checkpoints.
+
+    The checkpoint tensors match the shared MXFP8 layout. ``wo_a`` is additionally
+    stored as grouped ND ``[n_local_groups, hidden, o_lora_rank]`` for DSA.
+    """
+
+    _wo_a_3d_output_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
+    )
+
+    def process_weights_after_loading(self, layer):
+        wo_a_3d = getattr(layer, "prefix", "").endswith("wo_a") and getattr(layer, "o_lora_rank", 0) > 0
+        layer._mxfp8_wo_a_3d = wo_a_3d
+        if not wo_a_3d:
+            super().process_weights_after_loading(layer)
+            return
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+
+        padded_weight = layer.weight.data
+        n_dim, k_dim = layer.weight_scale.data.shape
+        if layer.weight_scale.data.shape[-1] % 2 != 0:
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
+        else:
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+
+        n_local_groups = padded_weight.shape[0] // layer.o_lora_rank
+        layer.weight.data = padded_weight.reshape(n_local_groups, layer.o_lora_rank, -1).transpose(1, 2).contiguous()
+        layer.weight_scale.data = (
+            reshaped_scale.reshape(n_local_groups, layer.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+        )
+
+        layer._mxfp8_transformed = True
+
+    def _get_weight_switch_specs(
+        self,
+        layer: torch.nn.Module,
+        config: WeightSwitchConfig,
+    ) -> tuple[
+        tuple[WeightSwitchGatherSpec, ...],
+        tuple[WeightSwitchRepeatSpec, ...],
+        str,
+    ]:
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        # Grouped wo_a keeps the PCP output shard on dim 0. Other linears stay
+        # on the transposed 2D output dimension.
+        if shard_axis == "output" and getattr(layer, "_mxfp8_wo_a_3d", False):
+            return self._wo_a_3d_output_gather_specs, repeat_specs, shard_axis
+        return gather_specs, repeat_specs, shard_axis

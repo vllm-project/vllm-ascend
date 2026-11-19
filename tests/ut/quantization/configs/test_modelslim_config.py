@@ -196,6 +196,36 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, mock_ascend_linear.return_value)
             mock_ascend_linear.assert_called_once_with(mock_scheme)
 
+    def test_dsv41_mxfp8_linear_uses_flash_scheme(self):
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_scheme = MagicMock()
+        cases = (
+            ("deepseek_v41", "ds_linear_mxfp8"),
+            ("qwen3", "linear"),
+        )
+        for model_type, layer_type in cases:
+            mock_config = MagicMock()
+            mock_config.model_config.hf_config.model_type = model_type
+            mock_config.model_config.hf_config.text_config = None
+            with (
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                    return_value=mock_config,
+                ),
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer",
+                    return_value="W8A8_MXFP8",
+                ),
+                patch(
+                    "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer",
+                    return_value=mock_scheme,
+                ) as mock_create,
+                patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()),
+            ):
+                self.ascend_config.get_quant_method(linear_layer, "model.layers.0.attn.wo_a")
+            self.assertEqual(mock_create.call_args.args[0], "W8A8_MXFP8")
+            self.assertEqual(mock_create.call_args.args[2], layer_type)
+
     def test_get_quant_method_for_attention(self):
         attention_layer = MagicMock(spec=Attention)
         mock_config = MagicMock()
