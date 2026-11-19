@@ -50,9 +50,13 @@ DSV3_2_MODEL = os.getenv(
     "DSV3_2_MODEL_PATH",
     "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
 )
+# vLLM rejects decode context parallelism on GQA/MQA models unless
+# tensor_parallel_size > total KV heads, so this case needs a model with two KV
+# heads to keep the layout inside four cards (TP4, DCP<=TP/KV heads=2). The
+# 8-KV-head Qwen3-8B default could never satisfy that rule here.
 GQA_MODEL = os.getenv(
     "GQA_MODEL_PATH",
-    "Qwen/Qwen3-8B",
+    "Qwen/Qwen2.5-1.5B-Instruct",
 )
 
 MLA_RUNNER_KWARGS: dict[str, Any] = {
@@ -68,7 +72,7 @@ MLA_RUNNER_KWARGS: dict[str, Any] = {
 }
 
 GQA_RUNNER_KWARGS: dict[str, Any] = {
-    "tensor_parallel_size": 2,
+    "tensor_parallel_size": 4,
     "max_num_seqs": MAX_NUM_SEQS,
     "block_size": BLOCK_SIZE,
     "cp_kv_cache_interleave_size": CP_KV_CACHE_INTERLEAVE_SIZE,
