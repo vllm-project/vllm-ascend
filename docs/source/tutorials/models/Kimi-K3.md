@@ -26,21 +26,6 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-### 2.1 Context Parallelism { #21-context-parallelism }
-
-Kimi K3 combines KDA with gated MLA. PCP partitions KDA heads and state across
-TP × PCP while MLA uses the context-parallel attention backend. PCP is
-implemented, but model-level PCP system validation is not yet recorded in the
-support matrix. See [Kimi hybrid attention](../../user_guide/feature_guide/context_parallel.md#kimi-hybrid-attention)
-for head divisibility, state layout, graph-mode, and speculative-decoding constraints.
-
-The deployment templates below leave PCP at its default size of `1`. The
-[long-context P/D templates](#53-long-context-and-1m-pd-separation-deployment)
-enable standalone DCP on Decode: TP8/DCP8 on 950DT products with block/interleave
-size `768`, or TP16/DCP16 on A3 with block/interleave size `384`. DCP shards the
-MLA KV cache; it does not additionally shard KDA state. Keep the complete
-platform-specific launch configuration when enabling DCP.
-
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

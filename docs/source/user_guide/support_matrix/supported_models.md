@@ -104,13 +104,6 @@
 
 ## Multimodal Language Models
 
-For Kimi K3 and K3.1 Pro, read [Kimi hybrid attention](../feature_guide/context_parallel.md#kimi-hybrid-attention)
-alongside the PCP/DCP columns. K3 PCP is implemented but remains **unverified**
-at the model-system level in this matrix. K3.1 Pro PCP and DCP remain
-**experimental**, following the separate Prefill and Decode configurations in
-its model guide. These entries do not establish support for every combination
-with graph execution, speculative decoding, or KV transfer.
-
 === "950PR&950DT Products"
 
     | Model | Support | Hardware | [Graph Mode](../../user_guide/feature_guide/graph_mode.md) |||| [Npugraph_ex](../../user_guide/feature_guide/graph_mode.md#using-npugraph_ex) || [CP](../../user_guide/feature_guide/context_parallel.md) || [KVPP(only D node)](../../user_guide/feature_guide/kvpp.md) | TP | EP | DP | MLAPO | [EPLB](../../user_guide/feature_guide/expert_parallelism_load_balancer.md) | Multistream MoE(only D node) | Shared Expert DP | Fused MC2 | [Speculative Decoding](../../user_guide/feature_guide/speculative_decoding.md) |||| [Mooncake Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [Memcache Backend Pool](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) ||| [KV Cache Offloading](../../user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md) || Prefix Cache | Weight nz | Async Scheduling | [CPU Binding](../../user_guide/feature_guide/cpu_binding.md) | flashcomm1(only P node) | [Fine-grained TP](../../user_guide/feature_guide/Fine_grained_TP.md) ||||

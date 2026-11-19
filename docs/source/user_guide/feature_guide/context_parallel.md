@@ -47,46 +47,11 @@ DCP supports eager and graph execution, prefix caching, chunked prefill, specula
 - ✅ **Full compatibility**: Combining the feature with DCP is supported.
 - 🟠 **Partial compatibility**: Combining the feature with DCP is supported with the stated limitations.
 
-### Kimi hybrid attention { #kimi-hybrid-attention }
-
-Kimi K3 and K3.1 Pro combine recurrent Kimi Delta Attention (KDA) with
-full-attention layers. The MLA/SFA tables above describe their full-attention
-layers; they do not describe KDA state storage or establish support for every
-hybrid-model feature combination.
-
-| Model | Attention layers | Context-parallel configuration |
-| --- | --- | --- |
-| [Kimi K2.6](../../tutorials/models/Kimi-K2.6.md) | MLA | Uses the MLA PCP/DCP paths and topology constraints. |
-| [Kimi K3](../../tutorials/models/Kimi-K3.md#21-context-parallelism) | KDA + gated MLA | PCP head sharding is implemented; model-level PCP system validation remains unverified in the support matrix. The deployment guide provides standalone DCP configurations for long-context Decode. |
-| [Kimi K3.1 Pro](../../tutorials/models/Kimi-K3.1-Pro.md#21-context-parallelism) | KDA + DSA sparse attention through the SFA backend | Experimental support includes PCP on Prefill and standalone DCP on Decode in the documented P/D configurations. |
-
-For Kimi K3 and K3.1 Pro:
-
-- Use Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) on every node.
-- With PCP enabled, KDA projection weights, convolution state, and recurrent
-  state use the same `TP_SIZE * PCP_SIZE` head partition. The KDA head count
-  must be divisible by this product. Each head shard processes the restored
-  global token sequence in causal order; KDA does not run independent recurrent
-  states on the head and tail token fragments.
-- DCP shards the MLA/SFA attention cache along the sequence dimension. It does
-  not further divide the KDA convolution or recurrent state by `DCP_SIZE`.
-  Consequently, total hybrid-cache memory does not scale simply as `1 / DCP_SIZE`.
-- K3.1 Pro uses a DCP-sharded indexer cache and distributed TopK selection,
-  rather than the replicated GLM-5.2 indexer layout. Its standalone sparse
-  DCP configuration requires `DCP_SIZE = TP_SIZE`.
-- For P/D deployment, use the complete model-specific `MooncakeConnectorV2`
-  templates, including the peer TP/PP/PCP/DCP metadata, cache dtypes, block size,
-  and interleave size. The K3.1 Pro examples use PCP only on Prefill and DCP
-  only on Decode; they do not validate stacking both on the same engine.
-- DSpark requires a compatible draft checkpoint and role-specific draft TP
-  settings. The draft runs with logical PCP size `1`. Optional
-  [KDA RecoverSSM](speculative_decoding.md#experimental-kimi-k3-and-k31-kda-recoverssm)
-  has separate experimental constraints; ordinary PCP/DCP support does not
-  establish RecoverSSM compatibility.
-
-See the [model support matrix](../support_matrix/supported_models.md#multimodal-language-models)
-for model and hardware status. The topology examples in the model guides are
-deployment references, rather than implementation limits on node or device count.
+For hybrid models such as [Kimi K3](../../tutorials/models/Kimi-K3.md) and
+[Kimi K3.1 Pro](../../tutorials/models/Kimi-K3.1-Pro.md), these tables describe
+the MLA/SFA layers. DCP shards their attention cache and K3.1 Pro's indexer cache;
+it does not further shard KDA convolution or recurrent state. Model and hardware
+status is listed in the [model support matrix](../support_matrix/supported_models.md#multimodal-language-models).
 
 ## Usage { #usage }
 
@@ -159,6 +124,9 @@ For either method, remove `--enforce-eager` and add the following option to use 
   and replicated DFlash/DFlash2 drafts.
 - PCP does not support `FULL` CUDA graphs; use eager mode, `PIECEWISE`, `FULL_AND_PIECEWISE`, or `FULL_DECODE_ONLY`.
 - Encoder-decoder models and LoRA are not supported with PCP.
+- Hybrid KDA models require Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`).
+  The KDA head count must be divisible by `tensor_parallel_size * prefill_context_parallel_size`;
+  KDA projection weights, convolution state, and recurrent state share this head partition.
 - PCP and DCP can be stacked for MLA, SFA, and GQA. See
   [Combining PCP and DCP](#combining-pcp-and-dcp) for the supported sizes.
 - Adaptive verification is not supported with PCP speculative decoding.
@@ -198,6 +166,11 @@ When both PCP and DCP are enabled (`prefill_context_parallel_size>1` and `decode
 - **GQA**: Supports only `DCP_SIZE = PCP_SIZE`. When `TP_SIZE > 1`, `DCP_SIZE = PCP_SIZE * TP_SIZE` is not supported.
 
 DCP reuses the ranks introduced by PCP and TP, so stacking DCP does not add ranks beyond the PCP world size. For example, `TP2 + PCP2 + DCP4` is a supported MLA/SFA topology.
+
+The Kimi K3.1 Pro P/D templates enable PCP on Prefill and standalone DCP on
+Decode. They do not validate PCP+DCP on the same engine. Optional
+[KDA RecoverSSM](speculative_decoding.md#experimental-kimi-k3-and-k31-kda-recoverssm)
+has separate experimental constraints.
 
 #### KV-cache Transfer
 

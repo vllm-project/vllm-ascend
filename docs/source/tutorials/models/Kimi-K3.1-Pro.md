@@ -28,28 +28,6 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
-### 2.1 Context Parallelism {#21-context-parallelism}
-
-Use Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) on every node. Kimi K3.1 Pro
-combines KDA with DSA sparse attention implemented by the Ascend SFA backend.
-KDA weights and state are head-sharded across TP × PCP; DCP shards the sparse
-attention and indexer caches along the sequence dimension. See
-[Kimi hybrid attention](../../user_guide/feature_guide/context_parallel.md#kimi-hybrid-attention)
-for the topology and state-layout constraints.
-
-The basic eight-node P/D templates use the following configurations:
-
-| Platform | Prefill TP / PP / PCP / DCP | Decode DP / TP / PCP / DCP | Decode block / interleave size |
-| --- | --- | --- | --- |
-| Atlas 800I A3 | `4 / 4 / 4 / 1` | `4 / 16 / 1 / 16` | `768 / 768` |
-| 950DT Products | `1 / 4 / 8 / 1` | `4 / 8 / 1 / 8` | `1536 / 1536` |
-
-These are experimental deployment references. They enable PCP on Prefill and
-DCP on Decode separately; they do not establish validation for PCP+DCP on the
-same engine. Use the complete [P/D templates](#511-create-the-engine-templates)
-for connector metadata, cache dtypes, and optional DSpark settings. RecoverSSM
-has [separate experimental requirements](../../user_guide/feature_guide/speculative_decoding.md#experimental-kimi-k3-and-k31-kda-recoverssm).
-
 ## 3 Prerequisites {#3-prerequisites}
 
 ### 3.1 Model Weights {#31-model-weights}

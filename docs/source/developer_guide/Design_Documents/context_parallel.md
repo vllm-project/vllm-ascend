@@ -114,6 +114,12 @@ The normal v1 builders remain the source of truth for request classification, pa
 
 For PCP, `AscendPCPAttentionContext` supplies the global request view and restore maps to the backend metadata builders. The same local-query/global-cache distinction applies when PCP is stacked with DCP.
 
+Recurrent KDA layers gather the PCP-local hidden states and restore global causal
+token order before execution, then select the local output rows afterward.
+Projection weights, convolution state, and recurrent state use the same TP×PCP
+head partition; DCP does not further shard this state. KDA output projections
+reduce across PCP even when sequence parallelism defers the TP reduction.
+
 ### Prefill and chunked prefill
 
 During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
@@ -154,7 +160,11 @@ GLM-5.2 uses Sparse Flash Attention (SFA) with a LightningIndexer. For DCP, the 
 - During prefill or a mixed batch, KV blocks referenced by the request block table are compacted and all-gathered after the current layer writes its KV cache.
 - Decode-only batches retain the DCP SFA Q-gather and result-merge path.
 
-This mode is selected automatically for sparse SFA models when DCP is enabled (`decode_context_parallel_size>1`).
+For GLM-5.2, this mode is selected automatically when DCP is enabled (`decode_context_parallel_size>1`).
+
+Kimi K3.1 Pro uses the SFA backend with a token-sharded indexer cache instead.
+Its indexer follows the attention cache's DCP token owners, and distributed
+TopK combines candidates from the local indexer shards.
 
 For a GLM-5.2 DCP deployment, keep `cp_kv_cache_interleave_size` equal to the KV-cache block size:
 
@@ -174,34 +184,6 @@ With PCP+DCP, the compact block-table plan is derived from the global request vi
 ### DSA and DSA V4.1 PCP
 
 DSA PCP gathers hidden states and restores global order for cache updates, compression, and indexing. Attention then evaluates local query rows. DSA V4.1 follows the same local-query/global-cache structure with its sliding-window and compressor state, using backend-specific metadata.
-
-### Kimi K3 and K3.1 hybrid state
-
-Kimi K3 alternates KDA and gated MLA layers. K3.1 Pro also routes its DSA
-layers through the shared SFA backend. Cache ownership differs between the
-recurrent and full-attention layers:
-
-- `kda_parallel.py` assigns each KDA head to a combined TP×PCP rank,
-  `tp_rank * pcp_size + pcp_rank`. Projection loaders, convolution parameters,
-  and recurrent-state shapes use this same partition. State-shape calculation
-  delegates to the installed vLLM using a copied configuration with effective
-  TP size `TP * PCP`; it does not change the model's actual TP configuration.
-- `KimiKDAHostMetadataBuilder` uses the global PCP batch and token restore maps.
-  `kda_pcp_gather` restores causal token order before KDA execution;
-  `kda_pcp_scatter` selects the local token rows afterward. Padding masks keep
-  invalid rows out of the returned activations. The permutation buffers retain
-  stable addresses for graph replay.
-- KDA's output projection reduces contributions across PCP, even when sequence
-  parallelism defers the TP reduction to the decoder layer.
-- DCP sequence sharding applies to MLA/SFA caches, not KDA's recurrent state.
-  K3.1's uncompressed indexer follows the attention cache's DCP token owners;
-  distributed TopK combines candidates from the local indexer shards. This
-  differs from the GLM-5.2 replicated-indexer path described above.
-
-KDA cache groups and attention cache groups must retain their own state and
-block-layout semantics during P/D transfer. Use the model guide's connector
-topology and block/interleave settings. Model-level deployment coverage and
-RecoverSSM limitations are listed in [Kimi hybrid attention](../../user_guide/feature_guide/context_parallel.md#kimi-hybrid-attention).
 
 ## Integration with other features
 
