@@ -323,8 +323,6 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
         uint64_t qsfaTotalOutputSize;
         uint64_t qsfaOutputStart = 0;
         bool qsfaNeedOutputInit = true;
-        constexpr uint64_t statsAlign = 32 / sizeof(T);
-        uint64_t statsStart = 0;
         if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
             // TND lengths are cumulative: the last entry is the number of valid
             // rows. Only initialize [actual, T); valid rows are written by the
@@ -334,12 +332,6 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
                 qsfaNeedOutputInit = false;
             } else {
                 uint32_t qsfaActualRows = actualSeqLengthsQGm.GetValue(constInfo.batchSize - 1);
-                // With one complete group per tile, CopyFALseToGm writes both
-                // statistics for each live row. InitAllZeroOutput handles empty KV.
-                if (constInfo.kvHeadNum == 1 && constInfo.mBaseSize == constInfo.gSize &&
-                    constInfo.gSize % statsAlign == 0 && qsfaActualRows <= constInfo.qSeqSize) {
-                    statsStart = static_cast<uint64_t>(qsfaActualRows) * constInfo.gSize;
-                }
                 if (qsfaActualRows >= constInfo.qSeqSize) {
                     qsfaNeedOutputInit = false;
                 } else {
@@ -376,18 +368,13 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<QSFAT>::InitOutputSing
             if constexpr (LAYOUT_T != QSFA_LAYOUT::TND) {
                 totalReturnSoftmaxSize *= constInfo.batchSize;
             }
-            uint64_t remaining = totalReturnSoftmaxSize - statsStart;
-            uint64_t numAiv = 2ULL * qsfaCoreNum;
-            uint64_t blocks = (remaining + statsAlign - 1) / statsAlign;
-            uint64_t perCore = (blocks + numAiv - 1) / numAiv * statsAlign;
-            uint64_t offset = tmpBlockIdx * perCore;
-            if (offset < remaining) {
-                uint64_t count = remaining - offset < perCore ? remaining - offset : perCore;
-                PipeBarrier<PIPE_ALL>();
-                matmul::InitOutput<T>(softmaxSumGm[statsStart + offset], count, 0);
-                PipeBarrier<PIPE_ALL>();
-                matmul::InitOutput<T>(softmaxMaxGm[statsStart + offset], count, 0);
-                PipeBarrier<PIPE_ALL>();
+            uint64_t singleCoreReturnSoftmaxSize = (totalReturnSoftmaxSize + (2 * qsfaCoreNum) - 1) / (2 * qsfaCoreNum);
+            uint64_t tailReturnSoftmaxSize = totalReturnSoftmaxSize - tmpBlockIdx * singleCoreReturnSoftmaxSize;
+            uint64_t singleInitReturnSoftmaxSize = tailReturnSoftmaxSize < singleCoreReturnSoftmaxSize ?
+                                                   tailReturnSoftmaxSize : singleCoreReturnSoftmaxSize;
+            if (tmpBlockIdx * singleCoreReturnSoftmaxSize < totalReturnSoftmaxSize && singleInitReturnSoftmaxSize > 0) {
+                matmul::InitOutput<T>(softmaxSumGm[tmpBlockIdx * singleCoreReturnSoftmaxSize], singleInitReturnSoftmaxSize, 0);
+                matmul::InitOutput<T>(softmaxMaxGm[tmpBlockIdx * singleCoreReturnSoftmaxSize], singleInitReturnSoftmaxSize, 0);
             }
         }
         SyncAll();
