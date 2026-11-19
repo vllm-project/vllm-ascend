@@ -622,6 +622,76 @@ def test_a5_address_precompute_non_power_of_two_page_fallback(rope_dim):
     _check_a5_uniform_case(case, rope_dim, page_size=48)
 
 
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires A5 packed QSFA.")
+@pytest.mark.parametrize("kv_dtype", [torch.float8_e4m3fn, torch.int8], ids=["fp8", "int8"])
+@pytest.mark.parametrize(
+    "page_size,query_rows,sparse_width,heads,rope_dim,remap_pages",
+    [
+        pytest.param(128, 256, 2048, 8, 0, True, id="multi-query-workspace"),
+        pytest.param(128, 3, 129, 128, 0, True, id="split-g"),
+        pytest.param(48, 1, 129, 8, 0, False, id="non-power-of-two-page"),
+        pytest.param(128, 1, 129, 8, 64, False, id="rope-fallback"),
+    ],
+)
+@torch.inference_mode()
+def test_a5_packed_qsfa_address_precompute(kv_dtype, page_size, query_rows, sparse_width, heads, rope_dim, remap_pages):
+    kv_length, nope_dim, tile_size = 768, 512, 128
+    pages = kv_length // page_size
+    rng = torch.Generator().manual_seed(1024)
+    raw = torch.randint(-8, 9, (pages, page_size, 1, nope_dim), generator=rng)
+    raw[..., 0] = 0
+    key_nope = raw.to(kv_dtype)
+    scales = torch.rand((pages, page_size, 1, nope_dim // tile_size), generator=rng) * 0.05 + 0.01
+    key_rope = torch.zeros((pages, page_size, 1, rope_dim), dtype=torch.bfloat16)
+    packed = torch.cat([key_nope.view(torch.uint8), key_rope.view(torch.uint8), scales.view(torch.uint8)], -1)
+    assert packed.shape[-1] == 528 + 2 * rope_dim
+    cache = packed.view(kv_dtype)
+
+    candidates = (torch.arange(64, dtype=torch.int32)[:, None] * 4 + torch.arange(2, dtype=torch.int32)).flatten()
+    logical = candidates[None, :] + (torch.arange(query_rows, dtype=torch.int32) % 127)[:, None]
+    assert int(logical.max()) < kv_length - query_rows + 1
+    sparse_indices = torch.full((query_rows, 1, sparse_width), -1, dtype=torch.int32)
+    sparse_indices[:, 0, : logical.shape[-1]] = logical
+    block_table = torch.arange(pages, dtype=torch.int32)
+    if remap_pages:
+        block_table = block_table.roll(1).flip(0)
+    query = torch.zeros((query_rows, heads, nope_dim + rope_dim), dtype=torch.bfloat16)
+    query[..., 0] = 1
+
+    inputs = dict(
+        query=query,
+        key=cache,
+        sparse_indices=sparse_indices,
+        scale_value=(nope_dim + rope_dim) ** -0.5,
+        key_quant_mode=2,
+        value_quant_mode=2,
+        block_table=block_table.unsqueeze(0),
+        actual_seq_lengths_query=torch.tensor([query_rows], dtype=torch.int32),
+        actual_seq_lengths_kv=torch.tensor([kv_length], dtype=torch.int32),
+        sparse_block_size=1,
+        layout_query="TND",
+        layout_kv="PA_BSND",
+        sparse_mode=3,
+        attention_mode=2,
+        quant_scale_repo_mode=1,
+        tile_size=tile_size,
+        rope_head_dim=rope_dim,
+    )
+    npu_inputs = _to_npu(inputs)
+    npu_inputs["value"] = npu_inputs["key"]
+    output, _, _ = _run_custom_op(npu_inputs)
+
+    values = (key_nope.float() * scales.repeat_interleave(tile_size, dim=-1)).to(torch.bfloat16).float()
+    physical_pages = block_table[logical // page_size].long()
+    expected = values[physical_pages, logical % page_size, 0].mean(dim=1)
+    expected = expected.unsqueeze(1).expand(-1, heads, -1)
+    assert output.shape == (query_rows, heads, nope_dim)
+    assert output.dtype == torch.bfloat16
+    result = output.cpu().float()
+    assert torch.isfinite(result).all()
+    torch.testing.assert_close(result, expected, atol=2e-3, rtol=1e-2)
+
+
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
     reason="C8 rope=0 custom-kernel tests require an A2 or A3 hardware profile.",
