@@ -15,6 +15,16 @@ from vllm_ascend.patch.worker import patch_dspark
 from vllm_ascend.platform import _validate_eplb_config
 
 
+@pytest.fixture(autouse=True)
+def _stub_pp_group(monkeypatch):
+    # v0.34.0's draft loader resolves the PP-safe load config via get_pp_group().
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+        raising=False,
+    )
+
+
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
 def test_invalid_target_is_still_rejected(phase):
     config = SimpleNamespace(

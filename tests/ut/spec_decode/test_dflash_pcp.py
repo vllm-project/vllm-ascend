@@ -25,7 +25,9 @@ def test_global_draft_batch_negotiates_its_own_capacity(monkeypatch, pcp_enabled
     spec = object.__new__(spec_module.AscendDFlashSpeculator)
     spec.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     spec.draft_logits = None
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     num_reqs = 32 if pcp_enabled else 4
     batch = SimpleNamespace(num_reqs=num_reqs, idx_mapping=torch.arange(num_reqs))
     kwargs = {"max_query_len": None}

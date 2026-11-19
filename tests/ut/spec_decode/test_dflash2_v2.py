@@ -33,6 +33,7 @@ import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
@@ -102,6 +103,12 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     draft_model = SimpleNamespace(model=object(), config=draft_config.hf_config)
     target_model = SimpleNamespace(model=object())
     monkeypatch.setattr(loader, "get_draft_load_config", lambda _: config.load_config)
+    # v0.34.0 resolves the PP-safe draft config through get_pp_group().
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+        lambda: SimpleNamespace(world_size=1),
+        raising=False,
+    )
     monkeypatch.setattr(loader, "maybe_share_target_embed", lambda *_: None)
     monkeypatch.setattr(loader, "get_target_lm_head", lambda *_: None)
     monkeypatch.setattr(
@@ -593,7 +600,9 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
     speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
     speculator.draft_logits = None
-    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.pcp_manager.get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor)
+    )
     batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
     sync_state = SimpleNamespace(num_reqs=1)
     result = torch.zeros(8, 1, dtype=torch.int64)
@@ -648,6 +657,10 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
 
 
 def _native_dflash_inputs(inputs, block_stride=None):
+    # vLLM main (#58984) inserts the DP block stride before cp_rank; v0.34.0
+    # has no such positional argument.
+    if vllm_version_is("0.34.0"):
+        return list(inputs)
     stride = inputs[17] if block_stride is None else block_stride
     return [*inputs[:18], stride, *inputs[18:]]
 
@@ -664,7 +677,6 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
     kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
 
 
-@pytest.mark.skipif(False, reason="main-only num_reqs_override")
 def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
     """vLLM main (#58984) forwards the DP-synced request count positionally."""
     kernel = MagicMock()

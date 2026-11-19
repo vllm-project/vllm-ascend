@@ -176,15 +176,15 @@ def test_init_cudagraph_manager_keeps_graph_mode():
     parent_init.assert_called_once_with(CUDAGraphMode.FULL)
 
 
-def test_generate_draft_updates_attn_metadata():
-    """Test updating attention metadata during draft generation."""
+def test_decode_updates_attn_metadata():
+    """Test updating attention metadata during draft decoding."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
     with patch.object(TargetDependentARSpeculator, "_decode") as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
-        speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
+        speculator._decode(2, 4, attn_metadata, None, None, num_speculative_steps=3)
     expected_args: tuple[Any, ...] = (2, 4, attn_metadata, None, None, CUDAGraphMode.NONE)
     # vLLM #60335 added `num_speculative_steps` on main.
     expected_args = (*expected_args, 3)
@@ -192,13 +192,13 @@ def test_generate_draft_updates_attn_metadata():
     speculator._update_decode_attn_metadata.assert_called_once_with(attn_metadata, 1, 2)
 
 
-def test_generate_draft_skips_update_without_attn_metadata():
+def test_decode_skips_update_without_attn_metadata():
     """Test skipping metadata updates when attention metadata is absent."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
     with patch.object(TargetDependentARSpeculator, "_decode"):
-        speculator._generate_draft(2, 4, None, None, None)
+        speculator._decode(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
 
@@ -866,7 +866,7 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(1, 4), (2, 8), (4, 16)])
-def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
+def test_decode_capture_uses_request_rows(num_reqs, num_tokens):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.method = "mtp"
     speculator.max_num_reqs = 8
@@ -882,7 +882,7 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
         patch.object(TargetDependentARSpeculator, "_decode", side_effect=parent) as generate,
     ):
-        speculator._generate_draft(num_reqs, num_tokens, None, None, None)
+        speculator._decode(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
     expected.append(None)
     generate.assert_called_once_with(*expected)

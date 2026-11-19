@@ -2675,20 +2675,17 @@ def test_adaptive_cost_diagnostics_reads_only_cpu_budget_inputs():
     np.testing.assert_allclose(args[7], [0.7, 0.8])
 
 
-@pytest.mark.parametrize("release_lane", [False, True])
 @pytest.mark.parametrize("dcp_size", [1, 2])
 @pytest.mark.parametrize("tokens,expected", [(None, 16), ([4, 8], 8), ([32, 64], 16)])
-def test_lmhead_padding_reads_versioned_dp_sync_state(release_lane, dcp_size, tokens, expected):
+def test_lmhead_padding_reads_versioned_dp_sync_state(dcp_size, tokens, expected):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.max_num_reqs = 16
     runner.decode_query_len = 1
     runner.dcp_size = dcp_size
     dp_sync = None if tokens is None else SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens))
-    field = "dp_sync" if release_lane else "dp_sync_state"
-    state = SimpleNamespace(**{field: dp_sync})
-    with patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=release_lane):
-        assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
-        assert runner._get_lmhead_pad_size(None) == 16
+    state = SimpleNamespace(dp_sync_state=dp_sync)
+    assert runner._get_lmhead_pad_size(state) == (expected if dcp_size == 1 else 16)
+    assert runner._get_lmhead_pad_size(None) == 16
 
 
 @pytest.mark.parametrize("lmhead_tp", [False, True])
@@ -2713,12 +2710,11 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
 
     module = "vllm_ascend.worker.v2.model_runner."
     monkeypatch.setattr(module + "lmhead_tp_enable", lambda: lmhead_tp)
-    monkeypatch.setattr(module + "vllm_version_is", lambda _version: True)
     monkeypatch.setattr(GPUModelRunner, "sample_tokens", parent_sample_tokens)
 
     for step, tokens in enumerate(([2, 4], [8, 6], None)):
         runner.execute_model_state = (
-            SimpleNamespace(dp_sync=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
+            SimpleNamespace(dp_sync_state=SimpleNamespace(num_tokens_across_dp=torch.tensor(tokens)))
             if tokens is not None
             else None
         )
