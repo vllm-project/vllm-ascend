@@ -95,6 +95,7 @@ from .engram.embedding import (
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
+from .engram.node_shared import checkpoint_layout
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .indexer import DeepseekV41Indexer
 
@@ -1024,10 +1025,25 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_root = vllm_config.model_config.model
         config = self.config
         self.engram_weight_root = self.engram_root
+        ascend_config = get_ascend_config()
+        self.engram_node_shared = None
+        if ascend_config.engram_node_shared_endpoint is not None:
+            if not self.has_engram:
+                raise ValueError("Node-shared Engram requires a model with Engram tables")
+            layout = checkpoint_layout(self.engram_weight_root)
+            self.engram_node_shared = {
+                "endpoint": ascend_config.engram_node_shared_endpoint,
+                "generation": ascend_config.engram_node_shared_generation,
+                "timeout": ascend_config.engram_node_shared_timeout,
+                "fingerprint": layout["fingerprint"],
+                "checkpoint_keys": frozenset(
+                    name for key in layout["tables"] for name in (key, key.removesuffix(".weight") + ".scale")
+                ),
+            }
         # Detect each table's checkpoint dtype independently of dense weights.
         # Host placement remains controlled by vLLM's EngramConfig.
         cpu_offload = engram_cpu_offload(vllm_config)
-        self.engram_dp_shared_memory = resolve_dp_shared_memory(
+        self.engram_dp_shared_memory = self.engram_node_shared is not None or resolve_dp_shared_memory(
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
@@ -1060,6 +1076,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     storage_dtype=storage_dtype,
                     cpu_offload=cpu_offload,
                     dp_shared_memory=self.engram_dp_shared_memory,
+                    node_shared=self.engram_node_shared,
+                    checkpoint_key=f"layers.{layer_id}.engram.embed.weight",
                 )
                 embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
                 self.layers[layer_id].engram.embed_tokens = embed
@@ -1783,7 +1801,23 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         if not self.model.has_engram:
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
+        if self.model.engram_node_shared is not None:
+            for name, module in self.named_modules():
+                if isinstance(module, AscendParallelEngramEmbedding):
+                    if module._node_lease is None:
+                        raise RuntimeError(f"External Engram table is not attached: {name}")
+                    loaded.update((f"{name}.weight", f"{name}.weight_scale_inv"))
         return loaded
+
+    @property
+    def requires_lazy_checkpoint_loading(self) -> bool:
+        return self.model.engram_node_shared is not None
+
+    @property
+    def is_unused_checkpoint_weight(self):
+        if self.model.engram_node_shared is None:
+            return None
+        return self.model.engram_node_shared["checkpoint_keys"].__contains__
 
     def set_moe_parameters(self):
         self.expert_weights = []

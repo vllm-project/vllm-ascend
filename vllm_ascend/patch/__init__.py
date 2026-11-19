@@ -28,6 +28,15 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * worker/patch_engram_weight_loader.py:
+#   Target: vllm.model_executor.model_loader.default_loader.DefaultModelLoader.get_all_weights.
+#   Why: The paired upstream loader filters entire shards, so Engram owner
+#        tensors in mixed shards would still be materialized by consumers.
+#   How: Use a lazy per-tensor filter for the opted-in primary checkpoint.
+#   Related PR: https://github.com/vllm-project/vllm/pull/64395
+#   Future plan: Remove when upstream applies the model's weight predicate
+#                before tensor materialization in the lazy loader.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.

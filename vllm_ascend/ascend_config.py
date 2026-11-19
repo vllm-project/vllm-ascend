@@ -567,6 +567,9 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    engram_node_shared_endpoint: str | None = None
+    engram_node_shared_generation: str | None = None
+    engram_node_shared_timeout: int = 1800
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -687,6 +690,25 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        if self.engram_node_shared_endpoint is not None:
+            if not os.path.isabs(self.engram_node_shared_endpoint):
+                raise ValueError("engram_node_shared_endpoint must be an absolute Unix socket path")
+            if not self.engram_node_shared_generation or self.engram_node_shared_timeout <= 0:
+                raise ValueError("Node-shared Engram requires a generation and a positive timeout")
+            if engram_config is None or not engram_config.cpu_offload or not engram_config.dp_shared_memory:
+                raise ValueError("Node-shared Engram requires cpu_offload=true and dp_shared_memory=true")
+            if vc.parallel_config.tensor_parallel_size != 1 or vc.parallel_config.pipeline_parallel_size != 1:
+                raise ValueError("Node-shared Engram currently supports TP1/PP1 full tables")
+            if vc.model_config.enable_sleep_mode:
+                raise ValueError("Node-shared Engram does not support sleep mode")
+            if (
+                vc.load_config.load_format not in ("auto", "safetensors")
+                or vc.load_config.safetensors_load_strategy not in (None, "lazy")
+                or vc.load_config.model_loader_extra_config.get("enable_multithread_load")
+            ):
+                raise ValueError("Node-shared Engram requires default lazy safetensors loading")
+        elif self.engram_node_shared_generation is not None:
+            raise ValueError("engram_node_shared_generation requires an endpoint")
         if (
             engram_config is not None
             and not engram_config.dp_shared_memory

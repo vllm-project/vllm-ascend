@@ -10,7 +10,10 @@ copy nor a host-side gather.
 """
 
 import ctypes
+import fcntl
 import mmap
+import os
+import time
 from functools import cache
 from multiprocessing import shared_memory
 from typing import cast
@@ -27,6 +30,7 @@ SCALE_GROUP = 32
 # can express, so the device address of every group of rows is published
 # separately.
 CHUNK_ROWS = 1 << 22
+NODE_REGISTER_LOG_INTERVAL = 8
 
 
 def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
@@ -399,3 +403,100 @@ class SharedUvaBuffer:
         if self.shm is not None:
             self.shm.close()
             self.shm = None
+
+
+class NodeUvaBuffer:
+    """Register an owner memfd, then protect this worker's CPU mapping."""
+
+    def __init__(self, fd, shape, dtype, device):
+        self.lib = _host_library()
+        self.pointer = ctypes.c_void_p()
+        self.tensor = None
+        self.ptrs = None
+        self.mapping = None
+        self._registered_chunks = []
+        self._chunk_mappings = []
+        rows = int(shape[0])
+        row_elements = int(torch.Size(shape[1:]).numel())
+        self.row_bytes = row_elements * torch.empty((), dtype=dtype).element_size()
+        size = rows * self.row_bytes
+        seals = fcntl.fcntl(fd, fcntl.F_GET_SEALS)
+        required = fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK
+        if seals & required != required or os.fstat(fd).st_size != size:
+            raise ValueError("Engram owner FD is not sealed or has the wrong size")
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            libc.mprotect.restype = ctypes.c_int
+            addresses = []
+            registration_start = time.monotonic()
+            logger.info("Registering node Engram: %d bytes, %d bytes/row", size, self.row_bytes)
+            for start in range(0, rows, CHUNK_ROWS):
+                chunk_size = min(CHUNK_ROWS, rows - start) * self.row_bytes
+                # Keep each CANN registration and its VMA bounded. Registering
+                # a complete ~98 GB code range hides progress on this runtime.
+                mapping = mmap.mmap(
+                    fd,
+                    chunk_size,
+                    flags=mmap.MAP_SHARED,
+                    prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                    offset=start * self.row_bytes,
+                )
+                self._chunk_mappings.append(mapping)
+                mapping.madvise(mmap.MADV_HUGEPAGE)
+                pointer = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(mapping)))
+                rc = self.lib.aclrtHostRegisterV2(pointer, chunk_size, DeviceOperator.host_register_flags())
+                if rc:
+                    raise RuntimeError(f"aclrtHostRegisterV2 failed for node Engram: rc={rc} size={chunk_size}")
+                self._registered_chunks.append(pointer)
+                address = ctypes.c_void_p()
+                rc = self.lib.aclrtHostGetDevicePointer(pointer, ctypes.byref(address), 0)
+                if rc:
+                    raise RuntimeError(f"aclrtHostGetDevicePointer failed for node Engram: rc={rc}")
+                if libc.mprotect(pointer, chunk_size, mmap.PROT_READ):
+                    raise OSError(ctypes.get_errno(), "Engram chunk mprotect(PROT_READ) failed")
+                addresses.append(address.value)
+                if (
+                    len(addresses) == 1
+                    or len(addresses) % NODE_REGISTER_LOG_INTERVAL == 0
+                    or start + CHUNK_ROWS >= rows
+                ):
+                    logger.info(
+                        "Node Engram registered %d/%d chunks (%d bytes/row) in %.1fs",
+                        len(addresses),
+                        (rows + CHUNK_ROWS - 1) // CHUNK_ROWS,
+                        self.row_bytes,
+                        time.monotonic() - registration_start,
+                    )
+            self.ptrs = torch.tensor(addresses, dtype=torch.int64, device=device)
+            # The parameter aliases the same memfd; kernels use the registered
+            # chunk mappings above, not this CPU-only shape/dtype view.
+            self.mapping = mmap.mmap(fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+            self.tensor = torch.frombuffer(self.mapping, dtype=dtype, count=rows * row_elements).reshape(shape)
+            self.pointer = ctypes.c_void_p(self.tensor.data_ptr())
+            if libc.mprotect(self.pointer, size, mmap.PROT_READ):
+                raise OSError(ctypes.get_errno(), "Engram mprotect(PROT_READ) failed")
+        except Exception as exc:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                raise HostUvaBufferCleanupError(self, exc, cleanup_error) from exc
+            raise
+
+    def close(self):
+        if self._registered_chunks:
+            torch.npu.synchronize()
+        while self._registered_chunks:
+            rc = self.lib.aclrtHostUnregister(self._registered_chunks[-1])
+            if rc:
+                raise RuntimeError(f"aclrtHostUnregister failed for node Engram: rc={rc}")
+            self._registered_chunks.pop()
+        self.pointer = ctypes.c_void_p()
+        self.tensor = None
+        self.ptrs = None
+        while self._chunk_mappings:
+            self._chunk_mappings[-1].close()
+            self._chunk_mappings.pop()
+        if self.mapping is not None:
+            self.mapping.close()
+            self.mapping = None

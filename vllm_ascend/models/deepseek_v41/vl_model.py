@@ -295,6 +295,14 @@ class AscendDeepseekV41ForCausalLM(
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.set_aux_hidden_state_layers(layers)
 
+    @property
+    def requires_lazy_checkpoint_loading(self) -> bool:
+        return self.language_model.requires_lazy_checkpoint_loading
+
+    @property
+    def is_unused_checkpoint_weight(self):
+        return self.language_model.is_unused_checkpoint_weight
+
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],

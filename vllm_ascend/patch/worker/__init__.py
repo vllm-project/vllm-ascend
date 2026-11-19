@@ -36,6 +36,8 @@ import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 # Apply before model construction on every device, including 310P.
 import vllm_ascend.patch.worker.patch_mm_input_norm  # noqa
 
+import vllm_ascend.patch.worker.patch_engram_weight_loader  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa

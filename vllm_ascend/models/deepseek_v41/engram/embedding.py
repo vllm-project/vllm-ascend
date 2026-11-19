@@ -32,8 +32,10 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
+from .node_shared import NodeTableLease
 from .npu import (
     HostUvaBuffer,
+    NodeUvaBuffer,
     SharedUvaBuffer,
     gather_dequantize_engram_int8,
     gather_dequantize_host_uva,
@@ -61,12 +63,21 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         storage_dtype: torch.dtype = torch.int8,
+        node_shared: dict | None = None,
+        checkpoint_key: str | None = None,
     ) -> None:
         self.storage_dtype = storage_dtype
         if storage_dtype not in (torch.bfloat16, torch.int8, torch.float8_e4m3fn):
             raise ValueError(f"Unsupported Engram storage dtype: {storage_dtype}")
         self.scale_dtype = torch.uint8 if storage_dtype == torch.float8_e4m3fn else torch.float32
         self.cpu_offload = cpu_offload
+        self._node_shared = node_shared
+        self._node_lease = None
+        self._checkpoint_key = checkpoint_key
+        if node_shared is not None and (
+            not cpu_offload or not dp_shared_memory or storage_dtype != torch.float8_e4m3fn
+        ):
+            raise ValueError("Node-shared Engram requires host-offloaded shared MXFP8/E8M0 tables")
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
         if not all(in_the_same_node_as(get_tp_group().cpu_group)):
@@ -77,7 +88,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 "Ascend Engram requires all DP replicas to share the same node and shared-memory namespace"
             )
         if dp_shared_memory:
-            if group is None or group.world_size <= 1:
+            if (group is None or group.world_size <= 1) and node_shared is None:
                 raise ValueError("dp_shared_memory needs a node-local sharing group with more than one rank")
             self._shared_group = group
             # DP x PCP peers map the same TP shard and look up their own
@@ -85,8 +96,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self.dp_size = 1
         else:
             self.dp_size = max(get_engram_dp_size(), 1)
-        self._codes_uva: HostUvaBuffer | SharedUvaBuffer | None = None
-        self._scales_uva: HostUvaBuffer | SharedUvaBuffer | None = None
+        self._codes_uva: HostUvaBuffer | SharedUvaBuffer | NodeUvaBuffer | None = None
+        self._scales_uva: HostUvaBuffer | SharedUvaBuffer | NodeUvaBuffer | None = None
         # The upstream constructor queries CUDA properties; keep its parameter
         # contract with Ascend storage and device allocation.
         nn.Module.__init__(self)
@@ -116,7 +127,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             if param is None:
                 continue
             set_weight_attrs(param, {"weight_loader": self._weight_loader, "engram_vocab_start": self.vocab_start_idx})
-        if cpu_offload:
+        if cpu_offload and node_shared is None:
             set_weight_attrs(self.weight, {"dummy_weight_value": 0})
             if self.weight_scale_inv is not None:
                 scale_one = 127 if self.scale_dtype == torch.uint8 else 1.0
@@ -142,6 +153,47 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scales_shape = (self.part_num_embeddings, self.dim // self.block_size)
         device = torch.device("npu", torch.npu.current_device())
         quantized = self.storage_dtype != torch.bfloat16
+        if getattr(self, "_node_shared", None) is not None:
+            if self.tp_size != 1 or self.vocab_start_idx != 0:
+                raise ValueError("Node-shared Engram requires a complete TP1 table")
+            config = self._node_shared
+            self._node_lease = NodeTableLease(
+                config["endpoint"],
+                config["generation"],
+                config["fingerprint"],
+                self._checkpoint_key,
+                config["timeout"],
+            )
+            try:
+                parts = self._node_lease.metadata["parts"]
+                if parts["codes"]["shape"] != list(codes_shape) or parts["scales"]["shape"] != list(scales_shape):
+                    raise ValueError("Node-shared Engram model/owner shape mismatch")
+                self._codes_uva = NodeUvaBuffer(self._node_lease.fds[0], codes_shape, self.storage_dtype, device)
+                self._scales_uva = NodeUvaBuffer(self._node_lease.fds[1], scales_shape, self.scale_dtype, device)
+            except Exception as exc:
+                # Retain a registered buffer if constructor cleanup failed.
+                pending = getattr(exc, "host_buffer", None)
+                if pending is not None:
+                    if self._codes_uva is None:
+                        self._codes_uva = pending
+                    else:
+                        self._scales_uva = pending
+                try:
+                    for buffer in (self._codes_uva, self._scales_uva):
+                        if buffer is not None:
+                            buffer.close()
+                    self._node_lease.release()
+                except Exception:
+                    # Keep the attachment available to the caller for retry.
+                    exc.engram_attachment = self
+                raise
+            logger.info(
+                "Node-shared Engram attached: key=%s generation=%s inodes=%s",
+                self._checkpoint_key,
+                config["generation"],
+                self._node_lease.metadata["inodes"],
+            )
+            return self._codes_uva.tensor, self._scales_uva.tensor
         if not self.cpu_offload:
             return (
                 # Zeroed, not empty: the engine profiles the model (and runs the
@@ -199,6 +251,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                     requires_grad=False,
                 ),
             )
+        if getattr(self, "_node_lease", None) is not None:
+            self._node_lease.release()
+            self._node_lease = None
 
     def bind_checkpoint(self, model_path, key: str) -> None:
         """Use parameter callbacks while retaining the indexed shard reader.
@@ -208,9 +263,13 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         order and a separate unquantized index must not overwrite that pair.
         """
         self._checkpoint_path = model_path
+        if getattr(self, "_node_shared", None) is not None and key != self._checkpoint_key:
+            raise ValueError("Node-shared Engram checkpoint key mismatch")
         self._checkpoint_key = key
 
     def _weight_loader(self, param, loaded_weight) -> None:
+        if getattr(self, "_node_shared", None) is not None:
+            raise RuntimeError("Node-shared Engram weights must be filtered before materialization")
         if param is self.weight:
             self.load_checkpoint(self._checkpoint_path, self._checkpoint_key)
 
@@ -220,6 +279,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         Shared head slices have one writer per DP x PCP group. The final CPU
         collective synchronizes writes and propagates loading failures.
         """
+        if getattr(self, "_node_shared", None) is not None:
+            if key != self._checkpoint_key or self._node_lease is None:
+                raise ValueError("Node-shared Engram is not attached to the requested table")
+            return
         if self._shared_group is None:
             self._load_into_storage(model_path, key, chunk_rows)
             return
