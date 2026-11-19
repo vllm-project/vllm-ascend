@@ -110,13 +110,44 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         param_dict["w2_weight_offset"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
         return param_dict
 
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        # FP8 per-channel scales are stored in float32; override the int8
+        # parent's ``output_dtype=w2_scale_dtype`` so gmm1 outputs ``self.in_dtype``
+        # (BF16/FP16) for downstream SwiGLU and FP8 dynamic quantization.
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=w1,
+            scale=w1_scale,
+            bias=None,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=self.in_dtype,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        # FP8 weights are kept in ND layout (no FRACTAL_NZ cast), so the fused
-        # gmm1+swiglu+quant path must use the FP8-capable v2 kernel instead of
-        # the weight-NZ kernel the int8 W8A8 scheme dispatches to (including
-        # the EPLB per-expert weight list path).
+        # FP8 weights are kept in ND layout (no FRACTAL_NZ cast).
+        # ``npu_grouped_matmul_swiglu_quant_v2`` requires a single stacked 3D
+        # weight and 2D scale tensor on A5, so EPLB per-expert weight lists
+        # (along with non-fused or SWIGLUOAI_UNINTERLEAVE runs) must stay on
+        # the FP8 GMM + SwiGLU + FP8 dynamic quant fallback rather than falling
+        # back to the int8 parent or passing 2D/1D lists to the v2 kernel.
         activation = mlp_compute_input.activation
-        if not mlp_compute_input.fusion or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        if (
+            not mlp_compute_input.fusion
+            or mlp_compute_input.dynamic_eplb
+            or getattr(self, "use_expert_weight_list", False)
+            or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        ):
             hidden_states = self.apply_gmm1(mlp_compute_input)
             if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
                 hidden_states = torch_npu.npu_clipped_swiglu(

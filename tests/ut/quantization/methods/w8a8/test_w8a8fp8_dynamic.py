@@ -136,7 +136,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
-    def test_apply_gmm1_act_quant_with_eplb_uses_fp8_v2_kernel_not_int8_nz(self):
+    def test_apply_gmm1_act_quant_with_eplb_uses_fp8_fallback_not_fused_or_int8_nz(self):
         from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
         from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -153,9 +153,12 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             torch.randn(self.hidden_size, self.intermediate_size, dtype=torch.bfloat16).to(torch.float8_e4m3fn)
             for _ in range(self.num_experts)
         ]
-        layer.w2_weight_scale_list = [torch.ones(self.hidden_size, dtype=torch.float32) for _ in range(self.num_experts)]
+        layer.w2_weight_scale_list = [
+            torch.ones(self.hidden_size, dtype=torch.float32) for _ in range(self.num_experts)
+        ]
 
         self.quant_method.use_expert_weight_list = True
+        self.quant_method.in_dtype = torch.bfloat16
 
         hidden_states = torch.randn(4, self.hidden_size, dtype=torch.bfloat16)
         quant_hidden = hidden_states.to(torch.float8_e4m3fn)
@@ -175,6 +178,8 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             dynamic_eplb=True,
         )
 
+        gmm1_out = torch.randn(4, 2 * self.intermediate_size, dtype=torch.bfloat16)
+        swiglu_out = torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)
         expected_out = torch.zeros(4, self.intermediate_size, dtype=torch.float8_e4m3fn)
         expected_scale = torch.ones(4, dtype=torch.float32)
         nz_kernel_mock = MagicMock()
@@ -189,6 +194,85 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             ),
             patch.object(self.quant_method, "_quant_hidden_states", return_value=(quant_hidden, pertoken_scale)),
             patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_grouped_matmul_swiglu_quant_v2"
+            ) as mock_v2,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_grouped_matmul",
+                return_value=[gmm1_out],
+            ) as mock_gmm,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_swiglu",
+                return_value=swiglu_out,
+            ) as mock_swiglu,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.torch_npu.npu_dynamic_quant",
+                return_value=(expected_out, expected_scale),
+            ) as mock_dyn_quant,
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.dispose_tensor"),
+        ):
+            out, out_scale = self.quant_method.apply_gmm1_act_quant(mlp_input)
+
+        nz_kernel_mock.assert_not_called()
+        mock_v2.assert_not_called()
+        mock_gmm.assert_called_once_with(
+            x=[quant_hidden],
+            weight=layer.w13_weight_list,
+            scale=layer.w13_weight_scale_fp32_list,
+            bias=None,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_type=0,
+            group_list=group_list,
+            group_list_type=1,
+            output_dtype=torch.bfloat16,
+        )
+        mock_swiglu.assert_called_once_with(gmm1_out)
+        mock_dyn_quant.assert_called_once_with(swiglu_out, dst_type=torch.float8_e4m3fn)
+        self.assertIs(out, expected_out)
+        self.assertIs(out_scale, expected_scale)
+
+    def test_apply_gmm1_act_quant_without_eplb_uses_fp8_v2_kernel(self):
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.randn(
+            self.num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
+        layer.w2_weight = torch.randn(
+            self.num_experts, self.hidden_size, self.intermediate_size, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        layer.w2_weight_scale = torch.ones(self.num_experts, self.hidden_size, dtype=torch.float32)
+
+        self.quant_method.use_expert_weight_list = False
+        self.quant_method.in_dtype = torch.bfloat16
+
+        hidden_states = torch.randn(4, self.hidden_size, dtype=torch.bfloat16)
+        quant_hidden = hidden_states.to(torch.float8_e4m3fn)
+        pertoken_scale = torch.ones(4, dtype=torch.float32)
+        group_list = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0], dtype=torch.int64)
+        mlp_input = MoEMlpComputeInput(
+            hidden_states=hidden_states,
+            group_list=group_list,
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MagicMock(),
+            quant=MagicMock(),
+            fusion=True,
+            layer=layer,
+            activation=MoEActivation.SILU,
+            dynamic_eplb=False,
+        )
+
+        expected_out = torch.zeros(4, self.intermediate_size, dtype=torch.float8_e4m3fn)
+        expected_scale = torch.ones(4, dtype=torch.float32)
+
+        with (
+            patch.object(self.quant_method, "_quant_hidden_states", return_value=(quant_hidden, pertoken_scale)),
+            patch(
                 "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
                 return_value=(expected_out, expected_scale),
             ) as mock_v2,
@@ -196,14 +280,88 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         ):
             out, out_scale = self.quant_method.apply_gmm1_act_quant(mlp_input)
 
-        nz_kernel_mock.assert_not_called()
         mock_v2.assert_called_once()
         v2_kwargs = mock_v2.call_args.kwargs
         self.assertIs(v2_kwargs["x"], quant_hidden)
-        self.assertIs(v2_kwargs["weight"], layer.w13_weight_list)
-        self.assertIs(v2_kwargs["weight_scale"], layer.w13_weight_scale_fp32_list)
+        self.assertEqual(v2_kwargs["weight"], [layer.w13_weight])
+        self.assertEqual(v2_kwargs["weight_scale"], [layer.w13_weight_scale_fp32])
         self.assertIs(v2_kwargs["x_scale"], pertoken_scale)
         self.assertEqual(v2_kwargs["quant_dtype"], torch.float8_e4m3fn)
         self.assertEqual(v2_kwargs["dequant_dtype"], torch.float32)
+        self.assertIs(out, expected_out)
+        self.assertIs(out_scale, expected_scale)
+
+    def test_apply_gmm1_act_quant_swigluoai_uninterleave_uses_fp8_fallback(self):
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+        from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.randn(
+            self.num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        layer.w13_weight_scale_fp32 = torch.ones(self.num_experts, 2 * self.intermediate_size, dtype=torch.float32)
+        layer.w2_weight = torch.randn(
+            self.num_experts, self.hidden_size, self.intermediate_size, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        layer.w2_weight_scale = torch.ones(self.num_experts, self.hidden_size, dtype=torch.float32)
+
+        self.quant_method.use_expert_weight_list = False
+        self.quant_method.in_dtype = torch.bfloat16
+
+        hidden_states = torch.randn(4, self.hidden_size, dtype=torch.bfloat16)
+        quant_hidden = hidden_states.to(torch.float8_e4m3fn)
+        pertoken_scale = torch.ones(4, dtype=torch.float32)
+        group_list = torch.tensor([1, 1, 1, 1, 0, 0, 0, 0], dtype=torch.int64)
+        mlp_input = MoEMlpComputeInput(
+            hidden_states=hidden_states,
+            group_list=group_list,
+            group_list_type=1,
+            dynamic_scale=None,
+            topk_scales=None,
+            weights=MagicMock(),
+            quant=MagicMock(),
+            fusion=True,
+            layer=layer,
+            activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            dynamic_eplb=False,
+            swiglu_alpha=1.702,
+            swiglu_limit=7.0,
+            swiglu_beta=1.0,
+        )
+
+        gmm1_out = torch.randn(4, 2 * self.intermediate_size, dtype=torch.bfloat16)
+        clipped_out = torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)
+        expected_out = torch.zeros(4, self.intermediate_size, dtype=torch.float8_e4m3fn)
+        expected_scale = torch.ones(4, dtype=torch.float32)
+
+        with (
+            patch.object(self.quant_method, "_quant_hidden_states", return_value=(quant_hidden, pertoken_scale)),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_grouped_matmul",
+                return_value=[gmm1_out],
+            ) as mock_gmm,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.torch_npu.npu_clipped_swiglu",
+                return_value=clipped_out,
+            ) as mock_clipped,
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.torch_npu.npu_dynamic_quant",
+                return_value=(expected_out, expected_scale),
+            ) as mock_dyn_quant,
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic.dispose_tensor"),
+        ):
+            out, out_scale = self.quant_method.apply_gmm1_act_quant(mlp_input)
+
+        mock_gmm.assert_called_once()
+        self.assertEqual(mock_gmm.call_args.kwargs["output_dtype"], torch.bfloat16)
+        mock_clipped.assert_called_once_with(
+            gmm1_out,
+            interleaved=False,
+            alpha=1.702,
+            limit=7.0,
+            bias=1.0,
+        )
+        mock_dyn_quant.assert_called_once_with(clipped_out, dst_type=torch.float8_e4m3fn)
         self.assertIs(out, expected_out)
         self.assertIs(out_scale, expected_scale)
