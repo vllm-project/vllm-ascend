@@ -51,10 +51,10 @@
 
 ## Test Cases
 
-- CPU unit contract (launches no NPU kernel): `pytest -sv tests/ut/expert_offload/test_dspark_expert_pool.py` covers role construction, verification graph admission, padding refresh with role-buffer address reuse, pool deactivation on ordinary decode and structured-output steps, native-output preservation outside the verification segment (`merge_native`), and capture-time uniform verify-width roles.
+- CPU unit contract (launches no NPU kernel): `pytest -sv tests/ut/distributed/expert_transfer/test_dspark_expert_pool.py` covers role construction, verification graph admission, padding refresh with role-buffer address reuse, pool deactivation on ordinary decode and structured-output steps, native-output preservation outside the verification segment (`merge_native`), and capture-time uniform verify-width roles.
 - NPU nightly accuracy: `pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_expert_pool.py` compares the fused route against the PyTorch reference on 6, 12, and 18 verification rows, contiguous and strided logits, tied scores, suffix candidate counts of 0, 2, and 6, and padding from 6 to 12 or 12 to 16 rows. Expert IDs must match exactly. At least 99% of FP32 weights must satisfy `abs(actual - expected) <= 2**-16 + 2**-10 * abs(expected)`, and the maximum absolute error must be at most 0.01.
 
 ```bash
-pytest -sv tests/ut/expert_offload/test_dspark_expert_pool.py
+pytest -sv tests/ut/distributed/expert_transfer/test_dspark_expert_pool.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_expert_pool.py
 ```

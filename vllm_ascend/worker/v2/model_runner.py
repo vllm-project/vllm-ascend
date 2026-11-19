@@ -358,6 +358,7 @@ class NPUModelRunner(GPUModelRunner):
 
         expert_offload.initialize(self)
 
+        expert_offload_manager = expert_offload.get_manager(self.model)
         pool_config = (
             getattr(self.ascend_config, "dspark_expert_pool", None) if expert_offload_manager is not None else None
         )
