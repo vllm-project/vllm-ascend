@@ -1,9 +1,10 @@
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -48,6 +49,27 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(
@@ -568,6 +590,27 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def _kv_layer_transfer_connectors(
+    connector: Any,
+    layer: Any,
+    *,
+    for_save: bool = False,
+) -> Iterator[Any]:
+    """Route model boundaries only to children that understand their layout."""
+    if getattr(layer, "kv_transfer_cache_names", None) is None:
+        yield connector
+        return
+    accepts_boundary = (not for_save and getattr(connector, "supports_composite_kv_loads", False) is True) or (
+        for_save and getattr(connector, "supports_composite_kv_saves", False) is True
+    )
+    if accepts_boundary:
+        if connector.has_connector_metadata():
+            yield connector
+        return
+    for child in getattr(connector, "sub_connectors", ()):
+        yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -579,7 +622,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.wait_for_layer_load(layer_name)
+    for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
+        layer_connector.wait_for_layer_load(layer_name)
 
 
 def maybe_save_kv_layer_to_connector(
@@ -596,7 +640,10 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    for layer_connector in _kv_layer_transfer_connectors(
+        connector, forward_context.no_compile_layers.get(layer_name), for_save=True
+    ):
+        layer_connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 def notify_kv_cache_written(layer_name: str = ""):

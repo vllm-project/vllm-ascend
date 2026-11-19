@@ -229,7 +229,7 @@ jobs:
           - name: Install FLA NPU for A2 upstream tests
             run: |
               set -euo pipefail
-              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.10.0+feature
               python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test

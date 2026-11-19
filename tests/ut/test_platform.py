@@ -22,6 +22,7 @@ from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
+    _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_glm5next_dflash2_pp_config,
@@ -193,6 +194,36 @@ def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, 
     )
 
     assert config.use_sequence_parallel_moe is expected
+
+
+@pytest.mark.parametrize("method", ["dspark", "mtp"])
+@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 1), (1, 2), (2, 2)])
+def test_validate_v41_adaptive_rejects_cp(method, pcp_size, dcp_size):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method=method, enable_adaptive_verification=True),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41")),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, decode_context_parallel_size=dcp_size),
+    )
+    with pytest.raises(ValueError, match=rf"V4.1 adaptive verification.*PCP={pcp_size}, DCP={dcp_size}") as exc:
+        _validate_deepseek_v41_adaptive_config(config)
+    assert "enable_adaptive_verification=false" in str(exc.value)
+    assert "--prefill-context-parallel-size 1" in str(exc.value)
+    assert "--decode-context-parallel-size 1" in str(exc.value)
+
+
+@pytest.mark.parametrize("mode", ["plain", "fixed", "other_model", "cp_disabled"])
+def test_validate_v41_adaptive_preserves_other_configs(mode):
+    config = SimpleNamespace(
+        speculative_config=None if mode == "plain" else SimpleNamespace(enable_adaptive_verification=mode != "fixed"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3" if mode == "other_model" else "deepseek_v41")
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1 if mode == "cp_disabled" else 2,
+            decode_context_parallel_size=1 if mode == "cp_disabled" else 2,
+        ),
+    )
+    _validate_deepseek_v41_adaptive_config(config)
 
 
 @pytest.mark.parametrize(
@@ -2591,31 +2622,38 @@ class TestNPUPlatform(TestBase):
             "vllm_ascend.xlite.xlite_worker.XliteWorker",
         )
 
-    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch(
-        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType._310P),
-    )
-    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_310p_no_custom_ops(
-        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
-    ):
-        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+    def test_check_and_update_config_310p_no_custom_ops(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
-        mock_init_recompute.return_value = MagicMock()
-
         vllm_config.scheduler_config = MagicMock()
+
         from vllm_ascend import platform
 
-        importlib.reload(platform)
+        with (
+            patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization"),
+            patch("vllm_ascend.ascend_config.init_ascend_config") as mock_init_ascend,
+            patch(
+                "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
+            patch(
+                "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
+            ) as mock_init_recompute,
+        ):
+            mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+            mock_init_recompute.return_value = MagicMock()
+            importlib.reload(platform)
 
-        self.platform.check_and_update_config(vllm_config)
-        self.assertEqual(vllm_config.compilation_config.custom_ops, [])
+            self.platform.check_and_update_config(vllm_config)
+            self.assertEqual(vllm_config.compilation_config.custom_ops, [])
+        # The reload above rebound platform's by-value imports to the mocks.
+        # Reload once more with the patches unwound so later tests in this
+        # worker see the real functions again (otherwise e.g. the 310P
+        # hardware profile leaks into get_attn_backend_cls selections).
+        importlib.reload(platform)
 
     @patch("vllm_ascend.platform.get_ascend_config")
     def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):

@@ -28,8 +28,8 @@ vLLM Ascend Plugin
 
 - [2026/10] 我们发布了新的正式版本 [v0.30.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.30.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
 - [2026/08] 我们发布了新的正式版本 [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.23.0/)开始在 Ascend 上部署 vLLM Ascend Plugin。
-- [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.18.0/)开始在Ascend上部署vLLM Ascend Plugin。
-- [2026/02] 我们发布了新的正式版本 [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.13.0/)开始在Ascend上部署vLLM Ascend Plugin。
+- [2026/05] 我们发布了新的正式版本 [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.18.0/)开始在 Ascend 上部署vLLM Ascend Plugin。
+- [2026/02] 我们发布了新的正式版本 [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)！请按照[官方指南](https://docs.vllm.ai/projects/ascend/zh-cn/v0.13.0/)开始在 Ascend 上部署vLLM Ascend Plugin。
 
 <details>
 <summary>更多内容</summary>
@@ -50,21 +50,21 @@ vLLM Ascend Plugin
 
 ## 总览
 
-vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei Ascend NPU无缝运行的后端插件。
+vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei Ascend NPU 上无缝运行的后端插件。
 
 此插件是 vLLM 社区中支持昇腾后端的推荐方式。它遵循[[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162)所述原则：通过解耦的方式提供了vLLM对Ascend NPU的支持。
 
-使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MOE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
+使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MoE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
 
 支持的模型详细信息，请参考[模型支持列表](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/support_matrix/supported_models.html)。
 
 ## DeepWiki
 
-[**DeepWiki**](https://deepwiki.com/vllm-project/vllm-ascend) 是一个由社区和 AI 协同维护的动态知识库，旨在为你提供超越常规文档的、更深层次的技术解析。
+[**DeepWiki**](https://deepwiki.com/vllm-project/vllm-ascend) 是一个由社区和 AI 协同维护的动态知识库，旨在为您提供超越常规文档的、更深层次的技术解析。
 
 如果说官方文档是帮助您“快速上手”的操作指南，那么DeepWiki就是陪伴您“深入理解”的技术伙伴。在这里，您可以探索：核心架构与设计原理、关键源码解读、技术背景与决策逻辑。
 
-无论您是希望将 vLLM-Ascend 用于生产部署的性能调优者，还是想基于它进行二次开发的贡献者，DeepWiki 都能为您提供极具价值的参考。欢迎立即探索，与我们一起深入 vLLM-Ascend 的技术内核。
+无论您是希望将 vllm-ascend 用于生产部署的性能调优者，还是想基于它进行二次开发的贡献者，DeepWiki 都能为您提供极具价值的参考。欢迎立即探索，与我们一起深入 vllm-ascend 的技术内核。
 
 ## 准备
 
@@ -74,7 +74,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
     - Python == 3.12
     - CANN == 9.2.1 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/softwareinst/releasenote/9.2.1/release-notes.md))
     - PyTorch == 2.10.0, TorchNPU == 2.10.0.post7
-    - vLLM (与vllm-ascend版本一致)
+    - vLLM （与vllm-ascend版本一致）
 
 ## 访问昇腾NPU
 
@@ -120,8 +120,8 @@ vllm-ascend有主干分支和开发分支。
 
 ## 社区例会
 
-- vLLM Ascend 每周社区例会: <https://tinyurl.com/vllm-ascend-meeting>
-- 每周三下午，15:00 - 16:00 (UTC+8, [查看您的时区](https://dateful.com/convert/gmt8?t=15))
+- vLLM Ascend 每周社区例会：<https://tinyurl.com/vllm-ascend-meeting>
+- 每周三下午，15:00 - 16:00 (UTC+8, 查看[您的时区](https://dateful.com/convert/gmt8?t=15))
 
 ## 许可证
 

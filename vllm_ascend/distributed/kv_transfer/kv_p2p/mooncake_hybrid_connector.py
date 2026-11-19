@@ -116,12 +116,13 @@ def _reconstruct_shared_pages(
     ``layer_stride == 0`` retains the legacy ``shared_by`` contract: all
     descriptor layers alias one standalone tensor. For nonzero layer strides,
     a layer's physical start is ``base + offset + index * layer_stride`` and
-    layers resolving to the same start and block stride share one page. Runtime
-    view addresses can still differ because a layer may start at an inner-page
-    offset.
+    component placements within the first block of a slot share one page.
+    Runtime view addresses can differ from descriptor placements when the
+    backend exposes an inner-page component.
     """
     pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
     page_strides: dict[tuple[str, int, int], int] = {}
+    strided_placements: list[tuple[str, int, int, int]] = []
     for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
         descriptor_layers: list[tuple[str, int, tuple[torch.Tensor, ...]]] = []
         for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
@@ -153,14 +154,27 @@ def _reconstruct_shared_pages(
         )
         for layer_name, placement_start, layer_tensors in descriptor_layers:
             layer_start = descriptor_base + placement_start
-            page_key = ("strided", descriptor.block_stride, layer_start)
-            pages_by_key.setdefault(page_key, []).append(
-                (
-                    layer_name,
-                    min(tensor.data_ptr() for tensor in layer_tensors) - layer_start,
-                )
+            strided_placements.append(
+                (layer_name, descriptor.block_stride, layer_start, min(t.data_ptr() for t in layer_tensors))
             )
-            page_strides[page_key] = descriptor.block_stride
+
+    # Singleton descriptors can place K, indexer and scale at different offsets
+    # in one slot. Recover the slot's first-block base before registering full
+    # pages; an inner component must not become an independent page transfer.
+    page_bases: dict[tuple[int, int], int] = {}
+    last_base_by_stride: dict[int, int] = {}
+    for stride, start in sorted({(stride, start) for _, stride, start, _ in strided_placements}):
+        base = last_base_by_stride.get(stride)
+        if base is None or start >= base + stride:
+            base = start
+            last_base_by_stride[stride] = base
+        page_bases[stride, start] = base
+
+    for layer_name, stride, start, pointer in strided_placements:
+        base = page_bases[stride, start]
+        page_key = ("strided", stride, base)
+        pages_by_key.setdefault(page_key, []).append((layer_name, pointer - base))
+        page_strides[page_key] = stride
 
     return [
         _SharedPage(
