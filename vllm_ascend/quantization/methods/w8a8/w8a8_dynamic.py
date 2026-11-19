@@ -534,8 +534,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
-        w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
-        w2_scale_dtype = w2_scale[0].dtype
+        w1, w1_scale, _, _ = self._get_mlp_weights(layer)
+        # The grouped matmul writes activations back in the model dtype. Using the
+        # scale dtype here used to be equivalent because the checkpoint scales were
+        # fp16; the fp32 copies kept for A8W8 would otherwise turn the output into
+        # float32, which aclnn rejects ("y[0] ... has incorrect dtype FLOAT").
+        out_dtype = mlp_compute_input.hidden_states.dtype
         # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
         # then scales must be per-expert too — aclnn grouped_matmul requires
         # len(scale) == len(weight). The stacked path keeps a single-element list.
@@ -550,7 +554,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             group_type=0,
             group_list=mlp_compute_input.group_list,
             group_list_type=mlp_compute_input.group_list_type,
-            output_dtype=w2_scale_dtype,
+            output_dtype=out_dtype,
         )[0]
         dispose_tensor(mlp_compute_input.hidden_states)
         return hidden_states
@@ -561,6 +565,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
         scale = w2_scale
+        # Same reason as apply_gmm1: the fp32 dequant scale is not the output dtype.
+        out_dtype = mlp_compute_input.hidden_states.dtype
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
@@ -571,5 +577,5 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             group_list_type=mlp_compute_input.group_list_type,
             group_type=0,
             group_list=mlp_compute_input.group_list,
-            output_dtype=w2_scale[0].dtype,
+            output_dtype=out_dtype,
         )[0]
