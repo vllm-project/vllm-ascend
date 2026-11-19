@@ -42,6 +42,13 @@ def test_rare_feed_jobs_block_reap_without_force():
         assert store.list_reapable(current_wave=2) == []  # age < cap
         # Past cap → force clear rare_feed_jobs and reap.
         assert store.list_reapable(current_wave=100) == ["r1"]
+        st = store.get_state("r1")
+        assert st is not None
+        assert st.rare_feed_jobs == 0
+        assert st.rare_feed_force_cleared is True
+        finishable, incomplete = store.partition_rare_finish_reapable(["r1"])
+        assert finishable == []
+        assert incomplete == ["r1"]
     finally:
         RequestGuardStore.reset_for_tests()
 
@@ -65,6 +72,34 @@ def test_mark_finished_defers_rare_finish_when_rare_enabled():
         assert store.is_request_finished("r1")
         p._reap_finished_requests()
         p.detectors.finish_rare_chars.assert_called_once_with(["r1"])
+    finally:
+        RequestGuardStore.reset_for_tests()
+
+
+def test_force_clear_skips_finish_rare_chars():
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.max_deferred_waves = 2
+        store.get_or_create("stuck")
+        store.get_or_create("ok")
+        store.mark_finished(["stuck", "ok"], wave=1)
+        store.add_rare_feed_jobs(["stuck"])
+        # Drain ok normally (no pin); stuck past cap → force-clear.
+        assert set(store.list_reapable(current_wave=100)) == {"stuck", "ok"}
+
+        p = object.__new__(RuntimeGuardProcessor)
+        p.wave_tracker = SimpleNamespace(current_wave=lambda: 100, discard_many=lambda *_: None)
+        p.runtime_config = MagicMock()
+        p.detectors = MagicMock()
+        p.detectors.finish_rare_chars.return_value = []
+        p.detectors.rare_chars_enabled.return_value = True
+        p.detectors.get.return_value = None
+        p._handle_alert = MagicMock()  # type: ignore[method-assign]
+
+        p._reap_finished_requests()
+        # Only the drained req should finish; force-cleared stuck is skipped.
+        p.detectors.finish_rare_chars.assert_called_once_with(["ok"])
     finally:
         RequestGuardStore.reset_for_tests()
 
