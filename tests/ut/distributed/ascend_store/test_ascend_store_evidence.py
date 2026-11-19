@@ -35,7 +35,7 @@ Each test names the state(s) it pins.
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -562,19 +562,32 @@ class TestSyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
         worker = self._make_evidence_worker()  # backend: mooncake
         self.assertEqual(worker._evidence_certification, "content")
 
+    def test_gate_reads_current_tp_mismatch_state(self):
+        # [F-4] the gate must observe the CURRENT tp_mismatch state (set by
+        # _init_key_head_config BEFORE the gate runs in __init__): a
+        # tp_mismatch worker under the repair policy must come up with the
+        # evidence path OFF -- the flat channels own the outcome.
+        worker = self._make_evidence_worker()
+        self.assertIsNotNone(worker.evidence_buffer)
+        worker.tp_mismatch = True
+        worker._init_evidence_path(worker.vllm_config, False)
+        self.assertIsNone(worker.evidence_buffer)
+        self.assertEqual(worker._evidence_certification, "none")
 
-class TestAsyncLoadEvidence(unittest.TestCase):
+
+class TestAsyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
     """KVCacheStoreRecvingThread (async blockwise path) with an active
     evidence path."""
 
     def _make_thread(self, store):
+        # PRODUCTION wiring (Phase-2 F-1): the recv thread receives a worker
+        # ONLY on the tp_mismatch path, which the evidence gate refuses, so
+        # an evidence-active deployment ALWAYS runs with worker=None. The
+        # evidence accounting facts are the thread's EXPLICIT constructor
+        # parameters -- never read through a worker object.
         db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0)], [BLOCK], None)
         db.set_group_buffers({0: [1000]}, {0: [BLOCK]}, group_num_layers={0: LAYERS})
         buf = EvidenceBuffer()
-        worker = MagicMock()
-        worker.tp_mismatch = False
-        worker._evidence_num_layers = LAYERS
-        worker._evidence_certification = "content"
         thread = KVCacheStoreRecvingThread(
             m_store=store,
             token_database=db,
@@ -583,8 +596,9 @@ class TestAsyncLoadEvidence(unittest.TestCase):
             ready_event=threading.Event(),
             invalid_block_ids=set(),
             invalid_block_ids_lock=threading.Lock(),
-            worker=worker,
             evidence_buffer=buf,
+            evidence_num_layers=LAYERS,
+            evidence_certification="content",
         )
         return thread, buf
 
@@ -616,6 +630,38 @@ class TestAsyncLoadEvidence(unittest.TestCase):
         self.assertTrue(att.terminal)
         self.assertEqual(att.loaded_objects, N_BLOCKS * LAYERS)
         self.assertEqual(att.failed_objects, 0)
+
+    def test_async_production_wiring_healthy_delivery_non_vacuous(self):
+        # [1] E Phase-2 F-1 regression: the FULL production wiring. The recv
+        # thread receives a worker ONLY on the tp_mismatch path, which the
+        # evidence gate refuses -- so in every evidence-active deployment
+        # the thread runs with worker=None and the accounting facts must
+        # flow through the EXPLICIT constructor parameters. A healthy async
+        # delivery must yield a NON-vacuous, certified terminal attestation:
+        # Core's completeness gate counts only expected_objects >= 1 with
+        # certifies_content() (E's b1-repro.py shape: blocks x 0 layers +
+        # "none" never authorizes anything).
+        worker = self._make_evidence_worker(extra_config={"load_async": True})
+        worker.m_store.get = MagicMock(return_value=[0] * N_BLOCKS)
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [BLOCK]})
+        with patch.object(KVCacheStoreRecvingThread, "start", autospec=True) as start_mock:
+            start_mock.side_effect = lambda thread: thread.ready_event.set()
+            worker._start_kv_transfer_threads()
+        thread = worker.kv_recv_thread
+        self.assertIsNotNone(thread)
+        self.assertIsNone(thread.worker)  # production: worker=None here
+        self.assertEqual(thread._evidence_num_layers, LAYERS)
+        self.assertEqual(thread._evidence_certification, "content")
+        req = self._req()
+        thread.request_queue.put(req)
+        thread._handle_request(req)
+        (ev,) = worker.evidence_buffer.drain_terminal()
+        att = ev.to_attestation()
+        self.assertTrue(att.terminal)
+        self.assertEqual(att.expected_objects, N_BLOCKS * LAYERS)
+        self.assertEqual(att.certified_objects, N_BLOCKS * LAYERS)
+        self.assertEqual(att.certification, "content")
+        self.assertTrue(att.certifies_content())
 
     def test_async_per_key_failure_report(self):
         # [2] missing object mid-batch: single-region report; the flat

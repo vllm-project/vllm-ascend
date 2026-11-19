@@ -97,7 +97,7 @@ the structured failure reports and per-rank transfer attestations this policy re
 | :--- | :--- |
 | Policy | `kv_load_failure_policy="repair"` in the KV transfer configuration. |
 | Backend | Blockwise transfer only: `use_layerwise` is not supported with `repair`. |
-| Layout | The engine must run with `VLLM_KV_CACHE_LAYOUT=HND` (or `LBHNC`). With the default layout, repairs are refused at engine start and every failed load falls back to recompute. |
+| Layout | The engine must run with `VLLM_KV_CACHE_LAYOUT=HND` (or `LBHNC`). With the default layout, repairs are refused at engine start (the layout-capability gate that performs this refusal ships as a companion change; deploy the two together) and every failed load falls back to recompute. |
 | Parallelism | Single KV cache group, TP-only (PP/DP/CP/DCP = 1). |
 
 **Content verification per backend (`evidence_certification`)**
