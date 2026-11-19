@@ -220,6 +220,18 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    # ModelSlim Step5 checkpoints store the routed-expert projections fused
+    # across all experts as "moe.{gate,up,down}_proj" (no "experts.E."
+    # infix), so the FusedMoE "experts" container resolves its shards
+    # directly against those keys.  The rest of the fused layout
+    # (qkv_proj/qkvg_proj/qkv_indexer_proj/gate_up_proj) is seeded from the
+    # model's own STEP5_PACKED_MODULES_MAPPING.
+    "step5": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
+    "step5_vl": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
 }
 
 
@@ -284,6 +296,12 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # Same for the step5 MTP draft: the module tree nests the decoder block
+    # under ".mtp_block." while the checkpoint keys it without that infix
+    # (e.g. "model.layers.93.self_attn.q_proj.weight").
+    "step5_mtp": {
         ".mtp_block.": ".",
     },
     # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim

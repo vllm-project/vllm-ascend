@@ -1,5 +1,5 @@
 pr: 22147
 entries:
-  - category: dependency
-    text: A3 images use flash-linear-attention-npu-a3 26.10.0 for Chunk64 gated delta-rule prefill.
-    hardware: [A3]
+  - category: performance
+    text: Use the FLA Chunk32 prefill kernel for supported BF16 gated delta-rule inputs with 128-dimensional heads on A5.
+    hardware: [A5]

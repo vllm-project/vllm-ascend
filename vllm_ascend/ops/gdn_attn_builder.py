@@ -14,6 +14,8 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -32,7 +34,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
-from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -48,6 +50,16 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 # Accepted-token counts are one-based. The zero-length query segment makes
 # graph-padding rows no-ops, while 1 keeps their count valid for GDN kernels.
 _GDN_GRAPH_DUMMY_ACCEPTED_TOKEN_COUNT = 1
+
+
+@lru_cache(maxsize=1)
+def _supports_fla_chunk32() -> bool:
+    if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+        return False
+    try:
+        return version("flash-linear-attention-npu-a5") in {"26.10.0", "26.10.0+feature"}
+    except PackageNotFoundError:
+        return False
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -138,6 +150,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    chunk_indices_chunk32_host: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -343,7 +356,13 @@ def _build_non_spec_chunked_prefill_metadata(
             "block_indices_cumsum": None,
         }
 
+    # prepare_chunk_indices numbers only nonempty sequences, matching cu_seqlens_kern.
+    chunk32_indices = None
+    if _supports_fla_chunk32():
+        chunk32_indices = tuple(prepare_chunk_indices(cu_seqlens_cpu, 32).flatten().tolist())
+
     return GDNChunkedPrefillMetadata(
+        chunk_indices_chunk32_host=chunk32_indices,
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
         **device_chunk_metadata,
@@ -1114,6 +1133,10 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):

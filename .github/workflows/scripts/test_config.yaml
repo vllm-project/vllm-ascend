@@ -43,6 +43,7 @@ curated_tests:
     - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
+    - tests/e2e/pull_request/one_card/test_expert_offload_a5.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
@@ -113,6 +114,10 @@ accuracy_tests:
 runner_mapping:
   tests/e2e/pull_request/one_card/test_gdn_fla_chunk64\.py$:
     default: a3-2
+  tests/e2e/pull_request/one_card/test_gdn_fla_chunk32\.py$:
+    default: a5-4
+  tests/e2e/pull_request/one_card/test_expert_offload_a5\.py$:
+    default: a5-4
   # Sparse KV offload native ops require A3, even for the TP=1 runner test.
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle\.py$:
     default: a3-2

@@ -13,7 +13,7 @@ from vllm.model_executor.models import deepseek_v2
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
-from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
+from vllm_ascend.models import quarot_utils, qwen3_dflash2
 from vllm_ascend.ops import vocab_parallel_embedding as ascend_vocab
 from vllm_ascend.patch.worker import patch_deepseek_v2
 
@@ -105,6 +105,7 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
     monkeypatch.setattr(ascend_vocab, "enable_pcp_embedding_lmhead_weight_sharding", lambda: False)
     monkeypatch.setattr(ascend_vocab, "embedding_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "lmhead_tp_enable", lambda: False)
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: False)
     monkeypatch.setattr(ascend_vocab, "get_tp_group", lambda: SimpleNamespace(rank_in_group=tp_rank, world_size=2))
     target, _ = _make_target(monkeypatch, 2, 1, "dflash")
     assert isinstance(target.embed_tokens, vocab_parallel_embedding.VocabParallelEmbedding)
@@ -143,8 +144,8 @@ def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(mon
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=65, hidden_size=2))
     )
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda _: "/rotation" if rotated else None)
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_path", lambda _: "/rotation" if rotated else None)
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_matrix", lambda _: rotation)
+    monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda _: "/rotation" if rotated else None)
+    monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda _: rotation)
     # Device-specific post-load packing is outside this CPU test.
     process_weights = Mock()
     monkeypatch.setattr(

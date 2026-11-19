@@ -331,10 +331,10 @@ msgstr ""
 
 msgid ""
 "For startup scripts and a proxy example, see\n"
-"[D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe)."
+"[D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe)."
 msgstr ""
 "有关启动脚本和代理示例，请参见\n"
-"[Atlas 850E 上的 D2RH 部署](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe)。"
+"[Atlas 850E 风冷超节点 (UBoE) 上部署 D2RH](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe)。"
 
 msgid "#### Mooncake V2 Layerwise Push Connector"
 msgstr "#### Mooncake V2 逐层推送连接器"

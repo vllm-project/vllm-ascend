@@ -1012,6 +1012,7 @@ class BaseDeviceAdaptor:
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A2/A3 Phase6 FLA NPU GDN prefill kernel."""
         # FLA's import-time capability queries can initialize an NPU context;
@@ -1020,18 +1021,15 @@ class BaseDeviceAdaptor:
         # Ascend versions make these queries safe before device selection.
         from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-        q = l2norm_fwd(q.contiguous()).contiguous()
-        k = l2norm_fwd(k.contiguous()).contiguous()
-        v = v.contiguous()
+        # Conv1d produces head-first storage exposed to attention as BSND views.
+        # Pack only views with gaps or a different storage order. L2Norm reduces D only.
+        q, k, v = (x.transpose(1, 2).contiguous() for x in (q, k, v))
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
         g = g.to(torch.float32).contiguous()
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
-
-        # BNSD/NTD take [B, H, T, D]; q/k/v arrive sequence-major. The output is
-        # still returned sequence-major, so only the inputs are permuted.
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
         chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
@@ -1050,7 +1048,7 @@ class BaseDeviceAdaptor:
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
@@ -1660,23 +1658,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def unpack_dsa_indexer_kv_cache(kv_cache):
-        """Unpack indexer kv_cache tuple.
-        A5: returns (state_cache, k_cache, scale_cache, full_cache)."""
-        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache = kv_cache
+        """Unpack MRV2 indexer components and recover the packed-page alias."""
+        # attention.utils imports device operators while loading attention ops.
+        from vllm_ascend.attention.utils import combine_cache_components
+
+        _, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache = kv_cache
+        indexer_full_cache = combine_cache_components(indexer_k_cache, indexer_scale_cache)
         return indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache
 
     @staticmethod
     def unpack_dsa_forward_kv_cache(kv_cache, compress_ratio):
-        """Unpack kv_cache for forward pass. A5: 7-element tuple with
-        indexer_full_cache at position 6; non-A5: 6 elements (None substituted)."""
-        idx_full = 6
-        full_cache = kv_cache[idx_full]
+        """Unpack six MRV2 components; only C4 needs the combined indexer alias."""
+        compressed, swa, state, _, indexer_key, indexer_scale = kv_cache
         if compress_ratio == 4:
-            return (kv_cache[0], kv_cache[1], kv_cache[2], kv_cache[4], kv_cache[5], full_cache)
+            from vllm_ascend.attention.utils import combine_cache_components
+
+            full_cache = combine_cache_components(indexer_key, indexer_scale)
+            return compressed, swa, state, indexer_key, indexer_scale, full_cache
         elif compress_ratio == 128:
-            return (kv_cache[0], kv_cache[1], kv_cache[2], None, None, full_cache)
+            return compressed, swa, state, None, None, None
         else:
-            return (None, kv_cache[1], None, None, None, full_cache)
+            return None, swa, None, None, None, None
 
     @staticmethod
     def pad_dsa_decode_slot_mapping(slot_mapping, num_decode_tokens, compress_ratio, num_decodes):
@@ -2055,6 +2057,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         scale: float,
         prebuilt_meta,
         fused_fwd,
+        chunk_size: int = 64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
         # Conv1d head-first output is exposed as BSND views by GDN. Recover
@@ -2073,7 +2076,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         initial_state = initial_state.contiguous()
 
         cu_seqlens = prebuilt_meta.cu_seqlens_host
-        chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+        use_chunk32 = chunk_size == 32
+        chunk_indices = (
+            prebuilt_meta.chunk_indices_chunk32_host if use_chunk32 else prebuilt_meta.chunk_indices_chunk64_host
+        )
         keep_meta = prebuilt_meta.keep_meta
         initial_state_kern = initial_state
         if keep_meta is not None:
@@ -2088,15 +2094,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             beta,
             initial_state=initial_state_kern,
             output_final_state=True,
-            chunk_size=64,
+            chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             scale=scale,
             layout=layout,
-            use_exp2=True,
+            use_exp2=not use_chunk32,
             use_qk_l2norm_in_kernel=True,
+            use_beta_sigmoid_in_kernel=use_chunk32,
             allow_neg_eigval=False,
-            disable_recompute=True,
+            disable_recompute=not use_chunk32,
             state_v_first=True,
         )
         if keep_meta is not None:
