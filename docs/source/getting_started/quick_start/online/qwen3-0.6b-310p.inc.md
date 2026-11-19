@@ -3,7 +3,7 @@ The following Qwen3-0.6B example has been validated on Atlas 300I DUO and Atlas 
 ???+ important "Runtime requirements for this hardware path"
 
     - Use `float16`.
-    - For graph mode, use `FULL_DECODE_ONLY` and limit the graph capture sizes.
+    - Use `FULL_DECODE_ONLY` and limit the graph capture sizes.
     - `enable_npugraph_ex` is not supported. Set `--additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'`.
 
 <!-- doctest: quickstart-300i-duo-online-serve -->
@@ -72,26 +72,5 @@ INFO:     Shutting down
 INFO:     Waiting for application shutdown.
 INFO:     Application shutdown complete.
 ```
-
-**Optional: Serve with pipeline parallelism on two 310P devices**
-
-After stopping the previous server, select two available devices on the same host.
-The 310P Model Runner V2 supports two pipeline stages with multiprocessing
-for text generation. Leave speculative decoding, data parallelism, expert
-parallelism, and context parallelism disabled.
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen3-0.6B \
-    --dtype float16 \
-    --tensor-parallel-size 1 \
-    --pipeline-parallel-size 2 \
-    --distributed-executor-backend mp \
-    --enforce-eager \
-    --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
-```
-
-Use the same completion request above to check the service. If you switch
-from eager mode to `FULL_DECODE_ONLY` for benchmarking, choose capture sizes
-based on the observed PP microbatch sizes.
 
 Finally, press `Ctrl+D` to exit the container.
