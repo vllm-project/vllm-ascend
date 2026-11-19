@@ -267,6 +267,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         }'
     ```
 
+    !!! note
+
+        During single-node deployment, if startup aborts with an `HCCL_BUFFSIZE_EP is too SMALL` assertion (`NEEDED_HCCL_BUFFSIZE` exceeds the actual `CCL_BUFFSIZE`), increase `HCCL_BUFFSIZE` (in MB) to at least the `NEEDED_HCCL_BUFFSIZE` value reported in the error (for example, `2332033024` bytes requires at least `2224` MB). Also consider setting `VLLM_ENGINE_READY_TIMEOUT_S` (for example, `1800`) to avoid engine startup timeouts when initializing larger communication buffers.
+
 === "A2 series"
 
     Run the following script to execute online inference.
