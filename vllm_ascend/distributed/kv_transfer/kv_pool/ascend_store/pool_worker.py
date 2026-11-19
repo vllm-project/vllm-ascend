@@ -215,14 +215,14 @@ class BaseKVPoolWorker(ABC):
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        self.block_size = self.grouped_block_size[0]
         self.hash_block_size = kv_cache_config.hash_block_size
-        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        # TODO: Adapt layerwise save/load paths to support partial hash hits.
-        self.enable_partial_hash_hits = kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         for group_id in self.cacheable_group_ids:
             group_block_size = self.grouped_block_size[group_id]
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        self.block_size = self.grouped_block_size[0]
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
+        # TODO: Adapt layerwise save/load paths to support partial hash hits.
+        self.enable_partial_hash_hits = kv_cache_config.cache_hit_alignment_tokens < self.lcm_block_size
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
