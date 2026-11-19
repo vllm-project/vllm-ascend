@@ -1617,6 +1617,15 @@ def _uses_glm_component_views(vllm_config, kv_cache_config, attn_layers, kernel_
         return False
     parallel = vllm_config.parallel_config
     specs = _get_layer_kv_cache_specs(kv_cache_config)
+    # Packed SFA still flattens its single component for writes. Only use the
+    # new allocation when its blocks remain adjacent; indexer pages may stride.
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        for name in descriptor.layers:
+            spec = specs[name]
+            if getattr(spec, "uses_packed_sfa_main_cache", False) and descriptor.block_stride != (
+                spec.block_size * spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+            ):
+                return False
     return (
         enable_sfa(vllm_config)
         and parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 1

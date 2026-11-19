@@ -423,12 +423,19 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     )
 
 
-def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
+@pytest.mark.parametrize("paged", [False, True])
+def test_c4_cache_write_preserves_packed_bytes(monkeypatch, paged):
     indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
     indexer.enable_sparse_li_c4 = True
     indexer.enable_sparse_li_c8 = False
     key_cache = torch.full((2, 128, 1, 64), 23, dtype=torch.uint8)
     scale_bytes = torch.full((2, 128, 1, 2, 2), 23, dtype=torch.uint8)
+    backing = None
+    if paged:
+        # Keep each block dense, with K and scale sharing the physical page.
+        backing = torch.full((2, 128 * (64 + 4) + 32), 23, dtype=torch.uint8)
+        key_cache = backing[:, : 128 * 64].view(2, 128, 1, 64)
+        scale_bytes = backing[:, 128 * 64 : 128 * (64 + 4)].view(2, 128, 1, 2, 2)
     indexer.k_cache = SimpleNamespace(kv_cache=(key_cache, scale_bytes.view(torch.float8_e8m0fnu)))
     packed_key = torch.arange(3 * 64, dtype=torch.uint8).view(3, 64)
     scale = torch.arange(12, dtype=torch.uint8).view(3, 2, 2)
@@ -439,19 +446,25 @@ def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
 
     def scatter(cache, indices, updates):
         assert cache.dtype == updates.dtype == torch.uint8
-        cache[indices.flatten()] = updates
+        if indices.shape[1] == 2:
+            cache[indices[:, 0], indices[:, 1]] = updates
+        else:
+            cache[indices.flatten()] = updates
 
     scatter_op = Mock(side_effect=scatter)
     monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter_op)
 
-    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots)
+    scatter_indices = torch.stack((slots // 128, slots % 128), dim=-1)
+    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots, scatter_indices)
 
     expected_key = torch.full_like(key_cache, 23).view(-1, 64)
     expected_scale = torch.full_like(scale_bytes, 23).view(-1, 2, 2)
     expected_key[slots] = packed_key
     expected_scale[slots] = scale
-    assert torch.equal(key_cache.view(-1, 64), expected_key)
-    assert torch.equal(scale_bytes.view(-1, 2, 2), expected_scale)
+    assert torch.equal(key_cache, expected_key.view(2, 128, 1, 64))
+    assert torch.equal(scale_bytes, expected_scale.view(2, 128, 1, 2, 2))
+    if backing is not None:
+        assert torch.all(backing[:, -32:] == 23)
     assert scatter_op.call_count == 2
 
 
@@ -685,85 +698,3 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         if enabled:
             assert specs["cache_owner"] == replace(spec, block_stride_alignment=MultipleOf(_KERNEL_BLOCK_SIZE))
             assert owner.cache_spec == spec
-
-
-@pytest.mark.parametrize("key_dtype,scale_dtype", [(torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)])
-@pytest.mark.parametrize("paged,width", [(True, 128), (False, 128), (True, 96)])
-def test_c8_cache_write_selects_page_store(monkeypatch, key_dtype, scale_dtype, paged, width):
-    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
-
-    block_size = 128
-    page = block_size * (width + torch.empty((), dtype=scale_dtype).element_size())
-    raw = torch.full((2 * page,), 23, dtype=torch.int8)
-    key, scale = create_cache_component_views(
-        raw, [(2, block_size, 1, width), (2, block_size, 1, 1)], [key_dtype, scale_dtype], page
-    )
-    if not paged:
-        key, scale = key.contiguous(), scale.contiguous()
-    indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
-    indexer.enable_sparse_li_c8, indexer.enable_sparse_li_c4 = True, False
-    indexer.k_cache = SimpleNamespace(kv_cache=(key, scale))
-    updates = torch.arange(6 * width, dtype=torch.float32).remainder(8).to(key_dtype).view(6, width)[::2]
-    scales = torch.tensor([1.25, 0, 2.5, 0, 3.75, 0], dtype=scale_dtype)[::2]
-    slots = torch.tensor([127, 128, -1])
-    store = Mock()
-    scatter = Mock()
-    monkeypatch.setattr(indexer_module, "store_indexer_key_scale", store)
-    monkeypatch.setattr(indexer, "_write_cache_tensor", scatter)
-    indexer.write_cache(updates, scales, slots)
-    if paged and width == 128:
-        store.assert_called_once()
-        scatter.assert_not_called()
-        actual_key, actual_scale, actual_slots, actual_cache, actual_scale_cache = store.call_args.args
-        assert actual_key.is_contiguous() and actual_scale.is_contiguous()
-        assert actual_key.dtype == key_dtype and actual_scale.dtype == scale_dtype
-        torch.testing.assert_close(actual_key.float(), updates.float())
-        torch.testing.assert_close(actual_scale, scales)
-        torch.testing.assert_close(actual_slots, slots)
-        assert actual_cache is key and actual_scale_cache is scale
-        assert store.call_args.kwargs == {
-            "block_size": block_size,
-            "key_block_stride": key.stride(0),
-            "scale_block_stride": scale.stride(0),
-        }
-    else:
-        store.assert_not_called()
-        assert scatter.call_count == 2
-
-
-@pytest.mark.parametrize("empty", [False, True])
-def test_c4_page_write_pairs_key_and_scale_without_copying_destination(monkeypatch, empty):
-    from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
-
-    raw = torch.full((3 * 304,), 19, dtype=torch.int8)
-    key, scale = create_cache_component_views(raw, [(3, 4, 1, 64), (3, 4, 1, 2, 2)], [torch.uint8, torch.uint8], 304)
-    before = raw.clone()
-    backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
-    backend.enable_sparse_li_c4, backend.enable_sparse_li_c8 = True, False
-    backend.k_cache = SimpleNamespace(kv_cache=(key, scale))
-    slots = torch.tensor([] if empty else [3, 4, -1], dtype=torch.int32)
-    keys = torch.arange(slots.numel() * 64, dtype=torch.uint8).view(-1, 64)
-    scales = torch.arange(slots.numel() * 4, dtype=torch.uint8).view(-1, 2, 2)
-
-    def write(k, v, kc, vc, indices):
-        assert kc.data_ptr() == key.data_ptr() and vc.data_ptr() == scale.data_ptr()
-        assert kc.stride(0) == vc.stride(0) == 304
-        assert k.dtype == v.dtype == kc.dtype == vc.dtype == torch.int8
-        assert k.shape[-1] == 64 and v.shape[-1] == 4
-        for i, slot in enumerate(indices.tolist()):
-            if slot >= 0:
-                kc[slot // 4, slot % 4].copy_(k[i])
-                vc[slot // 4, slot % 4].copy_(v[i])
-
-    paired = Mock(side_effect=write)
-    monkeypatch.setattr(indexer_module.DeviceOperator, "reshape_and_cache", paired)
-    backend.write_cache(keys, scales, slots)
-    assert paired.call_count == (0 if empty else 1)
-    for i, slot in enumerate(slots.tolist()):
-        if slot >= 0:
-            page, token = divmod(slot, 4)
-            before[page * 304 + token * 64 : page * 304 + (token + 1) * 64] = keys[i].view(torch.int8)
-            before[page * 304 + 256 + token * 4 : page * 304 + 256 + (token + 1) * 4] = (
-                scales[i].view(torch.int8).flatten()
-            )
-    assert torch.equal(raw, before)
