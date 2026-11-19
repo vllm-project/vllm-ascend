@@ -89,8 +89,8 @@ def _record_rejection(llm, queries, documents, message, result):
     try:
         with pytest.raises(VLLMValidationError, match=message) as error:
             llm.score(queries, documents, use_tqdm=False)
-    except (AssertionError, TypeError, ValueError, pytest.fail.Exception) as error:
-        result["error"] = f"{type(error).__name__}: {error}"
+    except (AssertionError, TypeError, ValueError, pytest.fail.Exception) as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
     else:
         result.update(exception=type(error.value).__name__, message=str(error.value))
 
@@ -104,7 +104,7 @@ def _check_invalid_inputs(llm, max_model_len, results):
         ("invalid_text_type", {"content": []}, DOCUMENT, "MultiModalParam is not supported"),
     ]
     for name, queries, documents, message in cases:
-        result = {"name": name}
+        result: dict[str, str | int] = {"name": name}
         results.append(result)
         _record_rejection(llm, queries, documents, message, result)
     overlong_document = "Paris " * max_model_len
@@ -158,7 +158,7 @@ def run_bge_reranker_check(config_filename, tp_size, report_dir, *, skip_other_m
         )
         report["model_path"] = model_path
         report["stage"] = "ascend_scoring"
-        failures = []
+        failures: list[str] = []
         engine_start = perf_counter()
         with VllmRunner(model_path, **serve) as runner:
             report["engine_startup_seconds"] = perf_counter() - engine_start
