@@ -59,10 +59,13 @@ def _find_close_offset(reasoner: KimiK3ReasoningParser, tokens: Sequence[int]) -
     # Match the context-free fast path in the upstream fix. An incomplete close
     # at the beginning requires the context-aware singleton fallback instead.
     if not reasoner._thinking_enabled:
-        # Preserve upstream find_reasoning_end semantics. Normal disabled
-        # requests delegate before this lookup (reasoning_ended is True/None).
+        # Match upstream for explicit ended=False; normal disabled requests
+        # (ended=True/None) already delegate in the caller before this lookup.
         return 0
     close = reasoner._think_close_ids
+    # The parser encodes markers with the supplied tokenizer; equal lengths
+    # are not enforced. Decline this lookup for unequal/empty encodings, as
+    # upstream does, and leave their semantics to the streaming fallback.
     if not close or len(close) != len(reasoner._think_open_ids):
         return None
     for offset in range(1, len(close)):
@@ -78,6 +81,8 @@ def _find_close_offset(reasoner: KimiK3ReasoningParser, tokens: Sequence[int]) -
 def _kimi_constraint_start(manager, request, spec_tokens, committed, reasoner_cls):
     if manager.enable_in_reasoning:
         return None
+    # Preserve the upstream contract for direct non-structured calls, including
+    # its assertion where applicable; do not invent a boundary for such calls.
     structured_req = request.structured_output_request
     if structured_req is None or structured_req.reasoning_ended:
         return None
@@ -110,6 +115,8 @@ def _apply_patch():
     has_bounds = hasattr(manager_cls, "_get_constraint_bounds")
     method_name = "_get_constraint_bounds" if has_bounds else "_get_constraint_start"
     original = getattr(manager_cls, method_name, None)
+    # The bounds method/type ship together upstream. Checking the pair guards
+    # partial backports, not an expected state of a supported upstream release.
     if (
         not callable(original)
         or not callable(getattr(manager_cls, "_get_reasoner", None))
