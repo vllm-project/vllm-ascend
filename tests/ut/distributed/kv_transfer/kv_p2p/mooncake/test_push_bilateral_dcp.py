@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
@@ -47,7 +48,7 @@ def producers(worker, monkeypatch):
             )
             if cache_kind in ("mla", "p_unsharded", "d_unsharded", "both_unsharded"):
                 spec = Mock(
-                    spec=push_worker.MLAAttentionSpec,
+                    spec=MLAAttentionSpec,
                     dcp_sharded=cache_kind not in ("p_unsharded", "both_unsharded"),
                     sliding_window=None,
                     is_circular=False,

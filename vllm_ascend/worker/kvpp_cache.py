@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpec,
+)
 
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs, group_manager
 from vllm_ascend.core.kv_cache_placement import (
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
@@ -19,12 +24,11 @@ def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
 
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    specs: dict[str, KVCacheSpec] = {}
-    for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        for name in group.layer_names:
-            specs[name] = spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-    return specs
+    if HAS_LAYER_CONFIG and any(
+        group_manager(group) is not FullAttentionManager for group in kv_cache_config.kv_cache_groups
+    ):
+        raise ValueError("KVPP requires full-attention cache allocation.")
+    return {name: spec for group in kv_cache_config.kv_cache_groups for name, spec in group_layer_specs(group).items()}
 
 
 def allocate_kvpp_cache(

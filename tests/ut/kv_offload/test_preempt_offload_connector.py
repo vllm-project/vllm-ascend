@@ -11,17 +11,12 @@ import pytest
 import torch
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, ring_spec_type
 from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -61,6 +56,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.work
 
 for _module_name, _module in _saved_modules.items():
     sys.modules[_module_name] = _module
+
+
+def _dense_spec(block_size, sharded):
+    return full_attention_spec_type(
+        block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.float16, dcp_sharded=sharded
+    )
 
 
 def test_preempt_offload_connector_worker_metadata_aggregate():
@@ -366,9 +367,7 @@ def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
-    scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
-    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["layer"], _dense_spec(16, False))])
     scheduler.enable_offload_prefix_caching = False
     scheduler._pending_hash_blocks = {}
     scheduler._gpu_block_pool = SimpleNamespace(
@@ -402,9 +401,7 @@ def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_block
     scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
-    scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
-    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["layer"], _dense_spec(16, False))])
     scheduler._gpu_block_pool = SimpleNamespace(blocks={30: "gpu30", 31: "gpu31"}, touch=MagicMock())
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
@@ -435,9 +432,7 @@ def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler.dcp_world_size = 1
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
-    scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False))]
-    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["layer"], _dense_spec(16, False))])
     scheduler._gpu_block_pool = SimpleNamespace(
         blocks={10: "gpu10", 11: "gpu11", 12: "gpu12"},
         touch=MagicMock(),
@@ -487,13 +482,7 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
         blocks={50: "gpu50"},
         touch=MagicMock(),
     )
-    scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[
-            SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False),
-            )
-        ]
-    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["layer"], _dense_spec(16, False))])
     return scheduler
 
 
@@ -512,8 +501,8 @@ def test_preempt_offload_connector_scheduler_classifies_mamba_conv_groups():
     )
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(kv_cache_spec=linear_spec),
-            SimpleNamespace(kv_cache_spec=gdn_spec),
+            cache_group(["linear"], linear_spec),
+            cache_group(["gdn"], gdn_spec),
         ]
     )
 
@@ -1056,7 +1045,7 @@ def test_worker_registers_largest_same_pointer_view(reverse, large_scale):
     config = SimpleNamespace(
         num_blocks=3,
         kv_cache_tensors=[SimpleNamespace(size=48, layers=list(caches))],
-        kv_cache_groups=[SimpleNamespace(layer_names=list(caches), kv_cache_spec=SimpleNamespace())],
+        kv_cache_groups=[cache_group(list(caches), _dense_spec(16, False))],
     )
     worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
     zeros = torch.zeros
@@ -1113,7 +1102,7 @@ def test_worker_keeps_mamba_views_separate_from_attention(reverse, attention_sca
     config = SimpleNamespace(
         num_blocks=n,
         kv_cache_tensors=[SimpleNamespace(size=n * page, layers=list(caches))],
-        kv_cache_groups=[SimpleNamespace(layer_names=mamba_names, kv_cache_spec=spec)],
+        kv_cache_groups=[cache_group(mamba_names, spec)],
     )
     worker = PreemptOffloadWorker(SimpleNamespace(speculative_config=None), config, None)
     zeros = torch.zeros
@@ -1162,15 +1151,15 @@ def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_
             num_kv_heads=1,
             head_size=8,
             dtype=torch.float32,
-            sliding_window=4,
+            **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
             compress_ratio=4,
         )
     else:
-        spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        spec = ring_requirement(ring_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32))
     if uniform:
-        spec = UniformTypeKVCacheSpecs.from_specs({"ring": spec})
+        spec = {"ring": spec}
         assert spec is not None
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    config = SimpleNamespace(kv_cache_groups=[cache_group(["ring"], spec)])
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler.dcp_world_size = 1
     scheduler.cpu_kv_cache_config = config
@@ -1224,7 +1213,7 @@ def test_worker_only_deduplicates_identical_mamba_state_views(difference):
     groups = []
     for name, (tensor,) in caches.items():
         groups.append(
-            SimpleNamespace(
+            cache_group(
                 layer_names=[name],
                 kv_cache_spec=MambaSpec(
                     block_size=16,
@@ -1272,9 +1261,7 @@ def test_preempt_offload_dcp_partial_block_round_trip(dcp_size, sharded, compute
     scheduler.dcp_world_size = dcp_size
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
-    scheduler.cpu_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=384, dcp_sharded=sharded))]
-    )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["layer"], _dense_spec(384, sharded))])
     scheduler.enable_offload_prefix_caching = False
     scheduler._pending_hash_blocks = {}
     scheduler._preempted_req_states = {}
@@ -1316,9 +1303,9 @@ def test_pcp_offload_local_round_trip_waits_for_all_workers(pcp, tp, pp, dcp, sh
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                full_attention_spec_type(
                     block_size=384,
                     num_kv_heads=1,
                     head_size=1,

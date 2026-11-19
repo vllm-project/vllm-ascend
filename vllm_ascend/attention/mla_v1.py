@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -70,6 +70,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, get_layer_spec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
@@ -169,9 +170,18 @@ class AscendMLAAttention(MLAAttention):
 
     supports_pcp_dcp: ClassVar[bool] = True
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
-        """Publish the complete cache demand using the selected execution format."""
-        spec = super().get_kv_cache_spec(vllm_config)
+    if HAS_LAYER_CONFIG:
+
+        def get_kv_cache_config(self, vllm_config):
+            config = super().get_kv_cache_config(vllm_config)
+            return replace(config, spec=self._ascend_cache_layout(config.spec, vllm_config, config.is_draft))
+    else:
+
+        def get_kv_cache_spec(self, vllm_config):
+            spec = super().get_kv_cache_spec(vllm_config)
+            return self._ascend_cache_layout(spec, vllm_config, spec.is_draft)
+
+    def _ascend_cache_layout(self, spec, vllm_config, is_draft):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
@@ -193,7 +203,7 @@ class AscendMLAAttention(MLAAttention):
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
             store_on_host=(
-                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
+                not (is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,
             dtype=dtype,
@@ -1432,7 +1442,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
         if not isinstance(attn_module, MLAAttention):
             return
-        cache_spec = attn_module.get_kv_cache_spec(config)
+        cache_spec = get_layer_spec(attn_module, config)
         if supports_strided_mla_cache(config, attn_module, cache_spec):
             self._prepare_prolog_v3_weights()
 

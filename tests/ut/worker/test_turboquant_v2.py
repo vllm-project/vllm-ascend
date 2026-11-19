@@ -5,11 +5,13 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from tests.kv_cache_groups import cache_group
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend, AscendDSAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -92,7 +94,7 @@ def test_dsv4_cache_view_validates_backing_size_in_bytes():
     config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+        kv_cache_groups=[cache_group(layer_names=["attn"], kv_cache_spec=spec)],
     )
     raw = torch.empty(
         spec.page_size_bytes // torch.empty((), dtype=torch.bfloat16).element_size(),
@@ -124,7 +126,7 @@ def test_non_turboquant_v2_rejects_noncontiguous_pages_before_allocation(monkeyp
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[descriptor],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=spec)],
+        kv_cache_groups=[cache_group(layer_names=["attn"], kv_cache_spec=spec)],
     )
     runtime = SimpleNamespace(
         additional_config={},
@@ -162,8 +164,8 @@ def test_tq_v2_uses_one_backing_and_preserves_strided_pages(monkeypatch):
         model_version="deepseek_v4",
     )
     groups = [
-        KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=UniformTypeKVCacheSpecs.from_specs(specs)),
-        KVCacheGroupSpec(layer_names=["swa"], kv_cache_spec=UniformTypeKVCacheSpecs.from_specs({"swa": swa})),
+        cache_group(layer_names=list(specs), kv_cache_spec=specs),
+        cache_group(layer_names=["swa"], kv_cache_spec={"swa": swa}),
     ]
     runtime = SimpleNamespace(
         additional_config={},
@@ -225,8 +227,8 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
             KVCacheTensor(size=pool_size, layers=[alias_name], offset=0, layer_stride=0, block_stride=stride),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(names.copy(), UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))),
-            KVCacheGroupSpec([alias_name], UniformTypeKVCacheSpecs.from_specs({alias_name: spec})),
+            cache_group(names.copy(), dict.fromkeys(names, spec)),
+            cache_group([alias_name], {alias_name: spec}),
         ],
     )
     runtime = SimpleNamespace(
@@ -247,7 +249,10 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     consumer_name = "model.layers.3.attn"
     consumer = Mock(spec=attn_utils.Attention, kv_sharing_target_layer_name=names[1])
     runtime.compilation_config = SimpleNamespace(static_forward_context={**layers, consumer_name: consumer})
-    config.kv_cache_groups[0].layer_names.append(consumer_name)
+    if HAS_LAYER_CONFIG:
+        config.kv_cache_groups[0].kv_cache_specs[consumer_name] = spec
+    else:
+        config.kv_cache_groups[0].layer_names.append(consumer_name)
     legacy_allocate = Mock(side_effect=AssertionError("Unified route must allocate its own backing"))
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
     monkeypatch.setattr(

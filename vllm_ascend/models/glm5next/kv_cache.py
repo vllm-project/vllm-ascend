@@ -19,6 +19,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, FullAttentionCacheLayer
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
@@ -65,7 +66,7 @@ def format_indexer_kpool_slot_mapping(
     return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
 
 
-class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
+class Glm5NextIndexerCache(FullAttentionCacheLayer, nn.Module, AttentionLayerBase):
     """Independently allocated compressed-K cache for the GLM-Next indexer."""
 
     # Auxiliary caches use the GLM-specific small-page class instead of the
@@ -104,7 +105,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
@@ -163,15 +164,23 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
+    if HAS_LAYER_CONFIG:
+
+        def get_kv_cache_config(self, vllm_config):
+            return KpoolTailManager.layer_config(self._get_cache_layout())
+    else:
+
+        def get_kv_cache_spec(self, vllm_config):
+            return self._get_cache_layout()
+
+    def _get_cache_layout(self):
         return AscendIndexerKPoolTailSpec(
             block_size=self.compress_ratio,
             ring_capacity=self.ring_capacity,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            sliding_window=self.compress_ratio,
+            **({} if HAS_LAYER_CONFIG else {"sliding_window": self.compress_ratio}),
             compress_ratio=self.compress_ratio,
         )
 
@@ -194,41 +203,76 @@ class KpoolTailManager(FullAttentionManager):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
-    def __init__(
-        self,
-        kv_cache_spec: KVCacheSpec,
-        block_pool: BlockPool,
-        enable_caching: bool,
-        kv_cache_group_id: int,
-        scheduler_block_size: int,
-        **kwargs: Any,
-    ) -> None:
-        # The global pool can cache other groups; this manager never does.
-        # Disable it before entering the base constructor, independently of
-        # coordinator-side filtering and the caller's global caching setting.
-        super().__init__(
-            kv_cache_spec=kv_cache_spec,
-            block_pool=block_pool,
-            enable_caching=False,
-            kv_cache_group_id=kv_cache_group_id,
-            scheduler_block_size=scheduler_block_size,
-            **kwargs,
-        )
+    if HAS_LAYER_CONFIG:
+        block_table_token_alignment = None
 
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        return tuple([] for _ in kv_cache_group_ids), 0
+        @classmethod
+        def prefix_cacheable(cls, config):
+            return False
+
+        @classmethod
+        def max_admission_blocks(cls, config, block_size, max_in_flight_tokens, max_model_len):
+            return 1
+
+        @classmethod
+        def max_num_blocks_per_req(cls, config, block_size, dcp_sharded, vllm_config, max_len):
+            return 1
+
+        def __init__(self, kv_cache_group, *, enable_caching, **kwargs):
+            super().__init__(kv_cache_group, enable_caching=False, **kwargs)
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes,
+            max_length,
+            kv_cache_group_ids,
+            block_pool,
+            block_size,
+            manager_config,
+            drop_eagle_block,
+            alignment_tokens,
+            dcp_world_size=1,
+            pcp_world_size=1,
+        ):
+            return tuple([] for _ in kv_cache_group_ids), 0
+    else:
+
+        def __init__(
+            self,
+            kv_cache_spec: KVCacheSpec,
+            block_pool: BlockPool,
+            enable_caching: bool,
+            kv_cache_group_id: int,
+            scheduler_block_size: int,
+            **kwargs: Any,
+        ) -> None:
+            # The global pool can cache other groups; this manager never does.
+            # Disable it before entering the base constructor, independently of
+            # coordinator-side filtering and the caller's global caching setting.
+            super().__init__(
+                kv_cache_spec=kv_cache_spec,
+                block_pool=block_pool,
+                enable_caching=False,
+                kv_cache_group_id=kv_cache_group_id,
+                scheduler_block_size=scheduler_block_size,
+                **kwargs,
+            )
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes: BlockHashList,
+            max_length: int,
+            kv_cache_group_ids: list[int],
+            block_pool: BlockPool,
+            kv_cache_spec: KVCacheSpec,
+            drop_eagle_block: bool,
+            alignment_tokens: int,
+            dcp_world_size: int = 1,
+            pcp_world_size: int = 1,
+        ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+            return tuple([] for _ in kv_cache_group_ids), 0
 
     def cache_blocks(
         self,

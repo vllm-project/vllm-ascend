@@ -10,14 +10,19 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig, KVCacheGroupSpec
+
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+
+if not HAS_LAYER_CONFIG:
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type, window_mla_spec_type
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
@@ -38,22 +43,31 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     config.model_config.hf_config.compress_ratios = [1, 2]
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     full = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
-    swa = AscendSlidingWindowMLASpec(
-        block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=128
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    swa = window_mla_spec_type(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
     )
-    ring = CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
+    if HAS_LAYER_CONFIG:
+        swa = SlidingWindowManager.layer_config(swa, sliding_window=128)
+    ring = ring_spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
     plan = KVCacheConfig(
         num_blocks=128,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["state"], ring),
-            KVCacheGroupSpec(["swa"], swa, is_eagle_group=speculative_method is not None),
+            cache_group(["full"], full),
+            cache_group(["state"], ring_requirement(ring)),
+            cache_group(["swa"], swa, is_eagle_group=speculative_method is not None),
         ],
     )
     plan.kv_transfer_config = config.kv_transfer_config
     config.cache_config.num_gpu_blocks = plan.num_blocks
-    register_all_kvcache_specs(None)
+    if not HAS_LAYER_CONFIG:
+        register_all_kvcache_specs(None)
     init_none_hash(sha256)
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
     scheduler = Scheduler(

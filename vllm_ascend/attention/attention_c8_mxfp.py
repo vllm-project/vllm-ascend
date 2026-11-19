@@ -54,7 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.utils import uses_ascend_store_memcache, uses_mooncake_connector
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 # KV cache MXFP8 scale layouts, PA_NZ flavor (QFA layout_kv="PA_NZ"; golden
@@ -182,7 +182,7 @@ def mxfp_packet_size_bytes(num_kv_heads: int, block_size: int, k_dim: int, v_dim
     return sum(mxfp_packet_section_sizes(num_kv_heads, block_size, k_dim, v_dim))
 
 
-def mxfp_cache_spec(spec: "FullAttentionSpec") -> "FullAttentionSpec":
+def mxfp_cache_spec(spec: "AttentionSpec") -> "AttentionSpec":
     """Budget scales through upstream state_content_bytes, preserving real D."""
     k_dim, v_dim = spec.head_size, spec.head_size_v
     if spec.tokens_per_state != 1 or spec.num_heads != spec.num_kv_heads:
@@ -237,7 +237,7 @@ def mxfp_paged_cache_views(
     return tuple(views)
 
 
-def mxfp_cache_views_for_spec(raw_tensor: torch.Tensor, spec: "FullAttentionSpec", kernel_block_size: int):
+def mxfp_cache_views_for_spec(raw_tensor: torch.Tensor, spec: "AttentionSpec", kernel_block_size: int):
     """Translate scheduler pages (including padding) into kernel block views."""
     if kernel_block_size <= 0 or spec.block_size % kernel_block_size:
         raise ValueError("MXFP scheduler block must contain a whole number of kernel blocks.")

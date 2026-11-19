@@ -14,38 +14,50 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     FullAttentionManager,
     SlidingWindowManager,
-    register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-)
+
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+
+if not HAS_LAYER_CONFIG:
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import KVCacheConfig
+
+if not HAS_LAYER_CONFIG:
+    from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec
 from vllm.v1.request import Request
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
 from vllm_ascend.patch.platform import patch_kv_cache_admission  # noqa: F401
 
 
-def _manager(kind="sliding", cap=8197, enable_caching=True, block_pool=None):
-    register_all_kvcache_specs(None)
+def _requirement(kind):
+    if not HAS_LAYER_CONFIG:
+        register_all_kvcache_specs(None)
     kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
     if kind == "sliding":
         cls = SlidingWindowManager
-        spec = SlidingWindowSpec(sliding_window=8, **kwargs)
+        spec = window_requirement(sliding_window=8, **kwargs)
     elif kind == "chunked":
         cls = ChunkedLocalAttentionManager
-        spec = ChunkedLocalAttentionSpec(attention_chunk_size=8, **kwargs)
+        spec = (
+            cls.layer_config(full_attention_spec_type(**kwargs), attention_chunk_size=8)
+            if HAS_LAYER_CONFIG
+            else ChunkedLocalAttentionSpec(attention_chunk_size=8, **kwargs)
+        )
     else:
         cls = FullAttentionManager
-        spec = FullAttentionSpec(**kwargs)
+        spec = full_attention_spec_type(**kwargs)
+    return cls, spec
+
+
+def _manager(kind="sliding", cap=8197, enable_caching=True, block_pool=None):
+    cls, spec = _requirement(kind)
     if block_pool is None:
         null = KVCacheBlock(block_id=0)
         null.is_null = True
         block_pool = SimpleNamespace(null_block=null)
     return cls(
-        kv_cache_spec=spec,
+        cache_group(["layer"], spec) if HAS_LAYER_CONFIG else spec,
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
@@ -175,17 +187,18 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     max_model_len = 128
     chunk_tokens = 16
     num_blocks = 256
-    spec = _manager(kind).kv_cache_spec
+    _, spec = _requirement(kind)
+    group = cache_group(["layer"], spec)
     config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer"], kv_cache_spec=spec)],
+        kv_cache_groups=[group],
     )
     cache = KVCacheManager(
         config,
         max_model_len=max_model_len,
-        scheduler_block_size=spec.block_size,
-        hash_block_size=spec.block_size,
+        scheduler_block_size=group.block_size if HAS_LAYER_CONFIG else spec.block_size,
+        hash_block_size=group.block_size if HAS_LAYER_CONFIG else spec.block_size,
         max_in_flight_tokens=2 * chunk_tokens,
         enable_caching=False,
     )
@@ -194,7 +207,7 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     manager = cache.coordinator.single_type_managers[0]
     assert request.request_id not in manager.num_cached_block
     blocks = manager.req_to_blocks[request.request_id]
-    assert len(blocks) == chunk_tokens // spec.block_size
+    assert len(blocks) == chunk_tokens // manager.block_size
     assert all(not block.is_null for block in blocks)
 
     # Scheduling advances this count before the worker finishes the chunk.
@@ -232,18 +245,19 @@ def test_async_remote_admission_leaves_capacity_to_resume_prefill():
     # engine. Use real allocation and scheduler reservation accounting.
     common = dict(num_kv_heads=1, head_size=8, dtype=torch.float16)
     specs = [
-        FullAttentionSpec(block_size=128, **common),
-        FullAttentionSpec(block_size=4096, **common),
-        SlidingWindowSpec(block_size=32, sliding_window=128, **common),
-        SlidingWindowSpec(block_size=32, sliding_window=128, **common),
-        SlidingWindowSpec(block_size=2, sliding_window=8, **common),
-        SlidingWindowSpec(block_size=8, sliding_window=128, **common),
+        full_attention_spec_type(block_size=128, **common),
+        full_attention_spec_type(block_size=4096, **common),
+        window_requirement(block_size=32, sliding_window=128, **common),
+        window_requirement(block_size=32, sliding_window=128, **common),
+        window_requirement(block_size=2, sliding_window=8, **common),
+        window_requirement(block_size=8, sliding_window=128, **common),
     ]
-    register_all_kvcache_specs(None)
+    if not HAS_LAYER_CONFIG:
+        register_all_kvcache_specs(None)
     config = KVCacheConfig(
         num_blocks=13724,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=[str(i)], kv_cache_spec=spec) for i, spec in enumerate(specs)],
+        kv_cache_groups=[cache_group(layer_names=[str(i)], kv_cache_spec=spec) for i, spec in enumerate(specs)],
     )
     cache = KVCacheManager(
         config,

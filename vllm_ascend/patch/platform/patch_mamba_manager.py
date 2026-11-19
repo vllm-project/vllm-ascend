@@ -11,39 +11,71 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
     KVCacheBlock,
-    KVCacheSpec,
     MambaManager,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
+
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 
 
 class AscendMambaManager(MambaManager):
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-        drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Mamba recurrent states are replicated across DCP ranks, so
-        # their prefix-cache lookup keeps the ordinary logical
-        # block layout. Only attention groups shard their KV cache for DCP.
-        return super().find_longest_cache_hit(
-            block_hashes=block_hashes,
-            max_length=max_length,
-            kv_cache_group_ids=kv_cache_group_ids,
-            block_pool=block_pool,
-            kv_cache_spec=kv_cache_spec,
-            alignment_tokens=alignment_tokens,
+    if HAS_LAYER_CONFIG:
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes,
+            max_length,
+            kv_cache_group_ids,
+            block_pool,
+            block_size,
+            manager_config,
+            drop_eagle_block,
+            alignment_tokens,
             dcp_world_size=1,
-            pcp_world_size=pcp_world_size,
-            drop_eagle_block=drop_eagle_block,
-        )
+            pcp_world_size=1,
+        ):
+            return super().find_longest_cache_hit(
+                block_hashes,
+                max_length,
+                kv_cache_group_ids,
+                block_pool,
+                block_size,
+                manager_config,
+                drop_eagle_block,
+                alignment_tokens,
+                dcp_world_size=1,
+                pcp_world_size=pcp_world_size,
+            )
+    else:
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes: BlockHashList,
+            max_length: int,
+            kv_cache_group_ids: list[int],
+            block_pool: BlockPool,
+            kv_cache_spec: KVCacheSpec,
+            alignment_tokens: int,
+            dcp_world_size: int = 1,
+            pcp_world_size: int = 1,
+            drop_eagle_block: bool = False,
+        ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+            # Mamba recurrent states are replicated across DCP ranks, so
+            # their prefix-cache lookup keeps the ordinary logical
+            # block layout. Only attention groups shard their KV cache for DCP.
+            return super().find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_length,
+                kv_cache_group_ids=kv_cache_group_ids,
+                block_pool=block_pool,
+                kv_cache_spec=kv_cache_spec,
+                alignment_tokens=alignment_tokens,
+                dcp_world_size=1,
+                pcp_world_size=pcp_world_size,
+                drop_eagle_block=drop_eagle_block,
+            )
 
     def get_num_blocks_to_allocate(
         self,
@@ -92,4 +124,5 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
-single_type_kv_cache_manager.MambaManager = AscendMambaManager
+if not HAS_LAYER_CONFIG:
+    single_type_kv_cache_manager.MambaManager = AscendMambaManager

@@ -6,8 +6,8 @@ from dataclasses import replace
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
@@ -15,12 +15,13 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_packet_size_bytes,
     mxfp_paged_cache_views,
 )
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
 def _spec(ratio=1, heads=1, v_dim=256, padding=0):
     spec = mxfp_cache_spec(
-        FullAttentionSpec(
+        full_attention_spec_type(
             block_size=512 * ratio,
             num_kv_heads=heads,
             head_size=256,
@@ -67,13 +68,19 @@ def test_page_views_partition_payload_and_preserve_padding(ratio, heads, v_dim, 
 
 
 def test_spec_keeps_real_head_dimensions_and_metadata():
-    original = FullAttentionSpec(
-        block_size=512, num_kv_heads=1, head_size=256, head_size_v=128, dtype=torch.float16, non_causal=True
+    original = full_attention_spec_type(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=256,
+        head_size_v=128,
+        dtype=torch.float16,
+        **({} if HAS_LAYER_CONFIG else {"non_causal": True}),
     )
     spec = mxfp_cache_spec(original)
-    assert type(spec) is FullAttentionSpec
+    assert type(spec) is full_attention_spec_type
     assert (spec.head_size, spec.head_size_v) == (256, 128)
-    assert spec.non_causal is True
+    if not HAS_LAYER_CONFIG:
+        assert spec.non_causal is True
     assert spec.state_content_bytes == 396
     assert spec.page_size_bytes == 512 * 396
     assert original.state_content_bytes is None

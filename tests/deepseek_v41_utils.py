@@ -7,20 +7,39 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
-from vllm_ascend.core.kv_cache_interface import (
-    AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
-)
+from tests.kv_cache_groups import ring_spec_type, window_mla_spec_type
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_block_size, group_layer_specs, group_manager
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
-    group_cache_specs,
-    make_cache_groups,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+
+
+def v41_groups(specs, window=128):
+    from vllm_ascend.models.deepseek_v41.cache_config import group_layer_configs
+
+    if not HAS_LAYER_CONFIG:
+        return group_layer_configs(specs)
+    from vllm.v1.core.single_type_kv_cache_manager import (
+        CircularBufferManager,
+        FullAttentionManager,
+        SlidingWindowManager,
+    )
+
+    configs = {}
+    for name, spec in specs.items():
+        if type(spec) is window_mla_spec_type:
+            config = SlidingWindowManager.layer_config(spec, sliding_window=window)
+        elif name.endswith(".state_cache"):
+            config = CircularBufferManager.layer_config(spec)
+        else:
+            config = FullAttentionManager.layer_config(spec)
+        configs[name] = config
+    return group_layer_configs(configs)
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
@@ -34,12 +53,12 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
     specs = {}
     for role in build_layer_plan(config).layers:
         attn_prefix = f"{prefix}.layers.{role.layer_idx}.self_attn"
-        specs[f"{attn_prefix}.swa_cache"] = AscendSlidingWindowMLASpec(
+        specs[f"{attn_prefix}.swa_cache"] = window_mla_spec_type(
             block_size=block_size,
             num_kv_heads=1,
             head_size=width,
             dtype=torch.bfloat16,
-            sliding_window=window,
+            **({} if HAS_LAYER_CONFIG else {"sliding_window": window}),
             model_version="deepseek_v41",
         )
         if not role.is_kv_source:
@@ -67,7 +86,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             scale_dtype=torch.float16,
         )
         if role.compress_ratio == 2:
-            specs[f"{attn_prefix}.compressor.state_cache"] = CircularBufferSpec(
+            specs[f"{attn_prefix}.compressor.state_cache"] = ring_spec_type(
                 block_size=STATE_RING_ROWS,
                 num_kv_heads=1,
                 head_size=2 * width,
@@ -295,16 +314,16 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
     )
     specs = build_v41_cache_specs(config, runtime)
     for stage in range(draft_layers):
-        specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
+        specs[f"mtp.{stage}.self_attn.swa_cache"] = window_mla_spec_type(
             block_size=block_size,
             num_kv_heads=1,
             head_size=head_size,
             dtype=torch.bfloat16,
-            sliding_window=config.sliding_window,
+            **({} if HAS_LAYER_CONFIG else {"sliding_window": config.sliding_window}),
             cache_dtype_str="bfloat16",
             model_version="deepseek_v41",
         )
-    groups = make_cache_groups(group_cache_specs(specs))
+    groups = v41_groups(specs)
     return get_deepseek_v41_kv_cache_config(
         runtime,
         groups,
@@ -319,15 +338,18 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
-    layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
+    layers = {
+        name: DeepseekV41CacheLayer(context, name, spec, manager_cls=group_manager(g))
+        for g in config.kv_cache_groups
+        for name, spec in group_layer_specs(g).items()
+    }
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)
     caches = create_kv_cache_runtime_views(
         config,
         raw,
         _get_cache_attention_groups(config, layers, {}),
-        [group.kv_cache_spec.block_size for group in config.kv_cache_groups],
+        [group_block_size(group) for group in config.kv_cache_groups],
         {},
     )
     for name, cache in caches.items():

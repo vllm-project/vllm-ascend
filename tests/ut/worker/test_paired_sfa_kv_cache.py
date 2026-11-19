@@ -9,18 +9,12 @@ import pytest
 import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheLayout,
-    KVCacheTensor,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    compute_layout_strides,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayout, KVCacheTensor, MambaSpec, compute_layout_strides
 from vllm.v1.worker.utils import AttentionGroup
 
+from tests.kv_cache_groups import cache_group, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
 from vllm_ascend.worker.v2 import attn_utils
 
@@ -82,13 +76,29 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
                 num_kv_heads=1,
                 head_size=576,
                 dtype=dtype,
-                is_draft=True,
-                non_causal_multi_token_decode=True,
+                **({} if HAS_LAYER_CONFIG else {"is_draft": True, "non_causal_multi_token_decode": True}),
             )
-    groups = paired_sfa_cache_groups(config, specs)
+    if HAS_LAYER_CONFIG and with_draft:
+        config.speculative_config = SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(full_attention_causal=False))
+        )
+    configs = (
+        {n: replace(layer_config(s), is_draft=extract_layer_index(n) in (8, 9)) for n, s in specs.items()}
+        if HAS_LAYER_CONFIG
+        else specs
+    )
+    groups = paired_sfa_cache_groups(config, configs)
     if local_layers is not None:
         groups = [
             replace(
+                group,
+                kv_cache_specs={
+                    n: s for n, s in group.kv_cache_specs.items() if extract_layer_index(n) in local_layers
+                },
+                unprojected_specs=group.distinct_specs,
+            )
+            if HAS_LAYER_CONFIG
+            else replace(
                 group, layer_names=[name for name in group.layer_names if extract_layer_index(name) in local_layers]
             )
             for group in groups
@@ -293,9 +303,9 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=descriptors,
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            cache_group(
                 layer_names=list(specs),
-                kv_cache_spec=UniformTypeKVCacheSpecs(block_size=BLOCK_SIZE, kv_cache_specs=specs),
+                kv_cache_spec=specs,
             )
         ],
     )

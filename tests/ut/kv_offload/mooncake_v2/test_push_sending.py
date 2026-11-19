@@ -17,8 +17,11 @@ import torch
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, window_requirement
+from tests.ut.kv_offload.mooncake_v2.helpers import make_circular_spec
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_cache_config, make_kvpp_config, make_kvpp_specs
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeMetadataThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
@@ -148,9 +151,7 @@ def drive(worker, predicate):
 
 @pytest.fixture
 def worker(monkeypatch, request):
-    spec = Mock(spec=push_worker.FullAttentionSpec)
-    spec.sliding_window = None
-    spec.is_circular = False
+    spec = full_attention_spec_type(block_size=4, num_kv_heads=2, head_size=2, dtype=torch.float16)
     config = SimpleNamespace(
         speculative_config=None,
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test")),
@@ -193,6 +194,12 @@ def worker(monkeypatch, request):
                 indexer_replication_sizes=[0, 0, 0],
                 dcp_sharded=[True] * 3,
             )
+        self.layer_name_to_group_index = dict(
+            zip(self.transfer_metadata.layer_names, self.transfer_metadata.group_indices)
+        )
+        self.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[cache_group([str(i)], spec) for i in range(max(self.transfer_metadata.group_indices) + 1)]
+        )
         self.kv_cache_specs = [spec]
         self.layer_name_to_spec_index = {name: 0 for name in self.transfer_metadata.layer_names}
         self.engine = SimpleNamespace(batch_transfer_sync_write=Mock(return_value=0))
@@ -219,7 +226,7 @@ def worker(monkeypatch, request):
 @pytest.mark.parametrize("dcp", [1, 2])
 def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     worker.dcp_size = worker.tp_size = dcp
-    worker.kv_cache_specs[0].dcp_sharded = False
+    worker.kv_cache_specs[0] = replace(worker.kv_cache_specs[0], dcp_sharded=False)
     worker.transfer_metadata.dcp_sharded[:] = [False]
     remote = replace(remote_metadata(tp_size=dcp), dcp_size=dcp)
     remote.metadata_by_pp_rank[0].dcp_sharded[:] = [False]
@@ -272,11 +279,9 @@ def test_partial_block_waits_for_later_chunk(worker):
 
 
 def test_swa_is_final_chunk_only_and_pcp_replicated(worker):
-    spec = Mock(spec=push_worker.SlidingWindowSpec)
-    spec.sliding_window = 4
-    spec.num_retained_tokens = 3
-    spec.is_circular = False
-    worker.kv_cache_specs = [spec]
+    requirement = window_requirement(block_size=4, num_kv_heads=2, head_size=2, dtype=torch.float16, sliding_window=4)
+    worker.kv_cache_config.kv_cache_groups[0] = cache_group(["model.layers.0.attn"], requirement)
+    worker.kv_cache_specs = [requirement.spec if HAS_LAYER_CONFIG else requirement]
     worker.pcp_size = 2
     assert worker._get_transfer_partition("model.layers.0.attn", remote_metadata(), (0, 0, 0)) == (0, 0, 2)
     worker.pcp_rank = 1
@@ -499,7 +504,9 @@ def test_metadata_query_and_done_real_sockets(worker, monkeypatch, write_fails):
 
 
 def test_circular_waits_for_final_chunk(worker):
-    worker.kv_cache_specs = [SimpleNamespace(is_circular=True, sliding_window=None)]
+    ring = make_circular_spec(block_size=4)
+    worker.kv_cache_specs = [ring]
+    worker.kv_cache_config.kv_cache_groups[0] = cache_group(["model.layers.0.attn"], ring_requirement(ring))
     message = destination_message()
     message["block_ids"] = [[10]]
     first = source_meta(target=message)
@@ -876,7 +883,11 @@ def test_draft_namespace_does_not_share_target_readiness(worker, monkeypatch, dr
 def test_shared_layer_event_preserves_final_chunk_only_state(worker, monkeypatch):
     monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
     attention, circular, _ = worker.transfer_metadata.layer_names
-    worker.kv_cache_specs.append(SimpleNamespace(is_circular=True, sliding_window=None))
+    ring = make_circular_spec(block_size=4)
+    worker.kv_cache_specs.append(ring)
+    worker.kv_cache_config.kv_cache_groups[worker.layer_name_to_group_index[circular]] = cache_group(
+        [circular], ring_requirement(ring)
+    )
     worker.layer_name_to_spec_index[circular] = 1
     message = destination_message()
     message["block_ids"] = [[20], [10, 11]]

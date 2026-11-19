@@ -13,9 +13,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.models.step5.model as step5_model
+from tests.kv_cache_groups import full_attention_spec_type
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
 from vllm_ascend.models.step5.model import (
     AscendStep5Attention,
     AscendStep5DSAAttention,
@@ -367,9 +368,9 @@ def test_dsa_attention_get_kv_cache_spec(dsa_env):
     vllm_config = _vllm_config(cache_dtype="fp16")
     attn = _make_dsa(vllm_config, _sparse_config())
 
-    spec = attn.get_kv_cache_spec(vllm_config)
+    spec = get_layer_spec(attn, vllm_config)
 
-    assert spec == FullAttentionSpec(
+    assert spec == full_attention_spec_type(
         block_size=128,
         num_kv_heads=1,
         head_size=128,

@@ -25,9 +25,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core import kv_cache_utils
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_manager, group_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
     GroupTransferInfo,
@@ -1789,7 +1791,9 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
     def _get_scheduler_block_size(self) -> int:
         for group in self.kv_cache_config.kv_cache_groups:
             for spec in self._get_group_unique_specs(group):
-                if isinstance(spec, AscendSlidingWindowMLASpec) and spec.model_version == "deepseek_v4":
+                if getattr(spec, "model_version", None) == "deepseek_v4" and issubclass(
+                    group_manager(group), SlidingWindowManager
+                ):
                     return spec.block_size
         return self.vllm_config.cache_config.block_size
 
@@ -2044,7 +2048,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             prefill_pp_rank = remote_rank // prefill_tp_size
             group_pulls: list[GroupPull] = []
             for group_id, group in enumerate(self.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, MambaSpec):
+                if any(isinstance(s, MambaSpec) for s in group_distinct_specs(group)):
                     num_group_pulls = max(1, prefill_tp_size // self._decode_tp_size)
                 else:
                     group_spec = self._serialize_group_for_scheduler(group)
@@ -2070,12 +2074,13 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
     @staticmethod
     def _serialize_group_for_scheduler(group: Any) -> dict[str, Any]:
-        kv_cache_spec = group.kv_cache_spec
+        kv_cache_spec = group_distinct_specs(group)[0] if HAS_LAYER_CONFIG else group.kv_cache_spec
         return {
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": {
                 "num_kv_heads": getattr(kv_cache_spec, "num_kv_heads", None),
                 "num_key_value_heads": getattr(kv_cache_spec, "num_key_value_heads", None),
+                "sliding_window": getattr(group_params(group), "sliding_window", None),
             },
             "layer_names": list(group.layer_names),
         }

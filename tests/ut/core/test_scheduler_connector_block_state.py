@@ -9,10 +9,11 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, make_dyntra_test_config
 from tests.ut.kv_offload.utils import create_request
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
@@ -109,9 +110,9 @@ def test_kv_zeroing_preserves_only_async_loaded_groups(scheduler_cls, loaded_gro
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            cache_group(
                 [f"layer-{index}"],
-                FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=1, dtype=dtype),
+                full_attention_spec_type(block_size=block_size, num_kv_heads=1, head_size=1, dtype=dtype),
             )
             for index, dtype in enumerate([torch.float16, torch.float32])
         ],

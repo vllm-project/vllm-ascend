@@ -38,11 +38,17 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.kv_cache_coordinator import SpecGroup
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+
+from tests.kv_cache_groups import full_attention_spec_type
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup
+
+if HAS_LAYER_CONFIG:
+    from vllm.v1.kv_cache_interface import PrefixLookupGroup
+else:
+    from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
 )
 
@@ -53,7 +59,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 
 HASH_BLOCK_SIZE = 128
 
-FA_SPEC = FullAttentionSpec(
+FA_SPEC = full_attention_spec_type(
     block_size=128,
     num_kv_heads=1,
     head_size=8,
@@ -63,7 +69,7 @@ MAMBA_SPEC = MambaSpec(
     block_size=1536,
     shapes=((1,),),
     dtypes=(torch.float32,),
-    mamba_cache_mode="align",
+    **({} if HAS_LAYER_CONFIG else {"mamba_cache_mode": "align"}),
 )
 
 
@@ -96,10 +102,19 @@ def _fake_manager_factory(**kwargs):
 
 
 def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
-    groups = [
-        KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
-        KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
-    ]
+    if HAS_LAYER_CONFIG:
+        groups = [
+            CacheGroup.from_layers({"fa-layer": FullAttentionManager.layer_config(FA_SPEC)}),
+            CacheGroup.from_layers(
+                {"mamba-layer": MambaManager.layer_config(MAMBA_SPEC, mamba_cache_mode="align")},
+                is_eagle_group=mamba_eagle,
+            ),
+        ]
+    else:
+        groups = [
+            CacheGroup(["fa-layer"], FA_SPEC, False),
+            CacheGroup(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
+        ]
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
@@ -116,9 +131,10 @@ def _make_coordinator(
     mamba_eagle: bool = False,
     retention_interval: int | None = None,
 ):
-    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
-    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
-    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    if not HAS_LAYER_CONFIG:
+        monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+        monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
+        monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
@@ -254,24 +270,34 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+    if HAS_LAYER_CONFIG:
+        from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 
-    sentinel_config = SimpleNamespace()
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
-        kv_transfer_config=kv_transfer_config,
-    )
-    monkeypatch.setattr(
-        kcu_patch,
-        "_orig_get_kv_cache_config_from_groups",
-        lambda *args, **kwargs: sentinel_config,
-    )
-    result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
-    # The builder replaces the upstream entry point, so the coordinator-side
-    # getattr in __init__ sees the attached role on every real engine path.
-    live_module = kcu_patch._kv_cache_planning
-    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
-    assert result is sentinel_config
+        builder = AscendKVCacheConfigBuilder()
+        config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+        sentinel = SimpleNamespace()
+        monkeypatch.setattr(builder, "_place", lambda *_: sentinel)
+        result = builder.get_kv_cache_config_from_groups(config, [], 1)
+        assert result is sentinel
+    else:
+        from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+
+        sentinel_config = SimpleNamespace()
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+            kv_transfer_config=kv_transfer_config,
+        )
+        monkeypatch.setattr(
+            kcu_patch,
+            "_orig_get_kv_cache_config_from_groups",
+            lambda *args, **kwargs: sentinel_config,
+        )
+        result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
+        # The builder replaces the upstream entry point, so the coordinator-side
+        # getattr in __init__ sees the attached role on every real engine path.
+        live_module = kcu_patch._kv_cache_planning
+        assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+        assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 
 
@@ -294,11 +320,11 @@ class _RecordingManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
         drop_eagle_block,
         alignment_tokens,
         dcp_world_size=1,
         pcp_world_size=1,
+        **policy,
     ):
         cls.calls.append(
             {"max_length": max_length, "drop_eagle_block": drop_eagle_block, "dcp_world_size": dcp_world_size}
@@ -306,11 +332,11 @@ class _RecordingManager:
         return (([],), max_length)
 
 
-class _RecordingFA(_RecordingManager):
+class _RecordingFA(_RecordingManager, FullAttentionManager):
     calls = []
 
 
-class _RecordingMamba(_RecordingManager):
+class _RecordingMamba(_RecordingManager, MambaManager):
     calls = []
 
 
@@ -324,12 +350,22 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator.enable_partial_hash_hits = False
     coordinator.enable_caching = True
     coordinator.block_pool = object()
-    coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
-    # FA group is the EAGLE group; the mamba group never is.
-    coordinator.attention_groups = [
-        SpecGroup(FA_SPEC, [0], _RecordingFA, True),
-        SpecGroup(MAMBA_SPEC, [1], _RecordingMamba, False),
-    ]
+    if HAS_LAYER_CONFIG:
+        groups = [
+            CacheGroup.from_layers({"fa": _RecordingFA.layer_config(FA_SPEC)}),
+            CacheGroup.from_layers({"mamba": _RecordingMamba.layer_config(MAMBA_SPEC, mamba_cache_mode="align")}),
+        ]
+        coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=groups)
+        coordinator.attention_groups = [
+            PrefixLookupGroup(group.manager_config, group.block_size, [i], i == 0) for i, group in enumerate(groups)
+        ]
+    else:
+        coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+        # FA group is the EAGLE group; the mamba group never is.
+        coordinator.attention_groups = [
+            SpecGroup(FA_SPEC, [0], _RecordingFA, True),
+            SpecGroup(MAMBA_SPEC, [1], _RecordingMamba, False),
+        ]
     # Newer PD/partial-hit revisions cap the offered hit length at lookup
     # entry. That behavior is outside this regression's scope; install a
     # pass-through stub so the drop-gating logic runs with the original

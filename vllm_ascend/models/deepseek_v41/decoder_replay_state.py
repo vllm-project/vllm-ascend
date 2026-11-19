@@ -21,7 +21,8 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
+from vllm_ascend.core.kv_cache_layers import CacheGroup
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
@@ -41,6 +42,7 @@ class DecoderReplayInputs:
     slot_mappings: torch.Tensor
     attn_groups: list[list[AttentionGroup]]
     encoder_replay_start: torch.Tensor
+    kv_cache_groups: list[CacheGroup]
     pcp_context: "AscendPCPAttentionContext | None" = None
     metadata_producer_stream: torch.npu.Stream | None = None
 
@@ -180,9 +182,9 @@ class DecoderReplayState:
         )
         with set_current_vllm_config(self.config):
             for group_id, groups in enumerate(inputs.attn_groups):
+                if is_circular_cache_group(inputs.kv_cache_groups[group_id]):
+                    continue
                 for group in groups:
-                    if is_circular_kv_cache_spec(group.kv_cache_spec):
-                        continue
                     builder_cls = group.backend.get_builder_cls()
                     if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
                         builder = builder_cls(group.kv_cache_spec, group.layer_names, self.config, self.rows.device)

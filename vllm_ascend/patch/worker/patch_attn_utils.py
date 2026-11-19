@@ -8,6 +8,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend, AscendSFAIndexerBackend
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
@@ -16,7 +17,6 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2.attn_utils import (
     allocate_kv_cache_main,
-    get_kv_cache_spec,
 )
 
 
@@ -107,4 +107,11 @@ vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
-vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+if HAS_LAYER_CONFIG:
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_layer_configs
+
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_layer_configs = get_kv_cache_layer_configs
+else:
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_spec
+
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

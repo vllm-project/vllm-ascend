@@ -42,19 +42,24 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_layers import (
+    CacheGroup,
+    group_block_size,
+    group_distinct_specs,
+    group_layer_specs,
+    group_manager,
+    is_plain_full_attention,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -217,7 +222,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         engine: TransferEngine,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
-        kv_cache_specs: list[KVCacheSpec],
+        kv_cache_groups: list[CacheGroup],
         attn_resharding_group_idx: set,
         total_layers: int,
         ready_event: threading.Event,
@@ -240,7 +245,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.engine = engine
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.kv_cache_specs = kv_cache_specs
+        self.kv_cache_groups = kv_cache_groups
         self.attn_resharding_group_idx = attn_resharding_group_idx
         self.mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
         self.num_speculative_tokens = (
@@ -262,7 +267,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         send_queue_size = 0
         if self.pd_head_ratio != 1:
             if self.use_attn_mamba_hybrid:
-                send_queue_size = len(self.kv_cache_specs)
+                send_queue_size = len(self.kv_cache_groups)
             else:
                 send_queue_size = 1
         self.send_queue = queue.Queue[SendTask](maxsize=send_queue_size)
@@ -334,7 +339,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         dst_list: list[int] = []
         length_list: list[int] = []
 
-        layer_kv_cache_spec = self.kv_cache_specs[layer_group_idx]
+        layer_kv_cache_spec = group_layer_specs(self.kv_cache_groups[layer_group_idx])[layer_name]
         remote_block_ids = req_meta.remote_block_ids[layer_group_idx]
         remote_layer_metadata = req_meta.remote_layer_metadata[layer_name]
         local_layer_metadata = self.layer_metadata[layer_name]
@@ -870,7 +875,7 @@ class MooncakeLayerwiseConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.block_size = [group_block_size(group_spec) for group_spec in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -912,12 +917,8 @@ class MooncakeLayerwiseConnectorScheduler:
 
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                yield from kv_cache_spec.kv_cache_specs.values()
-            else:
-                yield kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups:
+            yield from group_distinct_specs(group)
 
     @classmethod
     def _has_attn_mamba_hybrid_cache(cls, kv_cache_config: KVCacheConfig) -> bool:
@@ -1215,7 +1216,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
+        self.kv_cache_groups = self.kv_cache_config.kv_cache_groups
         self.local_engine_id: str = " "
         self.engine_id = engine_id
         self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
@@ -1259,7 +1260,7 @@ class MooncakeLayerwiseConnectorWorker:
         self._pending_reuse_layers: set[int] = set()
         self._cache_write_events: list[torch.npu.Event | None] = [None] * self.total_layers
 
-        self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
+        self.block_size: list[int] = [group_block_size(group) for group in self.kv_cache_groups]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
         self.layer_metadata: dict[str, LayerMetadata] = {}
         self.sparse_sfa_c8_layers: set[str] = set()
@@ -1393,7 +1394,7 @@ class MooncakeLayerwiseConnectorWorker:
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
+                layer_kv_cache_spec = group_layer_specs(kv_cache_groups[layer2group_ids[layer_name]])[layer_name]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
                     conv_shape, conv_dtype = layer_kv_cache_spec.shapes[0], layer_kv_cache_spec.dtypes[0]
@@ -1414,9 +1415,7 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(kv_cache_tuple, (list, tuple)) is False:
                 kv_cache_tuple = [kv_cache_tuple]
             layer_kv_group_id = layer2group_ids[layer_name]
-            layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+            layer_kv_cache_spec = group_layer_specs(kv_cache_groups[layer_kv_group_id])[layer_name]
             # Read the layout flags directly: some Ascend versions expose the
             # cache spec flags without the corresponding utils helpers.
             is_mla = isinstance(layer_kv_cache_spec, MLAAttentionSpec)
@@ -1438,7 +1437,7 @@ class MooncakeLayerwiseConnectorWorker:
                 and (
                     (
                         self.pd_head_ratio > 1
-                        and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
+                        and is_plain_full_attention(layer_kv_cache_spec, kv_cache_groups[layer_kv_group_id])
                     )
                     or self.enable_kv_quant
                     or self.enable_c8_quant
@@ -1536,7 +1535,7 @@ class MooncakeLayerwiseConnectorWorker:
                 engine=self.engine,
                 vllm_config=self.vllm_config,
                 kv_cache_config=self.kv_cache_config,
-                kv_cache_specs=self.kv_cache_specs,
+                kv_cache_groups=self.kv_cache_groups,
                 attn_resharding_group_idx=self.attn_resharding_group_idx,
                 total_layers=self.total_layers,
                 ready_event=ready_event,
@@ -1746,7 +1745,7 @@ class MooncakeLayerwiseConnectorWorker:
         remote_block_size = req_meta.remote_block_size
         remote_block_ids = req_meta.remote_block_ids
         for i in range(self.num_kv_cache_groups):
-            if isinstance(self.kv_cache_specs[i], MambaSpec):
+            if issubclass(group_manager(self.kv_cache_groups[i]), MambaManager):
                 continue
             if remote_block_size[i] != self.block_size[i] and len(req_meta.remote_block_ids[i]) > 0:
                 assert remote_block_size[i] > self.block_size[i] and remote_block_size[i] % self.block_size[i] == 0, (
@@ -1765,7 +1764,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     def _get_kernel_block_ids(self, block_ids):
         for i in range(self.num_kv_cache_groups):
-            if isinstance(self.kv_cache_specs[i], MambaSpec):
+            if issubclass(group_manager(self.kv_cache_groups[i]), MambaManager):
                 continue
             if len(block_ids[i]) > 0:
                 block_ids[i] = [
@@ -1797,8 +1796,8 @@ class MooncakeLayerwiseConnectorWorker:
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
                 transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
                 self._align_remote_block_ids(req_meta)
-                for i, kv_cache_spec in enumerate(self.kv_cache_specs):
-                    if isinstance(kv_cache_spec, MambaSpec):
+                for i, group in enumerate(self.kv_cache_groups):
+                    if issubclass(group_manager(group), MambaManager):
                         single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
                             req_meta, req_idx, req_id, i
                         )
@@ -1921,7 +1920,10 @@ class MooncakeLayerwiseConnectorWorker:
             if layer_name not in self.sparse_sfa_c8_layers and (
                 (
                     self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                    and is_plain_full_attention(
+                        group_layer_specs(self.kv_cache_groups[layer_group_idx])[layer_name],
+                        self.kv_cache_groups[layer_group_idx],
+                    )
                     and send_task.group_num_blocks[layer_group_idx] > 0
                 )
                 or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)

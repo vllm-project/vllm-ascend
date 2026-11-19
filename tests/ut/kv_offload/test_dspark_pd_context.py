@@ -9,9 +9,11 @@ from unittest.mock import Mock, patch
 import msgspec
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, configure_cache_transfer, group_layer_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     DSparkContextReceiver,
@@ -46,13 +48,14 @@ def _context_scheduler(draft_spec, *, method="dspark", wrapped=False):
     host_spec = AscendMLAAttentionSpec(
         block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, store_on_host=True
     )
+    indexer = full_attention_spec_type(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    if not isinstance(draft_spec, AscendMLAAttentionSpec):
+        draft_spec = indexer
     scheduler.kv_cache_config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(kv_cache_spec=host_spec),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace()),
-            SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(kv_cache_specs={"draft": draft_spec}) if wrapped else draft_spec
-            ),
+            cache_group(["host"], host_spec),
+            cache_group(["index"], indexer),
+            cache_group(["draft"], {"draft": draft_spec} if wrapped else draft_spec),
         ]
     )
     return scheduler
@@ -67,10 +70,11 @@ def test_scheduler_discovers_resident_mla_independent_of_attention_causality(non
         head_size=576,
         dtype=torch.bfloat16,
         store_on_host=False,
-        non_causal_multi_token_decode=non_causal,
+        **({} if HAS_LAYER_CONFIG else {"non_causal_multi_token_decode": non_causal}),
     )
     assert _context_scheduler(spec, wrapped=wrapped)._find_dspark_context_groups() == (2,)
-    assert spec.non_causal_multi_token_decode is non_causal
+    if not HAS_LAYER_CONFIG:
+        assert spec.non_causal_multi_token_decode is non_causal
 
 
 @pytest.mark.parametrize("method", [None, "mtp"])
@@ -81,42 +85,37 @@ def test_scheduler_does_not_require_dspark_groups_on_legacy_paths(method):
 def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
-    from vllm_ascend.patch.platform import patch_kv_cache_utils
-
     host_spec = AscendMLAAttentionSpec(
         block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, store_on_host=True
     )
-    draft_spec = replace(host_spec, store_on_host=False, is_draft=True)
-    uniform = UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs={"target": host_spec, "draft": draft_spec})
+    draft_spec = replace(host_spec, store_on_host=False, **({} if HAS_LAYER_CONFIG else {"is_draft": True}))
+    uniform = {
+        "target": host_spec,
+        "draft": replace(layer_config(draft_spec), is_draft=True) if HAS_LAYER_CONFIG else draft_spec,
+    }
     config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=["target", "draft"], kv_cache_spec=uniform)],
+        kv_cache_groups=[cache_group(layer_names=["target", "draft"], kv_cache_spec=uniform)],
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         speculative_config=SimpleNamespace(method="dspark"),
         kv_transfer_config=None,
     )
-    with (
-        pytest.MonkeyPatch.context() as monkeypatch,
-    ):
-        monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_config_from_groups", lambda *a, **k: config)
-        monkeypatch.setattr(patch_kv_cache_utils, "is_deepseek_v41_cache", lambda *a, **k: False)
-        monkeypatch.setattr(patch_kv_cache_utils, "_get_glm5_next_cache_layout", lambda *a, **k: None)
-        monkeypatch.setattr(patch_kv_cache_utils, "_is_deepseek_v4_groups", lambda *a, **k: False)
-        physical = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(vllm_config, config.kv_cache_groups, 1)
+    configure_cache_transfer(vllm_config, config)
+    physical = config
     assert physical.dspark_context_group_ids == (0,)
     assert physical.dspark_draft_only_group_ids == ()
     scheduler_config = generate_scheduler_kv_cache_config([physical])
-    assert scheduler_config.kv_cache_groups[0].kv_cache_spec.store_on_host is True
+    assert group_layer_specs(scheduler_config.kv_cache_groups[0])["target"].store_on_host is True
     assert scheduler_config.dspark_context_group_ids == (0,)
     assert scheduler_config.dspark_draft_only_group_ids == ()
     scheduler = _context_scheduler(draft_spec)
     scheduler.kv_cache_config = scheduler_config
     scheduler.main_group_idx = scheduler.indexer_group_idx = 0
     assert scheduler._find_dspark_context_groups() == (0,)
-    assert physical.kv_cache_groups[0].kv_cache_spec is uniform
+    assert group_layer_specs(physical.kv_cache_groups[0]) == {"target": host_spec, "draft": draft_spec}
     assert resident_mla_context_group_ids(physical.kv_cache_groups) == (0,)
 
 
@@ -328,7 +327,12 @@ def test_cache_metadata_uses_registered_draft_layer_names():
     config = SimpleNamespace(
         num_blocks=3,
         dspark_draft_layer_names=("draft.self_attn",),
-        kv_cache_groups=[SimpleNamespace(layer_names=["draft.self_attn"], kv_cache_spec=SimpleNamespace(block_size=4))],
+        kv_cache_groups=[
+            cache_group(
+                ["draft.self_attn"],
+                full_attention_spec_type(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float16),
+            )
+        ],
     )
     metadata = build_draft_kv_metadata(config, {"draft.self_attn": torch.empty((3, 4, 2), dtype=torch.bfloat16)})
     item = metadata["draft.self_attn"]

@@ -207,8 +207,15 @@ def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
         mamba_cache_mode="none",
     )
     layer.cache_config = cache
-    spec = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
-    assert spec.num_speculative_blocks == (0 if recover else 5)
+    from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+
+    if HAS_LAYER_CONFIG:
+        requirement = layer.get_kv_cache_config(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
+        spec = requirement.spec
+        policy = requirement.manager_config.params
+    else:
+        spec = policy = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
+    assert policy.num_speculative_blocks == (0 if recover else 5)
     assert spec.shapes[1] == (2, 128, 128)
     assert len(spec.shapes) == len(spec.dtypes) == 2
     assert spec.dtypes == (torch.bfloat16, torch.float32)

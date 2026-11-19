@@ -37,18 +37,12 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
+from vllm_ascend.models.kimi_k3.cache_config import _uses_causal_draft_attention
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiMLAAttention,
 )
 from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-
-
-def _uses_causal_draft_attention(config) -> bool:
-    dflash_config = getattr(config, "dflash_config", None)
-    if isinstance(dflash_config, dict) and "causal" in dflash_config:
-        return bool(dflash_config["causal"])
-    return bool(getattr(config, "full_attention_causal", False))
 
 
 def _normalize_dspark_mla_cache(

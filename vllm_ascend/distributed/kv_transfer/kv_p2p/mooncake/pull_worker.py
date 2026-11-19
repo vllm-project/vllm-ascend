@@ -15,20 +15,22 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
-    is_circular_kv_cache_spec,
+    is_circular_cache_group,
 )
+from vllm_ascend.core.kv_cache_layers import MLA_LAYOUT_TYPES, group_manager, group_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
     MooncakeTransferAddressMixin,
@@ -316,6 +318,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             )
         return groups_by_pp_rank, layer_pairs_by_pp_rank
 
+    def _is_circular_layer(self, local_layer_index: int) -> bool:
+        return is_circular_cache_group(self.kv_cache_config.kv_cache_groups[self.group_indices[local_layer_index]])
+
     def _get_layer_remote_tp_rank_groups(
         self,
         local_layer_index: int,
@@ -336,14 +341,15 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 remote_tp_size,
             )
 
+        is_circular = self._is_circular_layer(local_layer_index)
         local_dcp_size, remote_dcp_size = self._get_attention_dcp_sizes(
-            spec, remote_layer_index, remote_metadata, remote_dcp_size
+            spec, remote_layer_index, remote_metadata, remote_dcp_size, is_circular
         )
         fixed_total_num_kv_heads = None
-        if is_circular_kv_cache_spec(spec) or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+        if is_circular or isinstance(spec, MLA_LAYOUT_TYPES):
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
-        elif isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+        elif isinstance(spec, AttentionSpec):
             local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
             remote_num_kv_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
         else:
@@ -373,11 +379,12 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_layer_index: int,
         remote_metadata: MooncakePPTransferMetadata,
         remote_dcp_size: int,
+        is_circular: bool,
     ) -> tuple[int, int]:
         """Resolve each endpoint's sequence layout from its cache spec."""
         local_size = self.dcp_size if spec.dcp_sharded else 1
         remote_size = remote_dcp_size if remote_metadata.dcp_sharded[remote_layer_index] else 1
-        if is_circular_kv_cache_spec(spec):
+        if is_circular:
             return 1, 1
         if isinstance(spec, AscendSFAIndexerCacheSpec):
             # Packed indexer pages already contain all DCP sequence pieces.
@@ -530,7 +537,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
+                tuple[int, int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
                 list[tuple[int, list[int], list[int]]],
             ],
         ] = {}
@@ -602,7 +609,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         transfer_block_ids_by_spec: dict[
             str,
             dict[
-                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
+                tuple[int, int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
                 list[tuple[int, list[int], list[int]]],
             ],
         ],
@@ -632,9 +639,15 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 layer_pair = (local_layer_index, remote_layer_index)
                 remote_tp_rank_groups = tp_rank_groups_by_layer[layer_pair]
                 local_dcp_size, layer_remote_dcp_size = self._get_attention_dcp_sizes(
-                    spec, remote_layer_index, remote_metadata, remote_dcp_size
+                    spec,
+                    remote_layer_index,
+                    remote_metadata,
+                    remote_dcp_size,
+                    self._is_circular_layer(local_layer_index),
                 )
+                group_index = self.group_indices[local_layer_index]
                 cache_key = (
+                    group_index,
                     spec_index,
                     layer_remote_dcp_size,
                     tuple(tuple(group) for group in remote_tp_rank_groups),
@@ -651,7 +664,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 )
                 transfer_block_ids = request_block_ids_by_spec.get(cache_key)
                 if transfer_block_ids is None:
-                    group_index = self.group_indices[local_layer_index]
                     if not isinstance(spec, MambaSpec):
                         local_kernel_block_size = (
                             self.layer_block_sizes[local_layer_index] // self.block_size_scales[local_layer_index][0]
@@ -669,7 +681,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         request_id,
                         remote_tp_rank_groups,
                         layer_remote_dcp_size,
-                        spec_index,
+                        self.kv_cache_config.kv_cache_groups[group_index],
                         self.layer_block_sizes[local_layer_index],
                         remote_metadata.layer_block_sizes[remote_layer_index],
                         request_metadata.local_block_ids[group_index],
@@ -719,7 +731,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         request_id: str,
         remote_tp_rank_groups: list[list[int]],
         remote_dcp_size: int,
-        spec_index: int,
+        cache_group,
         local_block_size: int,
         remote_block_size: int,
         local_group_block_ids: list[int],
@@ -737,6 +749,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_indexer_replication_size: int = 1,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
+        manager_cls = group_manager(cache_group)
         if local_dcp_size is None:
             local_dcp_size = self.dcp_size if spec.dcp_sharded else 1
         local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
@@ -745,10 +758,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         )
         is_dcp_transfer = (
             (local_dcp_size > 1 or remote_dcp_size > 1)
-            and isinstance(spec, FullAttentionSpec)
+            and issubclass(manager_cls, FullAttentionManager)
             and not is_replicated_sfa_indexer
         )
-        if is_circular_kv_cache_spec(spec):
+        if is_circular_cache_group(cache_group):
             if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:
                 raise ValueError(
                     "Mooncake circular cache requires exactly one block per request: "
@@ -769,14 +782,14 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     f"request={request_id!r}, local={len(local_kernel_block_ids)}, "
                     f"remote={len(remote_kernel_block_ids)}"
                 )
-        elif isinstance(spec, SlidingWindowSpec):
+        elif issubclass(manager_cls, SlidingWindowManager):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
             local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
             remote_kernel_block_ids = self._expand_block_ids(
                 remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
             )
-        elif isinstance(spec, FullAttentionSpec):
+        elif isinstance(spec, AttentionSpec):
             if is_dcp_transfer:
                 local_kernel_block_size = local_block_size // local_block_size_scale
                 remote_kernel_block_size = remote_block_size // remote_block_size_scale
@@ -872,7 +885,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             remote_start_block_idx = num_computed_tokens // kernel_block_size
             remote_kernel_block_ids = remote_kernel_block_ids[remote_start_block_idx:]
         elif isinstance(spec, MambaSpec):
-            local_kernel_block_ids = [local_group_block_ids[-spec.num_speculative_blocks - 1]]
+            params = group_params(cache_group)
+            local_kernel_block_ids = [local_group_block_ids[-params.num_speculative_blocks - 1]]
             remote_kernel_block_ids = [remote_group_block_ids[-1]]
         else:
             raise NotImplementedError(f"Mooncake block ID expansion does not support {type(spec).__name__}")
@@ -973,9 +987,12 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
         }
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
-        transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
+        # Spec indices are scoped to a single local cache group.
+        first_local_layer_index, first_remote_layer_index = next(iter(transfer_entries_by_layer))
+        is_circular = self._is_circular_layer(first_local_layer_index)
+        transfer_whole_block = is_circular or isinstance(
             spec,
-            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
+            (*MLA_LAYOUT_TYPES, AscendSFAIndexerCacheSpec),
         )
         if transfer_whole_block:
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
@@ -989,7 +1006,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 for cache_index, (local_base_addr, remote_base_addr) in enumerate(
                     zip(local_base_addrs, remote_base_addrs)
                 ):
-                    if is_circular_kv_cache_spec(spec):
+                    if is_circular:
                         local_shape = self.block_shapes[local_layer_index][cache_index]
                         remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
                         if local_shape != remote_shape:
@@ -1029,14 +1046,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         )
             return
 
-        if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+        if not isinstance(spec, AttentionSpec):
             raise NotImplementedError(f"Mooncake transfer address calculation does not support {type(spec).__name__}")
 
-        first_local_layer_index, first_remote_layer_index = next(iter(transfer_entries_by_layer))
         local_num_heads = self.block_shapes[first_local_layer_index][0][0]
         remote_num_heads = remote_metadata.block_shapes[first_remote_layer_index][0][0]
         local_attention_dcp_size, remote_attention_dcp_size = self._get_attention_dcp_sizes(
-            spec, first_remote_layer_index, remote_metadata, remote_dcp_size
+            spec, first_remote_layer_index, remote_metadata, remote_dcp_size, is_circular
         )
         total_num_kv_heads = self._infer_total_num_kv_heads(
             local_num_kv_heads=local_num_heads,

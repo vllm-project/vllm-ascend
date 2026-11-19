@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
+
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
@@ -372,14 +374,19 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             scheduler_config=types.SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         )
         state_spec = (
-            MagicMock(spec=MambaSpec, block_size=128, shapes=((2, 2), (2, 2)), dtypes=(torch.float32, torch.float32))
+            MambaSpec(block_size=128, shapes=((2, 2), (2, 2)), dtypes=(torch.float32, torch.float32))
             if use_mamba
-            else types.SimpleNamespace(block_size=128)
+            else window_requirement(
+                block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float32, sliding_window=128
+            )
         )
         cache_config = types.SimpleNamespace(
             kv_cache_groups=[
-                types.SimpleNamespace(kv_cache_spec=types.SimpleNamespace(block_size=512), layer_names=["layer.0"]),
-                types.SimpleNamespace(kv_cache_spec=state_spec, layer_names=["layer.1"]),
+                cache_group(
+                    ["layer.0"],
+                    full_attention_spec_type(block_size=512, num_kv_heads=1, head_size=8, dtype=torch.float32),
+                ),
+                cache_group(["layer.1"], state_spec),
             ]
         )
         host = f"192.0.2.{pcp_rank * tp_size + tp_rank + 1}"
@@ -912,6 +919,7 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
     def _make_scheduler(self):
         scheduler = object.__new__(MooncakeConnectorScheduler)
+        scheduler.circular_group_ids = set()
         scheduler.use_hybrid = True
         scheduler.use_compress = True
         scheduler.num_swa_blocks = [0, 2]
@@ -937,10 +945,7 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 
     def test_compute_transfer_block_ids_preserves_circular_groups(self):
         scheduler = self._make_scheduler()
-        scheduler.kv_cache_specs = [
-            [types.SimpleNamespace(is_circular=True)],
-            [types.SimpleNamespace(is_circular=False)],
-        ]
+        scheduler.circular_group_ids = {0}
         block_ids = (list(range(10)), [100, 101, 102, 103])
 
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)

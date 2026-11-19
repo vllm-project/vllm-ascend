@@ -26,7 +26,9 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
+from tests.kv_cache_groups import full_attention_spec_type
+from tests.kv_cache_groups import cache_group
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
@@ -217,7 +219,7 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     def test_sharded_mamba_rejects_joint_tp_pcp_before_pool_initialization(self):
         spec = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
-        cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["state"], spec)])
+        cache = types.SimpleNamespace(kv_cache_groups=[cache_group(["state"], spec)])
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
         for role, layerwise in product((KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER), (False, True)):
             with self.subTest(role=role, layerwise=layerwise):
@@ -234,7 +236,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                     worker.assert_not_called()
 
     def test_parallel_validation_allows_replicas_and_single_axis_state_shards(self):
-        attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        attention = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         sharded = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
         replicated = MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,), tp_replicated=True)
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
@@ -243,7 +245,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                 config = self._make_vllm_config()
                 config.parallel_config.tensor_parallel_size = tp_size
                 config.parallel_config.prefill_context_parallel_size = pcp_size
-                cache = types.SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)])
+                cache = types.SimpleNamespace(kv_cache_groups=[cache_group(["layer"], spec)])
                 with patch(f"{module}.create_kv_pool_scheduler") as scheduler:
                     connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
                     self.assertIs(connector.connector_scheduler, scheduler.return_value)

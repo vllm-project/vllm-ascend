@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_lay
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_layers import group_block_size
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
@@ -166,7 +167,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if not group_ids or not layer_group_ids:
             raise ValueError("DSpark context initialization requires loaded draft attention layers")
         block_sizes = {
-            group_id: self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.block_size for group_id in group_ids
+            group_id: group_block_size(self.kv_cache_config.kv_cache_groups[group_id]) for group_id in group_ids
         }
         return group_ids, layer_group_ids, block_sizes
 

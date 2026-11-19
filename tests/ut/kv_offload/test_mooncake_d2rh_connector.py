@@ -27,7 +27,12 @@ if "mooncake.engine" not in sys.modules:
         _fake_engine.__dict__["TransferEngine"] = MagicMock()
         sys.modules["mooncake.engine"] = _fake_engine
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec  # noqa: E402
+from tests.kv_cache_groups import (
+    cache_group,  # noqa: E402
+    full_attention_spec_type,
+    window_mla_spec_type,  # noqa: E402
+)
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh  # noqa: E402
 
 
@@ -99,8 +104,10 @@ class TestBuildStartPullParams:
         scheduler.use_sparse = False
         scheduler.tp_size = 2
         scheduler.kv_cache_groups = [
-            SimpleNamespace(
-                kv_cache_spec=SimpleNamespace(block_size=16, num_kv_heads=4),
+            cache_group(
+                kv_cache_spec=full_attention_spec_type(
+                    block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+                ),
                 layer_names=["layer.0"],
             )
         ]
@@ -730,23 +737,32 @@ class TestSchedulerBlockSize:
     """
 
     @staticmethod
-    def _swa_spec(block_size: int, model_version: str | None) -> AscendSlidingWindowMLASpec:
-        return AscendSlidingWindowMLASpec(
+    def _swa_spec(block_size: int, model_version: str | None):
+        spec = window_mla_spec_type(
             block_size=block_size,
             num_kv_heads=1,
             head_size=16,
             dtype=torch.float16,
-            sliding_window=128,
+            **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
             model_version=model_version,
         )
+
+        if HAS_LAYER_CONFIG:
+            from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+            return SlidingWindowManager.layer_config(spec, sliding_window=128)
+        return spec
 
     def test_dsv4_swa_spec_overrides_hybrid_cache_quantum(self):
         scheduler = object.__new__(d2rh.MooncakeConnectorScheduler)
         scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=2))
         scheduler.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=4096), layer_names=["state"]),
-                SimpleNamespace(
+                cache_group(
+                    ["state"],
+                    full_attention_spec_type(block_size=4096, num_kv_heads=1, head_size=16, dtype=torch.float16),
+                ),
+                cache_group(
                     kv_cache_spec=self._swa_spec(32, "deepseek_v4"),
                     layer_names=["swa"],
                 ),
@@ -754,12 +770,23 @@ class TestSchedulerBlockSize:
         )
         assert scheduler._get_scheduler_block_size() == 32
 
+    @pytest.mark.skipif(not HAS_LAYER_CONFIG, reason="Full and sliding MLA share one spec type on main.")
+    def test_dsv4_full_mla_does_not_override_scheduler_block_size(self):
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        sliding = self._swa_spec(32, "deepseek_v4")
+        full = FullAttentionManager.layer_config(sliding.spec)
+        scheduler = object.__new__(d2rh.MooncakeConnectorScheduler)
+        scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=2))
+        scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[cache_group(["full"], full)])
+        assert scheduler._get_scheduler_block_size() == 2
+
     def test_non_dsv4_swa_spec_falls_back_to_cache_config(self):
         scheduler = object.__new__(d2rh.MooncakeConnectorScheduler)
         scheduler.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
         scheduler.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(
+                cache_group(
                     kv_cache_spec=self._swa_spec(32, None),
                     layer_names=["swa"],
                 ),

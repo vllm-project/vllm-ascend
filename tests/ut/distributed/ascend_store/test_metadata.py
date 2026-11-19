@@ -24,8 +24,9 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, mamba_requirement, window_requirement
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerPoolKey,
     masked_block_runs,
@@ -51,27 +52,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 class TestCacheLayoutHelpers(unittest.TestCase):
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
-        mamba_spec = MambaSpec(
+        mamba_spec = mamba_requirement(
             shapes=((4,),),
             dtypes=(torch.float32,),
             block_size=16,
             mamba_cache_mode="align",
         )
         specs = [
-            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
             mamba_spec,
-            replace(mamba_spec, tp_replicated=True),
-            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
+            replace(mamba_spec, spec=replace(mamba_spec.spec, tp_replicated=True))
+            if HAS_LAYER_CONFIG
+            else replace(mamba_spec, tp_replicated=True),
+            {"layer.3": mamba_spec},
         ]
         config = SimpleNamespace(
-            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+            kv_cache_groups=[cache_group([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
         )
         self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
 
     def test_uses_hybrid_kv_cache(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            cache_group(
+                ["layer"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            cache_group(
+                ["window"],
+                window_requirement(sliding_window=64, block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            ),
         ]
         scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
         self.assertTrue(uses_hybrid_kv_cache(scheduler_config, groups))
@@ -79,16 +87,26 @@ class TestCacheLayoutHelpers(unittest.TestCase):
 
     def test_uses_hybrid_kv_cache_disabled(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            cache_group(
+                ["layer"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            cache_group(
+                ["window"],
+                window_requirement(sliding_window=64, block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            ),
         ]
         scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=True)
         self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
 
     def test_infer_group_block_sizes(self):
         groups = [
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
-            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+            cache_group(
+                ["layer"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            cache_group(
+                ["window"],
+                window_requirement(sliding_window=64, block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            ),
         ]
         self.assertEqual(infer_group_block_sizes(8, groups), [16, 32])
         self.assertEqual(infer_group_block_sizes(8, None), [8])

@@ -79,9 +79,10 @@ from vllm.models.step5.nvidia.model import (
     make_layers,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector, wait_for_kv_layer_from_connector
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, FullAttentionCacheLayer
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -102,6 +103,10 @@ from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
     fused_qknorm_rope,
 )
 from vllm_ascend.utils import vllm_version_is
+
+if not HAS_LAYER_CONFIG:
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
 
 if vllm_version_is("0.33.0"):
     from vllm.models.step5.nvidia.config import (  # type: ignore[import-not-found]
@@ -165,7 +170,7 @@ class AscendStep5RMSNorm(Step5RMSNorm):
         return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
-class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
+class AscendStep5DSAAttention(FullAttentionCacheLayer, nn.Module, AttentionLayerBase):
     """Step5 DSA layer on Ascend over the upstream ring/summary layout."""
 
     def __init__(
@@ -389,8 +394,9 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AscendStep5DSABackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return FullAttentionSpec(
+    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        spec_type = AttentionSpec if HAS_LAYER_CONFIG else FullAttentionSpec
+        return spec_type(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,

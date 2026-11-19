@@ -16,10 +16,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
@@ -223,7 +224,7 @@ def _make_sparse_builder(
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=7, max_num_new_slots_for_drafting=0, parallel_drafting=False
     )
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=128,
         num_kv_heads=2,
         head_size=128,
@@ -245,7 +246,7 @@ def _make_indexer_builder(
 ) -> AscendMiniMaxM3IndexerMetadataBuilder:
     vllm_config = _make_vllm_config()
     vllm_config.parallel_config.tensor_parallel_size = tp_size
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
@@ -280,8 +281,8 @@ def test_indexer_cache_uses_sfa_indexer_spec(mock_get_vllm_config: MagicMock) ->
         head_dim=128,
         prefix="layer0.attn.index_cache",
     )
-    spec = index_cache.get_kv_cache_spec(vllm_config)
-    old_full_spec = FullAttentionSpec(
+    spec = get_layer_spec(index_cache, vllm_config)
+    old_full_spec = full_attention_spec_type(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
@@ -362,7 +363,7 @@ def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: 
         kv_cache_torch_dtype=torch.float8_e4m3fn,
     )
 
-    spec = index_cache.get_kv_cache_spec(vllm_config)
+    spec = get_layer_spec(index_cache, vllm_config)
 
     assert spec.dtype == torch.float8_e4m3fn
     assert spec.cache_dtype_str == "fp8"
@@ -2845,7 +2846,7 @@ def test_sparse_builder_refreshes_captured_gbsa_buffer_for_padded_decode(
 def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size, query_len, mock_gbsa_ops):
     config = _make_vllm_config()
     config.model_config.dtype = dtype
-    spec = FullAttentionSpec(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
+    spec = full_attention_spec_type(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
     config.speculative_config = SimpleNamespace(
         num_speculative_tokens=3, max_num_new_slots_for_drafting=0, parallel_drafting=False
     )
@@ -3415,7 +3416,7 @@ def test_gbsa_schedule_lengths_follow_speculative_config(spec_tokens, mock_gbsa_
         if spec_tokens
         else None
     )
-    spec = FullAttentionSpec(block_size=128, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
+    spec = full_attention_spec_type(block_size=128, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
     builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))
     widths = range(1, spec_tokens + 2)
     assert list(builder.decode_gbsa_query_lengths) == list(widths)

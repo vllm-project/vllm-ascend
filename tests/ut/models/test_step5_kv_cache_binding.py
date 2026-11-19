@@ -9,15 +9,17 @@ reshape (attn_utils._reshape_kv_cache_v2) -> bind (patch_bind_kv_cache).
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
 
 import vllm_ascend.worker.v2.attn_utils as attn_utils_v2
+from tests.kv_cache_groups import (
+    cache_group,
+    full_attention_spec_type,
+    layer_config,
+    ring_requirement,
+    ring_spec_type,
+    window_requirement,
+)
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
@@ -39,8 +41,10 @@ SUMMARY2 = f"{L2}.sparse_summary_cache"
 
 
 def _specs():
-    main = FullAttentionSpec(block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16)
-    sliding = SlidingWindowSpec(
+    main = full_attention_spec_type(
+        block_size=BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16
+    )
+    sliding = window_requirement(
         block_size=BLOCK,
         num_kv_heads=4,
         head_size=48,
@@ -48,8 +52,8 @@ def _specs():
         dtype=torch.bfloat16,
         sliding_window=4096,
     )
-    summary = FullAttentionSpec(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
-    ring = CircularBufferSpec(
+    summary = full_attention_spec_type(block_size=BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+    ring = ring_spec_type(
         block_size=BLOCK,
         num_kv_heads=1,
         head_size=384,
@@ -68,11 +72,7 @@ def _specs():
 
 
 def _orig_groups(vllm_config, kv_cache_spec):
-    full = [name for name, spec in kv_cache_spec.items() if type(spec) is FullAttentionSpec]
-    sliding = [name for name, spec in kv_cache_spec.items() if isinstance(spec, SlidingWindowSpec)]
-    groups = [KVCacheGroupSpec(full, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in full}))]
-    groups.append(KVCacheGroupSpec(sliding, UniformTypeKVCacheSpecs.from_specs({n: kv_cache_spec[n] for n in sliding})))
-    return groups
+    return [cache_group(names, {n: kv_cache_spec[n] for n in names}) for names in ([L0, L2], [L1])]
 
 
 def _plan(num_blocks: int = 3):
@@ -92,7 +92,14 @@ def _plan(num_blocks: int = 3):
         additional_config={},
         kv_transfer_config=None,
     )
-    groups = get_step5_kv_cache_groups(vllm_config, _specs(), _orig_groups)
+    specs = _specs()
+    groups = get_step5_kv_cache_groups(
+        vllm_config,
+        {n: ring_requirement(s) if n == RING else layer_config(s) for n, s in specs.items()}
+        if HAS_LAYER_CONFIG
+        else specs,
+        _orig_groups,
+    )
     config = get_step5_kv_cache_config_from_groups(
         SimpleNamespace(
             cache_config=SimpleNamespace(
@@ -119,7 +126,11 @@ def _allocate(config, vllm_config, monkeypatch):
 
 
 def _reshape(config, raw, monkeypatch):
-    monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        attn_utils_v2,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=dict.fromkeys(_specs()))),
+    )
     monkeypatch.setattr(attn_utils_v2, "get_layers_from_vllm_config", lambda *_: {})
     backend = SimpleNamespace(
         get_kv_cache_shape=lambda num_blocks, block_size, heads, head_size, *a, **k: (
@@ -133,11 +144,12 @@ def _reshape(config, raw, monkeypatch):
     groups = [
         SimpleNamespace(
             kv_cache_group_id=index,
-            kv_cache_spec=group.kv_cache_spec,
-            layer_names=group.layer_names,
+            kv_cache_spec=spec,
+            layer_names=[name],
             backend=backend,
         )
         for index, group in enumerate(config.kv_cache_groups)
+        for name, spec in group_layer_specs(group).items()
     ]
     return attn_utils_v2._reshape_kv_cache_v2(
         groups,

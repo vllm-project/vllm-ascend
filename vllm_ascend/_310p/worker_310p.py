@@ -28,13 +28,14 @@ from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
-        kv_cache_spec = self.get_kv_cache_spec()
+        kv_cache_spec = self.get_kv_cache_layer_configs() if HAS_LAYER_CONFIG else self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
         if isinstance(kv_cache_spec, dict) and callable(layout_resolver):
             groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)

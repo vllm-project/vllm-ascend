@@ -37,7 +37,6 @@ from vllm.platforms import current_platform
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, DeepseekV41CacheLayer, scatter_cache_sk
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -83,25 +82,6 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 
 
 class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
-    """DeepSeek V4.1 DSpark draft SWA cache layer.
-
-    ``DeepseekV41DraftSWASpec`` exists only to identify the draft cache.
-    """
-
-    # TODO: Extract DeepseekV41DraftSWASpec construction from this cache subclass.
-    def get_kv_cache_spec(self, vllm_config):
-        spec = super().get_kv_cache_spec(vllm_config)
-        return AscendSlidingWindowMLASpec(
-            block_size=spec.block_size,
-            num_kv_heads=spec.num_kv_heads,
-            head_size=spec.head_size,
-            dtype=spec.dtype,
-            sliding_window=spec.sliding_window,
-            cache_dtype_str=spec.cache_dtype_str,
-            model_version=spec.model_version,
-            bounded_replay=spec.bounded_replay,
-        )
-
     def get_attn_backend(self):
         return DeepseekV41CacheBackend
 

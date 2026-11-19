@@ -16,9 +16,11 @@ from vllm.config import (
 from vllm.config.model import ModelDType
 from vllm.distributed.parallel_state import all_gather_fake
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
+from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 
 
 def patch_distributed_groups(dcp_size=1, dcp_rank=0, needs_mocks=True):
@@ -228,14 +230,14 @@ def create_vllm_config(
     )
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
-    """Create a FullAttentionSpec from ModelParams only."""
-    return FullAttentionSpec(
+def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> AttentionSpec:
+    """Build the test cache geometry from the model configuration."""
+    return full_attention_spec_type(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
+        **({} if HAS_LAYER_CONFIG else {"sliding_window": vllm_config.model_config.get_sliding_window()}),
     )
 
 

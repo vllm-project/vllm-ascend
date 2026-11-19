@@ -8,6 +8,7 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -50,22 +51,28 @@ def initialize_kv_cache(
     slot_mapping_enabled = []
     dcp_sharded = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
-        spec = kv_cache_group.kv_cache_spec
-        block_sizes.append(spec.block_size)
-        layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
-        slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
-        # vLLM main lets each cache type report whether it is DCP-sharded;
-        dcp_sharded.append(spec.dcp_sharded)
-        # Let each cache type account for CP. Attention KV is DCP-sharded,
-        # while Mamba/GDN recurrent state is replicated across DCP ranks.
-        max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
-        # Preserve each cache type's alignment requirements after applying
-        # its topology-aware block-table width.
-        max_num_blocks = upstream.get_block_table_width(
-            max_num_blocks,
-            spec.block_size,
-            token_alignment=spec.block_table_token_alignment,
-        )
+        if HAS_LAYER_CONFIG:
+            block_sizes.append(kv_cache_group.block_size)
+            dcp_sharded.append(kv_cache_group.dcp_sharded)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            max_num_blocks = kv_cache_group.block_table_width(self.vllm_config, block_table_max_model_len)
+        else:
+            spec = kv_cache_group.kv_cache_spec
+            block_sizes.append(spec.block_size)
+            layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
+            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            # vLLM main lets each cache type report whether it is DCP-sharded;
+            dcp_sharded.append(spec.dcp_sharded)
+            # Let each cache type account for CP. Attention KV is DCP-sharded,
+            # while Mamba/GDN recurrent state is replicated across DCP ranks.
+            max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
+            # Preserve each cache type's alignment requirements after applying
+            # its topology-aware block-table width.
+            max_num_blocks = upstream.get_block_table_width(
+                max_num_blocks,
+                spec.block_size,
+                token_alignment=spec.block_table_token_alignment,
+            )
         max_num_blocks_per_group.append(max_num_blocks)
 
     target_attn_layer_names = None

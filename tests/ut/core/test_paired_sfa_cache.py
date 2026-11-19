@@ -7,15 +7,46 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from tests.kv_cache_groups import full_attention_spec_type, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_layer_specs
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
-    paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
-from vllm_ascend.patch.platform import patch_kv_cache_utils
+from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
+    paired_sfa_cache_groups as group_requirements,
+)
+
+if HAS_LAYER_CONFIG:
+    from vllm_ascend.core import kv_cache_layer_config_builder as planner
+else:
+    from vllm_ascend.patch.platform import patch_kv_cache_utils as planner
+
+
+def paired_sfa_cache_groups(config, specs, drafts=()):
+    if HAS_LAYER_CONFIG:
+        from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+        configs = {
+            n: replace(
+                MambaManager.layer_config(s, mamba_cache_mode="align") if isinstance(s, MambaSpec) else layer_config(s),
+                is_draft=n in drafts,
+            )
+            for n, s in specs.items()
+        }
+        return group_requirements(config, configs)
+    return group_requirements(config, specs)
+
+
+def project(group, names):
+    if HAS_LAYER_CONFIG:
+        return replace(
+            group, kv_cache_specs={n: group.kv_cache_specs[n] for n in names}, unprojected_specs=group.distinct_specs
+        )
+    return replace(group, layer_names=names)
 
 
 def make_specs():
@@ -45,7 +76,7 @@ def make_specs():
                 block_size=1536,
                 shapes=((3, 4608), (12, 128, 128)),
                 dtypes=(torch.bfloat16, torch.float32),
-                mamba_cache_mode="align",
+                **({} if HAS_LAYER_CONFIG else {"mamba_cache_mode": "align"}),
                 page_size_padded=1536 * 656,
             )
     return specs
@@ -67,7 +98,7 @@ def test_token_blocks_unchanged_and_components_share_ids():
     groups = paired_sfa_cache_groups(config, specs)
     assert len(groups) == 4
     assert [len(g.layer_names) for g in groups] == [48, 23, 23, 23]
-    assert all(isinstance(g.kv_cache_spec, MambaSpec) for g in groups[1:])
+    assert all(isinstance(group_distinct_specs(g)[0], MambaSpec) for g in groups[1:])
     assert {s.block_size for s in specs.values()} == {1536}
     assert {s.page_size_bytes for s in specs.values()} == {1007616, 202752}
     assert paired_sfa_pool_bytes(groups) == 29048832
@@ -77,7 +108,7 @@ def test_token_blocks_unchanged_and_components_share_ids():
     assert backing_size <= 17556701184
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {backing_size}
     assert len(plan.kv_cache_tensors) == 5
-    assert len(groups[0].kv_cache_spec.kv_cache_specs) == 48
+    assert len(group_layer_specs(groups[0])) == 48
     main, *recurrent, indexer = plan.kv_cache_tensors
     assert len(main.layers) == len(indexer.layers) == 24
     assert main.offset == 0
@@ -105,9 +136,7 @@ def test_paired_config_propagates_prefix_cache_retention_interval(interval):
 
 def test_pipeline_projection_retains_only_local_slot_cost():
     groups = paired_sfa_cache_groups(make_config(), make_specs())
-    projected = [
-        KVCacheGroupSpec([n for n in g.layer_names if int(n.split(".")[2]) < 24], g.kv_cache_spec) for g in groups
-    ]
+    projected = [project(g, [n for n in g.layer_names if int(n.split(".")[2]) < 24]) for g in groups]
     assert paired_sfa_pool_bytes(projected) == 6 * (1007616 + 202752)
 
 
@@ -125,26 +154,28 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
-            is_draft=True,
-            non_causal_multi_token_decode=True,
+            **({} if HAS_LAYER_CONFIG else {"is_draft": True, "non_causal_multi_token_decode": True}),
         )
         for layer in reversed(range(93, 108))
     }
     specs = {**draft, **dict(reversed(target.items()))}
-    groups = paired_sfa_cache_groups(config, specs)
+    config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(full_attention_causal=False))
+    )
+    groups = paired_sfa_cache_groups(config, specs, draft)
     draft_names = [f"model.layers.{layer}.attn" for layer in range(93, 108)]
     assert [len(g.layer_names) for g in groups] == [63, 23, 23, 23]
     assert groups[0].layer_names == target_groups[0].layer_names + draft_names
     assert groups[0].is_eagle_group
     assert groups[1:] == target_groups[1:]
-    assert groups[0].kv_cache_spec.kv_cache_specs == {**target_groups[0].kv_cache_spec.kv_cache_specs, **draft}
+    assert group_layer_specs(groups[0]) == {**group_layer_specs(target_groups[0]), **draft}
     draft_bytes = sum(spec.page_size_bytes for spec in draft.values())
     assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft_bytes
 
     # PP filters only local layer names; the global full-history specs still
     # identify the target geometry on a stage that owns only draft layers.
-    projected = [replace(g, layer_names=[n for n in g.layer_names if n in draft]) for g in groups]
-    assert projected[0].kv_cache_spec is groups[0].kv_cache_spec
+    projected = [project(g, [n for n in g.layer_names if n in draft]) for g in groups]
+    assert group_distinct_specs(projected[0]) == group_distinct_specs(groups[0])
     assert paired_sfa_pool_bytes(projected) == draft_bytes
 
 
@@ -157,21 +188,29 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
     specs = make_specs()
     target_groups = paired_sfa_cache_groups(config, specs)
     name = "model.layers.93.attn"
-    draft = FullAttentionSpec(
+    draft = full_attention_spec_type(
         block_size=1536,
         num_kv_heads=2,
         head_size=64,
         dtype=torch.bfloat16,
-        is_draft=True,
+        **({} if HAS_LAYER_CONFIG else {"is_draft": True}),
         dcp_sharded=dcp_sharded,
     )
-    groups = paired_sfa_cache_groups(config, {**specs, name: draft})
-    draft_group = next(group for group in groups if name in group.layer_names)
-    assert draft_group.kv_cache_spec.dcp_sharded == dcp_sharded
-    assert not draft_group.is_eagle_group
-    assert draft_group.kv_cache_spec.max_num_blocks_per_req(config, 32768) == draft.max_num_blocks_per_req(
-        config, 32768
+    config.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(full_attention_causal=True))
     )
+    groups = paired_sfa_cache_groups(config, {**specs, name: draft}, [name])
+    draft_group = next(group for group in groups if name in group.layer_names)
+    assert group_distinct_specs(draft_group)[0].dcp_sharded == dcp_sharded
+    assert not draft_group.is_eagle_group
+    if HAS_LAYER_CONFIG:
+        assert draft_group.max_num_blocks_per_req(config, 32768) == (
+            32768 + 1536 * (dcp_size if dcp_sharded else 1) - 1
+        ) // (1536 * (dcp_size if dcp_sharded else 1))
+    else:
+        assert draft_group.kv_cache_spec.max_num_blocks_per_req(config, 32768) == draft.max_num_blocks_per_req(
+            config, 32768
+        )
     assert (draft_group is groups[0]) == dcp_sharded
     assert groups[1:4] == target_groups[1:]
     assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft.page_size_bytes
@@ -185,7 +224,7 @@ def test_target_only_without_recurrent_layers_keeps_one_full_history_group():
     specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
     groups = paired_sfa_cache_groups(make_config(), specs)
     assert [len(g.layer_names) for g in groups] == [48]
-    assert groups[0].kv_cache_spec.kv_cache_specs == specs
+    assert group_layer_specs(groups[0]) == specs
     assert paired_sfa_pool_bytes(groups) == 29048832
 
 
@@ -203,11 +242,19 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     config.model_config.hf_config.model_type = model_type
     paired = Mock(return_value=[])
     upstream = Mock(return_value=[])
-    monkeypatch.setattr(patch_kv_cache_utils, "paired_sfa_cache_groups", paired)
-    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_groups", upstream)
-    monkeypatch.setattr(patch_kv_cache_utils, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(planner, "paired_sfa_cache_groups", paired)
+    if HAS_LAYER_CONFIG:
+        monkeypatch.setattr(planner.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
+        specs = {n: layer_config(s) for n, s in specs.items()}
+    else:
+        monkeypatch.setattr(planner, "_orig_get_kv_cache_groups", upstream)
+    monkeypatch.setattr(planner, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
 
-    actual = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    actual = (
+        planner.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+        if HAS_LAYER_CONFIG
+        else planner._get_ascend_kv_cache_groups(config, specs)
+    )
 
     # The same hybrid cache geometry must not opt unrelated models into K3.1.
     # K3.1's nested text config still reports kimi_linear.

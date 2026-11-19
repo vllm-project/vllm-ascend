@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 import vllm_ascend.attention.attention_v1 as attn_module
+from tests.kv_cache_groups import full_attention_spec_type
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -35,7 +35,7 @@ class TestAttentionGraphHelpers(TestBase):
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
-        spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
+        spec = full_attention_spec_type(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
         for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl):
             with self.subTest(impl=impl_cls):
                 impl = impl_cls.__new__(impl_cls)
@@ -52,7 +52,7 @@ class TestAttentionGraphHelpers(TestBase):
         config.model_config.runner_type = "pooling"
         self.assertFalse(requires_contiguous_pa_kv_cache(SimpleNamespace(impl=impl), config, spec))
         config.model_config.runner_type = "generate"
-        padded_spec = FullAttentionSpec(
+        padded_spec = full_attention_spec_type(
             block_size=8,
             num_kv_heads=2,
             head_size=128,
@@ -191,14 +191,17 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
-        self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
+        self.mock_vllm_config.compilation_config.static_forward_context = {
+            "attention": MagicMock(attn_type=attn_module.AttentionType.DECODER)
+        }
+        self.builder = AscendAttentionMetadataBuilder(None, ["attention"], self.mock_vllm_config, self.mock_device)
 
     def test_pcp_mode_is_initialized_from_config(self):
         self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
 
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
-        pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
+        pcp_builder = AscendAttentionMetadataBuilder(None, ["attention"], self.mock_vllm_config, self.mock_device)
 
         self.assertTrue(pcp_builder.use_pcp)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)

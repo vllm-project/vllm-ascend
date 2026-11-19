@@ -23,6 +23,8 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_layers import configure_cache_transfer
+from vllm_ascend.models.deepseek_v4.cache_config import _get_deepseek_v4_cache_layout, _place_deepseek_v4_cache
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -320,51 +322,6 @@ def _ascend_get_packed_kv_cache_groups(
     return groups
 
 
-def _get_deepseek_v4_cache_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> tuple[list[int], list[dict[int, list[str]]], list[str], int, int]:
-    """Return the geometry shared by DSV4 planning and rank normalization.
-
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
-
-    For each group, bucket its layers by page_size_bytes and place each layer
-    at tuple_idx = position-within-bucket.
-    """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(_page_sizes(full_mla_spec))
-
-    # Pre-bucket each group's layers by page_size (registration order within
-    # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
-    mtp_layer_names = []
-    mtp_page_size = 0
-    bucketed: list[dict[int, list[str]]] = []
-    for group in kv_cache_groups:
-        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        specs = group.kv_cache_spec.kv_cache_specs
-        b: dict[int, list[str]] = defaultdict(list)
-        for name in group.layer_names:
-            padded = getattr(specs[name], "page_size_padded", None)
-            page_size = padded if padded is not None else specs[name].page_size_bytes
-            if "mtp" not in name:
-                b[page_size].append(name)
-            else:
-                mtp_layer_names.append(name)
-                mtp_page_size = page_size
-        bucketed.append(b)
-
-    # num_layer_tuples = longest bucket list across all groups. For the
-    # full-MLA group this equals the count of layers in the largest
-    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
-    # this equals the sub-group size (each has a single page_size).
-    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
-
-    return page_sizes, bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples
-
-
 def _get_kv_cache_config_deepseek_v4_main(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -372,64 +329,9 @@ def _get_kv_cache_config_deepseek_v4_main(
 ) -> tuple[int, list[KVCacheTensor]]:
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
-    (
-        page_sizes,
-        bucketed,
-        mtp_layer_names,
-        mtp_page_size,
-        num_tuple_slots,
-    ) = _get_deepseek_v4_cache_layout(kv_cache_groups)
-
-    bytes_per_tuple = sum(page_sizes)
-    num_blocks = available_memory // (bytes_per_tuple * num_tuple_slots)
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-
-    tuple_stride = bytes_per_tuple * num_blocks
-    backing_size = tuple_stride * num_tuple_slots
-
-    # Within every tuple slot, page-size buckets are placed consecutively.
-    page_offsets: dict[int, int] = {}
-    page_prefix = 0
-    for page_size in page_sizes:
-        page_offsets[page_size] = page_prefix * num_blocks
-        page_prefix += page_size
-
-    tensors: list[KVCacheTensor] = []
-
-    # Keep each descriptor inside one cache group. Descriptors from different
-    # groups alias corresponding tuple slots by using identical geometry.
-    for group_buckets in bucketed:
-        for page_size in page_sizes:
-            layer_names = group_buckets.get(page_size)
-            if not layer_names:
-                continue
-
-            tensors.append(
-                KVCacheTensor(
-                    size=backing_size,
-                    layers=list(layer_names),
-                    offset=page_offsets[page_size],
-                    layer_stride=tuple_stride,
-                    block_stride=page_size,
-                )
-            )
-
-    # MTP layers receive trailing tuple slots. Unused page buckets remain
-    # padding so num_blocks and memory accounting retain the existing contract.
-    normal_tuple_slots = num_tuple_slots - len(mtp_layer_names)
-    for index, layer_name in enumerate(mtp_layer_names):
-        slot = normal_tuple_slots + index
-        tensors.append(
-            KVCacheTensor(
-                size=backing_size,
-                layers=[layer_name],
-                offset=slot * tuple_stride + page_offsets[mtp_page_size],
-                layer_stride=0,
-                block_stride=mtp_page_size,
-            )
-        )
-
-    return num_blocks, tensors
+    sizes, _, _, _, slots = _get_deepseek_v4_cache_layout(kv_cache_groups)
+    num_blocks = may_override_num_blocks(vllm_config, available_memory // (sum(sizes) * slots))
+    return num_blocks, _place_deepseek_v4_cache(kv_cache_groups, num_blocks)
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
@@ -629,19 +531,7 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
-    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    if speculative_config is not None and speculative_config.method == "dspark":
-        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids
-
-        # Upstream scheduler conversion keeps only the first spec in a uniform
-        # group, losing both residency and per-layer is_draft ownership. Keep
-        # the PD context and external prefix-store classifications separate:
-        # a mixed group needs draft block IDs AND ordinary target hit keys.
-        # Remove these snapshots once upstream preserves per-layer ownership.
-        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
-        kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    configure_cache_transfer(vllm_config, kv_cache_config)
     return kv_cache_config
 
 

@@ -10,12 +10,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.v1.core.sched import scheduler as scheduler_module
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
+
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+
+if not HAS_LAYER_CONFIG:
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.kv_cache_groups import cache_group, mamba_requirement
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request, create_vllm_config
-from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+
+if not HAS_LAYER_CONFIG:
+    from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.patch.platform import patch_mamba_block_aligned_split as split_patch
 
 
@@ -74,18 +83,19 @@ def _make_scheduler(
     connector.take_events.return_value = ()
     monkeypatch.setattr(scheduler_module.KVConnectorFactory, "create_connector", lambda **kwargs: connector)
 
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
+    if not HAS_LAYER_CONFIG:
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
     groups = [
-        KVCacheGroupSpec(
-            ["attention"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        cache_group(
+            ["attention"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         )
     ]
     if has_mamba:
         groups.append(
-            KVCacheGroupSpec(
+            cache_group(
                 ["state"],
-                MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode=cache_mode),
+                mamba_requirement(block_size=16, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode=cache_mode),
             )
         )
     kv_cache_config = KVCacheConfig(num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups)

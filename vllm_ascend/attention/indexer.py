@@ -45,6 +45,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import FullAttentionCacheLayer, get_layer_spec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -131,7 +132,7 @@ class AscendSFAIndexerMetadata:
     qli_metadata_group_id: int | None = None
 
 
-class AscendSFAIndexerCache(DeepseekV32IndexerCache):
+class AscendSFAIndexerCache(FullAttentionCacheLayer, DeepseekV32IndexerCache):
     """Cache owner whose storage spec is supplied by its indexer backend."""
 
     align_kv_cache_with_mamba = False
@@ -150,7 +151,7 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
         self.cache_enabled = True
         get_current_vllm_config().compilation_config.static_forward_context[self.prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
+    def _get_cache_layout(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
         if not self.cache_enabled:
             return None
         # mypy --follow-imports skip cannot see the upstream dataclass fields.
@@ -282,7 +283,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
         vllm_config = get_current_vllm_config()
-        spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+        spec = self._build_cache_spec(get_layer_spec(self.k_cache, vllm_config), vllm_config)
         # TODO: Make upstream DeepseekV32IndexerCache a PluggableLayer so the
         # Ascend cache layer can be selected directly and create its backend,
         # instead of the backend replacing an already-created cache layer.

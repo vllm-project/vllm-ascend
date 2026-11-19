@@ -21,12 +21,12 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1 import kv_cache_interface
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -54,6 +54,13 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
+from vllm_ascend.core.kv_cache_layers import (
+    HAS_LAYER_CONFIG,
+    group_block_size,
+    group_distinct_specs,
+    group_layer_specs,
+    group_params,
+)
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -771,14 +778,21 @@ class NPUModelRunner310V2(NPUModelRunner):
         if pending_copies:
             self._copy_kv_cache_blocks_310p(pending_copies)
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        """Restore linear-attention specs omitted by some upstream V2 versions."""
-        kv_cache_spec = super().get_kv_cache_spec()
+    if HAS_LAYER_CONFIG:
+
+        def get_kv_cache_layer_configs(self):
+            return self._include_linear_attention(super().get_kv_cache_layer_configs(), "get_kv_cache_config")
+    else:
+
+        def get_kv_cache_spec(self):
+            return self._include_linear_attention(super().get_kv_cache_spec(), "get_kv_cache_spec")
+
+    def _include_linear_attention(self, kv_cache_spec, method):
         static_forward_context = self.compilation_config.static_forward_context
         for layer_name, layer in static_forward_context.items():
             if "linear_attn" not in layer_name or layer_name in kv_cache_spec:
                 continue
-            get_spec = getattr(layer, "get_kv_cache_spec", None)
+            get_spec = getattr(layer, method, None)
             if get_spec is None:
                 continue
             if spec := get_spec(self.vllm_config):
@@ -797,24 +811,22 @@ class NPUModelRunner310V2(NPUModelRunner):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
-        circular_buffer_spec = kv_cache_interface.CircularBufferSpec
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            slot_mapping_enabled.append(
-                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
-            )
-            max_num_blocks = cdiv(self.max_model_len, spec.block_size)
-            if spec.block_size <= 128:
-                alignment = 128 // spec.block_size
+            size = group_block_size(kv_cache_group)
+            block_sizes.append(size)
+            specs = group_distinct_specs(kv_cache_group)
+            if HAS_LAYER_CONFIG:
+                slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            else:
+                slot_mapping_enabled.append(not isinstance(specs[0], kv_cache_interface.CircularBufferSpec))
+            max_num_blocks = cdiv(self.max_model_len, size)
+            if size <= 128:
+                alignment = 128 // size
                 max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
-            if isinstance(spec, MambaSpec):
-                # Without prefix caching, hybrid recurrent state uses one page
-                # per request plus speculative slots (same as 820_new).
-                max_num_blocks = (
-                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
-                ) + spec.num_speculative_blocks
+            if isinstance(specs[0], MambaSpec):
+                max_num_blocks = (max_num_blocks if self.cache_config.enable_prefix_caching else 1) + group_params(
+                    kv_cache_group
+                ).num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
@@ -897,11 +909,7 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                specs = tuple(group_spec.kv_cache_specs.values())
-            else:
-                specs = (group_spec,)
+            specs = group_distinct_specs(kv_cache_group)
             attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
             # Hybrid groups may be pure MambaSpec; skip kernel-block sizing.
             if not attention_specs:
@@ -925,8 +933,19 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def _init_kv_zero_meta(self) -> None:
         self.kv_block_zeroer = AscendKVBlockZeroer310V2(self.device, is_pin_memory_available())
+        groups = (group for backend_groups in self.attn_groups for group in backend_groups)
+        if HAS_LAYER_CONFIG:
+            # Full and sliding attention can have identical layouts. Only full
+            # attention participated in 310P's speculative block zeroing.
+            groups = (
+                group
+                for group in groups
+                if issubclass(
+                    self.kv_cache_config.kv_cache_groups[group.kv_cache_group_id].manager_cls, FullAttentionManager
+                )
+            )
         self.kv_block_zeroer.init_meta(
-            attn_groups_iter=(group for groups in self.attn_groups for group in groups),
+            attn_groups_iter=groups,
             kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=getattr(self, "runner_only_attn_layers", set()),
@@ -948,12 +967,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         layer_specs: dict[str, KVCacheSpec] = {}
         layer_group_ids: dict[str, int] = {}
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            group_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_specs[layer_name] = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_specs[layer_name] = group_spec
+            for layer_name, spec in group_layer_specs(kv_cache_group).items():
+                layer_specs[layer_name] = spec
                 layer_group_ids[layer_name] = group_id
 
         layer_backends = {

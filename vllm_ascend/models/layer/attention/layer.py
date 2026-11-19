@@ -26,6 +26,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSASWABackend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import FullAttentionCacheLayer
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.methods.kv_cache.turboquant import SLOT_BYTES, is_turboquant
 
@@ -65,7 +66,7 @@ def dsv4_block_sizes(vllm_config: VllmConfig):
     return DSV4_BLOCK_SIZES
 
 
-class DSAAttention(nn.Module, AttentionLayerBase):
+class DSAAttention(FullAttentionCacheLayer, nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
     This class takes query, and compressed key/value tensors as input.
@@ -209,7 +210,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)

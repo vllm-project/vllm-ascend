@@ -25,11 +25,11 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig
+from vllm_ascend.core.kv_cache_layers import CacheRequirement, cache_layouts, group_block_size, group_layer_specs
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
@@ -236,14 +236,15 @@ def _split_host_device_kv_specs(
 
 
 def plan_sparse_kv_offload_memory(
-    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_spec: dict[str, CacheRequirement],
     vllm_config: VllmConfig,
     available_device_memory_bytes: int,
     dram_limit_bytes: int,
     keep_device_kv_cache: bool,
 ) -> SparseKVOffloadMemoryBudget:
     """Bound sparse KV offload blocks by NPU, DRAM, and active demand."""
-    host_specs, device_specs = _split_host_device_kv_specs(kv_cache_spec)
+    layouts = cache_layouts(kv_cache_spec)
+    host_specs, device_specs = _split_host_device_kv_specs(layouts)
     host_page_size_bytes = sum(spec.page_size_bytes for spec in host_specs)
     device_page_size_bytes = sum(spec.page_size_bytes for spec in device_specs)
     total_page_size_bytes = host_page_size_bytes + device_page_size_bytes
@@ -256,11 +257,8 @@ def plan_sparse_kv_offload_memory(
     npu_limit_blocks = max(available_device_memory_bytes, 0) // npu_page_size_bytes
 
     max_blocks_per_request = max(
-        cdiv(
-            spec.max_memory_usage_bytes(vllm_config),
-            spec.page_size_bytes,
-        )
-        for spec in host_specs + device_specs
+        cdiv(requirement.max_memory_usage_bytes(vllm_config), layouts[name].page_size_bytes)
+        for name, requirement in kv_cache_spec.items()
     )
     workload_limit_blocks = max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
 
@@ -304,10 +302,7 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     """Return a safe upper bound for aligned host KV allocations."""
     layer_specs: dict[str, KVCacheSpec] = {}
     for group in kv_cache_config.kv_cache_groups:
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            layer_specs.update(group.kv_cache_spec.kv_cache_specs)
-        else:
-            layer_specs.update((layer_name, group.kv_cache_spec) for layer_name in group.layer_names)
+        layer_specs.update(group_layer_specs(group))
     host_specs = [spec for spec in layer_specs.values() if getattr(spec, "store_on_host", False)]
     if not host_specs:
         raise ValueError("Sparse KV offload requires host-resident KV cache specs")
@@ -594,7 +589,7 @@ class SparseKVOffloadManager:
         self,
         kv_cache_config: KVCacheConfig,
     ) -> int:
-        block_sizes = {group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups}
+        block_sizes = {group_block_size(group) for group in kv_cache_config.kv_cache_groups}
         if len(block_sizes) != 1:
             raise ValueError("Sparse KV offload requires one shared block size across target and draft groups.")
         return block_sizes.pop()
@@ -608,10 +603,7 @@ class SparseKVOffloadManager:
     def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         host_layer_names = set()
         for group in self.kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[layer_name]
+            for layer_name, spec in group_layer_specs(group).items():
                 if getattr(spec, "store_on_host", False):
                     host_layer_names.add(layer_name)
         self.offload_layer_names = [layer_name for layer_name in kv_caches if layer_name in host_layer_names]

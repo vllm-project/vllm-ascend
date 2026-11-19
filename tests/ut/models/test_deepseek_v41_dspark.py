@@ -15,9 +15,9 @@ pytest.importorskip(
 
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
+from tests.kv_cache_groups import window_mla_spec_type
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
 from vllm_ascend.models.deepseek_v41.dspark import (
@@ -29,32 +29,45 @@ from vllm_ascend.models.deepseek_v41.dspark import (
 )
 from vllm_ascend.models.deepseek_v41.model import (
     AscendDeepseekV41LLMForCausalLM,
-    AscendDeepseekV41SWACache,
     DeepseekV41Model,
 )
 from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
-    spec = AscendSlidingWindowMLASpec(
+    spec = window_mla_spec_type(
         block_size=128,
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        sliding_window=128,
+        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
         cache_dtype_str="bfloat16",
         model_version="deepseek_v41",
     )
-    with patch.object(AscendDeepseekV41SWACache, "get_kv_cache_spec", return_value=spec):
-        cache = DeepseekV41DSparkSWACache.__new__(DeepseekV41DSparkSWACache)
+    cache = DeepseekV41DSparkSWACache.__new__(DeepseekV41DSparkSWACache)
+    cache.spec = spec
+    cache.window_size = 128
+    cache.bounded_replay = False
+    if HAS_LAYER_CONFIG:
+        config = cache.get_kv_cache_config(None)
+        assert config.manager_cls is SlidingWindowManager
+        assert config.manager_config.params.sliding_window == 128
+        draft = config.spec
+    else:
         draft = cache.get_kv_cache_spec(None)
     from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 
     assert DeepseekV41DSparkSWACache.get_attn_backend(None) is DeepseekV41CacheBackend
-    assert type(draft) is AscendSlidingWindowMLASpec
+    assert type(draft) is window_mla_spec_type
     assert draft.page_size_bytes == 131072
     assert DeepseekV41DSparkDecoderLayer.attention_cls is DeepseekV41DSparkAttention
     assert DeepseekV41DSparkAttention.swa_cache_cls is DeepseekV41DSparkSWACache
+    if HAS_LAYER_CONFIG:
+        return
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+    from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
     registrations = {}
 
     def record(kvcache_spec_cls, manager_class, uniform_type_base_spec):

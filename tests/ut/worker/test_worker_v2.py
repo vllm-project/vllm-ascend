@@ -6,14 +6,12 @@ import pytest
 import torch
 from vllm.config import AttentionConfig, CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from tests.kv_cache_groups import cache_group
 from tests.ut.base import TestBase
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -339,11 +337,11 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
         dtypes=(torch.float32,),
     )
     groups = [
-        KVCacheGroupSpec(
+        cache_group(
             layer_names=["compressed_attn"],
             kv_cache_spec=compressed_spec,
         ),
-        KVCacheGroupSpec(
+        cache_group(
             layer_names=["linear_attn"],
             kv_cache_spec=mamba_spec,
         ),
@@ -358,12 +356,13 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
             KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
         ),
     )
-    worker.get_kv_cache_spec = MagicMock(
+    worker_cache = MagicMock(
         return_value={
             "compressed_attn": compressed_spec,
             "linear_attn": mamba_spec,
         }
     )
+    setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
     for use_sparse in (False, True):
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,

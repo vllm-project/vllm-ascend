@@ -5,8 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, UniformTypeKVCacheSpecs
+import torch
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type, window_requirement
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
@@ -56,8 +60,8 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     sliding_window: bool,
 ) -> None:
     config = make_scheduler_config()
-    spec = make_sliding_spec() if sliding_window else make_full_spec()
-    group = KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
+    spec = window_requirement(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16, sliding_window=64) if sliding_window else make_full_spec()
+    group = cache_group(layer_names=["layer.0"], kv_cache_spec=spec)
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     ascend_config = object()
     init_ascend_config = MagicMock()
@@ -87,7 +91,7 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     assert scheduler.max_device_id == 24
     assert scheduler.side_channel_port == 6025
     assert scheduler.group_block_size == [16]
-    assert scheduler.group_unique_specs == [[group.kv_cache_spec]]
+    assert scheduler.group_unique_specs == [list(group_distinct_specs(group))]
     assert scheduler.need_truncate is sliding_window
     init_ascend_config.assert_called_once_with(config)
 
@@ -171,12 +175,9 @@ def test_base_scheduler_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     full = make_full_spec()
-    sliding = make_sliding_spec()
-    uniform = UniformTypeKVCacheSpecs(
-        block_size=16,
-        kv_cache_specs={"layer.0": full, "layer.1": full, "layer.2": sliding},
-    )
-    group = KVCacheGroupSpec(
+    sliding = replace(full, head_size=16)
+    uniform = {"layer.0": full, "layer.1": full, "layer.2": sliding}
+    group = cache_group(
         layer_names=["layer.1", "layer.0", "layer.2"],
         kv_cache_spec=uniform,
     )
@@ -195,6 +196,7 @@ def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculat
     scheduler.num_speculative_tokens = 0
     scheduler.group_block_size = [16]
     scheduler.group_unique_specs = [[make_mamba_spec()]]
+    scheduler.kv_cache_groups = [cache_group(["state"], scheduler.group_unique_specs[0][0])]
 
     assert scheduler._get_transfer_block_ids((), prompt_len=32) == ()
     assert scheduler._get_transfer_block_ids(([10, 11],), prompt_len=32) == ([10, 11],)
@@ -206,7 +208,14 @@ def test_base_scheduler_keeps_recoverssm_checkpoint_and_trims_native_scratch_blo
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 5
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_mamba_spec()], [replace(make_mamba_spec(), num_speculative_blocks=5)]]
+    state = make_mamba_spec()
+    scratch = (
+        MambaManager.layer_config(state, num_speculative_blocks=5)
+        if HAS_LAYER_CONFIG
+        else replace(state, num_speculative_blocks=5)
+    )
+    scheduler.kv_cache_groups = [cache_group(["state"], state), cache_group(["scratch"], scratch)]
+    scheduler.group_unique_specs = [group_distinct_specs(g) for g in scheduler.kv_cache_groups]
 
     assert scheduler._get_transfer_block_ids(([7], [20, 21, 22, 23, 24, 25]), prompt_len=32) == ([7], [20])
 
@@ -217,6 +226,7 @@ def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 0
     scheduler.group_block_size = [16]
+    scheduler.kv_cache_groups = [cache_group(["full"], make_full_spec())]
     scheduler.group_unique_specs = [[make_full_spec()]]
 
     assert scheduler._get_transfer_block_ids(([10, 11, 12, 13],), prompt_len=64) == ([10, 11, 12, 13],)
@@ -229,6 +239,9 @@ def test_base_scheduler_dcp_shards_full_attention_but_keeps_swa_block_size() -> 
     scheduler.num_speculative_tokens = 0
     scheduler.group_block_size = [16, 16]
     scheduler.group_unique_specs = [[make_full_spec()], [make_sliding_spec()]]
+    scheduler.kv_cache_groups = [
+        cache_group([str(i)], specs[0]) for i, specs in enumerate(scheduler.group_unique_specs)
+    ]
 
     assert scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -243,6 +256,9 @@ def test_base_scheduler_keeps_single_circular_block_independent_of_prompt(spec: 
     scheduler.dcp_size = 4
     scheduler.num_speculative_tokens = 3
     scheduler.group_block_size = [16]
+    scheduler.kv_cache_groups = [
+        cache_group(["ring"], ring_requirement(spec) if type(spec) is ring_spec_type else spec)
+    ]
     scheduler.group_unique_specs = [[spec]]
 
     assert scheduler._get_transfer_block_ids(([10],), prompt_len=4096) == ([10],)

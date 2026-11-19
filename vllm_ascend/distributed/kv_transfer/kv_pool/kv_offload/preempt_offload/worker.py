@@ -9,8 +9,11 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+)
 
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
     PreemptOffloadMetadata,
@@ -106,10 +109,7 @@ class PreemptOffloadWorker:
 
         mamba_layers: dict[str, MambaSpec] = {}
         for group in self.kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                layer_spec = group.kv_cache_spec
-                if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = layer_spec.kv_cache_specs[layer_name]
+            for layer_name, layer_spec in group_layer_specs(group).items():
                 if isinstance(layer_spec, MambaSpec):
                     mamba_layers[layer_name] = layer_spec
 

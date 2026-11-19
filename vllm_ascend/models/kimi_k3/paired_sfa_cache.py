@@ -15,13 +15,22 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import (
+    HAS_LAYER_CONFIG,
+    CacheGroup,
+    cache_layouts,
+    group_distinct_specs,
+    group_draft_layers,
+    group_layer_specs,
+    group_max_blocks,
+    group_target_specs,
+    make_cache_group,
+)
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
 from vllm_ascend.utils import vllm_version_is
 
@@ -34,19 +43,17 @@ else:
 
 def _draft_layer_specs(groups):
     """Return local draft specs; empty PP-local groups allocate no tensors."""
-    result = {}
-    for group in groups:
-        group_spec = group.kv_cache_spec
-        for name in group.layer_names:
-            spec = group_spec.kv_cache_specs[name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
-            if spec.is_draft:
-                result[name] = spec
-    return result
+    return {
+        name: spec
+        for group in groups
+        for name, spec in group_layer_specs(group).items()
+        if name in group_draft_layers(group)
+    }
 
 
 def _validate_paired_sfa_pages(specs) -> None:
     """Check the page geometry settled by NPUPlatform before spec creation."""
-    main = [s for s in specs.values() if isinstance(s, AscendMLAAttentionSpec) and not s.is_draft]
+    main = [s for s in specs.values() if isinstance(s, AscendMLAAttentionSpec)]
     recurrent = [s for s in specs.values() if isinstance(s, MambaSpec)]
     if not main:
         raise ValueError("A paired SFA cache requires main MLA specs.")
@@ -59,13 +66,24 @@ def _validate_paired_sfa_pages(specs) -> None:
         raise ValueError("Paired SFA recurrent pages must match the main MLA page size.")
 
 
-def paired_sfa_cache_groups(config, specs):
-    draft = {name: spec for name, spec in specs.items() if spec.is_draft}
+def _needs_draft_tail_protection(config, draft):
     if not draft:
-        return _paired_sfa_target_cache_groups(config, specs)
-    target = {name: spec for name, spec in specs.items() if not spec.is_draft}
-    groups = _paired_sfa_target_cache_groups(config, target)
-    specs.update(target)
+        return False
+    if HAS_LAYER_CONFIG:
+        from vllm_ascend.models.kimi_k3.cache_config import _uses_causal_draft_attention
+
+        return not _uses_causal_draft_attention(config.speculative_config.draft_model_config.hf_config)
+    return any(getattr(spec, "non_causal_multi_token_decode", False) for spec in draft.values())
+
+
+def paired_sfa_cache_groups(config, specs):
+    configs = specs
+    layouts = cache_layouts(configs)
+    draft = {name: layouts[name] for name, config in configs.items() if config.is_draft}
+    if not draft:
+        return _paired_sfa_target_cache_groups(config, layouts, configs)
+    target = {n: spec for n, spec in layouts.items() if n not in draft}
+    groups = _paired_sfa_target_cache_groups(config, target, configs)
     if any(isinstance(spec, AscendMLAAttentionSpec) and spec.uses_packed_sfa_main_cache for spec in draft.values()):
         raise ValueError("Kimi DSpark draft groups require ordinary attention cache specs.")
     ordered = dict(sorted(draft.items(), key=lambda item: extract_layer_index(item[0])))
@@ -74,31 +92,31 @@ def paired_sfa_cache_groups(config, specs):
     # UniformType retains per-layer dtype/layout/non-causal flags; the strict
     # AscendMLAAttentionSpec.merge must not merge these different MLA specs.
     full = groups[0]
-    assert isinstance(full.kv_cache_spec, UniformTypeKVCacheSpecs)
     # Replicated and DCP-sharded attention have different logical coverage.
     # Preserve their own block tables while retaining independent physical
     # regions in the paired backing allocation.
-    separate = {name: spec for name, spec in ordered.items() if spec.dcp_sharded != full.kv_cache_spec.dcp_sharded}
+    separate = {
+        name: spec for name, spec in ordered.items() if spec.dcp_sharded != group_distinct_specs(full)[0].dcp_sharded
+    }
     ordered = {name: spec for name, spec in ordered.items() if name not in separate}
     if separate:
-        uniform_draft = UniformTypeKVCacheSpecs.from_specs(separate)
-        if uniform_draft is None:
+        separate_group = make_cache_group(configs, separate)
+        if separate_group is None:
             raise ValueError("Draft layers must share full-attention semantics and logical block size.")
-        groups.append(
-            KVCacheGroupSpec(
-                list(separate),
-                uniform_draft,
-                is_eagle_group=any(getattr(spec, "non_causal_multi_token_decode", False) for spec in separate.values()),
-            )
-        )
-    shared = {**full.kv_cache_spec.kv_cache_specs, **ordered}
+        separate_group.is_eagle_group = _needs_draft_tail_protection(config, separate)
+        groups.append(separate_group)
+    shared = {**group_layer_specs(full), **ordered}
     if any(spec.tokens_per_state != 1 for spec in shared.values()):
         raise ValueError("Shared DSpark ownership requires uncompressed full-history token slots.")
-    uniform = UniformTypeKVCacheSpecs.from_specs(shared)
+    uniform = make_cache_group(configs, shared)
     if uniform is None:
         raise ValueError("Target and DSpark must share full-attention semantics and logical block size.")
     max_len = config.model_config.max_model_len
-    widths = {spec.max_num_blocks_per_req(config, max_len) for spec in shared.values()}
+    widths = (
+        {uniform.max_num_blocks_per_req(config, max_len)}
+        if HAS_LAYER_CONFIG
+        else {spec.max_num_blocks_per_req(config, max_len) for spec in shared.values()}
+    )
     if len(widths) != 1:
         raise ValueError("Target and DSpark must have identical block-table coverage, including DCP sharding.")
     # Keep target first for scheduler conversion and keep recurrent group IDs.
@@ -106,16 +124,13 @@ def paired_sfa_cache_groups(config, specs):
     # Retain drafter prefix-tail protection after scheduler spec unwrapping;
     # this flag does not change the target's causal attention metadata.
     groups[0] = replace(
-        full,
-        layer_names=list(shared),
-        kv_cache_spec=uniform,
-        is_eagle_group=full.is_eagle_group
-        or any(getattr(spec, "non_causal_multi_token_decode", False) for spec in ordered.values()),
+        uniform,
+        is_eagle_group=full.is_eagle_group or _needs_draft_tail_protection(config, ordered),
     )
     return groups
 
 
-def _paired_sfa_target_cache_groups(config, specs):
+def _paired_sfa_target_cache_groups(config, specs, configs=None):
     if config.scheduler_config.disable_hybrid_kv_cache_manager:
         raise ValueError("Paired SFA cache requires the hybrid KV cache manager.")
     _validate_paired_sfa_pages(specs)
@@ -135,6 +150,7 @@ def _paired_sfa_target_cache_groups(config, specs):
         recurrent,
         recurrent_group_size=len(main),
         uniform_recurrent=False,
+        configs=configs,
     )
     if groups is None:
         raise ValueError("Paired SFA components must share full-attention block semantics.")
@@ -145,23 +161,24 @@ def _paired_sfa_target_cache_groups(config, specs):
 
 def _layout(groups):
     full = next(
-        g
-        for g in groups
-        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
-        and any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in g.kv_cache_spec.kv_cache_specs.values())
+        g for g in groups if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in group_distinct_specs(g))
     )
-    specs = full.kv_cache_spec.kv_cache_specs
+    specs = group_layer_specs(full)
     # Draft layers share logical IDs but must not enlarge the target/KDA
     # overlay or inherit the target's packed page geometry. Retain global
     # specs here: a PP-local group can have no local target MLA layer.
     target_main = {
-        n: spec for n, spec in specs.items() if isinstance(spec, AscendMLAAttentionSpec) and not spec.is_draft
+        n: spec
+        for n, spec in specs.items()
+        if isinstance(spec, AscendMLAAttentionSpec) and n not in group_draft_layers(full)
     }
     main = [n for n in full.layer_names if n in target_main]
     indexer = [n for n in full.layer_names if isinstance(specs[n], AscendSFAIndexerCacheSpec)]
-    recurrent = [g for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
-    main_page = next(iter(target_main.values())).page_size_bytes
-    indexer_page = next(s.page_size_bytes for s in specs.values() if isinstance(s, AscendSFAIndexerCacheSpec))
+    recurrent = [g for g in groups if isinstance(group_distinct_specs(g)[0], MambaSpec)]
+    main_page = next(s.page_size_bytes for s in group_target_specs(full) if isinstance(s, AscendMLAAttentionSpec))
+    indexer_page = next(
+        s.page_size_bytes for s in group_distinct_specs(full) if isinstance(s, AscendSFAIndexerCacheSpec)
+    )
     slots = max([len(main), *(len(g.layer_names) for g in recurrent)])
     return full, main, indexer, recurrent, main_page, indexer_page, slots
 
@@ -175,14 +192,18 @@ def paired_sfa_pool_bytes(groups):
 
 def paired_sfa_cache_config(
     vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    kv_cache_groups: list[CacheGroup],
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )
     pool_bytes = paired_sfa_pool_bytes(kv_cache_groups)
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes)
     backing_size = pool_bytes * num_blocks
     main_layer_size = main_page_size * num_blocks
     # Recurrent groups overlay the target MLA region. Their block IDs are
@@ -239,9 +260,5 @@ def paired_sfa_cache_config(
 
 
 def paired_sfa_max_memory(config, groups):
-    blocks = sum(
-        (g.kv_cache_spec.max_memory_usage_bytes(config) + g.kv_cache_spec.page_size_bytes - 1)
-        // g.kv_cache_spec.page_size_bytes
-        for g in groups
-    )
+    blocks = sum(group_max_blocks(g, config) for g in groups)
     return blocks * paired_sfa_pool_bytes(groups)

@@ -14,8 +14,7 @@ import pytest
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
-
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -144,9 +143,9 @@ def worker_factory():
 
     def create(backend_name, group_count=2):
         groups = [
-            KVCacheGroupSpec(
+            cache_group(
                 [f"model.layers.{index}.attn"],
-                FullAttentionSpec(
+                full_attention_spec_type(
                     block_size=16,
                     num_kv_heads=1,
                     head_size=1,
@@ -242,21 +241,22 @@ def test_mooncake_preserves_partial_get_errors():
 def test_packed_qsa_gdn_pages_restore_disjoint_live_block_ids(backend_name):
     """Restore actual shared-page views without touching another live owner."""
     import torch
-    from vllm.v1.kv_cache_interface import CircularBufferSpec, MambaSpec, MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
+    from tests.kv_cache_groups import ring_spec_type
     from vllm_ascend.models.qwen4_exp.cache_config import build_qwen4_kv_cache_layout, make_slab_view
 
-    main = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, head_size_v=8, dtype=torch.float16)
-    raw = CircularBufferSpec(block_size=8, num_kv_heads=1, head_size=4, head_size_v=0, dtype=torch.float16)
+    main = full_attention_spec_type(block_size=128, num_kv_heads=1, head_size=8, head_size_v=8, dtype=torch.float16)
+    raw = ring_spec_type(block_size=8, num_kv_heads=1, head_size=4, head_size_v=0, dtype=torch.float16)
     compressed = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=4, dtype=torch.float16, tokens_per_state=4)
     gdn = MambaSpec(block_size=128, shapes=((2, 4), (4, 4)), dtypes=(torch.float16, torch.float32))
     ple = MambaSpec(block_size=128, shapes=((2, 4),), dtypes=(torch.float16,))
     groups = [
-        KVCacheGroupSpec(["model.layers.0.self_attn.attn"], main),
-        KVCacheGroupSpec(["model.layers.0.self_attn.indexer.raw_key_cache"], raw),
-        KVCacheGroupSpec(["model.layers.0.self_attn.indexer.compressed_key_cache"], compressed),
-        KVCacheGroupSpec(["model.layers.1.linear_attn"], gdn),
-        KVCacheGroupSpec(["model.ple"], ple),
+        cache_group(["model.layers.0.self_attn.attn"], main),
+        cache_group(["model.layers.0.self_attn.indexer.raw_key_cache"], ring_requirement(raw)),
+        cache_group(["model.layers.0.self_attn.indexer.compressed_key_cache"], compressed),
+        cache_group(["model.layers.1.linear_attn"], gdn),
+        cache_group(["model.ple"], ple),
     ]
     blocks = 5
     layout = build_qwen4_kv_cache_layout(groups, blocks)

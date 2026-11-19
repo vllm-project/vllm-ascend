@@ -10,11 +10,13 @@ from unittest.mock import Mock
 import httpx
 import msgspec
 import pytest
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+import torch
 from vllm.v1.request import RequestStatus
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, mamba_requirement
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_scheduler as push_scheduler_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
@@ -72,7 +74,11 @@ def scheduler():
     obj.metaserver_client = None
     obj._remote_worker_addresses = ()
     obj.group_block_size = [16, 16]
-    obj.group_unique_specs = [[Mock(spec=FullAttentionSpec, is_circular=False)] for _ in range(2)]
+    obj.kv_cache_groups = [
+        cache_group([str(i)], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16))
+        for i in range(2)
+    ]
+    obj.group_unique_specs = [list(group_distinct_specs(g)) for g in obj.kv_cache_groups]
     obj.num_speculative_tokens = 0
     obj._reqs_pending_recv = {}
     obj._reqs_need_send_layerwise = {}
@@ -260,9 +266,14 @@ def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler, mo
 
 @pytest.mark.parametrize("num_speculative_blocks", [0, 2])
 def test_producer_mamba_excludes_speculative_tail(producer_scheduler, num_speculative_blocks):
-    producer_scheduler.group_unique_specs[1] = [
-        Mock(spec=MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
-    ]
+    mamba_group = cache_group(
+        ["state"],
+        mamba_requirement(
+            block_size=16, shapes=((8,),), dtypes=(torch.float32,), num_speculative_blocks=num_speculative_blocks
+        ),
+    )
+    producer_scheduler.kv_cache_groups[1] = mamba_group
+    producer_scheduler.group_unique_specs[1] = list(group_distinct_specs(mamba_group))
     request = prefill_request()
     blocks = ([1, 2, 3], [10, 11, 12])
     allocate(producer_scheduler, request, blocks)
@@ -447,9 +458,14 @@ def test_push_load_order_covers_chunks_pending_sends_and_idle(producer_scheduler
 def test_metaserver_mamba_blocks_exclude_only_speculative_tail(scheduler, use_replayssm, metaserver):
     # MambaSpec derives this count from use_replayssm at model registration.
     num_speculative_blocks = 0 if use_replayssm else 2
-    scheduler.group_unique_specs[1] = [
-        Mock(spec=MambaSpec, num_speculative_blocks=num_speculative_blocks, is_circular=False)
-    ]
+    mamba_group = cache_group(
+        ["state"],
+        mamba_requirement(
+            block_size=16, shapes=((8,),), dtypes=(torch.float32,), num_speculative_blocks=num_speculative_blocks
+        ),
+    )
+    scheduler.kv_cache_groups[1] = mamba_group
+    scheduler.group_unique_specs[1] = list(group_distinct_specs(mamba_group))
     scheduler.dcp_size = 1
     scheduler._metadata_thread = Mock(error=None)
     messages = []

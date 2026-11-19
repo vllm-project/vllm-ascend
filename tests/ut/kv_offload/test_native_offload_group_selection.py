@@ -17,16 +17,13 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupRole,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheGroupRole, KVCacheSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
@@ -38,8 +35,8 @@ HEAD_SIZE = 3
 DTYPE = torch.bfloat16
 
 
-def _attention_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
+def _attention_spec() -> AttentionSpec:
+    return full_attention_spec_type(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=HEAD_SIZE,
@@ -53,8 +50,8 @@ def _group(
     enable_kv_transfer: bool = True,
     spec: object | None = None,
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT,
-) -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
+) -> CacheGroup:
+    return cache_group(
         layer_names=[layer_name],
         kv_cache_spec=_attention_spec() if spec is None else spec,
         enable_kv_transfer=enable_kv_transfer,
@@ -63,7 +60,7 @@ def _group(
 
 
 def _config(
-    groups: list[KVCacheGroupSpec],
+    groups: list[CacheGroup],
     *,
     hisparse_host_num_blocks: int | None = None,
 ) -> KVCacheConfig:
@@ -140,7 +137,7 @@ def test_hisparse_bf16_offloading_preserves_shared_slab_stride(
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    group = KVCacheGroupSpec(names, spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
+    group = cache_group(names, spec, role=KVCacheGroupRole.HISPARSE_INDEXER)
     worker, captured = _prepare_worker(monkeypatch, _config([group], hisparse_host_num_blocks=8))
     forward_context = {name: SimpleNamespace() for name in names}
     worker.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context=forward_context))
@@ -203,7 +200,7 @@ def test_non_cacheable_group_spec_is_not_introspected(
         _group(
             "model.layers.0.experimental_state",
             enable_kv_transfer=False,
-            spec=SimpleNamespace(),
+            spec=KVCacheSpec(block_size=BLOCK_SIZE),
         ),
     ]
     kv_cache_config = _config(groups)
@@ -244,7 +241,7 @@ def test_hisparse_host_pool_registers_only_indexer_groups(
         _group(
             "model.layers.0.hisparse_source",
             enable_kv_transfer=False,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            role=KVCacheGroupRole.DEFAULT if HAS_LAYER_CONFIG else KVCacheGroupRole.HISPARSE_SOURCE,
         ),
         _group(
             "model.layers.0.hisparse_indexer",

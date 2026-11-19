@@ -47,7 +47,9 @@ def test_kda_state_dtype_matches_model_and_cache_spec(ssm_dtype, conv_dtype, exp
     assert layer.get_state_dtype() == want
     assert Glm5NextForCausalLM.get_mamba_state_dtype_from_config(config) == want
     assert Glm5NextForConditionalGeneration.get_mamba_state_dtype_from_config(config) == want
-    spec = layer.get_kv_cache_spec(config)
+    from vllm_ascend.core.kv_cache_layers import get_layer_spec
+
+    spec = get_layer_spec(layer, config)
     assert spec.dtypes == want
     state_bytes = 64 * 128 * 128 * torch.empty((), dtype=expected).element_size()
     conv_bytes = 3 * 64 * 128 * (3 + 5) * torch.empty((), dtype=expected_conv).element_size()

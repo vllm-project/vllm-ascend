@@ -6,16 +6,13 @@ from dataclasses import replace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    UniformTypeKVCacheSpecs,
-)
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
+from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
 
 # vLLM #61183 moved the planner helpers out of kv_cache_utils on main.
 try:
@@ -56,29 +53,34 @@ def test_mla_indexer_groups_publish_tp_replicas(tp_size, main_layers, indexer_la
         **{f"main.{i}": main for i in range(main_layers)},
         **{f"indexer.{i}": indexer for i in range(indexer_layers)},
     }
-    wrapper = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs)
-    groups = [KVCacheGroupSpec(list(specs), wrapper)]
+    groups = [cache_group(list(specs), specs)]
 
     assert kv_cache_groups_tp_replicas(groups, tp_size) == tp_size
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size=2) == 1
 
-    sharded = FullAttentionSpec(
+    sharded = full_attention_spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
         max_tp_shards=tp_size,
     )
-    groups.append(KVCacheGroupSpec(["sharded"], sharded))
+    groups.append(cache_group(["sharded"], sharded))
     assert kv_cache_groups_tp_replicas(groups, tp_size) == 1
 
 
 @pytest.mark.parametrize("spec_type", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec])
 def test_mla_replication_metadata_survives_merge(spec_type):
     spec = spec_type(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    merged = spec_type.merge([spec, spec])
+
+    def representative(layout):
+        if HAS_LAYER_CONFIG:
+            return group_layer_specs(cache_group(["a", "b"], layout))["a"]
+        return spec_type.merge([layout, layout])
+
+    merged = representative(spec)
     assert merged.max_tp_shards == 1
     unknown = replace(spec, max_tp_shards=None)
-    assert spec_type.merge([unknown, unknown]).max_tp_shards is None
-    groups = [KVCacheGroupSpec(["unknown"], unknown)]
+    assert representative(unknown).max_tp_shards is None
+    groups = [cache_group(["unknown"], unknown)]
     assert kv_cache_groups_tp_replicas(groups, 4) == 1
