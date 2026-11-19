@@ -448,6 +448,8 @@ def test_v1_backends_delegate_to_registry(
     monkeypatch.setattr(sfa_v1, "enable_sfa_dcp_replicated_indexer", lambda _config=None: False)
     for sizes, expected_pair in ((off_sizes, base_pair), (on_sizes, cp_pair)):
         vllm_config = SimpleNamespace(
+            # sfa_v1.get_builder_cls() consults the HiSparse switch first.
+            attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 prefill_context_parallel_size=sizes[0],
                 decode_context_parallel_size=sizes[1],

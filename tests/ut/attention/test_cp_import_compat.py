@@ -57,6 +57,7 @@ def test_pcp_manager_reexports_attention_context() -> None:
         "global_block_table_num_blocks",
         "local_to_global_req_indices",
         "local_token_indices",
+        "local_num_tokens",
     ]
     default_by_name = {field.name: field.default for field in fields(FromContext)}
     required, optional = field_names[:4], field_names[4:]
