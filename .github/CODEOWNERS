@@ -10,7 +10,7 @@
 /codecov.yml @zhangxinyuehfad @czydyy
 /format.sh @zhangxinyuehfad @czydyy
 /mypy.ini @zhangxinyuehfad @czydyy
-/requirements* @zhangxinyuehfad @czydyy
+/requirements* @zhangxinyuehfad @czydyy @winson-00178005
 /typos.toml @zhangxinyuehfad @czydyy
 /packages.txt @zhangxinyuehfad @czydyy
 /.markdownlint.yaml @MrZ20 @czydyy
@@ -34,7 +34,7 @@
 /CLAUDE.md @MrZ20
 
 # Dockerfiles
-/Dockerfile* @zhangxinyuehfad @czydyy
+/Dockerfile* @zhangxinyuehfad @czydyy @winson-00178005
 
 # docs
 /docs @liqian79
