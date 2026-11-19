@@ -31,7 +31,7 @@ import vllm_ascend.patch.platform.patch_idle_kv_drain as idle_drain_patch
 
 class FakeScheduler:
     def __init__(self, has_requests=True, connector="MISSING", drain_error=None):
-        self.calls = []
+        self.calls: list[KVConnectorOutput] = []
         self.has_requests = lambda: has_requests
         if connector != "MISSING":
             self.connector = connector
