@@ -1972,6 +1972,42 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(is_mega_moe_supported())
 
     @_clean_up
+    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
+    @patch(
+        "vllm_ascend.ascend_config.importlib.util.find_spec",
+        side_effect=lambda name, *args: object() if name == "cann_ops_transformer" else real_find_spec(name, *args),
+    )
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_falls_back_for_per_layer_swiglu_limit(self, mock_fix, mock_find_spec, mock_megamoe_config):
+        # The local dispatch_ffn_combine kernel clamps before SiLU with one shared
+        # limit, so a target or draft model with per-layer limits takes the regular
+        # path and keeps the overlap. The external MegaMoe keeps its own path.
+        for fused_mc2, target_limits, draft_limits, expected in (
+            (1, [0, 4], None, (0, True, False)),
+            (1, [0, None], [0, 4], (0, True, False)),
+            (1, [0, None], None, (1, False, False)),
+            (2, [0, 4], None, (1, False, True)),
+        ):
+            with self.subTest(fused_mc2=fused_mc2, target_limits=target_limits, draft_limits=draft_limits):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.additional_config = {"enable_fused_mc2": fused_mc2, "multistream_overlap_shared_expert": True}
+                vc.model_config.hf_text_config = SimpleNamespace(expert_swiglu_limit_list=target_limits)
+                if draft_limits is not None:
+                    draft_text_config = SimpleNamespace(expert_swiglu_limit_list=draft_limits)
+                    vc.speculative_config = SimpleNamespace(
+                        method="mtp",
+                        num_speculative_tokens=1,
+                        draft_model_config=SimpleNamespace(hf_text_config=draft_text_config),
+                    )
+
+                config = init_ascend_config(vc)
+
+                actual = (config.enable_fused_mc2, config.multistream_overlap_shared_expert, is_mega_moe_supported())
+                self.assertEqual(actual, expected)
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_minimax_m3_rejects_fused_mc2_dispatch_ffn_combine(self, mock_fix):
         vc = VllmConfig()

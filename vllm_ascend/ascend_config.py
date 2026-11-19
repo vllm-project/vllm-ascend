@@ -950,6 +950,12 @@ class AscendConfig:
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
+        # The local dispatch_ffn_combine kernel clamps before SiLU with one shared
+        # limit, so a target or draft model with per-layer swiglu limits takes the
+        # regular MoE path. Decided before the mutex below so the overlap is kept.
+        if self.enable_fused_mc2 == 1 and not is_mega_moe_supported() and self._has_per_layer_swiglu_limit(vc):
+            self.enable_fused_mc2 = 0
+            logger.warning_once("Disabling fused MC2: its local kernel cannot honor per-layer swiglu limits.")
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
@@ -1198,6 +1204,14 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    @staticmethod
+    def _has_per_layer_swiglu_limit(vllm_config: VllmConfig) -> bool:
+        draft_model_config = getattr(vllm_config.speculative_config, "draft_model_config", None)
+        for model_config in (vllm_config.model_config, draft_model_config):
+            if any(getattr(getattr(model_config, "hf_text_config", None), "expert_swiglu_limit_list", None) or ()):
+                return True
+        return False
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:

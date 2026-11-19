@@ -303,3 +303,42 @@ def test_factory_preserves_native_scaling_modes(mode_name):
         assert kwargs["apply_routed_scale_to_output"] is scaling["apply_routed_scale_to_output"]
         assert "routed_scale_mode" not in kwargs
     assert router_factory.call_args.kwargs["routed_scaling_factor"] == (2.0 if mode_name == "ROUTER" else 1.0)
+
+
+def test_ling_routed_experts_use_swiglustep_only_for_a_configured_limit():
+    # Build the real Ling MoE block. vLLM 0.33.0 passes activation="silu" and the
+    # Ascend factory moves a layer with a limit to swiglustep (vllm#65088); later
+    # vLLM chooses it in the model. Any other caller keeps the activation it asked for.
+    from vllm.model_executor.models import bailing_moe_v3 as ling
+
+    config = SimpleNamespace(
+        num_experts=8,
+        num_experts_per_tok=2,
+        hidden_size=16,
+        moe_intermediate_size=8,
+        moe_shared_expert_intermediate_size=8,
+        num_shared_experts=1,
+        n_group=1,
+        topk_group=1,
+        expert_swiglu_limit_list=[0, 4.0],
+    )
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0)
+    )
+    original_factory = MagicMock(return_value=SimpleNamespace(router=_Router()))
+
+    with (
+        patch.object(ling, "GateLinear"),
+        patch.object(ling, "BailingMoeV3MLP"),
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+        patch.object(patch_fused_moe, "create_ascend_fused_moe_router", return_value=_Router()),
+    ):
+        activations = []
+        for layer_id in (0, 1):
+            ling.BailingMoeV3MoE(config, layer_id=layer_id)
+            activations.append(original_factory.call_args.kwargs["activation"])
+        patch_fused_moe._ascend_FusedMoE(num_experts=8, top_k=2, activation="silu", swiglu_limit=4.0)
+        activations.append(original_factory.call_args.kwargs["activation"])
+
+    assert activations == ["silu", "swiglustep", "silu"]

@@ -243,6 +243,19 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+#   3. `vllm.model_executor.layers.fused_moe.FusedMoEFactory` (vLLM 0.33.0 only)
+#    Why:
+#       The 0.33.0 Ling model always passes `activation="silu"`, so a routed
+#       layer with a configured `swiglu_limit` is clamped before SiLU instead of
+#       taking the swiglustep path that clamps after SiLU.
+#    How:
+#       `_ascend_FusedMoE` switches such a call made directly from
+#       `bailing_moe_v3` to `swiglustep`, the rule the fixed upstream model applies.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/65088
+#    Future Plan:
+#       Remove this check when vLLM 0.33.0 support ends.
+#
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
