@@ -1,0 +1,7 @@
+pr: 22368
+entries:
+  - category: bugfix
+    text: >-
+      Serving LiquidAI/d1-3B on Ascend A2 no longer fails when the Mamba short-convolution fallback encounters an unsupported grouped Conv2D kernel.
+    model: LiquidAI/d1-3B
+    hardware: [A2]
