@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import sys
+import sysconfig
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -60,6 +61,15 @@ class ServerCommand:
 
 
 RankProcess = tuple[subprocess.Popen, RankInfo, Path]
+
+
+def _merge_envs(envs: dict[str, Any], extra_envs: dict[str, str]) -> dict[str, Any]:
+    merged_envs = {**envs, **extra_envs}
+    if "LD_LIBRARY_PATH" in extra_envs:
+        inherited_path = envs.get("LD_LIBRARY_PATH", os.environ.get("LD_LIBRARY_PATH", ""))
+        paths = [*extra_envs["LD_LIBRARY_PATH"].split(os.pathsep), *str(inherited_path).split(os.pathsep)]
+        merged_envs["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys(filter(None, paths)))
+    return merged_envs
 
 
 class ExternalDPKVPoolManager:
@@ -233,6 +243,13 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         runtime_dir = self.log_root / f"node-{self.current_node_index}" / "runtime"
         self.meta_config_path = (runtime_dir / "mmc-meta.conf").resolve()
         self.local_config_path = (runtime_dir / "mmc-local.conf").resolve()
+        library_path = Path(sysconfig.get_path("platlib")) / "memcache_hybrid" / "lib"
+        if not library_path.is_dir():
+            raise FileNotFoundError(
+                f"Memcache library directory does not exist: {library_path}. "
+                f"Install memcache_hybrid for the test interpreter {sys.executable}."
+            )
+        self.server_envs["LD_LIBRARY_PATH"] = str(library_path)
 
     @property
     def memcache_config(self) -> MemcacheKVPoolConfig:
@@ -268,7 +285,7 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
         local_config["ock.mmc.local_service.config_store_url"] = config_store_url
         self._write_text_atomic(self.meta_config_path, self._format_config(meta_config))
         self._write_text_atomic(self.local_config_path, self._format_config(local_config))
-        self.server_envs = {"MMC_LOCAL_CONFIG_PATH": str(self.local_config_path)}
+        self.server_envs["MMC_LOCAL_CONFIG_PATH"] = str(self.local_config_path)
         logger.info("Generated Memcache configs for node %d", self.current_node_index)
 
     def _start_service(self) -> None:
@@ -277,7 +294,10 @@ class ExternalDPMemcacheManager(ExternalDPKVPoolManager):
             "-c",
             "from memcache_hybrid import MetaService; MetaService.main()",
         ]
-        env = {"MMC_META_CONFIG_PATH": str(self.meta_config_path)}
+        env = _merge_envs(
+            {"MMC_META_CONFIG_PATH": str(self.meta_config_path)},
+            {"LD_LIBRARY_PATH": self.server_envs["LD_LIBRARY_PATH"]},
+        )
         log_file = self.log_root / f"node-{self.current_node_index}" / "memcache-meta-service.log"
         self.process = start_logged_process(cmd, env, log_file)
         logger.info("Memcache MetaService launched on node 0")
@@ -490,7 +510,7 @@ class ExternalDPServerManager:
             for rank in local_ranks:
                 template = self.config.launch_templates[rank.node_index]
                 template = type(template)(
-                    envs={**template.envs, **self.dist_envs, **self.extra_envs},
+                    envs=_merge_envs(template.envs, {**self.dist_envs, **self.extra_envs}),
                     server_cmd_template=template.server_cmd_template,
                 )
                 server_cmd = self.command_builder.build(rank, template)
