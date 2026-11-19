@@ -1,0 +1,6 @@
+# EPLB for Model Runner V2. The handlers only read state that upstream
+# EplbState already produces; no business code is touched. Entries fire on
+# balancedness-log or rebalance-interval events rather than every decode step.
+
+- symbol: vllm_ascend.distributed.eplb.eplb_state:AscendEplbState.step
+  handler: vllm_ascend.observability.ms_metrics.handlers:eplb_load_balance_handler
