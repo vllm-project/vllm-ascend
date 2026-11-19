@@ -1203,6 +1203,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            remote_aux_hidden_states: list[torch.Tensor] = []
             aux_hidden_states: list[torch.Tensor] = []
             self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         else:
@@ -1211,7 +1212,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
             # v0.34.0 relays earlier stages' aux slots through the PP tensors;
             # vLLM main instead merges them in the runner, so this returns [].
-            aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            # Only this stage's own captures are packed into the outgoing
+            # payload: re-packing the relayed slots would duplicate them and
+            # shift the local slot keys.
+            remote_aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
+            aux_hidden_states: list[torch.Tensor] = []
 
         hidden_states_are_sp = False
         sp_forward_context = None
@@ -1265,6 +1270,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         if hidden_states_are_sp:
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
+        # Order the states by global layer position: everything relayed by the
+        # upstream stages comes before this stage's own captures.
+        aux_hidden_states = remote_aux_hidden_states + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
 

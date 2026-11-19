@@ -1161,9 +1161,13 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         materialized_aux = self.dspark_aux_capture_materialized
         # v0.34.0 relays earlier stages' aux slots through the PP tensors;
         # vLLM main merges them in the runner, so this yields [] there.
-        aux_hidden_states: list[torch.Tensor] = (
+        # Only this stage's own captures are packed into the outgoing payload:
+        # re-packing the relayed slots would duplicate them and shift the
+        # local slot keys.
+        remote_aux_hidden_states: list[torch.Tensor] = (
             [] if get_pp_group().is_first_rank else self.collect_remote_aux_hidden_states(intermediate_tensors)
         )
+        aux_hidden_states: list[torch.Tensor] = []
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -1179,7 +1183,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = sp_shard(hidden_states)
             if residual is not None:
                 residual = sp_shard(residual)
-            aux_hidden_states = [sp_shard(aux) for aux in aux_hidden_states]
+            remote_aux_hidden_states = [sp_shard(aux) for aux in remote_aux_hidden_states]
         if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
                 aux_hidden_states,
@@ -1263,6 +1267,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         if materialized_aux and self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states)
+        # Order the states by global layer position: everything relayed by the
+        # upstream stages comes before this stage's own captures.
+        aux_hidden_states = remote_aux_hidden_states + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
