@@ -93,8 +93,9 @@ def parse_findings(text: str) -> list[dict]:
         if not body_match:
             continue
         fields = dict(FIELD_LINE_RE.findall(block[: body_match.start()]))
-        # body is everything after its key line, so it may span multiple lines
-        fields["body"] = block[body_match.end() :]
+        # body is the key line's remainder plus everything after it, so it
+        # may span multiple lines
+        fields["body"] = (body_match.group(1) + "\n" + block[body_match.end() :]).strip()
         if not all(f in fields and fields[f].strip() for f in REQUIRED_FINDING_FIELDS):
             continue
         try:
