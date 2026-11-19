@@ -356,9 +356,6 @@ class NPUWorker(GPUWorker):
     def start_draft_weight_update(self) -> None:
         raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
 
-    def _start_weight_update(self, is_draft: bool = False) -> None:
-        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
-
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")
 
@@ -503,32 +500,13 @@ class NPUWorker(GPUWorker):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def start_weight_update(self) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload."""
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        if is_draft:
+            raise NotImplementedError("Draft weight updates are not supported on Ascend.")
+        # Report a missing engine before checking the Ascend layout.
         self._check_weight_transfer_engine()
-
-        if self._weight_update_active:  # type: ignore[has-type]
-            raise RuntimeError(
-                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
-            )
-
         self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
-        self._weight_update_active = True
-
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update; runs layerwise postprocessing."""
-        self._check_weight_transfer_engine()
-
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
-        self._weight_update_active = False
+        super()._start_weight_update()
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)

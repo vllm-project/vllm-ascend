@@ -1,4 +1,6 @@
 pr: 22447
 entries:
   - category: bugfix
-    text: Fixed live weight updates on Ascend when `update_info` is a list of payloads indexed by global worker rank across data-parallel replicas.
+    text: >-
+      Fixed live weight updates on Ascend when `update_info` is a list of payloads indexed by global worker rank across data-parallel replicas.
+      When the installed vLLM supports `VLLM_RELOAD_MODE=direct`, restart the weight-update session and resend the weights if `finish_weight_update` fails.
