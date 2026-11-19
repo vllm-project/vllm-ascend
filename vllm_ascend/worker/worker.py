@@ -123,10 +123,7 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config.profiler import ProfilerConfig
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
-    from vllm.distributed.parallel_state import Handle
-    from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -237,16 +234,6 @@ class NPUWorker(GPUWorker):
                 distributed_init_method=distributed_init_method,
                 is_driver_worker=is_driver_worker,
             )
-
-        # Shared worker state is initialized and owned by GPUWorker.__init__.
-        # These are annotation-only declarations (no runtime assignment) so that
-        # mypy keeps the inherited types: it runs with --follow-imports=skip and
-        # the vLLM base class body is not analyzed.
-        self.profiler_config: ProfilerConfig | None
-        self.profiler: TorchNPUProfilerWrapper | None
-        self.weight_transfer_engine: WeightTransferEngine | None
-        self._weight_update_active: bool
-        self._pp_send_work: list[Handle]
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -368,9 +355,6 @@ class NPUWorker(GPUWorker):
 
     def start_draft_weight_update(self) -> None:
         raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
-
-    def _start_weight_update(self, is_draft: bool = False) -> None:
-        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")
@@ -507,19 +491,6 @@ class NPUWorker(GPUWorker):
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
 
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
-            )
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        """Initialize the HCCL weight transfer process group with the trainer."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
-
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
             raise ValueError(
@@ -529,47 +500,13 @@ class NPUWorker(GPUWorker):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def start_weight_update(self) -> None:
-        """Begin a new weight update; prepares the model for layerwise reload."""
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        if is_draft:
+            raise NotImplementedError("Draft weight updates are not supported on Ascend.")
+        # Report a missing engine before checking the Ascend layout.
         self._check_weight_transfer_engine()
-
-        if self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
-            )
-
         self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
-        self._weight_update_active = True
-
-    def update_weights(self, update_info: dict) -> None:
-        """Receive a chunk of weights from the trainer and load them in place."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        # state machine driven by start/finish.
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
-
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update; runs layerwise postprocessing."""
-        self._check_weight_transfer_engine()
-
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
-        self._weight_update_active = False
+        super()._start_weight_update()
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
@@ -588,8 +525,8 @@ class NPUWorker(GPUWorker):
         if ensure_ec_transfer_shutdown is not None:
             ensure_ec_transfer_shutdown()
 
-        if self.profiler is not None:
-            self.profiler.shutdown()
+        if (profiler := self.profiler) is not None:  # type: ignore[has-type]
+            profiler.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
@@ -1039,10 +976,10 @@ class NPUWorker(GPUWorker):
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
+        if self._pp_send_work:  # type: ignore[has-type]
+            for handle in self._pp_send_work:  # type: ignore[has-type]
                 handle.wait()
-            self._pp_send_work = []
+            self._pp_send_work = []  # type: ignore[var-annotated]
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -1061,8 +998,8 @@ class NPUWorker(GPUWorker):
                 comm_postprocess=comm_postprocess,
             )
 
-        if self.profiler is not None:
-            self.profiler.step()
+        if (profiler := self.profiler) is not None:  # type: ignore[has-type]
+            profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
@@ -1269,17 +1206,6 @@ class NPUWorker(GPUWorker):
             return get_model()
         return self.model_runner.model
 
-    def _weight_checksum_prefix(self) -> str:
-        # Aligned with upstream gpu_worker: data_parallel_rank is reset to 0
-        # in dense workers; only data_parallel_index keeps DP keys unique.
-        # (locals renamed from upstream's dp/pp/pcp/tp: dp is this module's
-        # dynamic_profile alias)
-        dp_rank = self.parallel_config.data_parallel_index
-        pp_rank = get_pp_group().rank_in_group
-        pcp_rank = get_pcp_group().rank_in_group
-        tp_rank = get_tp_group().rank_in_group
-        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
-
     def compute_weight_checksums(self) -> dict[str, str]:
         prefix = self._weight_checksum_prefix()
         digests = compute_tensor_digests(self._weight_checksum_model())
@@ -1472,26 +1398,28 @@ class NPUWorker(GPUWorker):
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
 
+        profiler = self.profiler  # type: ignore[has-type]
         if is_start:
             from vllm.distributed.utils import get_worker_rank_suffix
 
             rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
             trace_name = f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
 
-            if self.profiler is None:
-                self.profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
+            if profiler is None:
+                profiler = TorchNPUProfilerWrapper(self.profiler_config, trace_name)
+                self.profiler = profiler
                 logger.debug("Starting torch profiler with trace name: %s", trace_name)
             # Else: profiler already initialized. Restart profiling but keep the
             # original trace name from the first initialization.
             # vLLM main supports per-session profiler kwargs; the release
             # wrapper has no slot for them.
-            self.profiler.set_profiler_kwargs(profiler_kwargs)
-            self.profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
+            profiler.set_profiler_kwargs(profiler_kwargs)
+            profiler.start(delay_iterations=delay_iterations, max_iterations=max_iterations)
         else:
-            if self.profiler is None:
+            if profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
-            self.profiler.stop()
+            profiler.stop()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
