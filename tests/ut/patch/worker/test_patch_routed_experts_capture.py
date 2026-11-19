@@ -43,6 +43,10 @@ def _capturer(*, dp_rank: int = 0, tp_size: int = 1, max_tokens: int = 16) -> Ro
     capturer.tp_size = tp_size
     capturer.output_dtype = torch.uint8
     capturer.device_buffer = torch.full((max_tokens, _NUM_LAYERS, _TOP_K), -1, dtype=torch.int32)
+    # Upstream caches the row restorer in ``__init__`` and ``capture`` calls it
+    # through ``restore_rows``. Bypassing ``__init__`` skips that binding, so do
+    # it here; it resolves to the patched ``_restore_local_topk_ids``.
+    capturer.restore_rows = capturer._restore_local_topk_ids
     return capturer
 
 
@@ -100,6 +104,12 @@ def test_capture_keeps_the_upstream_implementation():
     """Only the row restore is overridden, so upstream keeps owning the layout."""
     assert RoutedExpertsCapturer.capture.__module__ == "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
     assert RoutedExpertsCapturer._restore_local_topk_ids is patch_routed_experts_capture._restore_local_topk_ids
+
+
+def test_restore_rows_binding_resolves_to_the_patch():
+    """Upstream caches the restorer in ``__init__``; that cached callable must be the patch."""
+    capturer = _capturer()
+    assert capturer.restore_rows.__func__ is patch_routed_experts_capture._restore_local_topk_ids
 
 
 def test_single_dp_all2all_gathers_uneven_tp_shards():
