@@ -84,6 +84,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
+          TRIGGER_WORKFLOW: ${{ github.event.workflow_run.name }}
         run: |
           python3 - <<'PY'
           import json
@@ -110,6 +111,14 @@ jobs:
           )
           run_url = os.environ["RUN_URL"]
           marker = "<!-- vllm-ascend-ci-gate-failure -->"
+          # A failed "CI Gate Refresh" run is not a gate failure - the gate
+          # itself is untouched and the review retrigger could not do its
+          # job. State that, so the reader does not look for a red ci-gate
+          # check that does not exist.
+          if os.environ.get("TRIGGER_WORKFLOW") == "CI Gate Refresh":
+              title = "The review-triggered ci-gate retrigger failed."
+          else:
+              title = "ci-gate failed."
 
           def api(path, method="GET", payload=None):
               request = urllib.request.Request(
@@ -167,19 +176,42 @@ jobs:
 
           if conclusion == "success":
               if old_id:
-                  api(f"/repos/{repo}/issues/comments/{old_id}", method="DELETE")
-                  print("gate passed; removed stale failure comment")
+                  # Flip the failure comment to a 'passed' state instead of
+                  # deleting it: a comment that silently vanishes looks like
+                  # the bot broke or the run hung, so the timeline keeps the
+                  # full failed -> passed trail. First-time passes post
+                  # nothing at all. The marker and head SHA stay in the
+                  # body so the next failure on this commit updates the
+                  # same comment back to the failure state.
+                  resolved = (
+                      f"{marker}\n"
+                      f"~~ci-gate failed~~ **Resolved: the ci-gate passed** for "
+                      f"commit {(head_sha or '')[:7]}. Keeping this comment so the "
+                      "history stays visible; it will be updated again if a "
+                      "later run on this commit fails."
+                  )
+                  if resolved == old_body:
+                      print("passed state unchanged; existing comment already up to date")
+                  else:
+                      api(f"/repos/{repo}/issues/comments/{old_id}", method="PATCH",
+                          payload={"body": resolved})
+                      print(f"marked the failure comment as passed on PR {pr}")
               else:
-                  print("gate passed; no failure comment to remove")
+                  print("gate passed; no failure comment to update")
               sys.exit(0)
 
+          # The gate aggregates every problem before failing, so the reason
+          # is often multi-line; quote each line so markdown renders the
+          # whole list as one blockquote.
+          quoted_reason = "\n".join(f"> {line}" for line in reason.splitlines())
           body = (
               f"{marker}\n"
-              "**ci-gate failed.** Reason:\n\n"
-              f"> {reason}\n\n"
+              f"**{title}** Reason:\n\n"
+              f"{quoted_reason}\n\n"
               f"See the [workflow run]({run_url}) for full logs. This "
               "comment is updated in place on each new failure and "
-              "removed once the gate passes."
+              "marked as passed once the gate passes (it is kept for "
+              "history, not deleted)."
           )
           # Per-file CODEOWNERS details: files still missing owner
           # approvals (with the exact owners to ask) and files with no
