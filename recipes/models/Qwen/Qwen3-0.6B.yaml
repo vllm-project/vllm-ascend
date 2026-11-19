@@ -15,7 +15,6 @@ model:
   architecture: dense
   parameter_count: 0.6B
   context_length: 40960
-  min_vllm_version: 0.21.0
 variants:
   default:
     precision: bf16
@@ -52,4 +51,5 @@ guide: |
   ## Ascend deployment
 
   This configuration serves the original BF16 weights with one Ascend chip.
+  Use the listed vLLM Ascend nightly image for your hardware. The A3 configuration was smoke-tested with vLLM 0.33.0 and vLLM Ascend build `405617bae227` from the A3 nightly image, using the CANNLab CANN 9.3.0 runtime.
   See the [Qwen3 Dense tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3-Dense.html) for the functional check, AIME 2025 accuracy example, and serving benchmarks.
