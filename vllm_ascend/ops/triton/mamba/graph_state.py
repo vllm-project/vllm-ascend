@@ -25,8 +25,14 @@ def _graph_state_kernel(
     BLOCK: tl.constexpr,
 ):
     group = tl.program_id(0)
-    source = tl.load(pointers + group * _POINTERS_PER_GROUP).to(tl.pointer_type(tl.int32))
     destination = tl.load(pointers + group * _POINTERS_PER_GROUP + 1).to(tl.pointer_type(tl.int32))
+    if actual_rows == 0:
+        # An empty source tensor may have a null data pointer; masked lanes
+        # still carry that base through pointer arithmetic, so use the valid
+        # destination as a dummy base. No source lane is read in this branch.
+        source = destination
+    else:
+        source = tl.load(pointers + group * _POINTERS_PER_GROUP).to(tl.pointer_type(tl.int32))
     for tile in range(tl.cdiv(graph_rows * WIDTH, BLOCK)):
         offsets = tile * BLOCK + tl.arange(0, BLOCK)
         rows = offsets // WIDTH
