@@ -35,6 +35,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 )
 
 from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
+from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
@@ -45,6 +46,7 @@ upstream_hc.hc_combine = hc_combine
 upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
+upstream_hc.GatedResidual = AscendTextGatedResidual
 
 # PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
 # internal formats are enabled. Scope the graph-safe option override to the
@@ -56,6 +58,7 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.GatedResidual = AscendTextGatedResidual
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
@@ -79,6 +82,12 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
@@ -106,6 +115,12 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
