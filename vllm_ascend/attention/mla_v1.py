@@ -377,9 +377,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             )
         if True in flashmla_choices or self.use_a3_mla_sink:
             impl = static_forward_context[layer_names[0]].impl
-            self.flashmla_state = FlashMLAMetadataBuilder(
-                impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
-            )
+            attn_mask = None if self.use_a3_mla_sink else self.attn_mask_builder.get_splitfuse_attn_mask()
+            self.flashmla_state = FlashMLAMetadataBuilder(impl, device, scheduler_config.max_num_seqs, attn_mask)
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
         """Keep FIA prefill metadata, but build decode inputs from device state."""
@@ -415,7 +414,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 self.num_prefills > 0,
                 retain_for_graph=retain_for_graph,
             )
-            decode_tokens = flash.query.shape[0]
+            decode_tokens = flash.slots.shape[0]
             decode = self.decode_metadata_cls(
                 input_positions=flash.positions,
                 block_table=flash.block_table,
@@ -1032,18 +1031,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
-        self.use_a3_mla_sink = (
-            supports_a3_mla(
-                self,
-                is_a3=get_ascend_device_type() == AscendDeviceType.A3,
-                is_draft=backends.model_tag == "dspark_head",
-                pd_supported=supports_component_major_mla_pd(self.vllm_config),
-            )
-            and get_a3_mla_ops() is not None
-        )
         self.a3_mla_adapter = None
-        if self.use_a3_mla_sink:
-            self.a3_mla_adapter = A3MLAAdapter.load(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype))
+        if supports_a3_mla(
+            self,
+            is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+            is_draft=backends.model_tag == "dspark_head",
+            pd_supported=supports_component_major_mla_pd(self.vllm_config),
+        ):
+            ops = get_a3_mla_ops()
+            if ops is not None:
+                self.a3_mla_adapter = A3MLAAdapter(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype), *ops)
+        self.use_a3_mla_sink = self.a3_mla_adapter is not None
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def _can_use_flashmla(self) -> bool:
@@ -2984,15 +2982,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
-        # Pack the separate NoPE (512) and RoPE (64) outputs into FlashMLA's
-        # TND(576) query. The backend retains this buffer for captured capacities
-        # so replay reuses its address.
-        flash.query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
-        flash.query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
+        if getattr(self, "use_a3_mla_sink", False):
+            query = (preprocessed.ql_nope, preprocessed.q_pe)
+        else:
+            query = flash.query
+            query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
+            query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
         output_kwargs = {"output_mask": flash.output_mask} if getattr(flash, "output_mask", None) is not None else {}
         latent, _ = flash.adapter.attention(
-            flash.query,
+            query,
             fused_cache,
             block_table=flash.block_table,
             cache_seqlens=flash.cache_lens,

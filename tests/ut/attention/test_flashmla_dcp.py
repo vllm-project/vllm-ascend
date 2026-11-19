@@ -824,8 +824,9 @@ def test_a3_dcp_defers_normalization_to_matching_consumers(runtime, monkeypatch,
             _v_up_proj_batch_major=lambda value: value,
         )
     )
+    assert flash.query is None
     if causal:
-        runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
+        assert flash.current.query is None
     preprocessed = SimpleNamespace(
         ql_nope=torch.zeros(4, 16, 512, dtype=torch.bfloat16),
         q_pe=torch.zeros(4, 16, 64, dtype=torch.bfloat16),

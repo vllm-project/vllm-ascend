@@ -199,7 +199,8 @@ class A3MLAAdapter:
         normalize_output=True,
     ):
         del attn_mask  # Mask semantics are explicit in cfg.mask_mode, never inferred from a tensor.
-        batch = self._check_lengths(cache_seqlens, cu_seqlens_q, seqused_q)
+        # The batch builder validated these length buffers when preparing metadata.
+        batch = cache_seqlens.numel()
         cfg = self.config
         if isinstance(q, tuple):
             qv, q_rope = q

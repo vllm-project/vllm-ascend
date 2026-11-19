@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -368,12 +369,19 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
     # the same retained buffers; masks must not be stale across graph replays.
     inputs.query_start_loc.copy_(torch.tensor([0, 1, 3], dtype=torch.int32))
     inputs.seq_lens.copy_(torch.tensor([0, 4], dtype=torch.int32))
-    third = builder.build(inputs, 2, 3, False)
+    with patch.object(torch, "searchsorted", wraps=torch.searchsorted) as lookup:
+        third = builder.build(inputs, 2, 3, False)
+    assert lookup.call_count == 1
     assert third.output_mask.data_ptr() == mask_ptr
     assert third.output_mask.tolist() == [True, False, False] + [True] * 5
     if split:
         assert third.current.output_mask.data_ptr() == current_mask_ptr
         assert third.current.output_mask.tolist() == third.output_mask.tolist()
+
+        inputs.query_start_loc.copy_(torch.tensor([0, 0, 3], dtype=torch.int32))
+        with_empty_request = builder.build(inputs, 2, 3, False)
+        assert with_empty_request.current.slots.tolist() == [0, 1, 2] + [-1] * 5
+        assert with_empty_request.current.output_mask.tolist() == [False] * 3 + [True] * 5
 
 
 @pytest.mark.parametrize("path", ["ordinary", "history", "current"])
@@ -381,9 +389,8 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
     monkeypatch.setattr(sink.A3MLAAdapter, "_check_lengths", lambda self, lengths, cu, used: lengths.numel())
 
     def provider(q, *args, **kwargs):
-        if path != "ordinary":
-            assert q.data_ptr() == q_pe.data_ptr()
-            assert kwargs["qv"].data_ptr() == q_nope.data_ptr()
+        assert q.data_ptr() == q_pe.data_ptr()
+        assert kwargs["qv"].data_ptr() == q_nope.data_ptr()
         # Finite invalid-row sentinels must be masked by the eventual consumer.
         return torch.ones(2, 8, 512, dtype=q.dtype), torch.zeros(8, 2), None, None
 
