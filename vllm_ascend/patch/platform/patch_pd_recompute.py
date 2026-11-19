@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
+from copy import deepcopy
 from functools import wraps
 from typing import Any
 
@@ -110,6 +111,11 @@ def _wrap_messages_full_converter(convert: Callable[..., Any]) -> Callable[..., 
         except json.JSONDecodeError as exc:
             transfer = response.kv_transfer_params or {}
             if transfer.get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_INTERRUPTED:
+                if response.choices[0].message.content:
+                    # Incomplete tool arguments must not hide the accompanying visible text.
+                    partial = deepcopy(response)
+                    partial.choices[0].message.tool_calls = []
+                    return convert(self, partial)
                 raise PDRecomputeError(PD_RECOMPUTE_INTERRUPTED, transfer) from exc
             raise
 

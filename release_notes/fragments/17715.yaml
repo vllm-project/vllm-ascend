@@ -11,6 +11,6 @@ entries:
       With matching Ascend backends, native Messages and Responses requests in the
       example proxy can retry decode recomputation through the load balancer.
       Text replies can continue from visible output with the remaining token
-      budget. Interrupted structured replies can restart, with partial
-      structured events held back until the attempt finishes. Server tools can
-      run again on a retry.
+      budget. Interrupted tool-call and thinking fragments are discarded;
+      only visible text is used to continue generation. Responses requests with server-side tools also end
+      with an error on recomputation to avoid repeating a tool call.

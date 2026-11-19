@@ -20,9 +20,8 @@
 #   enforce min_tokens=1 during prefill.
 # - Native recompute needs the matching Ascend decode scheduler and API server.
 #   On recompute the proxy selects a fresh P/D pair, up to --max-retries times.
-#   It continues visible text or retries the original input with the remaining
-#   token budget. Structured stream events are held until the attempt finishes.
-#   A retry can run backend tools again.
+#   It retries with the remaining token budget and continues plain text.
+#   Partial thinking and client-tool events are held until the attempt completes.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -127,7 +126,6 @@
 import argparse
 import asyncio
 import base64
-import copy
 import functools
 import hashlib
 import heapq
@@ -162,6 +160,7 @@ PD_RECOMPUTE_RESUME = "ascend_pd_recompute_resume"
 PD_CONTINUE_MESSAGE = "ascend_pd_continue_message"
 PD_RECOMPUTE_RETRY = "ascend_pd_recompute_before_output"
 PD_RECOMPUTE_INTERRUPTED = "ascend_pd_recompute_after_output"
+PD_RECOMPUTE_TOOL_REPLAY_BLOCKED = "ascend_pd_recompute_tool_replay_blocked"
 NATIVE_STREAM_START_EVENTS = ("message_start", "response.created", "response.in_progress", "ping")
 NATIVE_STREAM_END_EVENTS = ("message_stop", "response.completed", "response.incomplete", "response.failed", "error")
 MAX_DEFERRED_STREAM_BYTES = 64 * 1024
@@ -898,32 +897,16 @@ def build_prefill_request(req_data: dict) -> dict:
 
 
 def _api_kind(api: str) -> str:
-    path = "/" + api.strip("/")
-    if path.endswith("/responses"):
-        return "responses"
-    if path.endswith("/messages"):
-        return "messages"
-    return "openai"
+    endpoint = api.rstrip("/").rsplit("/", 1)[-1]
+    return endpoint if endpoint in ("messages", "responses") else "openai"
 
 
 def build_prefill_request_for_api(api: str, req_data: dict) -> dict:
-    if _api_kind(api) != "responses":
-        return build_prefill_request(req_data)
-    payload = req_data.copy()
-    payload["kv_transfer_params"] = {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-        "remote_engine_id": None,
-        "remote_block_ids": None,
-        "remote_host": None,
-        "remote_port": None,
-    }
-    payload["stream"] = False
-    payload["max_output_tokens"] = 1
-    payload.pop("max_tokens", None)
-    payload.pop("min_tokens", None)
-    payload.pop("stream_options", None)
-    payload.pop("max_completion_tokens", None)
+    payload = build_prefill_request(req_data)
+    if _api_kind(api) == "responses":
+        payload["max_output_tokens"] = 1
+        for name in ("max_tokens", "min_tokens", "max_completion_tokens"):
+            payload.pop(name, None)
     return payload
 
 
@@ -989,14 +972,15 @@ class SSEFrame:
     data_indices: list[int]
     data: dict | None
     event: bytes | None
+    complete: bool = True
 
     @classmethod
-    def parse(cls, frame: bytes) -> "SSEFrame":
+    def parse(cls, frame: bytes, *, complete: bool = True) -> "SSEFrame":
         lines = frame.splitlines(keepends=True)
         data_indices = [index for index, line in enumerate(lines) if line.startswith(b"data:")]
         payload = b"\n".join(lines[index][5:].strip() for index in data_indices)
         event = next((line[6:].strip() for line in reversed(lines) if line.startswith(b"event:")), None)
-        return cls(frame, lines, data_indices, _json_object(payload), event)
+        return cls(frame, lines, data_indices, _json_object(payload), event, complete)
 
     def encode(self) -> bytes:
         first = self.data_indices[0]
@@ -1011,33 +995,13 @@ class SSEFrame:
 
 def patch_cached_tokens_in_sse_frame(api: str, frame: bytes | SSEFrame, cached_tokens: int | None) -> bytes:
     parsed = SSEFrame.parse(frame) if isinstance(frame, bytes) else frame
-    if parsed.data is not None and write_cached_tokens_for_api(api, parsed.data, cached_tokens):
+    if parsed.complete and parsed.data is not None and write_cached_tokens_for_api(api, parsed.data, cached_tokens):
         return parsed.encode()
     return parsed.raw
 
 
-@dataclass(frozen=True)
-class RecomputeProgress:
-    output_tokens: int
-    remaining_tokens: int
-    input_tokens: int
-
-    @classmethod
-    def parse(cls, data: dict | None) -> "RecomputeProgress | None":
-        if data is None:
-            return None
-        used = data.get("output_tokens")
-        remaining = data.get("remaining_tokens")
-        prompt = data.get("input_tokens")
-        if type(used) is not int or type(remaining) is not int or type(prompt) is not int:
-            return None
-        if used <= 0 or remaining < 0 or prompt < 0:
-            return None
-        return cls(used, remaining, prompt)
-
-
 class DecodeRecompute(Exception):
-    def __init__(self, signal: str, progress: RecomputeProgress | None = None, partial: dict | None = None):
+    def __init__(self, signal: str, progress: dict | None = None, partial: dict | None = None):
         super().__init__(signal)
         self.signal = signal
         self.progress = progress
@@ -1049,23 +1013,22 @@ def _decode_recompute(obj: dict | None) -> DecodeRecompute | None:
         return None
     transfer = obj.get("kv_transfer_params")
     if isinstance(transfer, dict) and transfer.get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_INTERRUPTED:
-        return DecodeRecompute(PD_RECOMPUTE_INTERRUPTED, RecomputeProgress.parse(transfer), obj)
+        return DecodeRecompute(PD_RECOMPUTE_INTERRUPTED, transfer, obj)
     error = obj.get("error")
+    signals = (PD_RECOMPUTE_RETRY, PD_RECOMPUTE_INTERRUPTED)
     if isinstance(error, dict):
         message = error.get("message")
     elif obj.get("type") == "error":
         message = obj.get("message")
         code = obj.get("code")
-        if code in (PD_RECOMPUTE_RETRY, PD_RECOMPUTE_INTERRUPTED) and (
-            not isinstance(message, str) or not message.startswith(f"{code}:")
-        ):
+        if code in signals and (not isinstance(message, str) or not message.startswith(f"{code}:")):
             message = code
     else:
         return None
     if isinstance(message, str):
         signal, _, detail = message.partition(":")
-        if signal in (PD_RECOMPUTE_RETRY, PD_RECOMPUTE_INTERRUPTED):
-            progress = RecomputeProgress.parse(_json_object(detail.encode())) if detail else None
+        if signal in signals:
+            progress = _json_object(detail.encode()) if detail else None
             return DecodeRecompute(signal, progress)
     return None
 
@@ -1078,7 +1041,7 @@ class IncompleteDecodeResponse(Exception):
     """The native backend ended a non-streaming response without a JSON object."""
 
 
-async def _split_sse_frames(chunks: AsyncIterator[bytes]) -> AsyncGenerator[tuple[bytes, bool], None]:
+async def _split_sse_frames(chunks: AsyncIterator[bytes]) -> AsyncGenerator[SSEFrame, None]:
     stream_buf = bytearray()
     async for chunk in chunks:
         stream_buf += chunk
@@ -1093,9 +1056,9 @@ async def _split_sse_frames(chunks: AsyncIterator[bytes]) -> AsyncGenerator[tupl
             offset, size = min(boundaries)
             frame = bytes(stream_buf[: offset + size])
             del stream_buf[: offset + size]
-            yield frame, True
+            yield SSEFrame.parse(frame)
     if stream_buf:
-        yield bytes(stream_buf), False
+        yield SSEFrame.parse(bytes(stream_buf), complete=False)
 
 
 async def send_request_to_service(
@@ -1232,6 +1195,7 @@ async def assign_instances(
     else:
         prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
+    decoder_key = None
 
     try:
         response = await send_request_to_service(
@@ -1249,15 +1213,6 @@ async def assign_instances(
         elif not is_initial_request and _api_kind(api) != "openai":
             raise RetryPrefillMissingKV("Recompute prefill backend did not return KV transfer parameters.")
         prefiller_cached_tokens = extract_cached_tokens_for_api(api, response_json)
-    except (Exception, asyncio.CancelledError):
-        with CancelScope(shield=True):
-            await _abort_prefill_selection(
-                runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request
-            )
-        raise
-
-    decoder_key = None
-    try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
         decoder_key = decoder["key"]
         prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
@@ -1318,18 +1273,19 @@ def _encode_sse_event(data: dict) -> bytes:
 
 
 def _native_stream_error(api: str, signal: str, sequence: int) -> bytes:
-    message = _recompute_failure_message(signal)
-    if _api_kind(api) == "messages":
-        obj = _native_decode_error(api, signal, message)
-    else:
-        obj = {
-            "type": "error",
-            "code": signal,
-            "message": message,
-            "param": None,
-            "sequence_number": sequence,
-        }
-    return _encode_sse_event(obj)
+    error = _native_decode_error(api, signal, _recompute_failure_message(signal))
+    if _api_kind(api) != "messages":
+        error = {**error["error"], "type": "error", "sequence_number": sequence}
+    return _encode_sse_event(error)
+
+
+def _delta_text(event: dict) -> str:
+    delta = event.get("delta")
+    if event.get("type") == "content_block_delta" and isinstance(delta, dict) and delta.get("type") == "text_delta":
+        delta = delta.get("text")
+    elif event.get("type") != "response.output_text.delta":
+        return ""
+    return delta if isinstance(delta, str) else ""
 
 
 async def _native_sse_frames(chunks: AsyncIterator[bytes], state: "NativeStream") -> AsyncGenerator[bytes, None]:
@@ -1339,19 +1295,27 @@ async def _native_sse_frames(chunks: AsyncIterator[bytes], state: "NativeStream"
     attempt_committed = False
     decode = state.decode
     continuing = bool(decode.prefix)
-    defer_attempt = decode.buffer_output
+    defer_attempt = False
     finished_attempt = False
     async with aclosing(_split_sse_frames(chunks)) as frames:
-        async for raw_frame, complete in frames:
+        async for frame in frames:
+            raw_frame, complete = frame.raw, frame.complete
             if finished_attempt:
                 yield raw_frame
                 continue
-            frame = SSEFrame.parse(raw_frame)
             data = frame.data
             event = data.get("type") if data is not None else None
             if (event == "error" or frame.event == b"error") and (recompute := _decode_recompute(data)):
                 if attempt_committed and recompute.signal == PD_RECOMPUTE_RETRY:
                     raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
+                # Once a non-text block starts, its events stay private until the attempt finishes.
+                # Keep text generated later in that attempt, even if it followed a tool or thinking block.
+                delayed_text = "".join(_delta_text(held.data or {}) for held in deferred)
+                if delayed_text and recompute.signal == PD_RECOMPUTE_INTERRUPTED:
+                    for start in pending:
+                        yield start
+                    for outgoing in state.publish_text(delayed_text):
+                        yield outgoing
                 raise recompute
             preamble = (
                 event in NATIVE_STREAM_START_EVENTS
@@ -1418,6 +1382,8 @@ def _native_decode_error(api: str, signal: str, message: str) -> dict:
 
 
 def _recompute_failure_message(signal: str) -> str:
+    if signal == PD_RECOMPUTE_TOOL_REPLAY_BLOCKED:
+        return "Decode recompute interrupted this request. Retrying could repeat a server-side tool call."
     if signal == PD_RECOMPUTE_INTERRUPTED:
         return "Decode recompute interrupted generation; the proxy cannot resume the partial response."
     return "Decode recompute could not restart this request. Retry the original request if it is safe to repeat."
@@ -1427,15 +1393,34 @@ def _native_text_block(kind: str, obj: dict) -> dict | None:
     blocks = obj.get("content")
     if kind == "responses":
         output = obj.get("output")
-        if not output or len(output) != 1 or output[0].get("type") != "message":
+        if (
+            not isinstance(output, list)
+            or len(output) != 1
+            or not isinstance(output[0], dict)
+            or output[0].get("type") != "message"
+        ):
             return None
         blocks = output[0].get("content")
     block_type = "text" if kind == "messages" else "output_text"
-    if blocks and len(blocks) == 1:
+    if isinstance(blocks, list) and len(blocks) == 1:
         block = blocks[0]
-        if block.get("type") == block_type and isinstance(block.get("text"), str):
+        if isinstance(block, dict) and block.get("type") == block_type and isinstance(block.get("text"), str):
             return block
     return None
+
+
+def _visible_blocks(kind: str, obj: dict) -> Iterator[dict]:
+    if kind == "messages":
+        blocks = obj.get("content", [])
+        expected = "text"
+    else:
+        blocks = [
+            part for item in obj.get("output", []) if item.get("type") == "message" for part in item.get("content", [])
+        ]
+        expected = "output_text"
+    for block in blocks:
+        if block.get("type") == expected and isinstance(block.get("text"), str):
+            yield block
 
 
 def _continue_native_prompt(kind: str, history: Any, prefix: str) -> list | None:
@@ -1443,23 +1428,19 @@ def _continue_native_prompt(kind: str, history: Any, prefix: str) -> list | None
         history = [{"role": "user", "content": history}]
     if not isinstance(history, list):
         return None
-    last = history[-1] if history else {}
+    last = history[-1] if history and isinstance(history[-1], dict) else {}
+    assistant = last.get("role") == "assistant"
     if kind == "messages":
-        if isinstance(last, dict) and last.get("role") == "assistant":
+        if assistant:
             content = last.get("content")
-            if isinstance(content, str):
-                return [*history[:-1], {**last, "content": content + prefix}]
             if isinstance(content, list) and all(block.get("type") == "text" for block in content):
-                text = "".join(block["text"] for block in content)
-                return [*history[:-1], {**last, "content": text + prefix}]
-            return None
+                content = "".join(block["text"] for block in content)
+            if not isinstance(content, str):
+                return None
+            return [*history[:-1], {**last, "content": content + prefix}]
         return [*history, {"role": "assistant", "content": prefix}]
 
-    if (
-        isinstance(last, dict)
-        and last.get("role") == "assistant"
-        and last.get("status") in ("in_progress", "incomplete")
-    ):
+    if assistant and last.get("status") in ("in_progress", "incomplete"):
         block = _native_text_block(kind, {"output": [last]})
         if block is None:
             return None
@@ -1637,7 +1618,7 @@ class NativeStream:
                 if isinstance(index, int) and not self.merged_attempt_text:
                     event["index"] = index + 1
                 if event["type"] == "message_delta":
-                    self.decode.patch_usage(event, (self.envelope or {}).get("usage"))
+                    write_cached_tokens_for_api(self.decode.api, event, self.decode.info.prefiller_cached_tokens)
                 yield frame.encode()
             return
         yield from self.finish_responses(frames, data)
@@ -1656,9 +1637,12 @@ class NativeStream:
         output = response.get("output")
         if not isinstance(output, list):
             raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        native_item = output[0] if self.merged_attempt_text and output else {}
+        merge_first = self.merged_attempt_text or (
+            len(output) == 1 and output[0].get("type") == "message" and output[0].get("content") == []
+        )
+        native_item = output[0] if merge_first and output else {}
         native_parts = native_item.get("content", [])
-        if native_item and (not native_parts or native_parts[0].get("type") != "output_text"):
+        if native_parts and native_parts[0].get("type") != "output_text":
             raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
         text = self.decode.prefix + "".join(self.text)
         part = {**self.part, **(native_parts[0] if native_parts else {}), "text": text}
@@ -1670,8 +1654,8 @@ class NativeStream:
             "content": [part, *native_parts[1:]],
             "status": status,
         }
-        response["output"] = [item, *output[int(self.merged_attempt_text) :]]
-        self.decode.patch_usage(response)
+        response["output"] = [item, *output[int(merge_first) :]]
+        write_cached_tokens_for_api(self.decode.api, response, self.decode.info.prefiller_cached_tokens)
         indices = {"output_index": 0, "content_index": 0, "item_id": item["id"]}
         for event in (
             {"type": "response.output_text.done", **indices, "text": text, "logprobs": part.get("logprobs") or []},
@@ -1716,6 +1700,40 @@ class NativeStream:
         self.number(terminal)
         yield frames[-1].encode()
 
+    def publish_text(self, text: str) -> Iterator[bytes]:
+        """Publish held text in the existing plain-text block before rescheduling."""
+        if self.decode.kind == "messages":
+            if not self.block_open:
+                self.block_open = True
+                yield _encode_sse_event(
+                    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+                )
+            yield _encode_sse_event(
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}
+            )
+        else:
+            if self.item is None:
+                self.item = {
+                    "type": "message",
+                    "id": f"msg_{uuid.uuid4().hex}",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                }
+                event = {"type": "response.output_item.added", "output_index": 0, "item": self.item}
+                self.number(event)
+                yield _encode_sse_event(event)
+            indices = {"output_index": 0, "content_index": 0, "item_id": self.item["id"]}
+            if self.part is None:
+                self.part = {"type": "output_text", "text": "", "annotations": [], "logprobs": []}
+                event = {"type": "response.content_part.added", **indices, "part": self.part}
+                self.number(event)
+                yield _encode_sse_event(event)
+            event = {"type": "response.output_text.delta", **indices, "delta": text, "logprobs": []}
+            self.number(event)
+            yield _encode_sse_event(event)
+        self.text.append(text)
+
     def reset_attempt(self) -> None:
         self.text.clear()
         self.merged_attempt_text = False
@@ -1734,77 +1752,45 @@ class NativeStream:
 
 
 class NativeStreamingResponse(StreamingResponse):
-    def __init__(self, first_frame: bytes, frames: AsyncGenerator[bytes, None], decode: "NativeDecode"):
+    def __init__(self, first_frame: bytes, frames: AsyncGenerator[bytes, None]):
         self.frames = frames
-        self.decode = decode
         self.forward = self._forward(first_frame)
         super().__init__(self.forward, media_type="text/event-stream; charset=utf-8")
 
     async def _forward(self, first_frame: bytes) -> AsyncGenerator[bytes, None]:
-        try:
-            yield first_frame
-            async for frame in self.frames:
+        async with aclosing(self.frames):
+            async for frame in _replay_first_chunk(first_frame, self.frames):
                 yield frame
-        finally:
-            await self._finish()
-
-    async def _finish(self) -> None:
-        with CancelScope(shield=True):
-            try:
-                await self.frames.aclose()
-            finally:
-                await self.decode.finish()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
             with CancelScope(shield=True):
-                try:
+                async with aclosing(self.frames):
                     await self.forward.aclose()
-                finally:
-                    await self._finish()
 
 
 class NativeDecode:
-    """Own one logical request and its current prefill/decode reservation."""
+    """Keep one scheduled request alive across decode attempts."""
 
-    def __init__(self, api: str, req_data: dict, request_length: int, info: InstanceInfo):
+    def __init__(self, api: str, req_data: dict, info: InstanceInfo):
         self.api = api
         self.kind = _api_kind(api)
         self.req_data = req_data
-        self.request_length = request_length
         self.info = info
         self.runtime = get_runtime()
         self.args = get_global_args()
-        self.prefill_released = False
-        self.retries = 0
-        self.finished = False
         tools = req_data.get("tools") or []
-        has_server_tools = self.kind == "responses" and (
+        self.has_server_tools = self.kind == "responses" and (
             not isinstance(tools, list)
             or any(not isinstance(tool, dict) or tool.get("type") not in ("function", "custom") for tool in tools)
         )
-        if self.kind == "messages":
-            thinking = req_data.get("thinking") or {}
-            output_config = req_data.get("output_config") or {}
-            self.buffer_output = bool(thinking.get("type") in ("enabled", "adaptive") or output_config.get("format"))
-        else:
-            text_format = (req_data.get("text") or {}).get("format") or {}
-            self.buffer_output = bool(
-                has_server_tools
-                or text_format.get("type") not in (None, "text")
-                or req_data.get("include")
-                or req_data.get("structured_outputs")
-                or req_data.get("enable_response_messages")
-            )
         self.history_key = "messages" if self.kind == "messages" else "input"
         self.history = req_data.get(self.history_key)
+        self.prefill_released = False
+        self.retries = 0
         self.prefix = ""
-        self.output_tokens = 0
-        self.first_progress: RecomputeProgress | None = None
-        self.first_cached_tokens: int | None = None
-        self.partial: dict | None = None
 
     async def release_prefill_once(self) -> None:
         if not self.prefill_released:
@@ -1814,10 +1800,13 @@ class NativeDecode:
     async def chunks(self) -> AsyncGenerator[bytes, None]:
         client = await self.runtime.get_client(ServerRole.DECODE, self.info.decoder_key)
         payload = self.req_data.copy()
-        payload["vllm_xargs"] = {**(payload.get("vllm_xargs") or {}), PD_RECOMPUTE_ARG: PD_RECOMPUTE_VERSION}
-        payload["vllm_xargs"].pop(PD_RECOMPUTE_RESUME, None)
-        if not self.buffer_output:
-            payload["vllm_xargs"][PD_RECOMPUTE_RESUME] = PD_RECOMPUTE_VERSION
+        payload["vllm_xargs"] = {
+            **(payload.get("vllm_xargs") or {}),
+            PD_RECOMPUTE_ARG: PD_RECOMPUTE_VERSION,
+            PD_RECOMPUTE_RESUME: PD_RECOMPUTE_VERSION,
+        }
+        if self.has_server_tools:
+            payload["vllm_xargs"].pop(PD_RECOMPUTE_RESUME)
         async with aclosing(
             stream_service_response(
                 client,
@@ -1834,178 +1823,136 @@ class NativeDecode:
                     await self.release_prefill_once()
                 yield chunk
 
-    async def retry(self, recompute: DecodeRecompute, text: str | None = None) -> bool:
+    async def retry(self, recompute: DecodeRecompute, text: str) -> bool:
+        if self.has_server_tools:
+            raise DecodeRecompute(PD_RECOMPUTE_TOOL_REPLAY_BLOCKED) from recompute
         if self.retries >= self.args.max_retries:
             return False
         if recompute.signal == PD_RECOMPUTE_INTERRUPTED:
-            progress = recompute.progress
-            if progress is None or not progress.remaining_tokens:
+            progress = recompute.progress or {}
+            used = progress.get("output_tokens")
+            remaining = progress.get("remaining_tokens")
+            if type(used) is not int or type(remaining) is not int or used <= 0 or remaining <= 0:
                 return False
             budget_key = "max_tokens" if self.kind == "messages" else "max_output_tokens"
             budget = self.req_data.get(budget_key)
-            if isinstance(budget, int) and progress.output_tokens + progress.remaining_tokens > budget:
+            if isinstance(budget, int) and used + remaining > budget:
                 return False
-            prefix = self.prefix + text if text is not None else ""
-            history = _continue_native_prompt(self.kind, self.history, prefix) if prefix else None
-            if self.first_progress is None:
-                self.first_progress = progress
-                self.first_cached_tokens = self.info.prefiller_cached_tokens
-            if not prefix:
-                self.partial = None
-            elif self.partial is None:
-                self.partial = recompute.partial
-            if history is not None:
+            prefix = self.prefix + text
+            if prefix:
+                history = _continue_native_prompt(self.kind, self.history, prefix)
+                if history is None:
+                    return False
+                self.prefix = prefix
                 self.req_data[self.history_key] = history
-            elif self.prefix:
-                self.req_data[self.history_key] = self.history
-            self.prefix = prefix
-            self.output_tokens += progress.output_tokens
-            self.req_data[budget_key] = progress.remaining_tokens
+                if self.kind == "messages":
+                    self.req_data["vllm_xargs"] = {
+                        **(self.req_data.get("vllm_xargs") or {}),
+                        PD_CONTINUE_MESSAGE: PD_RECOMPUTE_VERSION,
+                    }
+            self.req_data[budget_key] = remaining
             if isinstance(minimum := self.req_data.get("min_tokens"), int):
-                self.req_data["min_tokens"] = max(0, minimum - progress.output_tokens)
-            if self.kind == "messages":
-                xargs = self.req_data.get("vllm_xargs") or {}
-                if history is not None:
-                    self.req_data["vllm_xargs"] = {**xargs, PD_CONTINUE_MESSAGE: PD_RECOMPUTE_VERSION}
-                elif PD_CONTINUE_MESSAGE in xargs:
-                    self.req_data["vllm_xargs"] = {k: v for k, v in xargs.items() if k != PD_CONTINUE_MESSAGE}
+                self.req_data["min_tokens"] = max(0, minimum - used)
+
         self.retries += 1
         await self.release_prefill_once()
         self.req_data.pop("kv_transfer_params", None)
         self.req_data["request_id"] = next_req_id()
-        if self.first_progress is not None:
-            self.request_length = len(json.dumps(self.req_data).encode("utf-8"))
+        request_length = len(json.dumps(self.req_data).encode("utf-8"))
         self.info = await reassign_instances(
-            self.api, self.req_data, self.request_length, self.info, previous_prefiller_kv_released=True
+            self.api, self.req_data, request_length, self.info, previous_prefiller_kv_released=True
         )
         self.prefill_released = False
         return True
 
-    def patch_usage(self, obj: dict, initial_usage: dict | None = None) -> bool:
-        first = self.first_progress
-        if first is None or not self.prefix:
-            return write_cached_tokens_for_api(self.api, obj, self.info.prefiller_cached_tokens)
-        usage = obj.get("usage")
-        if not isinstance(usage, dict):
-            return False
-        usage["output_tokens"] = self.output_tokens + (usage.get("output_tokens") or 0)
-        if self.kind == "messages" and "input_tokens" in usage:
-            usage["input_tokens"] = first.input_tokens
-            usage["cache_read_input_tokens"] = 0
-            if "cache_creation_input_tokens" in usage or initial_usage:
-                created = (initial_usage or {}).get("cache_creation_input_tokens") or 0
-                usage["cache_creation_input_tokens"] = created
-                usage["input_tokens"] -= created
-        elif self.kind == "responses":
-            usage["input_tokens"] = first.input_tokens
-            usage["total_tokens"] = first.input_tokens + usage["output_tokens"]
-            details = usage.get("input_tokens_details") or {}
-            if details.get("input_tokens_per_turn"):
-                details["input_tokens_per_turn"][0] = first.input_tokens
-            obj["max_output_tokens"] = first.remaining_tokens + first.output_tokens
-        write_cached_tokens_for_api(self.api, obj, self.first_cached_tokens)
-        return True
+    def json_body(self, body: bytes) -> bytes:
+        obj = _json_object(body)
+        if recompute := _decode_recompute(obj):
+            raise recompute
+        if obj is None:
+            raise IncompleteDecodeResponse("Decode backend did not return a complete JSON response.")
+        if self.prefix:
+            if self.kind == "messages":
+                blocks = obj["content"]
+                if not blocks or blocks[0].get("type") != "text":
+                    blocks.insert(0, {"type": "text", "text": ""})
+            else:
+                output = obj["output"]
+                if not output or output[0].get("type") != "message":
+                    output.insert(
+                        0,
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid.uuid4().hex}",
+                            "role": "assistant",
+                            "status": "incomplete" if obj.get("status") == "incomplete" else "completed",
+                            "content": [],
+                        },
+                    )
+                blocks = output[0]["content"]
+                if not blocks or blocks[0].get("type") != "output_text":
+                    blocks.insert(0, {"type": "output_text", "text": "", "annotations": []})
+            blocks[0]["text"] = self.prefix + blocks[0]["text"]
+        if write_cached_tokens_for_api(self.api, obj, self.info.prefiller_cached_tokens) or self.prefix:
+            return encode_response_chunk(obj, False)
+        return body
 
-    def merge_nonstream(self, obj: dict) -> None:
-        if self.partial is None:
-            return
-        block = _native_text_block(self.kind, obj)
-        if block is not None:
-            block["text"] = self.prefix + block["text"]
-            return
-        key = "content" if self.kind == "messages" else "output"
-        if not isinstance(obj.get(key), list):
-            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        partial = copy.deepcopy(self.partial[key][0])
-        if self.kind == "messages":
-            partial["text"] = self.prefix
-        else:
-            partial["content"][0]["text"] = self.prefix
-            partial["status"] = "incomplete" if obj["status"] == "incomplete" else "completed"
-        obj[key].insert(0, partial)
-
-    async def finish(self) -> None:
-        if not self.finished:
-            with CancelScope(shield=True):
-                await _finish_instance(self.runtime, self.info, release_prefill_kv=not self.prefill_released)
-            self.finished = True
-
-    async def nonstream(self) -> Response:
-        while True:
-            try:
-                async with aclosing(self.chunks()) as chunks:
-                    body = b"".join([chunk async for chunk in chunks])
-                obj = _json_object(body)
-                if recompute := _decode_recompute(obj):
-                    raise recompute
-                if obj is None:
-                    raise IncompleteDecodeResponse("Decode backend did not return a complete JSON response.")
-                self.merge_nonstream(obj)
-                if self.patch_usage(obj, (self.partial or {}).get("usage")) or self.partial is not None:
-                    body = encode_response_chunk(obj, False)
-                return Response(body, media_type="application/json")
-            except DecodeRecompute as exc:
-                block = (
-                    _native_text_block(self.kind, exc.partial)
-                    if exc.partial is not None and not self.buffer_output
-                    else None
-                )
-                if not await self.retry(exc, block["text"] if block else None):
-                    raise
-
-    async def stream(self) -> AsyncGenerator[bytes, None]:
-        state = NativeStream(self)
+    async def response_chunks(self, stream: bool) -> AsyncGenerator[bytes, None]:
+        state = NativeStream(self) if stream else None
         try:
             while True:
                 try:
-                    async with (
-                        aclosing(self.chunks()) as chunks,
-                        aclosing(_native_sse_frames(chunks, state)) as frames,
-                    ):
-                        async for frame in frames:
-                            state.sent = True
-                            yield frame
+                    async with aclosing(self.chunks()) as chunks:
+                        if state is not None:
+                            async with aclosing(_native_sse_frames(chunks, state)) as frames:
+                                async for frame in frames:
+                                    state.sent = True
+                                    yield frame
+                            return
+                        body = b"".join([chunk async for chunk in chunks])
+                    yield self.json_body(body)
                     return
                 except DecodeRecompute as exc:
-                    text = state.generated_text()
-                    if state.sent and not (self.prefix or text):
-                        raise
+                    if state is None:
+                        parts = _visible_blocks(self.kind, exc.partial or {})
+                        text = "".join(block["text"] for block in parts)
+                    else:
+                        text = state.generated_text()
+                        if state.sent and (not state.resumable or not (self.prefix or text)):
+                            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED) from exc
                     if not await self.retry(exc, text):
                         raise
-                    if state.sent:
-                        state.reset_attempt()
-                    else:
-                        state = NativeStream(self)
-        except DecodeRecompute as exc:
-            if not state.sent:
-                raise
-            signal = PD_RECOMPUTE_INTERRUPTED if self.prefix else exc.signal
-            yield _native_stream_error(self.api, signal, state.sequence + 1)
-        except (httpx.RequestError, httpx.HTTPStatusError, RetryPrefillMissingKV):
-            if not state.sent or self.first_progress is None:
+                    if state is not None:
+                        if state.sent:
+                            state.reset_attempt()
+                        else:
+                            state = NativeStream(self)
+        except DecodeRecompute:
+            if state is None or not state.sent:
                 raise
             yield _native_stream_error(self.api, PD_RECOMPUTE_INTERRUPTED, state.sequence + 1)
-
-
-async def _handle_native_decode(api: str, req_data: dict, request_length: int, instance_info: InstanceInfo) -> Response:
-    decode = NativeDecode(api, req_data, request_length, instance_info)
-    if not req_data.get("stream", False):
-        try:
-            return await decode.nonstream()
+        except (httpx.RequestError, httpx.HTTPStatusError, RetryPrefillMissingKV):
+            if state is None or not state.sent or not self.prefix:
+                raise
+            yield _native_stream_error(self.api, PD_RECOMPUTE_INTERRUPTED, state.sequence + 1)
         finally:
-            await decode.finish()
+            with CancelScope(shield=True):
+                await _finish_instance(self.runtime, self.info, release_prefill_kv=not self.prefill_released)
 
-    frames = decode.stream()
-    try:
-        first_frame = await anext(frames, None)
-    except (Exception, asyncio.CancelledError):
-        await decode.finish()
-        raise
+
+async def _handle_native_decode(api: str, req_data: dict, instance_info: InstanceInfo) -> Response:
+    decode = NativeDecode(api, req_data, instance_info)
+    stream = bool(req_data.get("stream", False))
+    frames = decode.response_chunks(stream)
+    if not stream:
+        async with aclosing(frames):
+            return Response(await anext(frames), media_type="application/json")
+
+    first_frame = await anext(frames, None)
     if first_frame is None:
-        await decode.finish()
         return Response(b"", media_type="text/event-stream; charset=utf-8")
 
-    return NativeStreamingResponse(first_frame, frames, decode)
+    return NativeStreamingResponse(first_frame, frames)
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -2046,7 +1993,7 @@ async def handle_completions_impl(api: str, request: Request):
         if _api_kind(api) != "openai":
             native_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
             try:
-                return await _handle_native_decode(api, req_data, request_length, native_info)
+                return await _handle_native_decode(api, req_data, native_info)
             except DecodeRecompute as exc:
                 return JSONResponse(
                     _native_decode_error(api, exc.signal, _recompute_failure_message(exc.signal)),

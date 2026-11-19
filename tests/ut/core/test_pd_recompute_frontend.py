@@ -140,7 +140,8 @@ def test_native_resume_preserves_partial_text_and_budget(output_kind, serialize_
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_messages_partial_tool_arguments_keep_private_recompute_signal(interrupted):
+@pytest.mark.parametrize("text", [None, "visible prefix"])
+def test_messages_partial_tool_arguments_keep_private_recompute_signal(interrupted, text):
     progress = {
         PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED,
         "output_tokens": 3,
@@ -151,7 +152,7 @@ def test_messages_partial_tool_arguments_keep_private_recompute_signal(interrupt
     choice = SimpleNamespace(
         finish_reason="length",
         stop_reason=None,
-        message=SimpleNamespace(reasoning=None, content=None, tool_calls=[tool_call]),
+        message=SimpleNamespace(reasoning=None, content=text, tool_calls=[tool_call]),
     )
     partial = SimpleNamespace(
         id="chatcmpl-1",
@@ -162,6 +163,12 @@ def test_messages_partial_tool_arguments_keep_private_recompute_signal(interrupt
         choices=[choice],
     )
     frontend = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    if interrupted and text:
+        result = frontend.messages_full_converter(partial)
+        assert [block.text for block in result.content] == [text]
+        assert result.kv_transfer_params == progress
+        assert choice.message.tool_calls == [tool_call]
+        return
     with pytest.raises(PDRecomputeError if interrupted else json.JSONDecodeError) as error:
         frontend.messages_full_converter(partial)
     if interrupted:
