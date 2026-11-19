@@ -40,10 +40,10 @@ Diff Coverage column. The output is a 4x3 markdown table:
     | ------------ | --------------   | ------------- |
     | **Total**    | 145055 lines     | 191 lines     |
     | **Missing**  | 41592 lines      | 85 lines      |
-    | **Coverage** | <b>71%</b> | <span style="color:red">55%</span> |
+    | **Coverage** | 71% | <mark>~~***55%***~~<mark> |
 
-Coverage cells render with red inline text (<span style="color:red">) when
-below the threshold (Total < 70%, Diff < 80%), bold when at/above.
+Coverage cells render as highlighted strikethrough-bold-italic when below
+the threshold (Total < 70%, Diff < 80%), plain when at/above.
 """
 
 import argparse
@@ -122,13 +122,13 @@ def extract_total_coverage(json_text: str) -> dict | None:
 
 
 def _fmt_coverage(pct: float, threshold: float) -> str:
-    """Format a coverage cell: red text below threshold, bold at/above."""
+    """Format a coverage cell: highlight below threshold, plain at/above."""
     pct_str = f"{pct}%"
     if isinstance(pct, float) and pct.is_integer():
         pct_str = f"{int(pct)}%"
     if pct < threshold:
-        return f'<span style="color:red">{pct_str}</span>'
-    return f"<b>{pct_str}</b>"
+        return f"<mark>~~***{pct_str}***~~<mark>"
+    return pct_str
 
 
 def build_table(total: dict, diff: dict | None, summary_url: str = "") -> str:
