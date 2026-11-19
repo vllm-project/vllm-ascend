@@ -212,10 +212,19 @@ class Orchestrator:
             f.write(prompt)
 
         cmd = os.environ.get("AI_REVIEW_DSH_CMD", "dsh --profile headless").split()
-        env = os.environ.copy()
-        # Picked up by dsh's config surface once confirmed in the smoke test;
-        # harmless to expose until then.
-        env.setdefault("AI_REVIEW_MODEL", "deepseek-v4.1-flash")
+        # The agent process gets ONLY the model credentials and the model
+        # name — never GH_TOKEN. Every GitHub API call is made by this
+        # orchestrator; the agent's output is parsed text we post ourselves.
+        # This keeps a prompt-injected PR diff from reaching any repo token.
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "AI_REVIEW_KEY": os.environ.get("AI_REVIEW_KEY", ""),
+            "AI_REVIEW_API": os.environ.get("AI_REVIEW_API", ""),
+            # Picked up by dsh's config surface once confirmed in the smoke
+            # test; harmless to expose until then.
+            "AI_REVIEW_MODEL": os.environ.get("AI_REVIEW_MODEL", "deepseek-v4.1-flash"),
+        }
         with open(out_file, "w") as out:
             subprocess.run([*cmd, prompt_file], stdout=out, check=True, env=env)
 
