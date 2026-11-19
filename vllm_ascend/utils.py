@@ -246,10 +246,6 @@ def model_uses_kimi_kda(model_config: Any | None) -> bool:
     )
 
 
-def supports_qkv_iproj_tp(model_type: str) -> bool:
-    return model_type in ("glm5_next", "glm5_next_text", "kimi_k31")
-
-
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
@@ -1475,10 +1471,9 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_context_moe_model:
         return True
     if getattr(ascend_config.finegrained_tp_config, "qkv_iproj_tensor_parallel_size", 1) > 1:
-        spec = vllm_config.speculative_config
-        model = spec.draft_model_config if is_draft_model and spec is not None else vllm_config.model_config
-        if model is not None and supports_qkv_iproj_tp(model.hf_config.model_type):
-            return False
+        # MoE target/draft QKV exchanges need a uniform capacity. Dense
+        # drafters returned above and do not execute these projections.
+        return False
     # Projection collectives belong to the target's execution plan. A dense
     # drafter does not run them and must retain its rank-local K=0 fast path.
     if not is_draft_model and any(

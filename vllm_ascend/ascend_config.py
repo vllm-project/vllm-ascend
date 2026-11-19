@@ -1515,16 +1515,13 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        from vllm_ascend.utils import model_uses_kimi_kda, supports_qkv_iproj_tp
+        from vllm_ascend.utils import model_uses_kimi_kda
 
         projection_tp = self.gproj_tensor_parallel_size > 1 or (
             self.qkv_iproj_tensor_parallel_size > 1 and model_uses_kimi_kda(vc.model_config)
         )
         shared_tp = self.shared_expert_tensor_parallel_size > 1
         if self.qkv_iproj_tensor_parallel_size > 1:
-            model_type = vc.model_config.hf_config.model_type
-            if not supports_qkv_iproj_tp(model_type):
-                raise ValueError(f"QKV input projection TP is not supported for model_type={model_type!r}.")
             parallel = vc.parallel_config
             if (
                 parallel.tensor_parallel_size != 1
@@ -1534,6 +1531,12 @@ class FinegrainedTPConfig:
                 raise ValueError("QKV input projection TP requires TP=1, PCP=1 and PP=1.")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise ValueError("QKV input projection TP is supported only on a PD decode node.")
+            text_config = vc.model_config.hf_text_config
+            if getattr(text_config, "model_type", None) in ("glm5_next", "glm5_next_text"):
+                if text_config.linear_num_heads % self.qkv_iproj_tensor_parallel_size:
+                    raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
+            elif vc.model_config.hf_config.model_type != "kimi_k31":
+                raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash and Kimi-K3.1 only.")
             enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
         if projection_tp or shared_tp:
             parallel = vc.parallel_config

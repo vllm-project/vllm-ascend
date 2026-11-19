@@ -1535,10 +1535,12 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.model_config.hf_text_config.model_type = "other"
-        with self.assertRaisesRegex(ValueError, "model_type='other'"):
+        with self.assertRaisesRegex(ValueError, "supports GLM-5.3-Flash and Kimi-K3.1 only"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         for size in (0, 1):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)._validate_preconditions(vc)
+        with self.assertRaisesRegex(ValueError, "divide the KDA head count"):
+            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=3)._validate_preconditions(deployment())
         vc = deployment()
         vc.parallel_config.data_parallel_size = 6
         with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):

@@ -221,7 +221,7 @@ def test_kimi_k31_qkv_tp_uses_the_outer_model_type():
     config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)
     config._validate_preconditions(vc)
     vc.model_config.hf_config.model_type = "kimi_k3"
-    with pytest.raises(ValueError, match="model_type='kimi_k3'"):
+    with pytest.raises(ValueError, match="supports GLM-5.3-Flash and Kimi-K3.1 only"):
         config._validate_preconditions(vc)
 
 
@@ -246,8 +246,7 @@ def test_projection_config_requires_runtime_graph_guard(knob):
 @pytest.mark.parametrize("dcp", [1, 2])
 def test_glm_qkv_keeps_eager_execution_contract(runner_v2, dcp):
     vc = valid_config()
-    vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next")
-    vc.model_config.hf_config = vc.model_config.hf_text_config
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", linear_num_heads=4)
     vc.use_v2_model_runner = runner_v2
     vc.parallel_config.decode_context_parallel_size = dcp
     vc.compilation_config.cudagraph_mode = CUDAGraphMode.NONE

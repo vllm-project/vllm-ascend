@@ -945,13 +945,8 @@ def test_finegrained_tp_enable_requires_weight_sharding(knob, enable_fn, size, e
 
 @pytest.mark.parametrize("input_proj_tp_size", [1, 2, 4])
 @pytest.mark.parametrize("is_draft", [False, True])
-@pytest.mark.parametrize("draft_type", ["glm5_next", "glm5_next_mtp"])
-def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft, draft_type):
+def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_draft):
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31")),
-        speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=draft_type))
-        ),
         kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
         compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
@@ -968,8 +963,7 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 128)
     monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
     monkeypatch.setattr(ascend_forward_context, "select_moe_comm_method", lambda *_: MoECommType.MC2)
-    skip = input_proj_tp_size == 1 or (is_draft and draft_type == "glm5_next_mtp")
-    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is skip
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
 
 
 @pytest.mark.parametrize("v2", [False, True])
@@ -993,7 +987,4 @@ def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, dra
     monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
     monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
     monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: False)
-    vc = SimpleNamespace(
-        speculative_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31"))
-    )
-    assert utils.should_skip_allreduce_across_dp_group(vc, is_draft_model=draft) is draft
+    assert utils.should_skip_allreduce_across_dp_group(SimpleNamespace(), is_draft_model=draft) is draft
