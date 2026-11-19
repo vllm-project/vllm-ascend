@@ -9,14 +9,9 @@ upstream positional ABI and derive NPU launch metadata from tensors and scalar
 arguments. Request lifecycle and execution ordering remain with the upstream
 speculator.
 
-The worker's patch_triton module installs launch adapters once at startup.
-Their bindings persist for that worker process, including direct upstream
-suffix calls. Remove the rebinds when upstream supports device kernel dispatch.
+Launch functions derive their grids from tensor metadata and scalar arguments
+rather than consuming the caller's grid.
 """
-
-from collections.abc import Callable
-from dataclasses import dataclass
-from functools import partial
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -534,7 +529,6 @@ def _suffix_clear_observed_kernel(
 
 
 def launch_suffix_local_scan(
-    grid: tuple[int, ...],
     token_ids: torch.Tensor,
     _token_ids_stride: int,
     idx_mapping: torch.Tensor,
@@ -547,10 +541,12 @@ def launch_suffix_local_scan(
 ) -> None:
     """Launch the NPU history scan using the upstream positional launch ABI.
 
-    Strides come from the actual tensors. The caller supplies the number of
-    active requests through grid metadata, so no device-to-host read is needed.
+    Strides come from the actual tensors. The active request count comes
+    from idx_mapping, not the capacity of the history or scratch buffers.
+    Reading tensor metadata requires no device-to-host transfer.
     """
-    _suffix_local_scan_kernel[(grid[0], scratch.shape[1])](
+    num_reqs = idx_mapping.shape[0]
+    _suffix_local_scan_kernel[(num_reqs, scratch.shape[1])](
         token_ids,
         token_ids.stride(0),
         idx_mapping,
@@ -564,7 +560,6 @@ def launch_suffix_local_scan(
 
 
 def launch_suffix_finalize(
-    grid: tuple[int, ...],
     token_ids: torch.Tensor,
     _token_ids_stride: int,
     idx_mapping: torch.Tensor,
@@ -587,12 +582,13 @@ def launch_suffix_finalize(
     **launch_options,
 ) -> None:
     """Select history/corpus drafts and emit confidence with NPU kernels."""
+    num_reqs = idx_mapping.shape[0]
     # Keep corpus voting matrices two-dimensional for a one-token draft;
     # A5 cannot lower the unit-width boolean gather in that path.
     launch_options["K_PO2"] = max(2, triton.next_power_of_2(launch_options["K"]))
     launch_options["DEPTH_PO2"] = triton.next_power_of_2(launch_options["MAX_DEPTH"])
     launch_options["NB_PO2"] = triton.next_power_of_2(num_blocks)
-    _suffix_finalize_kernel[(grid[0],)](
+    _suffix_finalize_kernel[(num_reqs,)](
         token_ids,
         token_ids.stride(0),
         idx_mapping,
@@ -617,7 +613,6 @@ def launch_suffix_finalize(
 
 
 def launch_suffix_observe(
-    grid: tuple[int, ...],
     idx_mapping: torch.Tensor,
     num_sampled: torch.Tensor,
     num_rejected: torch.Tensor,
@@ -626,15 +621,13 @@ def launch_suffix_observe(
     last_valid: torch.Tensor,
     **launch_options,
 ) -> None:
-    """Translate upstream's request grid to the NPU statistics-bucket grid.
+    """Reduce active requests into NPU statistics buckets.
 
     Preserve the parent observer's consumption semantics. Clearing previous
     buckets inside the reduction kernel would race the other bucket programs,
     so it runs as a second launch on the same stream after all reductions.
     """
-    num_reqs = grid[0]
-    if num_reqs == 0:
-        return
+    num_reqs = idx_mapping.shape[0]
     launch_options["K_PO2"] = triton.next_power_of_2(launch_options["K"])
     launch_options["REQS_PO2"] = triton.next_power_of_2(num_reqs)
     launch_options["num_warps"] = 4
@@ -659,7 +652,6 @@ def launch_suffix_observe(
 
 
 def launch_suffix_ingest(
-    _grid: tuple[int, ...],
     token_ids: torch.Tensor,
     _token_ids_stride: int,
     docs: torch.Tensor,
@@ -675,8 +667,6 @@ def launch_suffix_ingest(
     **launch_options,
 ) -> None:
     """Append completed responses and build indexes without owning their lifecycle."""
-    if num_docs == 0:
-        return
     grid = (num_docs, triton.cdiv(token_ids.shape[1], launch_options["BLOCK"]))
     _suffix_ingest_kernel[grid](
         token_ids,
@@ -693,13 +683,3 @@ def launch_suffix_ingest(
         table,
         **launch_options,
     )
-
-
-@dataclass(frozen=True)
-class SuffixKernelLaunchAdapter:
-    """Expose a host launch function through the upstream kernel[grid](...) ABI."""
-
-    launch: Callable
-
-    def __getitem__(self, grid: tuple[int, ...]) -> Callable:
-        return partial(self.launch, grid)
