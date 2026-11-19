@@ -110,8 +110,7 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 `token_repeat` uses a fixed pattern-based rule set with 64 raw-token check
 boundaries and a final partial-block flush. The native CPU extension lives
 in-tree at `vllm_ascend/.../native_pattern/` and is compiled when you build
-or install vllm-ascend; there is no separate pip package. (Helper notes under
-`tools/token_repeat_pattern/` point at the same sources.)
+or install vllm-ascend; there is no separate pip package.
 
 Alert thresholds, short on-call titles, and long rule ids live in packaged
 `native_pattern/pattern.json` (loaded once at detector init; not a
