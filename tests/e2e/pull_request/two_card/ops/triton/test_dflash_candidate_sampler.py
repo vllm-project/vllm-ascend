@@ -6,11 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
 from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as dflash2_speculator
 
+import vllm_ascend.ops.rotary_embedding as rope_module
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
+import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
@@ -44,9 +47,6 @@ def test_stable_gumbel_matches_fp64_reference():
 @pytest.mark.parametrize("mrope", [False, True])
 def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype, mrope):
     """Both NPU RoPE backends must write rotated context K, including key-only calls."""
-    import vllm_ascend.ops.rotary_embedding as rope_module
-    from vllm_ascend.patch.worker.patch_qwen3_dflash import precompute_and_store_context_kv
-
     monkeypatch.setattr(rope_module, "HAS_TRITON", use_triton)
     torch.manual_seed(7)
     layers, tokens, heads, head_dim = 2, 3, 2, 64
@@ -75,17 +75,18 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
         return rope.forward_oot(pos, query, key)
 
     caches = [SimpleNamespace(impl=MagicMock(), kv_cache=object()) for _ in range(layers)]
-    model = SimpleNamespace(
-        _num_attn_layers=layers,
-        _kv_size=heads * head_dim,
-        _head_dim=head_dim,
-        _num_kv_heads=heads,
-        _project_context_kv=lambda *args: (keys.clone(), values.clone()),
-        layers=[SimpleNamespace(self_attn=SimpleNamespace(k_norm=torch.nn.Identity(), rotary_emb=rotate))] * layers,
-        _attn_layers=caches,
-    )
+    model = DFlashQwen3Model.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace()
+    model._num_attn_layers = layers
+    model._kv_size = heads * head_dim
+    model._head_dim = head_dim
+    model._num_kv_heads = heads
+    model._project_context_kv = lambda *args: (keys.clone(), values.clone())
+    model.layers = [SimpleNamespace(self_attn=SimpleNamespace(k_norm=torch.nn.Identity(), rotary_emb=rotate))] * layers
+    model._attn_layers = caches
     mapping = torch.arange(tokens, dtype=torch.int32, device="npu")
-    precompute_and_store_context_kv(model, torch.zeros(tokens, heads * head_dim, device="npu"), positions, mapping)
+    model.precompute_and_store_context_kv(torch.zeros(tokens, heads * head_dim, device="npu"), positions, mapping)
 
     original = keys.cpu().float()
     cos, sin = cache.cpu().float()[positions.cpu()].chunk(2, dim=-1)
