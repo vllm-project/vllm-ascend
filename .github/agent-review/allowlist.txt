@@ -8,3 +8,9 @@
 # To shrink/roll back the POC: remove lines here — no code change needed.
 #
 # Maintainers: keep this list small (3–5) during the POC.
+wxsIcey
+ShyRa1n
+kunpengW-code
+drslark
+lcfenglinwan
+wangxiyuan
