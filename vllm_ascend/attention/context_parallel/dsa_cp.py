@@ -24,7 +24,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    get_effective_prefill_flags,
+    apply_prefill_as_decode_mask,
     has_effective_prefill,
     uses_pcp_sharded_layout,
 )
@@ -258,7 +258,11 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
             positions=global_batch.positions,
             attn_state=global_batch.attn_state,
             num_input_tokens=global_batch.num_tokens_after_padding,
-            is_prefilling=torch.from_numpy(get_effective_prefill_flags(global_batch)),
+            is_prefilling=torch.from_numpy(
+                apply_prefill_as_decode_mask(
+                    global_batch.is_prefilling_np, getattr(global_batch, "prefill_runs_as_decode_np", None)
+                )
+            ),
         )
 
     def _build_local_common_attn_metadata(

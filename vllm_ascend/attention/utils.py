@@ -40,30 +40,31 @@ from vllm_ascend.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
-def get_effective_prefill_flags(batch: Any) -> np.ndarray:
-    """Return request phases after PCP's prefill-as-decode override."""
-    is_prefilling_source = getattr(batch, "is_prefilling_np", None)
-    if is_prefilling_source is None:
-        is_prefilling_source = batch.is_prefilling
-    is_prefilling = np.asarray(is_prefilling_source, dtype=np.bool_)
-    prefill_runs_as_decode = getattr(batch, "prefill_runs_as_decode_np", None)
+def apply_prefill_as_decode_mask(
+    is_prefilling: np.ndarray | torch.Tensor,
+    prefill_runs_as_decode: np.ndarray | torch.Tensor | None = None,
+) -> np.ndarray:
+    """Return effective request phases from host masks without modifying the inputs."""
+    flags = np.asarray(is_prefilling, dtype=np.bool_)
     if prefill_runs_as_decode is None:
-        return is_prefilling
-    prefill_runs_as_decode = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
-    if prefill_runs_as_decode.shape != is_prefilling.shape:
+        return flags
+    override = np.asarray(prefill_runs_as_decode, dtype=np.bool_)
+    if override.shape != flags.shape:
         raise RuntimeError(
-            "Prefill-as-decode mask must match the request phase mask: "
-            f"{prefill_runs_as_decode.shape} != {is_prefilling.shape}."
+            f"Prefill-as-decode mask must match the request phase mask: {override.shape} != {flags.shape}."
         )
-    return is_prefilling & ~prefill_runs_as_decode
+    return flags & ~override
 
 
-def has_effective_prefill(batch: Any) -> bool:
-    """Whether a batch still contains requests computed by the prefill path."""
-    return bool(get_effective_prefill_flags(batch).any())
+def has_effective_prefill(batch: "InputBatch") -> bool:
+    """Whether an input batch still contains requests computed by the prefill path."""
+    flags = apply_prefill_as_decode_mask(batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None))
+    return bool(flags.any())
 
 
 # Native npu_attention_update accepts at most 16 output/LSE pairs.

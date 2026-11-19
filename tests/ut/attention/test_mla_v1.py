@@ -1514,6 +1514,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             num_scheduled_tokens=np.ones(3, dtype=np.int32),
             query_start_loc_np=np.arange(4, dtype=np.int32),
             query_start_loc=torch.arange(4, dtype=torch.int32),
+            max_query_len=None,
             is_prefilling_np=np.array([False, True, True]),
             prefill_runs_as_decode_np=np.array([False, True, False]),
             seq_lens=torch.tensor([64, 65, 1]),

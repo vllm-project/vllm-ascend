@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
-from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -146,7 +145,13 @@ def runtime(monkeypatch):
         return install(name, **runpy.run_path(str(ROOT / relative)))
 
     install("vllm_ascend")
-    utils = install("vllm_ascend.attention.utils", get_flashmla_ops=lambda: None, get_quant_flashmla_ops=lambda: None, np=np, Any=Any)
+    utils = install(
+        "vllm_ascend.attention.utils",
+        get_flashmla_ops=lambda: None,
+        get_quant_flashmla_ops=lambda: None,
+        np=np,
+        torch=torch,
+    )
     tree = ast.parse((ROOT / "vllm_ascend/attention/utils.py").read_text(encoding="utf-8"))
     constant = next(
         node
@@ -155,7 +160,7 @@ def runtime(monkeypatch):
         and any(isinstance(target, ast.Name) and target.id == "MLA_FLASH_SUPPORTED_Q_HEADS" for target in node.targets)
     )
     prefill_flags = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_effective_prefill_flags"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "apply_prefill_as_decode_mask"
     )
     exec(
         compile(ast.Module(body=[constant, prefill_flags], type_ignores=[]), "<attention-utils>", "exec"),

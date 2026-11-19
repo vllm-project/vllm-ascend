@@ -297,8 +297,11 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
         elif field != "req_ids":
             assert actual == expected
     assert uniform == (None if has_prefill or graph_eligible is False else 1)
+    prefill_runs_as_decode = getattr(result, "prefill_runs_as_decode_np", None)
     common = SimpleNamespace(
-        is_prefilling=torch.from_numpy(flashmla.get_effective_prefill_flags(result)),
+        is_prefilling=torch.from_numpy(
+            flashmla.apply_prefill_as_decode_mask(result.is_prefilling_np, prefill_runs_as_decode)
+        ),
         query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
         num_reqs=4,
         num_actual_tokens=3,

@@ -1966,6 +1966,14 @@ def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
         assert manager.get_num_tokens_for_dispatch(result.num_scheduled_tokens, result.is_prefilling_np) == 2
 
 
+def test_dispatch_rejects_override_with_different_request_shape():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.set_dispatch_batch_req_state(SimpleNamespace(prefill_runs_as_decode_np=np.array([True, False, False])))
+
+    with pytest.raises(RuntimeError, match="Prefill-as-decode mask must match the request phase mask"):
+        manager.get_num_tokens_for_dispatch(np.array([1, 1]), np.array([True, False]))
+
+
 def _hook_manager() -> AscendPCPManager:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.vllm_config = SimpleNamespace(
