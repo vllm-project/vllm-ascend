@@ -1127,6 +1127,43 @@ class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
+    def test_hybrid_get_failure_is_independent_of_partial_hit_capability(self):
+        for partial_hits in (False, True):
+            for result in (None, [], [0, 0], [-1]):
+                with self.subTest(partial_hits=partial_hits, result=result):
+                    store = FakeStore()
+                    store.get = MagicMock(return_value=result)
+                    db = MaskedFakeTokenDatabase(masks=([True], [True]))
+                    db.cache_coordinator = MagicMock(enable_partial_hash_hits=partial_hits)
+                    db.process_token_key_strings_with_block_ids = MagicMock(
+                        return_value=iter([(0, 16, "key", b"hash", 1)])
+                    )
+                    thread = KVCacheStoreRecvingThread(
+                        m_store=store,
+                        token_database=db,
+                        block_size=16,
+                        tp_rank=0,
+                        dcp_size=1,
+                        ready_event=threading.Event(),
+                        invalid_block_ids=set(),
+                        invalid_block_ids_lock=threading.Lock(),
+                    )
+                    request = ReqMeta(
+                        "hybrid",
+                        block_ids_by_group=[[1], [2]],
+                        kv_cache_group_ids=[0],
+                        block_hashes=[b"hash"],
+                        can_save=True,
+                        load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                    )
+                    thread.request_queue.put(request)
+                    thread._handle_request(request)
+                    self.assertEqual(thread.get_and_clear_failed_requests(), {"hybrid"})
+                    self.assertEqual(thread._invalid_block_ids, set())
+                    self.assertFalse(request.can_save)
+                    self.assertEqual(thread.get_and_clear_finished_requests(), {"hybrid"})
+                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+
     def test_handle_request(self):
         store = FakeStore()
         db = FakeTokenDatabase()

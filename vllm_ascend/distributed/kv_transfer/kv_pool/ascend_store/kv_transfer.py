@@ -1143,13 +1143,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if (
-                isinstance(self.m_store, MemcacheBackend)
-                or (
-                    self.token_database.cache_coordinator is not None
-                    and self.token_database.cache_coordinator.enable_partial_hash_hits
-                )
-            ) and (ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)):
+            if (isinstance(self.m_store, MemcacheBackend) or len(req_meta.block_ids_by_group) > 1) and (
+                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
+            ):
                 self._mark_failed_requests([req_meta])
                 self.set_finished_request(req_id)
                 return
