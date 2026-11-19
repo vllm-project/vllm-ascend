@@ -18,8 +18,14 @@
 from typing import Any
 
 import torch
+import torch_npu
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from ..base import QuantType
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
+from vllm_ascend.utils import dispose_tensor
+
+from ..base import PreparedLinearInput, QuantType
 from ..registry import register_scheme
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 
@@ -33,7 +39,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     """
 
     act_quant_type: torch.dtype = torch.float8_e4m3fn
-    supports_tp_weight_switch = False
+    supports_weight_switch = False
 
     def __init__(self):
         pass
@@ -55,15 +61,16 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        output_dtype = x.output_dtype if isinstance(x, PreparedLinearInput) else x.dtype
         output = super().apply(layer, x, bias, tp_rank)
         # TODO: there is a bug in npu_quant_matmul for fp8 with bias
         # after the bug is fixed, the whole apply method can be removed.
         if bias is not None:
-            output = (output + bias).to(x.dtype)
+            output = (output + bias).to(output_dtype)
         return output
 
 
@@ -72,6 +79,7 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     """FusedMoE method for Ascend W8A8FP8_DYNAMIC."""
 
     quant_type: QuantType = QuantType.W8A8FP
+    act_quant_type: torch.dtype = torch.float8_e4m3fn
 
     def __init__(self):
         super().__init__()
@@ -101,3 +109,48 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         param_dict["w2_weight_scale"] = torch.empty(num_experts, hidden_sizes, 1, dtype=torch.float32)
         param_dict["w2_weight_offset"] = torch.empty(num_experts, hidden_sizes, 1, dtype=params_dtype)
         return param_dict
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        # FP8 weights are kept in ND layout (no FRACTAL_NZ cast), so the fused
+        # gmm1+swiglu+quant path must use the FP8-capable v2 kernel instead of
+        # the weight-NZ kernel the int8 W8A8 scheme dispatches to.
+        activation = mlp_compute_input.activation
+        if (
+            not mlp_compute_input.fusion
+            or mlp_compute_input.dynamic_eplb
+            or activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        ):
+            return super().apply_gmm1_act_quant(mlp_compute_input)
+
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        w1, w1_scale, _, _ = self._get_mlp_weights(mlp_compute_input.layer)
+        hidden_states, swiglu_out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=hidden_states,
+            weight=w1,
+            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
+            weight_scale=w1_scale,
+            x_scale=pertoken_scale,
+            quant_dtype=torch.float8_e4m3fn,
+            dequant_dtype=torch.float32,
+        )
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states, swiglu_out_scale
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        # FP8 per-channel scales are stored in float32; deriving output_dtype
+        # from them (as the int8 parent does) would leak a float32 MoE output
+        # into the next add+residual norm, which requires matching dtypes.
+        _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=w2,
+            scale=w2_scale,
+            bias=None,
+            per_token_scale=[act_out_scale],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=self.in_dtype,
+        )[0]

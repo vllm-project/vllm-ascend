@@ -378,6 +378,20 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
         !CheckInputOutputShape(context), OP_LOGE(context, "Input shape invalid."),
         return ge::GRAPH_FAILED);
 
+    // Dispatch before GetCompileParameters subtracts the legacy UB reserve.
+    auto compileInfo = reinterpret_cast<const AddRmsNormBiasCompileInfo*>(context->GetCompileInfo());
+    platform_ascendc::SocVersion socVersion;
+    if (compileInfo != nullptr) {
+        socVersion = compileInfo->socVersion;
+    } else {
+        OP_CHECK_NULL_WITH_CONTEXT(context, context->GetPlatformInfo());
+        auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+        socVersion = platform.GetSocVersion();
+    }
+    if (socVersion == platform_ascendc::SocVersion::ASCEND950) {
+        return addRmsNormBiasRegbase::TilingAddRmsNormBiasRegbase(context);
+    }
+
     AddRMSNormBiasTilingData tiling;
 
     auto betaDesc = context->GetOptionalInputDesc(INPUT_BETA_INDEX);

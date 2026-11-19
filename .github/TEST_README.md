@@ -6,13 +6,58 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 
 | Workflow | Trigger | What it runs |
 |----------|---------|---------------|
-| `pr_test.yaml` | PR to main/dev/release branches | Lint + selective tests (UT + E2E) |
+| `pr_test.yaml` | PR opened/reopened, a label is added, or a `/run` comment | Lint + selective tests (UT + E2E) |
 | `_selected_tests.yaml` | Called by `pr_test.yaml` | Runs tests selected by `select_tests.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
 | `_pre_commit.yml` | Called by `pr_test.yaml` | Lint and format checks |
 | `schedule_nightly_test_a2.yaml` | Cron | Nightly E2E on A2 runners |
 | `schedule_nightly_test_a3.yaml` | Cron | Nightly E2E on A3 runners |
 | `schedule_weekly_test_a3.yaml` | Cron | Weekly E2E on A3 runners |
+
+## Repository-local Actions in Container Jobs
+
+On our container runners, calling `uses: ./.github/actions/<name>` directly can
+fail with:
+
+```text
+Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '.../.github/actions/<name>'.
+```
+
+The runner workspace (`/home/runner/_work/<repo>/<repo>`) and container workspace
+(`/__w/<repo>/<repo>`) are not synchronized when the runner loads the action.
+Copy `.github` to the shared temporary directory before calling it:
+
+```text
+/__w/
+├── <repo>/
+│   └── <repo>/                 # workspace; local uses paths start here
+│       └── .github/
+└── _temp/                     # $RUNNER_TEMP
+    └── ci-workflow/
+        └── .github/actions/...
+```
+
+With this layout, `./../../_temp` resolves to `$RUNNER_TEMP`. A layout change can
+break the action path; the staging script checks this layout before copying.
+Update the static `uses` path if needed.
+
+```yaml
+- name: Check layout and stage actions
+  shell: bash
+  run: bash .github/workflows/scripts/stage_ci_actions.sh
+
+- name: Restore incremental cache
+  uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
+  with:
+    cache-dir: csrc/build_cache
+    architecture: ${{ runner.arch }}
+    soc-version: a2
+    source-root: .
+```
+
+Run staging after checkout and use the same `if` condition as the action call.
+For a subdirectory checkout, set staging `working-directory` to that directory
+and pass `.` to the script; adjust the action's `source-root` accordingly.
 
 ## Selective Testing System
 
@@ -48,7 +93,8 @@ test_selector.py (coverage + AST) ──► recommended pytest targets
 |------|------|
 | `.github/workflows/scripts/test_selector.py` | Recommends tests from coverage data and the PR diff (AST based) |
 | `.github/workflows/scripts/select_tests.py` | Routes test targets to runners and emits the matrix |
-| `.github/workflows/scripts/test_config.yaml` | Routing metadata: curated suites, skip list, runner mapping, partitions, estimated times |
+| `.github/workflows/scripts/test_config.yaml` | Routing metadata: curated suites, skip list, runner mapping, partitions |
+| `.github/workflows/scripts/estimated_times.yaml` | Per-file estimated seconds for load-balanced partitioning |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
 
 `runner_mapping` maps test paths to default logical partitions such as
@@ -59,9 +105,10 @@ pin also applies when only one of its `::nodeid` targets is selected. If both a
 bare file and one of its nodeids are selected, the bare file wins to prevent
 duplicate execution. Each entry in `partition` selects an exact key from
 `runner_label.json` and sets the load-balanced group count.
-Logical partition names use display-ready labels such as `a3-2` and
-`a3-800i-2`; GitHub jobs render them as `a3-2 card-(part 1-3)` while the
-numeric `partition` value remains available for artifacts and load balancing.
+Logical partition names are display aliases such as `a3-2` and `a3-4`; each
+maps to an exact `runner_label.json` key (now `linux-aarch64-a3-800i-N`).
+GitHub jobs render them as `a3-2 card-(part 1-3)` while the numeric
+`partition` value remains available for artifacts and load balancing.
 
 Workflows that temporarily reroute selected tests can use
 `--runner-label-override` with an exact label from `runner_label.json`. This
@@ -74,8 +121,15 @@ a transient single-shard partition for that invocation.
 |------|------|---------|
 | Recommended | `--test-list-file <file>` | PR precision testing (coverage/AST recommendation) |
 | Explicit | `--explicit-e2e-tests <path>...` | `/e2e` PR comment command |
-| Full suite | `--all-tests` | `ready-all` PRs, scheduled full scans |
+| Full suite | `--all-tests` | `main2main` PRs, scheduled full scans |
 | Curated | `--curated <name>` | Curated suites (e.g. A5) |
+
+The `main2main` PR label reuses the full-suite selection and executes it twice,
+against both the verified vLLM main commit and the matched vLLM release tag.
+Release branches (`releases/v*`) are frozen, so their PRs run tests against the
+matched vLLM release tag only. The `pre-commit` job still checks out the
+branch's pinned `.github/vllm-main-verified.commit` for the static checks
+(mypy), because mypy must resolve every `import vllm...` target at once.
 
 `test_config.yaml` holds the routing metadata consumed by all modes:
 
@@ -84,9 +138,12 @@ a transient single-shard partition for that invocation.
 | `curated_tests` | Named test lists selected via `--curated <name>` |
 | `skip_tests` | Test files removed from any selection after scanning |
 | `runner_mapping` | Regex patterns mapping test paths to logical partitions |
-| `estimated_times` | Per-test estimated seconds for load-balanced partitioning |
 | `pinned_routes` | Files moved to dedicated partitions after selection |
 | `partition` | Logical partition → runner label + load-balanced group count |
+
+`estimated_times.yaml` holds per-test estimated seconds for load-balanced
+partitioning. It is a separate file so timing-only PRs do not trigger the
+full suite; changes to `test_config.yaml` still do.
 
 ## Runner Routing
 
@@ -107,7 +164,7 @@ No decorator is needed. UT runner routing is determined by path:
 
 ### E2E Routing
 
-All E2E tests run on NPU. E2E routing is determined by directory or `_310p` filename suffix:
+All E2E tests run on NPU. E2E routing is determined by directory:
 
 | Pattern | Runner |
 |---------|--------|
@@ -115,8 +172,9 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 | `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
 | `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
 | `tests/e2e/pull_request/eight_card/` | A3 NPU x8 |
-| `*_310p.py` under one/two-card paths | 310P NPU x1 |
-| `*_310p.py` under four-card paths | 310P NPU x4 |
+| `tests/e2e/pull_request/one_card/_310p/` | 310P NPU x1 |
+| `tests/e2e/pull_request/two_card/_310p/` | 310P NPU x2 |
+| `tests/e2e/pull_request/four_card/_310p/` | 310P NPU x4 |
 
 ## Adding a New UT Test
 
@@ -174,7 +232,7 @@ python3 .github/workflows/scripts/select_tests.py \
   --explicit-e2e-tests \
     tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
 
-# Run the full suite (mirrors ready-all PRs and scheduled scans)
+# Run the full suite (mirrors main2main PRs and scheduled scans)
 python3 .github/workflows/scripts/select_tests.py --all-tests
 
 # Run a curated suite

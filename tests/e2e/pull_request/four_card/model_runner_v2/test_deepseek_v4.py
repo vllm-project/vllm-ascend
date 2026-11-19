@@ -83,7 +83,7 @@ def test_deepseek_v4_mtp_full_decode_only():
             "num_speculative_tokens": num_speculative_tokens,
             "method": "mtp",
         },
-        additional_config={"enable_dsa_cp": False},
+        attention_config={"indexer_kv_dtype": "int8"},
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -101,13 +101,31 @@ def test_deepseek_v4_mtp_full_decode_only():
 
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("max_tokens", [1024])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    ("compilation_config", "enable_adaptive_verification"),
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            False,
+            id="full_decode_only",
+        ),
+        pytest.param({}, False, id="default_full_and_piecewise"),
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            True,
+            id="full_decode_only-adaptive",
+        ),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    enable_adaptive_verification: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -121,18 +139,25 @@ def test_dspark_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=4096,
+        max_num_seqs=len(prompts),
         tensor_parallel_size=4,
         enable_expert_parallel=True,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
+        attention_config={"indexer_kv_dtype": "int8"},
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
+            **({"enable_adaptive_verification": True} if enable_adaptive_verification else {}),
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
+
+    if enable_adaptive_verification:
+        return
 
     acceptance_per_pos = calculate_acceptance_per_pos(
         metrics,

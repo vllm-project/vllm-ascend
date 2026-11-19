@@ -14,89 +14,30 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-
 import torch
-import torch_npu
 
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 
 
-def quant_apply_mlp(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-    group_list: torch.Tensor,
-    group_list_type: int = 1,
-) -> torch.Tensor:
-    if group_list_type == 1:
-        # Convert group_list to cumulative sum format if group_list is count format
-        group_list = torch.cumsum(group_list, dim=0)
+def apply_moe_mlp(
+    mlp_compute_input: MoEMlpComputeInput,
+    quant_method,
+) -> tuple[torch.Tensor, torch.npu.Event]:
+    """
+    Unified MoE MLP entry (310P).
 
-    hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w1, weight_scale=w1_scale, group_list=group_list, quant_mode="pertoken"
-    )
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states = torch_npu.npu_quant_grouped_matmul_dequant(
-        x=hidden_states, quantized_weight=w2, weight_scale=w2_scale, group_list=group_list, quant_mode="pertoken"
-    )
-    return hidden_states
+    310P MoE only supports the swiglu (silu) activation, so every method
+    implements the fused ``gmm1 + swiglu (+ quant)`` path and the separate
+    ``apply_gmm1`` / ``apply_act_quant`` hooks are not used.
+    """
 
+    if not quant_method.supports_fused_activation(mlp_compute_input.activation):
+        activation = mlp_compute_input.activation
+        act_name = getattr(activation, "value", activation)
+        raise NotImplementedError(f"310P MoE only supports the swiglu (silu) activation, but got {act_name}.")
 
-def unquant_apply_mlp(
-    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor, group_list: torch.Tensor, group_list_type: int = 1
-) -> torch.Tensor:
-    gate_up_out = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-    )[0]
-    act_out = torch_npu.npu_swiglu(gate_up_out)
+    hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
 
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[act_out],
-        weight=[w2],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-    )[0]
-    return hidden_states
-
-
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
-    hidden_states = mlp_compute_input.hidden_states
-    w1 = mlp_compute_input.weights.w1
-    w2 = mlp_compute_input.weights.w2
-    w1_scale = mlp_compute_input.weights.w1_scale
-    w2_scale = mlp_compute_input.weights.w2_scale
-    group_list = mlp_compute_input.group_list
-    group_list_type = mlp_compute_input.group_list_type
-    assert isinstance(w1, torch.Tensor)
-    assert isinstance(w2, torch.Tensor)
-
-    if mlp_compute_input.quant.is_quant:
-        assert isinstance(w1_scale, torch.Tensor)
-        assert isinstance(w2_scale, torch.Tensor)
-        assert w1_scale is not None and w2_scale is not None
-        return quant_apply_mlp(
-            hidden_states=hidden_states,
-            w1=w1,
-            w1_scale=w1_scale,
-            w2=w2,
-            w2_scale=w2_scale,
-            group_list=group_list,
-            group_list_type=group_list_type,
-        )
-
-    return unquant_apply_mlp(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        group_list=group_list,
-        group_list_type=group_list_type,
-    )
+    before_gmm2_evt = torch.npu.current_stream().record_event()
+    hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+    return hidden_states, before_gmm2_evt

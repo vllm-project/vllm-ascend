@@ -42,14 +42,7 @@ TITLES = {
         "en": "Disaggregated Prefill",
         "zh": "分离式预填充",
     },
-    "developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
-    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
-        "en": "Model Runner V1 EPLB Architecture",
-        "zh": "Model Runner V1 EPLB 架构",
-    },
+    "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
         "zh": "Model Runner V2 EPLB 架构",
@@ -62,6 +55,10 @@ TITLES = {
     "developer_guide/contribution/multi_node_test.md": {"en": "Multi-Node Test", "zh": "多节点测试"},
     "developer_guide/contribution/nightly_ci_test.md": {"en": "Nightly CI Test", "zh": "夜间 CI 测试"},
     "developer_guide/contribution/testing.md": {"en": "Testing", "zh": "测试"},
+    "developer_guide/contribution/dependency_version_management.md": {
+        "en": "Dependency Version Management",
+        "zh": "依赖版本管理",
+    },
     "developer_guide/evaluation/using_ais_bench.md": {"en": "Using AISBench", "zh": "使用 AISBench"},
     "developer_guide/evaluation/using_evalscope.md": {"en": "Using EvalScope", "zh": "使用 EvalScope"},
     "developer_guide/evaluation/using_lm_eval.md": {"en": "Using lm_eval", "zh": "使用 lm_eval"},
@@ -85,10 +82,6 @@ TITLES = {
     "index.md": {"en": "Home", "zh": "首页"},
     "getting_started/installation.md": {"en": "Installation", "zh": "安装指南"},
     "getting_started/quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
-    "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
-        "en": "Dynamic Chunked Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "tutorials/features/pd_colocated_mooncake_multi_instance.md": {
         "en": "PD Colocated (Mooncake, Multi-Instance)",
         "zh": "PD 共置（Mooncake，多实例）",
@@ -102,21 +95,22 @@ TITLES = {
         "zh": "PD 分离（Mooncake，单节点）",
     },
     "tutorials/features/ray.md": {"en": "Ray", "zh": "Ray"},
-    "tutorials/features/suffix_speculative_decoding.md": {
-        "en": "Suffix Speculative Decoding",
-        "zh": "后缀推测解码",
-    },
     "tutorials/models/Cohere-Transcribe.md": {"en": "Cohere Transcribe", "zh": "Cohere Transcribe"},
     "tutorials/models/DeepSeek-R1.md": {"en": "DeepSeek-R1", "zh": "DeepSeek-R1"},
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
     "tutorials/models/DeepSeek-V3.2.md": {"en": "DeepSeek-V3.2", "zh": "DeepSeek-V3.2"},
     "tutorials/models/DeepSeek-V4-Flash.md": {"en": "DeepSeek-V4-Flash", "zh": "DeepSeek-V4-Flash"},
+    "tutorials/models/DeepSeek-V4.1-Flash.md": {
+        "en": "DeepSeek-V4.1-Flash",
+        "zh": "DeepSeek-V4.1-Flash",
+    },
     "tutorials/models/DeepSeek-V4-Pro.md": {"en": "DeepSeek-V4-Pro", "zh": "DeepSeek-V4-Pro"},
     "tutorials/models/DeepSeekOCR2.md": {"en": "DeepSeek-OCR-2", "zh": "DeepSeek-OCR-2"},
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
+    "tutorials/models/Gemma4.md": {"en": "Gemma4", "zh": "Gemma4"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
-    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
-    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
+    "tutorials/models/GLM5.2.md": {"en": "GLM-5.2 & GLM-5.3", "zh": "GLM-5.2 & GLM-5.3"},
+    "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
@@ -132,6 +126,10 @@ TITLES = {
     },
     "tutorials/models/MiniMax-M2.md": {"en": "MiniMax-M2", "zh": "MiniMax-M2"},
     "tutorials/models/MiniMax-M3.md": {"en": "MiniMax-M3", "zh": "MiniMax-M3"},
+    "tutorials/models/MiniMax-M3.1-Flash.md": {
+        "en": "MiniMax-M3.1-Flash",
+        "zh": "MiniMax-M3.1-Flash",
+    },
     "tutorials/models/Minitron-8B-Base.md": {"en": "Minitron-8B-Base", "zh": "Minitron-8B-Base"},
     "tutorials/models/Mixtral-8x7B-Instruct-v0.1.md": {
         "en": "Mixtral-8x7B-Instruct-v0.1",
@@ -149,6 +147,10 @@ TITLES = {
         "zh": "Qwen3-Dense(0.6B/1.7B/4B/8B/14B/32B)",
     },
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
+    "tutorials/models/Qwen3.8-Flash-Next.md": {
+        "en": "Qwen3.8-Flash-Next",
+        "zh": "Qwen3.8-Flash-Next",
+    },
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",
         "zh": "Qwen3-Omni-30B-A3B-Thinking",
@@ -163,6 +165,7 @@ TITLES = {
     },
     "tutorials/models/Qwen3-VL-Embedding.md": {"en": "Qwen3-VL-Embedding", "zh": "Qwen3-VL-Embedding"},
     "tutorials/models/Qwen3-VL-Reranker.md": {"en": "Qwen3-VL-Reranker", "zh": "Qwen3-VL-Reranker"},
+    "tutorials/models/SigLIP2.md": {"en": "SigLIP2", "zh": "SigLIP2"},
     "tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md": {
         "en": "Qwen3.5-27B & Qwen3.6-27B",
         "zh": "Qwen3.5-27B & Qwen3.6-27B",
@@ -175,13 +178,16 @@ TITLES = {
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
     "tutorials/models/Qwen3-Embedding.md": {"en": "Qwen3-Embedding", "zh": "Qwen3-Embedding"},
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
+    "tutorials/models/Step-5-Preview.md": {"en": "Step-5-Preview (Experimental)", "zh": "Step-5-Preview（实验性支持）"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
+    "user_guide/configuration/device_selection.md": {"en": "NPU Device Selection", "zh": "NPU 设备选择"},
     "user_guide/configuration/encoder_cache_manager.md": {
         "en": "Score Encoder Cache Manager",
         "zh": "Score 编码器缓存管理器",
     },
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
+    "user_guide/configuration/runtime_config.md": {"en": "Runtime Configuration", "zh": "运行时配置"},
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},
     "user_guide/feature_guide/Ai_QoS_introduction_en.md": {"en": "AI QoS", "zh": "AI QoS"},
@@ -189,19 +195,28 @@ TITLES = {
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
-    "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
-        "en": "Dynamic Chunk Pipeline Parallel",
-        "zh": "动态分块流水线并行",
-    },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
+        "en": "Encoder Cache CPU Offload",
+        "zh": "编码器缓存 CPU 卸载",
+    },
     "user_guide/feature_guide/expert_parallelism_load_balancer.md": {
         "en": "Expert Parallelism Load Balancer",
         "zh": "专家并行负载均衡",
     },
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
+    "user_guide/feature_guide/hisparse.md": {"en": "HiSparse on Ascend", "zh": "昇腾 HiSparse"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
-    "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
+    "user_guide/feature_guide/kv_cache_pool_ascend_store.md": {
+        "en": "KV Cache Pool (Ascend Store)",
+        "zh": "KV 缓存池（昇腾存储）",
+    },
+    "user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md": {
+        "en": "Mooncake Layerwise Adaptation and Optimization",
+        "zh": "Mooncake Layerwise 适配与优化",
+    },
+    "user_guide/feature_guide/kvpp.md": {"en": "KVPP", "zh": "KVPP"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",

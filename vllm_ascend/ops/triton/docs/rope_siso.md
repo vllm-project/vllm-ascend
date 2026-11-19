@@ -23,7 +23,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton_sis
   4. Kernel side: load the rotation coefficients of the row in fp32. With `USE_COS_SIN=True`, `pos_idx = positions[row_idx]` indexes `cos_sin_cache`, whose row holds `[cos(0 : rope_dim // 2), sin(rope_dim // 2 : rope_dim)]`; otherwise `cos`/`sin` are indexed by `row_idx`. `cos_mask = arange(0, pad_rope_dim // 2) < rope_dim // 2` masks the padding lanes.
   5. Kernel side: load the two rotation halves for **all** heads of the row at once as a `[pad_n_h, pad_rope_dim // 2]` tile. The offsets differ per style: NeoX uses `head * hd + i` and `head * hd + i + rope_dim // 2`; GPT-J uses `head * hd + 2 * i` and `head * hd + 2 * i + 1`. The mask `(head < n_h) & (i < rope_dim // 2)` disables the padded heads and lanes.
   6. Kernel side: compute `x1 * cos - x2 * sin` and `x2 * cos + x1 * sin`, store both tiles back to their own offsets, and advance to the next row.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products.
 
 ## Parameters
 

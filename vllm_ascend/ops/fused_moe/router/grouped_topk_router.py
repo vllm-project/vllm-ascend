@@ -45,7 +45,6 @@ class AscendGroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group if self.use_grouped_topk else None,
             has_e_score_bias=self.e_score_correction_bias is not None,
-            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _renormalize_topk_weights(
@@ -119,7 +118,6 @@ class AscendGroupedTopKRouter(BaseRouter):
             topk_weights = topk_weights + self.e_score_correction_bias
 
         topk_weights, topk_ids = topk_weights.topk(self.top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
 
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)

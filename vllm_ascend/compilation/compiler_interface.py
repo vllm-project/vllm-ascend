@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
+from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
 from torch._inductor.decomposition import select_decomp_table
@@ -31,6 +32,7 @@ from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
+from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
@@ -72,11 +74,65 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
     uniform_decode_query_len = num_spec_tokens + 1
     max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
-    return [
-        x
-        for x in vllm_config.compilation_config.cudagraph_capture_sizes
-        if max_num_tokens >= x >= uniform_decode_query_len
+    compilation_config = vllm_config.compilation_config
+    capture_sizes = set(compilation_config.cudagraph_capture_sizes)
+    if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
+        # V2 uniform decode capture rounds token counts up to the query length.
+        # With MTP5, for example, configured size 56 captures 60 tokens. Keep
+        # the raw sizes as well for routines that do not perform this rounding.
+        max_capture_size = compilation_config.max_cudagraph_capture_size
+        capture_sizes.update(
+            rounded
+            for size in compilation_config.cudagraph_capture_sizes
+            if (rounded := round_up(size, uniform_decode_query_len)) <= max_capture_size
+        )
+    return sorted(x for x in capture_sizes if max_num_tokens >= x >= uniform_decode_query_len)
+
+
+def _initialize_static_kernel_runtime(vllm_config: VllmConfig) -> None:
+    if "LOCAL_WORLD_SIZE" not in os.environ:
+        # External DP config counts one replica; runtime topology includes all local ranks.
+        # shortcut: uniform workers and contiguous node ranks; revisit for other layouts.
+        parallel_config = vllm_config.parallel_config
+        actual_local_world_size = parallel_config.local_world_size * parallel_config.data_parallel_size_local
+        topology_source = "parallel_config"
+        if parallel_config.data_parallel_external_lb:
+            from vllm.distributed.parallel_state import get_node_count
+
+            runtime_world_size = torch.distributed.get_world_size()
+            node_count = get_node_count()
+            if runtime_world_size != parallel_config.world_size_across_dp:
+                raise RuntimeError("External DP static compilation requires the full DP worker world")
+            actual_local_world_size, remainder = divmod(runtime_world_size, node_count)
+            if remainder:
+                raise RuntimeError("Static compilation requires worker world size divisible by node count")
+            topology_source = f"runtime_world_size={runtime_world_size}, node_count={node_count}"
+        os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
+        logger.info_once(
+            "Setting LOCAL_WORLD_SIZE=%d for static kernel "
+            "(source=%s, local_world_size=%d, data_parallel_size_local=%d).",
+            actual_local_world_size,
+            topology_source,
+            parallel_config.local_world_size,
+            parallel_config.data_parallel_size_local,
+            scope="global",
+        )
+
+    # TODO: Temporary workaround. Remove this static kernel blacklist once these ops are supported.
+    incompatible_ops = [
+        "TopKV2",  # minimax-m3 910C
+        "GenericBlockSparseAttention",  # minimax-m3 910C
+        "QuantBatchMatmulV3",  # glm5.2 910C
+        "TransposeQuantBatchMatMul",  # dsv4 950
+        "QuantLightningIndexer",  # glm5.2 950
+        "PoolKeyIndexer",  # glm5.3-flash
     ]
+    logger.info_once(
+        "Skipping static kernel compilation for incompatible ops: %s.",
+        ",".join(incompatible_ops),
+        scope="global",
+    )
+    _set_static_kernel_blacklist(incompatible_ops)
 
 
 def _configure_backend(
@@ -85,28 +141,6 @@ def _configure_backend(
     vllm_config: VllmConfig,
     process_kwargs_options: Callable | None = None,
 ) -> None:
-    if ascend_compilation_config.enable_static_kernel:
-        # npugraph_ex's static_kernel requires LOCAL_WORLD_SIZE to determine the
-        # physical node topology for creating per-node Gloo groups, which
-        # coordinate static kernel compilation and .run package installation.
-        # vLLM does not set this env var by default (unlike torchrun), so we
-        # compute it from parallel config:
-        #   local_world_size: processes per node for one DP replica
-        #   data_parallel_size_local: number of DP replicas on this node
-        #   actual_local_world_size: total processes on this physical machine
-        if "LOCAL_WORLD_SIZE" not in os.environ:
-            actual_local_world_size = (
-                vllm_config.parallel_config.local_world_size * vllm_config.parallel_config.data_parallel_size_local
-            )
-            os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
-            logger.info_once(
-                "Setting LOCAL_WORLD_SIZE=%d for static kernel (local_world_size=%d * data_parallel_size_local=%d).",
-                actual_local_world_size,
-                vllm_config.parallel_config.local_world_size,
-                vllm_config.parallel_config.data_parallel_size_local,
-                scope="global",
-            )
-
     if process_kwargs_options is not None:
         # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.
         # It maps flat option names to nested config paths for old versions,
@@ -124,9 +158,15 @@ def _configure_backend(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
                 scope="global",
             )
+
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            if ascend_compilation_config.enable_super_kernel:
+                options["super_kernel_optimize"] = True
+                options["super_kernel_optimize_options"] = {
+                    "dcci_after_kernel_end": [".*"],
+                }
         process_kwargs_options(config, {"options": options})
     else:
         # torchair (reduce-overhead): use nested config structure directly.
@@ -244,13 +284,18 @@ class AscendCompiler(CompilerInterface):
             "torch_npu_version": torch_npu.__version__,
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
+            "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
-    def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
+        """Initialize cache settings and runtime state before compiling or loading a graph."""
         self.cache_dir = cache_dir
         self.disable_cache = disable_cache
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
+            _initialize_static_kernel_runtime(self.vllm_config)
 
     def compile(
         self,

@@ -1,20 +1,22 @@
-First, install the system dependencies and configure the pip mirror.
+First, install the system dependencies for the container operating system and configure the pip mirror.
 
+For Ubuntu:
+
+<!-- doctest: installation-common-prerequisites-ubuntu -->
 ```bash
-# Using apt-get with mirror
 sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq
-# Or using yum
-# yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq
-# Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+pip config set global.index-url "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ```
 
-Optional: If you are working on an x86 machine or using a TorchNPU development version, configure pip's `extra-index`:
+For openEuler:
 
+<!-- doctest: installation-common-prerequisites-openeuler -->
 ```bash
-# For TorchNPU dev version or x86 machine
-pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
+yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq patch
+
+pip config set global.index-url "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ```
 
 Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch and TorchNPU are installed automatically as dependencies during this step using the compatible versions for the selected release.
@@ -23,17 +25,23 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     | Method | Package type | Hardware handling | Recommended for |
     | --- | --- | --- | --- |
-    | **pip** | Prebuilt wheel | Installs the standard `vllm-ascend` wheel, which currently targets A2 | A2 users who want the simplest installation |
+    | **pip** | vLLM built from source; prebuilt vLLM Ascend wheel | Installs the standard `vllm-ascend` wheel, which currently targets A2 | A2 users who want the simplest installation |
     | **uv** | Prebuilt wheel | Uses WheelNext wheel variants to select a compatible build for the detected hardware | Users who want a prebuilt wheel selected for their hardware |
     | **Source** | Source code | Builds and installs vLLM Ascend for the current environment | Development, customization, or environments without a suitable prebuilt wheel |
 
 === "pip installation"
 
-    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For other hardware, use a prebuilt image, WheelNext, or a source installation.
+    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, WheelNext, or a source installation.
 
+    <!-- doctest: installation-pip-install -->
     ```bash
-    pip install "vllm=={{ release_vllm_version }}"
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
+
     pip install \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
@@ -48,6 +56,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Check the device build type:
 
+    <!-- doctest: installation-pip-device-check -->
     ```bash
     python - <<'PY'
     from vllm_ascend._build_info import __device_type__
@@ -61,22 +70,24 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     WheelNext selects a vLLM Ascend wheel that matches the hardware from the variant index. First, install and verify `uv`:
 
+    <!-- doctest: installation-uv-bootstrap -->
     ```bash
     # install uv-wheelnext
     curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
     source $HOME/.local/bin/env
     ```
 
+    <!-- doctest: installation-uv-install -->
     ```bash
     # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
-    pip install vllm=={{ release_vllm_version }}
+    pip install "vllm=={{ release_vllm_version }}"
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
         --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
         --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
-        vllm-ascend=={{ release_vllm_ascend_version }}
+        "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
     ??? tip "Clear the cache if uv installation fails"
@@ -87,6 +98,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Check the device build type:
 
+    <!-- doctest: installation-uv-device-check -->
     ```bash
     python - <<'PY'
     from vllm_ascend._build_info import __device_type__
@@ -102,34 +114,77 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Install vLLM first, then install vLLM Ascend:
 
+    <!-- doctest: installation-source-install -->
     ```bash
     # Install vLLM.
     git clone --depth 1 --branch {{ vllm_version }} https://github.com/vllm-project/vllm
     cd vllm
-    VLLM_TARGET_DEVICE=empty pip install -e .
+    VLLM_TARGET_DEVICE=empty pip install -e . \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
     cd ..
 
     # Install vLLM Ascend.
     git clone --depth 1 --branch {{ vllm_ascend_version }} https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     # git submodule update --init --recursive
-    export ASCEND_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-    pip install -e . --extra-index-url "${ASCEND_INDEX_URL}"
+    pip install -e . \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
     cd ..
     ```
 
-Finally, handle `triton` and `triton-ascend` according to the hardware:
+    ??? tip "Reinstalling after a CANN version change"
 
-=== "A2 / A3 / 950DT"
+        If you upgrade or downgrade CANN and encounter compatibility issues,
+        consider performing a clean rebuild of vLLM Ascend to avoid reusing
+        build artifacts or caches from the previous CANN environment.
 
-    To ensure that Triton Ascend matches the current vLLM Ascend version, remove any existing `triton` and `triton-ascend` packages before installing the corresponding version of `triton-ascend`:
+        Run the following commands from the vLLM Ascend repository root
+        after configuring the selected CANN environment:
 
+        ```bash
+        # Remove previous build artifacts and caches.
+        rm -rf csrc/build csrc/build_out csrc/build_cache build
+
+        # Rebuild custom kernels and reinstall vLLM Ascend.
+        pip install -e . \
+            --extra-index-url https://download.pytorch.org/whl/cpu/ \
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+            --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly
+        ```
+
+        **Note:** If `VLLM_ASCEND_BUILD_CACHE_DIR` is set, the build cache
+        is stored in the specified directory instead of `csrc/build_cache`.
+        Clear the custom cache separately after verifying it is safe to
+        remove, especially if it is shared by other builds.
+
+After completing any of the three installation methods, install the kernel packages for your hardware in the same Python environment:
+
+=== "A2 / A3 / 950DT Products"
+
+    Reinstall the matching Triton Ascend version, then install FLA NPU. FLA NPU is required during worker initialization on these devices and is not installed automatically with `vllm-ascend`.
+
+    The following example installs FLA NPU for A2:
+
+    <!-- doctest: installation-post-standard -->
     ```bash
     pip uninstall -y triton triton-ascend
 
-    pip install triton-ascend=={{ release_triton_ascend_version }} \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+    pip install \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        "triton-ascend==={{ release_triton_ascend_version }}"
+
+    pip install --no-deps \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        "flash-linear-attention-npu-a2=={{ release_fla_npu_version }}"
     ```
+
+    ???+ note "FLA NPU packages"
+
+        For A3, replace `flash-linear-attention-npu-a2` with `flash-linear-attention-npu-a3`. For 950DT Products (A5), use `flash-linear-attention-npu-a5` instead. Keep the same version; pip selects the wheel for your host architecture automatically.
+
+        These packages require glibc 2.34 or later and a libstdc++ runtime providing `GLIBCXX_3.4.29`.
 
     ??? note "Can community Triton and Triton Ascend coexist?"
 
@@ -142,6 +197,8 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
     When installing another version of `vllm-ascend`, check the repository's `requirements.txt` for the corresponding `triton-ascend` version.
 
 === "Atlas 300I DUO / Atlas 200I Pro"
+
+    FLA NPU is not required for these devices.
 
     Atlas 300I DUO and Atlas 200I Pro do not support `triton` or `triton-ascend`. If either package is already installed in the environment, uninstall it and do not reinstall `triton-ascend`:
 

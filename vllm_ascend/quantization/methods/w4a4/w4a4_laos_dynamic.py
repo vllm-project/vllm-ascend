@@ -20,7 +20,7 @@ from typing import Any
 import torch
 import torch_npu
 
-from ..base import AscendLinearScheme
+from ..base import AscendLinearScheme, PreparedLinearInput
 from ..registry import register_scheme
 
 
@@ -46,19 +46,34 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
         params_dict["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
         return params_dict
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.quint4x2)
+        return PreparedLinearInput(quantized_x, pertoken_scale.reshape(-1), x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        dtype = x.dtype
-        x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.quint4x2)
-        pertoken_scale = pertoken_scale.reshape(-1, 1)
-        pertoken_scale = pertoken_scale.squeeze(-1)
+        if isinstance(x, PreparedLinearInput):
+            dtype = x.output_dtype
+            quantized_x = x.quantized
+            assert x.scale is not None
+            pertoken_scale = x.scale
+        else:
+            dtype = x.dtype
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.quint4x2)
+            pertoken_scale = pertoken_scale.reshape(-1, 1).squeeze(-1)
         output = torch_npu.npu_quant_matmul(
-            x,
+            quantized_x,
             layer.weight.data,
             scale=layer.weight_scale.data.view(-1),
             pertoken_scale=pertoken_scale,

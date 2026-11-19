@@ -11,8 +11,11 @@ from dataclasses import replace
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
+    get_offloading_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
@@ -23,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -30,21 +34,27 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
 )
+
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def _make_int8_block_view(
     tensor: torch.Tensor,
     num_blocks: int,
-    logical_blocks_per_manager_block: int,
-    bytes_per_logical_block: int,
+    physical_blocks_per_manager_block: int,
+    bytes_per_physical_block: int,
 ) -> torch.Tensor:
-    """Build a zero-copy ``[num_blocks, page_bytes]`` view of a cache part."""
-    if tensor.ndim < 1 or tensor.shape[0] < num_blocks * logical_blocks_per_manager_block:
+    """Build a zero-copy ``[num_blocks, page_bytes]`` cache view."""
+    required_blocks = num_blocks * physical_blocks_per_manager_block
+    if tensor.ndim < 1 or tensor.shape[0] < required_blocks:
         raise ValueError(
             "KV cache tensor has too few physical blocks: "
             f"shape={tuple(tensor.shape)}, num_blocks={num_blocks}, "
-            f"logical_blocks_per_manager_block={logical_blocks_per_manager_block}"
+            "physical_blocks_per_manager_block="
+            f"{physical_blocks_per_manager_block}"
         )
 
     element_size = tensor.element_size()
@@ -58,21 +68,21 @@ def _make_int8_block_view(
                 f"stride={tensor.stride()}"
             )
         expected_stride *= size
-    if physical_stride_bytes < bytes_per_logical_block:
+    if physical_stride_bytes < bytes_per_physical_block:
         raise ValueError(
             "Ascend KV cache blocks overlap in storage: "
             f"stride_bytes={physical_stride_bytes}, "
-            f"logical_block_bytes={bytes_per_logical_block}"
+            f"physical_block_bytes={bytes_per_physical_block}"
         )
-    if logical_blocks_per_manager_block > 1 and physical_stride_bytes != bytes_per_logical_block:
+    if physical_blocks_per_manager_block > 1 and physical_stride_bytes != bytes_per_physical_block:
         raise ValueError(
             "Cannot coalesce a non-contiguous Ascend KV cache layout: "
             f"stride_bytes={physical_stride_bytes}, "
-            f"logical_block_bytes={bytes_per_logical_block}"
+            f"physical_block_bytes={bytes_per_physical_block}"
         )
 
-    page_size_bytes = bytes_per_logical_block * logical_blocks_per_manager_block
-    manager_stride_bytes = physical_stride_bytes * logical_blocks_per_manager_block
+    page_size_bytes = bytes_per_physical_block * physical_blocks_per_manager_block
+    manager_stride_bytes = physical_stride_bytes * physical_blocks_per_manager_block
     byte_offset = tensor.storage_offset() * element_size
     raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(tensor.untyped_storage())
     return torch.as_strided(
@@ -83,34 +93,25 @@ def _make_int8_block_view(
     )
 
 
-def _canonicalize_split_attention_cache(
+def _canonicalize_split_cache(
     cache_parts: Sequence[torch.Tensor],
     num_blocks: int,
     unpadded_page_size_bytes: int,
 ) -> tuple[tuple[torch.Tensor, int], ...]:
-    """Canonicalize Ascend's separate K/V (and optional scale) tensors.
-
-    Ascend attention keeps cache components as separate tensors while vLLM's
-    native offloading worker expects a canonical block-level representation.
-    The returned views alias the original NPU storage and therefore add no
-    allocation or copy on the model execution path.
-    """
+    """Canonicalize separate K/V, scale, or recurrent-state tensors."""
     parts = tuple(cache_parts)
     if not parts or any(not isinstance(part, torch.Tensor) for part in parts):
-        raise TypeError("An Ascend attention KV cache must contain one or more tensors")
+        raise TypeError("An Ascend KV cache must contain one or more tensors")
 
-    logical_block_bytes = tuple(math.prod(part.shape[1:]) * part.element_size() for part in parts)
-    if any(size <= 0 for size in logical_block_bytes):
-        raise ValueError("Ascend attention KV cache components must be non-empty")
+    part_block_bytes = tuple(math.prod(part.shape[1:]) * part.element_size() for part in parts)
+    if any(size <= 0 for size in part_block_bytes):
+        raise ValueError("Ascend KV cache components must be non-empty")
 
-    # Some Ascend layouts expose both component views and a full overlapping
-    # view. Prefer the largest single view only when its first logical block
-    # actually contains every component's first block. Shape alone is not
-    # sufficient: a runner can allocate more physical blocks than the cache
-    # manager uses, which would otherwise make a long K tensor look like a
-    # complete K/V view and silently omit V from offloading.
+    # Some backends expose component views and an overlapping full-page view.
+    # Use the full view only if it really contains every component's first
+    # physical block; comparing shapes alone can silently omit V or scales.
     selected: tuple[tuple[torch.Tensor, int], ...] | None = None
-    for part, part_bytes in sorted(zip(parts, logical_block_bytes), key=lambda item: item[1], reverse=True):
+    for part, part_bytes in sorted(zip(parts, part_block_bytes), key=lambda item: item[1], reverse=True):
         if unpadded_page_size_bytes % part_bytes:
             continue
         factor = unpadded_page_size_bytes // part_bytes
@@ -121,43 +122,40 @@ def _canonicalize_split_attention_cache(
             other.untyped_storage().data_ptr() == candidate_storage_ptr
             and candidate_start <= other.data_ptr()
             and other.data_ptr() + other_bytes <= candidate_end
-            for other, other_bytes in zip(parts, logical_block_bytes)
+            for other, other_bytes in zip(parts, part_block_bytes)
         )
         if contains_all_parts and part.shape[0] >= num_blocks * factor:
             selected = ((part, part_bytes),)
             break
 
     if selected is None:
-        bytes_per_physical_block = sum(logical_block_bytes)
+        bytes_per_physical_block = sum(part_block_bytes)
         if unpadded_page_size_bytes % bytes_per_physical_block:
             raise ValueError(
                 "Ascend KV cache components do not cover one logical page: "
-                f"component_bytes={logical_block_bytes}, "
+                f"component_bytes={part_block_bytes}, "
                 f"page_size_bytes={unpadded_page_size_bytes}"
             )
-        selected = tuple(zip(parts, logical_block_bytes))
+        selected = tuple(zip(parts, part_block_bytes))
 
     bytes_per_physical_block = sum(size for _, size in selected)
     factor = unpadded_page_size_bytes // bytes_per_physical_block
-    views: list[tuple[torch.Tensor, int]] = []
-    for part, part_bytes in selected:
-        page_bytes = part_bytes * factor
-        views.append(
-            (
-                _make_int8_block_view(
-                    part,
-                    num_blocks,
-                    factor,
-                    part_bytes,
-                ),
-                page_bytes,
-            )
+    return tuple(
+        (
+            _make_int8_block_view(
+                part,
+                num_blocks,
+                factor,
+                part_bytes,
+            ),
+            part_bytes * factor,
         )
-    return tuple(views)
+        for part, part_bytes in selected
+    )
 
 
 class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
-    """Offloading worker boundary supporting Ascend's separate K/V layout."""
+    """Offloading worker boundary supporting Ascend's split KV layouts."""
 
     def register_kv_caches(
         self,
@@ -167,9 +165,17 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         ],
     ) -> None:
         kv_cache_config = self.kv_cache_config
+        # Only the groups the scheduler actually offloads, i.e. the same
+        # selection as vLLM's native offloading worker. Hybrid models expose
+        # extra non-prefix-cacheable groups (e.g. DeepSeek-V4.1 Engram and
+        # sparse attention); registering those here would make the group count
+        # diverge from GPULoadStoreSpec.group_sizes and misalign block ids.
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in get_offloading_group_ids(kv_cache_config)
+        )
 
         requires_layout_adaptation = False
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -183,16 +189,20 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
             if requires_layout_adaptation:
                 break
 
-        # Preserve upstream behavior verbatim for upstream-compatible layouts.
         if not requires_layout_adaptation:
             super().register_kv_caches(kv_caches)  # type: ignore[arg-type]
             return
 
         num_blocks = kv_cache_config.num_blocks
+        mappings = derive_canonical_mappings(
+            self.vllm_config,
+            kv_cache_config,
+            kv_caches,  # type: ignore[arg-type]
+        )
         layer_is_packed = {
-            layer_name: is_kv_cache_tensor_packed(kv_tensor)
+            layer_name: bool(kv_tensor.block_stride)
             for kv_tensor in kv_cache_config.kv_cache_tensors
-            for layer_name in kv_tensor.shared_by
+            for layer_name in get_kv_cache_tensor_layers(kv_tensor)
         }
 
         canonical_tensors: list[CanonicalKVCacheTensor] = []
@@ -203,6 +213,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
             layer_name: str,
             tensor: torch.Tensor,
             copy_size_bytes: int,
+            mapping: CanonicalPageMapping | None = None,
         ) -> None:
             key = (tensor.data_ptr(), tensor.stride(0), tensor.shape[1])
             tensor_idx = tensor_indices.get(key)
@@ -215,14 +226,17 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                         page_size_bytes=tensor.shape[1],
                     )
                 )
+            if mapping is not None:
+                assert mapping.local_page_size_bytes == copy_size_bytes
             refs_by_layer.setdefault(layer_name, []).append(
                 CanonicalKVCacheRef(
                     tensor_idx=tensor_idx,
                     page_size_bytes=copy_size_bytes,
+                    mapping=mapping,
                 )
             )
 
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_spec = group.kv_cache_spec
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
@@ -240,11 +254,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             if layer_is_packed.get(layer_name, False)
                             else page_size_bytes
                         )
-                        raw = torch.empty(
-                            0,
-                            dtype=torch.int8,
-                            device=layer_cache.device,
-                        ).set_(layer_cache.untyped_storage())
+                        raw = torch.empty(0, dtype=torch.int8, device=layer_cache.device).set_(
+                            layer_cache.untyped_storage()
+                        )
                         view = torch.as_strided(
                             raw,
                             (num_blocks, page_size_bytes),
@@ -255,40 +267,52 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             layer_name,
                             view,
                             layer_spec.unpadded_page_size_bytes,
+                            mappings.get(layer_name),
                         )
                     elif isinstance(layer_cache, (tuple, list)):
-                        for view, copy_size_bytes in _canonicalize_split_attention_cache(
+                        if group.role is KVCacheGroupRole.HISPARSE_INDEXER and isinstance(
+                            layer_spec, AscendSFAIndexerCacheSpec
+                        ):
+                            layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                            block_stride = getattr(layer, "hisparse_block_stride", 1)
+                            if block_stride > 1:
+                                # Attention addresses the dense alias with scaled block IDs.
+                                # Offloading receives logical block IDs, so restore the slab stride.
+                                (dense_cache,) = layer_cache
+                                layer_cache = (dense_cache[::block_stride],)
+                        views = _canonicalize_split_cache(
                             layer_cache,
                             num_blocks,
                             layer_spec.unpadded_page_size_bytes,
-                        ):
-                            add_view(layer_name, view, copy_size_bytes)
+                        )
+                        # A page mapping describes the complete local page and
+                        # is valid only when one canonical view covers it. For
+                        # genuinely split K/V refs, leave mapping unset rather
+                        # than applying incorrect offsets to every component.
+                        mapping = mappings.get(layer_name) if len(views) == 1 else None
+                        for view, copy_size_bytes in views:
+                            add_view(
+                                layer_name,
+                                view,
+                                copy_size_bytes,
+                                mapping,
+                            )
                     else:
                         raise TypeError(f"Unsupported KV cache type for {layer_name}: {type(layer_cache).__name__}")
                 elif isinstance(layer_spec, MambaSpec):
                     if not isinstance(layer_cache, list) or not layer_cache:
                         raise TypeError(f"Mamba KV cache for {layer_name} must be a non-empty list")
-                    # Ascend lays Mamba states out as consecutive, independent
-                    # ``[num_blocks, ...]`` regions and may align the underlying
-                    # raw allocation, yielding a non-zero storage offset. The
-                    # upstream reconstruction from state[0]'s whole storage
-                    # assumes block-interleaved states starting at offset zero.
-                    # Register each logical state instead; this is zero-copy and
-                    # transfers exactly the unpadded state bytes.
                     unpadded_page_size_bytes = sum(
                         math.prod(state.shape[1:]) * state.element_size() for state in layer_cache
                     )
-                    expected_page_size_bytes = replace(
-                        layer_spec,
-                        page_size_padded=None,
-                    ).page_size_bytes
+                    expected_page_size_bytes = replace(layer_spec, page_size_padded=None).page_size_bytes
                     if unpadded_page_size_bytes != expected_page_size_bytes:
                         raise ValueError(
                             f"Mamba KV cache page size mismatch for {layer_name}: "
                             f"tensors={unpadded_page_size_bytes}, "
                             f"spec={expected_page_size_bytes}"
                         )
-                    for view, copy_size_bytes in _canonicalize_split_attention_cache(
+                    for view, copy_size_bytes in _canonicalize_split_cache(
                         layer_cache,
                         num_blocks,
                         unpadded_page_size_bytes,
@@ -298,7 +322,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                     raise NotImplementedError(f"Unsupported KV cache spec: {type(layer_spec).__name__}")
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for group in kv_cache_config.kv_cache_groups:
+        for group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
@@ -317,9 +341,6 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 class AscendOffloadingConnector(OffloadingConnector):
     """vLLM OffloadingConnector with an Ascend layout adapter."""
 
-    # vLLM is skipped by the Ascend mypy invocation, so inherited attributes
-    # are not visible to the type checker. Keep this aligned with upstream;
-    # ``super().__init__`` still owns initialization and role handling.
     connector_worker: OffloadingConnectorWorker | None
 
     def __init__(

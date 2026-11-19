@@ -29,8 +29,11 @@ import logging
 import os
 import sys
 import types
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
+
+from prometheus_client import Counter, Gauge, Histogram
 
 # ---------------------------------------------------------------------------
 # Mock torch / torch_npu
@@ -41,7 +44,11 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.bool = "bool"  # type: ignore[attr-defined]
     _torch.float16 = "float16"  # type: ignore[attr-defined]
     _torch.float32 = "float32"  # type: ignore[attr-defined]
+    _torch.int8 = "int8"  # type: ignore[attr-defined]
+    _torch.dtype = str  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    _torch.empty = MagicMock()  # type: ignore[attr-defined]
+    _torch.uint8 = "uint8"  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
     _torch.distributed = MagicMock()  # type: ignore[attr-defined]
@@ -52,6 +59,10 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.npu = _npu  # type: ignore[attr-defined]
     sys.modules["torch"] = _torch
     sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
+
+_torch_module = sys.modules.get("torch") or importlib.import_module("torch")
+if not hasattr(_torch_module, "npu"):
+    _torch_module.npu = MagicMock()  # type: ignore[attr-defined]
 
 if "torch_npu" not in sys.modules:
     sys.modules["torch_npu"] = MagicMock()
@@ -70,19 +81,34 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector",
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
+    "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
     "vllm.logger",
     "vllm.model_executor",
+    "vllm.model_executor.model_loader",
+    "vllm.model_executor.model_loader.utils",
+    "vllm.model_executor.layers.mamba",
+    "vllm.model_executor.layers.mamba.mamba_utils",
     "vllm.model_executor.layers",
+    "vllm.model_executor.layers.attention",
+    "vllm.model_executor.layers.attention_layer_base",
     "vllm.model_executor.layers.linear",
     "vllm.model_executor.layers.quantization",
+    "vllm.model_executor.models",
+    "vllm.model_executor.models.extract_hidden_states",
+    "vllm.model_executor.models.utils",
     "vllm.platforms",
+    "vllm.platforms.interface",
     "vllm.utils",
     "vllm.utils.hashing",
     "vllm.utils.math_utils",
+    "vllm.utils.torch_utils",
     "vllm.utils.network_utils",
     "vllm.v1",
     "vllm.v1.attention",
@@ -90,36 +116,107 @@ _vllm_mock_modules = [
     "vllm.v1.core",
     "vllm.v1.core.block_pool",
     "vllm.v1.core.kv_cache_manager",
+    "vllm.v1.core.kv_cache_planning",
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
     "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.kv_cache_interface",
     "vllm.v1.kv_cache_spec_registry",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.utils",
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
     "vllm.v1.worker",
+    "vllm.v1.worker.mamba_utils",
+    "vllm.v1.worker.gpu",
+    "vllm.v1.worker.gpu.spec_decode",
+    "vllm.v1.worker.gpu.spec_decode.eagle",
+    "vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
         if _mod_name not in sys.modules:
             sys.modules[_mod_name] = MagicMock()
+    _lookup_protocol = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol"]
+    _lookup_protocol.LOOKUP_MSG = b"lookup"  # type: ignore[attr-defined]
+    _lookup_protocol.RESET_MSG = b"reset"  # type: ignore[attr-defined]
+    _lookup_protocol.RESP_OK = b"\x01"  # type: ignore[attr-defined]
+    _lookup_protocol.RESP_ERR = b"\x00"  # type: ignore[attr-defined]
+    sys.modules["vllm.v1.worker"].mamba_utils.MambaCopyBuffers = type("MambaCopyBuffers", (), {})
+
+    @dataclass
+    class _FakeKVConnectorOutput:
+        finished_sending: set[str] | None = None
+        finished_recving: set[str] | None = None
+        kv_connector_worker_meta: Any = None
+
+    sys.modules["vllm.v1.outputs"].KVConnectorOutput = _FakeKVConnectorOutput  # type: ignore[attr-defined]
 
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+    sys.modules["vllm.utils.torch_utils"].get_dtype_size = lambda dtype: {  # type: ignore[attr-defined]
+        "int8": 1,
+        "float16": 2,
+        "float32": 4,
+    }[dtype]
 
 _base_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 )
-_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
+_base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
+    "KVConnectorBase_V1",
+    (),
+    {
+        "__init__": lambda self, **kw: None,
+        "shutdown": lambda self: None,
+        "finish_forward": lambda self: None,
+        "role": property(lambda self: self._role),
+        "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
+        "_get_connector_metadata": lambda self: self._connector_metadata,
+    },
+)
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 _base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
+
+
+@dataclass
+class _MockKVConnectorStats:
+    data: dict = field(default_factory=dict)
+
+
+class _MockKVConnectorPromMetrics:
+    def __init__(
+        self,
+        vllm_config,
+        metric_types,
+        labelnames,
+        per_engine_labelvalues,
+    ):
+        self._gauge_cls = metric_types[Gauge]
+        self._counter_cls = metric_types[Counter]
+        self._histogram_cls = metric_types[Histogram]
+        self.per_engine_labelvalues = per_engine_labelvalues
+
+
+_metrics_mod: Any = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
+_metrics_mod.KVConnectorStats = _MockKVConnectorStats
+_metrics_mod.KVConnectorPromMetrics = _MockKVConnectorPromMetrics
+_metrics_mod.PromMetric = type("PromMetric", (), {})
+_metrics_mod.PromMetricT = type("PromMetricT", (), {})
+
+_metrics_utils_mod: Any = sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_metrics_utils_mod.create_metric_per_engine = lambda metric, labelvalues: {
+    engine_idx: metric.labels(*values) for engine_idx, values in labelvalues.items()
+}
 
 _events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
@@ -178,7 +275,7 @@ class _FakeKVCacheSpec:
 
 
 class _FakeAttentionSpec(_FakeKVCacheSpec):
-    pass
+    dcp_sharded = True
 
 
 class _FakeFullAttentionSpec(_FakeAttentionSpec):
@@ -281,6 +378,9 @@ class _FakeSingleTypeKVCacheManager:
         pcp_world_size=1,
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        scale = kv_cache_spec.block_size // block_pool.hash_block_size
+        if scale > 1:
+            block_hashes = [block_hashes[i] for i in range(scale - 1, len(block_hashes), scale)]
         max_blocks = max_length // kv_cache_spec.block_size
         for block_hash in list(block_hashes)[:max_blocks]:
             cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
@@ -291,7 +391,7 @@ class _FakeSingleTypeKVCacheManager:
         if drop_eagle_block and computed and computed[0]:
             for blocks in computed:
                 blocks.pop()
-        return computed
+        return computed, len(computed[0]) * kv_cache_spec.block_size
 
 
 class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
@@ -329,8 +429,15 @@ _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MLAAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowMLASpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.CircularBufferSpec = type(  # type: ignore[attr-defined]
+    "CircularBufferSpec", (_FakeKVCacheSpec,), {"prefix_cacheable": False}
+)
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
+_kv_interface_mod.RSWASpec = type("RSWASpec", (_FakeSlidingWindowSpec,), {})
+_kv_interface_mod.HiddenStateCacheSpec = type("HiddenStateCacheSpec", (_FakeKVCacheSpec,), {})
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheConfig = _FakeKVCacheConfig  # type: ignore[attr-defined]
@@ -368,7 +475,7 @@ for _mod_name in [
     "yr.datasystem.object_client",
     "zmq",
 ]:
-    if _mod_name not in sys.modules:
+    if _mod_name not in sys.modules and (_mod_name != "zmq" or importlib.util.find_spec("zmq") is None):
         sys.modules[_mod_name] = MagicMock()
 
 # ---------------------------------------------------------------------------
@@ -391,6 +498,12 @@ _vllm_ascend_package_paths = {
 for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
         sys.modules[_pkg] = _make_pkg(_pkg, _path)
+
+if _MOCK_VLLM_DEPS and "vllm_ascend._build_info" not in sys.modules:
+    # Standalone CPU tests have no wheel-generated hardware build metadata.
+    _build_info = types.ModuleType("vllm_ascend._build_info")
+    _build_info.__device_type__ = "A2"  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend._build_info"] = _build_info
 
 _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
 _distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
@@ -423,12 +536,15 @@ else:
     # tests in the same CPU-UT process.
     _kv_transfer_init = importlib.import_module("vllm_ascend.distributed.kv_transfer")
 
-_kv_utils_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.utils",
-    os.path.join(_kv_transfer_real_path, "utils"),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
-sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
+if _MOCK_VLLM_DEPS:
+    # Ascend-store tests import the Mooncake backend, which imports this module.
+    # Without vLLM there is no real engine to load, so keep the import stubbed.
+    _kv_utils_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.utils",
+        os.path.join(_kv_transfer_real_path, "utils"),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
 _kv_pool_pkg = _make_pkg(
     "vllm_ascend.distributed.kv_transfer.kv_pool",
@@ -467,11 +583,9 @@ sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] 
 # with ImportError under the stub. (Submodules such as
 # backend.memcache_backend resolve through the stub package's __path__ and
 # need no special casing.)
-# The scheduler/worker resolve the backend class dynamically via
-# ``importlib.import_module(path)``; tests that exercise those paths patch
-# ``<module>.importlib`` locally (see test_pool_scheduler.py /
-# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
-# register the backends in sys.modules or globally wrap import_module here:
+# Scheduler tests mock create_scheduler_client on real backend classes;
+# worker tests patch pool_worker.importlib locally. Do NOT install fake
+# backend modules in sys.modules or globally wrap import_module here:
 # test_backend.py imports the real backend classes and also relies on
 # ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.

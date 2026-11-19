@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
+"""GLM-5.3-Flash KDA layer with a fused convolution and a bounded safe gate."""
+
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import divide
+from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -19,31 +23,122 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import (
-    maybe_disable_graph_partition,
-    set_weight_attrs,
-)
-from vllm.platforms import current_platform
-
-# FusedRMSNormGated is a CustomOp, so the Ascend implementation is picked up
-# through the OOT registration in `vllm_ascend.utils` rather than by import.
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.models.glm5next.config import Glm5NextConfig
-from vllm_ascend.models.glm5next.ops.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.models.glm5next.ops.state_ops import (
-    gather_initial_states,
-    scatter_states,
-)
-from vllm_ascend.ops.triton.kda.kda import (
-    chunk_kda_with_fused_gate,
-    fused_recurrent_kda,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.parallel_state import get_qkv_iproj_tp_group
+from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTP
+from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
+from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
+from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+
+
+class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        # The GLM KDA layer gathers PCP prefill tokens before its head-sharded
+        # recurrent update and restores the PCP-local output afterward.
+        return True
+
+
+def get_kda_parallel_size(parallel_config: ParallelConfig) -> int:
+    """Number of head shards shared by projections and KDA state."""
+    return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
+
+
+def _get_kda_parallel_rank(tp_group, pcp_group) -> int:
+    # Match the TP-major ordering of Mooncake state transfer.
+    return tp_group.rank_in_group * pcp_group.world_size + pcp_group.rank_in_group
+
+
+class PCPColumnParallelLinear(ColumnParallelLinear):
+    """Column-parallel projection using combined TP and PCP head shards."""
+
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        # An explicit input-projection group already defines all its shards.
+        self.pcp_group = get_pcp_group() if tp_group is None else None
+        self.tp_group = get_tp_group() if tp_group is None else tp_group
+        rank = self.tp_group.rank_in_group
+        size = self.tp_group.world_size
+        if self.pcp_group is not None:
+            rank = _get_kda_parallel_rank(self.tp_group, self.pcp_group)
+            size *= self.pcp_group.world_size
+        super().__init__(
+            input_size,
+            output_size,
+            tp_rank=rank,
+            tp_size=size,
+            **kwargs,
+        )
+
+    def forward(self, input_):
+        bias = self.bias if not self.skip_bias_add else None
+        output = self.quant_method.apply(self, input_, bias)
+        if self.gather_output:
+            if self.pcp_group is not None and self.pcp_group.world_size > 1:
+                output = self.pcp_group.all_gather(output, dim=-1)
+            if self.tp_group.world_size > 1:
+                output = self.tp_group.all_gather(output, dim=-1)
+        if not self.return_bias:
+            return output
+        return output, self.bias if self.skip_bias_add else None
+
+
+class PCPRowParallelLinear(RowParallelLinear):
+    """Row-parallel projection reducing PCP and TP head contributions separately."""
+
+    def __init__(self, input_size: int, output_size: int, *, tp_group=None, **kwargs) -> None:
+        self.pcp_group = get_pcp_group() if tp_group is None else None
+        self.tp_group = get_tp_group() if tp_group is None else tp_group
+        rank = self.tp_group.rank_in_group
+        shard_count = self.tp_group.world_size
+        if self.pcp_group is not None:
+            rank = _get_kda_parallel_rank(self.tp_group, self.pcp_group)
+            shard_count *= self.pcp_group.world_size
+        # The pinned RowParallelLinear has no rank/size overrides. Allocate
+        # the local input shard, then bind its inherited weight loaders to the combined rank.
+        super().__init__(divide(input_size, shard_count), output_size, disable_tp=True, **kwargs)
+        self.input_size = input_size
+        self.disable_tp = False
+        self.tp_size = shard_count
+        self.tp_rank = rank
+        self.update_param_tp_status()
+
+    def forward(self, input_, pcp_output_indices=None):
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            input_parallel = input_.chunk(self.tp_size, dim=-1)[self.tp_rank].contiguous()
+        bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
+        output = self.quant_method.apply(self, input_parallel, bias)
+        # The decoder can defer TP reduction to sequence-parallel reduce-scatter.
+        # It does not reduce over PCP, so always combine those shards here.
+        if self.pcp_group is not None and self.pcp_group.world_size > 1:
+            if pcp_output_indices is not None:
+                output = self.pcp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
+                output = self.pcp_group.all_reduce(output)
+        if self.reduce_results and self.tp_group.world_size > 1:
+            if self.pcp_group is None and pcp_output_indices is not None:
+                output = self.tp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
+                output = self.tp_group.all_reduce(output)
+        if not self.return_bias:
+            return output
+        return output, self.bias if self.skip_bias_add else None
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -113,33 +208,86 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-)
-def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
-    """Fuse the fp32 cast + sigmoid into one Inductor kernel."""
-    return x.float().sigmoid()
+class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear, PCPColumnParallelLinear):
+    """PCP-sharded Q/K/V/b with replicated low-rank f_a/g_a shards."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        replicated_shard_ids: tuple[int, ...],
+        tp_size: int,
+        **kwargs,
+    ) -> None:
+        self.replicated_shard_ids = set(replicated_shard_ids)
+        self.output_sizes = output_sizes.copy()
+        for sid in self.replicated_shard_ids:
+            self.output_sizes[sid] *= tp_size
+        # MergedColumnParallelLinear's constructor hardcodes the TP group.
+        # Retain its shard loaders while allocating through the PCP column layer.
+        PCPColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        # vLLM #63752: the PCP allocation bypasses the stacked initializer.
+        self.shard_ids = tuple(range(len(self.output_sizes)))
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
+
+
+def _fused_qkv_conv1d(
+    conv_size: int,
+    projection_size: int,
+    tp_size: int,
+    tp_rank: int,
+    prefix: str,
+    column_linear: type[ColumnParallelLinear] = ColumnParallelLinear,
+) -> ColumnParallelLinear:
+    """Load checkpoint Q/K/V shards into one TP- or PCP-sharded parameter."""
+    # The upstream module imports FLA, so defer it until worker device selection.
+    from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import _make_fused_conv1d_weight_loader
+
+    conv1d = column_linear(
+        input_size=conv_size,
+        output_size=3 * projection_size,
+        bias=False,
+        params_dtype=torch.float32,
+        prefix=prefix,
+    )
+    conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
+    delattr(conv1d.weight, "weight_loader")
+    set_weight_attrs(
+        conv1d.weight,
+        {"weight_loader": _make_fused_conv1d_weight_loader([projection_size] * 3, tp_size, tp_rank)},
+    )
+    return conv1d
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
+    use_contiguous_conv_indices = True
+    use_shared_conv_output = True
+    # Ascend RecoverSSM only implements the Triton commit path; the upstream
+    # metadata builder reads this attribute when creating the commit context.
+    recoverssm_backend = "triton"
+
+    tp_size: int
     head_dim: int
     num_heads: int
     conv_size: int
+    _merged_conv_weight: torch.Tensor | None
 
     def get_state_dtype(
         self,
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(self.model_config.dtype, self.cache_config.mamba_cache_dtype)
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         # conv_state width must include num_spec so the spec-decode conv update
-        # (causal_conv1d_update with num_accepted_tokens + max_query_len) can
+        # (AscendC causal-conv with num_accepted_tokens) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
         return MambaStateShapeCalculator.kda_state_shape(
@@ -152,11 +300,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         # KDA projections remain BF16 because fp8 checkpoints omit their scales.
+        self.use_recoverssm = use_glm_recoverssm(vllm_config)
         saved_quant_config = vllm_config.quant_config
         try:
             vllm_config.quant_config = None
@@ -164,19 +313,57 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         finally:
             vllm_config.quant_config = saved_quant_config
 
+        if config.linear_head_dim != 128 or vllm_config.model_config.dtype != torch.bfloat16:
+            raise ValueError("GLM AscendC KDA requires BF16 activations and head_dim=128.")
+        num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        if num_spec + 1 > KDA_MAX_RECURRENT_TOKENS:
+            raise ValueError("GLM AscendC KDA supports at most seven speculative tokens.")
+        if not 2 <= config.linear_conv_kernel_dim <= 4:
+            raise ValueError("GLM AscendC causal-conv requires a kernel width in [2, 4].")
+        if num_spec and config.linear_conv_kernel_dim != 4:
+            raise ValueError("GLM AscendC causal-conv requires kernel width=4 for MTP.")
+        if not -5 <= config.linear_lower_bound < 0:
+            raise ValueError("GLM AscendC KDA requires linear_lower_bound in [-5, 0).")
+        self.pcp_group = get_pcp_group()
+        self.pcp_size = self.pcp_group.world_size
+        self.pcp_rank = self.pcp_group.rank_in_group
+        self.use_pcp_head_sharding = self.pcp_size > 1
+        column_linear = ColumnParallelLinear
+        merged_linear = _Glm5NextMergedColumnParallelLinear
+        row_linear = RowParallelLinear
+        if self.use_pcp_head_sharding:
+            self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
+            self.tp_rank = _get_kda_parallel_rank(get_tp_group(), self.pcp_group)
+            column_linear = PCPColumnParallelLinear
+            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            row_linear = PCPRowParallelLinear
+
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
         self.conv_size = config.linear_conv_kernel_dim
-        assert self.num_heads % self.tp_size == 0
+        if self.num_heads % self.tp_size:
+            raise ValueError(
+                f"GLM KDA head count ({self.num_heads}) must be divisible by the TP x PCP shard count ({self.tp_size})."
+            )
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
+        projection_tp_size = self.tp_size
+        merged_linear_kwargs = {}
+        self.projection_tp: KDAInputProjectionTP | None = None
+        qkv_iproj_tp_size = get_ascend_config().finegrained_tp_config.qkv_iproj_tensor_parallel_size
+        if qkv_iproj_tp_size > 1:
+            group = get_qkv_iproj_tp_group()
+            projection_tp_size = group.world_size
+            self.projection_tp = KDAInputProjectionTP(group, self.num_heads, self.head_dim)
+            merged_linear = PCPGlm5NextMergedColumnParallelLinear
+            merged_linear_kwargs["tp_group"] = group
 
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
-        # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
-        self.in_proj_qkvbfg_a = _Glm5NextMergedColumnParallelLinear(
+        # Shards 4 (f_a) and 5 (g_a) are replicated across head-sharding ranks.
+        self.in_proj_qkvbfg_a = merged_linear(
             self.hidden_size,
             [
                 projection_size,  # q (shard 0)
@@ -187,13 +374,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,  # g_a (shard 5, replicated)
             ],
             replicated_shard_ids=(4, 5),
-            tp_size=self.tp_size,
+            tp_size=projection_tp_size,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
+            **merged_linear_kwargs,
         )
 
-        self.f_b_proj = ColumnParallelLinear(
+        self.f_b_proj = column_linear(
             self.head_dim,
             projection_size,
             bias=False,
@@ -202,56 +390,59 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         self.dt_bias = nn.Parameter(torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32))
 
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": self._dt_bias_weight_loader})
 
-        self.q_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.q_conv1d",
+        self.conv1d = _fused_qkv_conv1d(
+            self.conv_size,
+            projection_size,
+            self.tp_size,
+            self.tp_rank,
+            prefix=f"{prefix}.conv1d",
+            column_linear=column_linear,
         )
-        self.k_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.k_conv1d",
-        )
-        self.v_conv1d = ColumnParallelLinear(
-            input_size=self.conv_size,
-            output_size=projection_size,
-            bias=False,
-            params_dtype=torch.float32,
-            prefix=f"{prefix}.v_conv1d",
-        )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # Rebuilt by the deferred post-load hook while retaining the address
+        # captured by ACL graphs across weight updates.
+        self._merged_conv_weight = None
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
+        set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
+        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        if self.use_recoverssm:
+            # Importing Kimi's package can load FLA and initialize an NPU.
+            # Defer it until the worker has selected its device.
+            from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords as KDARecords
 
-        self.g_b_proj = ColumnParallelLinear(
+            self.recoverssm_records = KDARecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.num_spec + 1,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.A_log.device,
+            )
+
+        self.g_b_proj = column_linear(
             self.head_dim,
             projection_size,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
+        # FLA imports can initialize an NPU context through capability queries.
+        # Resolve and register the Ascend subclass after worker device selection.
+        # TODO: Restore eager import/registration once supported vLLM FLA or
+        # Triton Ascend versions make these queries safe before device selection.
+        from vllm_ascend.utils import register_ascend_fla_customop
+
+        register_ascend_fla_customop()
+        from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
-        self.o_proj = RowParallelLinear(
+        self.o_proj = row_linear(
             projection_size,
             self.hidden_size,
             bias=False,
-            quant_config=self.quant_config,
+            quant_config=saved_quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -260,61 +451,123 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
-        def _a_log_weight_loader(param, loaded_weight):
-            if loaded_weight.dim() == 1:
-                loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
-
-        self.A_log.weight_loader = _a_log_weight_loader
-
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
-        self.kda_safe_gate = True
         self.kda_lower_bound = config.linear_lower_bound
+        self.gate_lower_bound = self.kda_lower_bound
         # Process-global conv-state layout, resolved once here instead of on
-        # every _forward call (it reads an env-derived flag each time).
+        # every _forward_core call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+        # Piecewise graph capture needs a graph-owned output address for the
+        # eager KDA op between captured segments. Other modes can return the
+        # op's own output and skip a hidden_size-wide copy per layer.
+        self._needs_output_buffer = compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self, act_dtype: torch.dtype | None = None) -> None:
+        """Refresh the q|k|v convolution after initial loading and weight refits.
+
+        vLLM finalizes the projection children before calling this hook.
+        Updating the derived tensor in place preserves decode graph arguments across
+        every reload.
+        """
+        # Current vLLM calls without arguments; v0.33.0 passes the dtype.
+        if act_dtype is None:
+            act_dtype = self.model_config.dtype
+        # AscendC consumes [kernel width, Q|K|V] in the activation dtype,
+        # unlike the checkpoint-shaped FP32 fused parameter.
+        merged = self.conv1d.weight.squeeze(1).transpose(0, 1).to(dtype=act_dtype, copy=True).contiguous()
+        # TODO: Use upstream refill_derived once all vLLM versions supported
+        # by vllm-ascend main provide it.
+        if self._merged_conv_weight is None:
+            self._merged_conv_weight = merged
+        else:
+            self._merged_conv_weight.copy_(merged)
+
+    def _dt_bias_weight_loader(self, param, loaded_weight):
+        shard_size = param.shape[0]
+        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * shard_size, shard_size))
+
+    def _a_log_weight_loader(self, param, loaded_weight):
+        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
+        if loaded_weight.dim() == 1:
+            loaded_weight = loaded_weight.view(1, 1, -1, 1)
+        shard_size = param.shape[2]
+        default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * shard_size, shard_size))
+
+    def get_attn_backend(self):
+        return Glm5NextGDNHostMetadataBackend
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
-        # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
-        projected = self.in_proj_qkvbfg_a(hidden_states)[0]
-        qkv, beta_raw, f_a, g_a = projected.split(
-            [
-                3 * self.local_projection_size,
-                self.local_num_heads,
-                self.head_dim,
-                self.head_dim,
-            ],
-            dim=-1,
-        )
+        if self._needs_output_buffer:
+            # Allocate in the compiled graph so downstream captures retain the
+            # same output address when this split op executes on each
+            # invocation.
+            output = torch.empty_like(hidden_states)
+            torch.ops.vllm.glm5next_kda_forward_with_output(hidden_states, output, self.prefix)
+            return output
+        return torch.ops.vllm.glm5next_kda_forward(hidden_states, self.prefix)
 
-        # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
-        # at load (SIGMOID_BETA), and only the chunked prefill path needs the
-        # pre-computed fp32 sigmoid — computed lazily in _forward. Pure decode
-        # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
-        # intermediate entirely.
-        beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
-        g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
+    def _forward(self, hidden_states: torch.Tensor, output_buffer: torch.Tensor | None) -> torch.Tensor | None:
+        attn_metadata_raw = get_forward_context().attn_metadata
+        attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
+        pcp_context = getattr(attn_metadata, "pcp_context", None)
+        has_pcp_prefill = pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any())
+        local_num_tokens = hidden_states.size(0)
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            assert pcp_context.padded_gather_idx is not None
+            # PCP assigns the first and last chunks of a prefill to the same
+            # rank. Reconstruct causal order before advancing the head-sharded
+            # recurrent state across the combined TP and PCP head shards.
+            hidden_states = self.pcp_group.all_gather(hidden_states, dim=0)[pcp_context.hidden_restore_idx]
+        if self.projection_tp is not None:
+            projections = self.projection_tp.project(self, hidden_states)
+            if projections is None:
+                # Only a zero common capacity skips the core and output collectives.
+                if output_buffer is None:
+                    return torch.empty_like(hidden_states)
+                return None
+            qkv, g1, beta, g2 = projections
+            core_attn_out = hidden_states.new_zeros((1, qkv.shape[0], self.local_num_heads, self.head_dim))
+        else:
+            num_tokens = hidden_states.size(0)
+            # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
+            projected = self.in_proj_qkvbfg_a(hidden_states)[0]
+            qkv, beta_raw, f_a, g_a = projected.split(
+                [
+                    3 * self.local_projection_size,
+                    self.local_num_heads,
+                    self.head_dim,
+                    self.head_dim,
+                ],
+                dim=-1,
+            )
 
-        g_proj_states = self.g_b_proj(g_a)[0]
-        # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
-        g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
+            # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
+            # at load (SIGMOID_BETA), and only the chunked prefill path needs the
+            # pre-computed fp32 sigmoid — computed lazily in _forward_core. Pure decode
+            # / spec-verify steps then skip the separate sigmoid and its fp32
+            # intermediate entirely.
+            beta = beta_raw.unsqueeze(0)
+            g1 = self.f_b_proj(f_a)[0]
+            g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        core_attn_out = torch.empty(
-            (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        # Call the decorated eager break directly so host-side prefill branches
-        # are not captured by PIECEWISE CUDA graphs.
-        self._forward(
+            g_proj_states = self.g_b_proj(g_a)[0]
+            # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
+            g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
+
+            core_attn_out = torch.empty(
+                (1, num_tokens, self.local_num_heads, self.head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+        # Keep the layer's dispatch outside piecewise graph compilation.
+        self._forward_core(
             qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
@@ -322,10 +575,39 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        return self.o_proj(core_attn_out)[0]
+        use_pcp_reduce_scatter = False
+        if has_pcp_prefill:
+            assert pcp_context is not None
+            if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
+                raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
+            # Mixed batches replicate decode rows in every rank's packed output.
+            # Keep them on AllReduce to avoid expanding the communication input.
+            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and bool(
+                pcp_context.global_batch.is_prefilling_np.all()
+            )
+        if use_pcp_reduce_scatter:
+            assert pcp_context is not None
+            logger.info_once("KDA PCP pure-prefill output uses packed ReduceScatter.")
+            output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
+        else:
+            output = self.o_proj(core_attn_out)[0]
+            if has_pcp_prefill:
+                assert pcp_context is not None
+                local_start = self.pcp_rank * local_num_tokens
+                local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+                if output_buffer is None:
+                    return torch.index_select(output, 0, local_indices)
+                # Preserve the graph-owned output address on the fallback path.
+                torch.index_select(output, 0, local_indices, out=output_buffer)
+                return None
+            if self.projection_tp is not None:
+                output = output[:local_num_tokens]
+        if output_buffer is None:
+            return output
+        output_buffer.copy_(output)
+        return None
 
-    @eager_break_during_capture
-    def _forward(
+    def _forward_core(
         self,
         qkv_proj_states: torch.Tensor,
         g1: torch.Tensor,
@@ -336,60 +618,47 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata_raw = forward_context.attn_metadata
 
         if attn_metadata_raw is None:
+            core_attn_out.zero_()
             return
 
         assert isinstance(attn_metadata_raw, dict)
         attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
             # Profile/warmup dummy runs may omit mamba-family metadata.
+            core_attn_out.zero_()
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
-        has_initial_state = attn_metadata_narrowed.has_initial_state
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
         non_spec_query_start_loc = attn_metadata_narrowed.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata_narrowed.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata_narrowed.num_actual_tokens
         # Spec-decode metadata (all None when speculative decoding is disabled).
-        spec_sequence_masks = attn_metadata_narrowed.spec_sequence_masks
         spec_query_start_loc = attn_metadata_narrowed.spec_query_start_loc
         spec_state_indices_tensor = attn_metadata_narrowed.spec_state_indices_tensor
         spec_token_indx = attn_metadata_narrowed.spec_token_indx
         non_spec_token_indx = attn_metadata_narrowed.non_spec_token_indx
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
-        use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
         # Safe-gate checkpoints use the bounded sigmoid variant.
-        safe_gate = self.kda_safe_gate
         lower_bound = self.kda_lower_bound
-        constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        (conv_state, recurrent_state) = constant_caches
-        # conv_state must be (..., dim, width-1) for the conv kernels.
-        # DS layout stores it that way directly; SD layout needs a transpose.
+        conv_state, recurrent_state = self.kv_cache
+        # AscendC consumes [cache, state_len, dim]. Preserve the original storage.
         # Layout is process-global and resolved once at init (see __init__).
-        if not self._conv_state_dim_first:
+        if self._conv_state_dim_first:
             conv_state = conv_state.transpose(-1, -2)
 
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
-        # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
+        # channel dim preserves the independent q/k/v convolutions.
         conv_weights = self._merged_conv_weight
-        conv_bias = self.q_conv1d.bias
+        assert conv_weights is not None, "KDA convolution weights must be processed before forward"
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
@@ -426,18 +695,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
-            conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
-            conv_mql = spec_state_indices_tensor.size(-1)
-            qkv_spec = causal_conv1d_update(
+            conv_meta = attn_metadata_narrowed.spec_decode_metadata.spec_causal_conv1d
+            qkv_spec = causal_conv1d(
                 qkv_spec,
-                conv_state,
                 conv_weights,
-                conv_bias,
-                activation="silu",
-                conv_state_indices=conv_idx,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=conv_mql,
+                conv_state,
+                conv_meta.query_start_loc,
+                conv_meta.cache_indices,
+                run_mode=1,
+                num_accepted_tokens=conv_meta.num_accepted_tokens,
+                output_buffer=conv_meta.output_buffer,
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -445,151 +712,167 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
-            qkv_ns = causal_conv1d_fn(
-                qkv_ns.transpose(0, 1),
+            conv_meta = attn_metadata_narrowed.non_spec_prefill_metadata.causal_conv1d
+            qkv_ns = causal_conv1d(
+                qkv_ns,
                 conv_weights,
-                conv_bias,
-                activation="silu",
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
+                conv_state,
+                conv_meta.query_start_loc,
+                conv_meta.cache_indices,
+                run_mode=0,
+                initial_state_mode=conv_meta.initial_state_mode,
+            )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
-            decode_conv_indices = non_spec_state_indices_tensor[: attn_metadata_narrowed.num_decodes]
-            qkv_ns = causal_conv1d_update(
+            conv_meta = attn_metadata_narrowed.non_spec_decode_metadata.causal_conv1d
+            qkv_ns = causal_conv1d(
                 qkv_ns,
-                conv_state,
                 conv_weights,
-                conv_bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
+                conv_state,
+                conv_meta.query_start_loc,
+                conv_meta.cache_indices,
+                run_mode=1,
+                output_buffer=conv_meta.output_buffer,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
-        def _rearr(x):
+        def rearrange(x):
             return x.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        # --- core attention: spec (draft-verify) path ---
-        core_attn_out_spec = None
-        # In a pure spec-verify step (no non-spec tokens) the recurrent kernel
-        # can write straight into the layer output buffer, skipping the
-        # fresh allocation + copy below. Mixed steps must scatter via
-        # spec_token_indx, so they keep the kernel-managed output.
-        spec_out = (
-            core_attn_out[0, :num_actual_tokens].unsqueeze(0)
-            if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
-            else None
+        # Pure decode writes the whole captured buffer, including padding.
+        direct_output = (
+            not use_spec and attn_metadata_narrowed.num_prefills == 0 and attn_metadata_narrowed.num_decodes > 0
         )
+        # Prefill copies its output and speculative dispatch scatters both token
+        # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
-            assert spec_state_indices_tensor is not None
-            assert num_accepted_tokens is not None
-            assert spec_query_start_loc is not None
-            # Gate computed inside the recurrent kernel (COMPUTE_GATE) from
-            # raw g1 — replicates fused_kda_gate's arithmetic bit-for-bit and
-            # skips its launch + fp32 [n, H, D] intermediate per layer.
-            core_attn_out_spec, _ = fused_recurrent_kda(
-                q=_rearr(q_spec),
-                k=_rearr(k_spec),
-                v=_rearr(v_spec),
-                g=g1_spec,
-                beta=beta_spec,
-                initial_state=recurrent_state,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=spec_query_start_loc[: num_spec_decodes + 1],
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
-                out=spec_out,
-                sigmoid_beta=True,
-                a_log=self.A_log,
-                g_bias=self.dt_bias,
-                compute_gate=True,
-                lower_bound=lower_bound,
-            )
+            if self.use_recoverssm:
+                records = self.recoverssm_records
+                assert records is not None
+                # One paged checkpoint per request; verification only records
+                # compact updates. MRV2 commits after rejection sampling.
+                spec_output = kda_recoverssm_verify(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    self.A_log.reshape(-1),
+                    self.dt_bias,
+                    lower_bound,
+                    recurrent_state,
+                    records.correction,
+                    records.key_gate,
+                    spec_query_start_loc,
+                    spec_state_indices_tensor[:, 0],
+                    self.num_spec + 1,
+                )
+            else:
+                spec_output = recurrent_kda(
+                    rearrange(q_spec),
+                    rearrange(k_spec),
+                    rearrange(v_spec),
+                    g1_spec,
+                    beta_spec,
+                    recurrent_state,
+                    spec_query_start_loc[: num_spec_decodes + 1],
+                    spec_state_indices_tensor,
+                    self.A_log,
+                    self.dt_bias,
+                    lower_bound,
+                    num_accepted_tokens,
+                )
+            if spec_token_indx is None:
+                core_attn_out[:, : spec_output.shape[1]].copy_(spec_output)
+            else:
+                core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
-        # --- core attention: non-spec path (prefill or plain decode) ---
-        core_attn_out_non_spec = None
-        # Only the plain-decode recurrent kernel can write straight into the
-        # layer output buffer; the chunked prefill kernel cannot, so this
-        # stays None there and the merge copy below runs as before.
-        ns_out = None
-        if attn_metadata_narrowed.num_prefills > 0:
-            assert q_ns is not None
-            assert non_spec_state_indices_tensor is not None
-            assert has_initial_state is not None
-            initial_state = gather_initial_states(recurrent_state, non_spec_state_indices_tensor, has_initial_state)
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_kda_with_fused_gate(
-                q=_rearr(q_ns),
-                k=_rearr(k_ns),
-                v=_rearr(v_ns),
-                raw_g=g1_ns,
-                # Chunk path wants the pre-sigmoided fp32 beta (its kernels
-                # don't sigmoid); beta_ns is raw bf16 from forward.
-                beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
-                A_log=self.A_log,
-                g_bias=self.dt_bias,
-                initial_state=initial_state,
-                output_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc,
-                safe_gate=safe_gate,
-                lower_bound=lower_bound,
-            )
-            # Init cache
-            scatter_states(
+        if q_ns is None:
+            maybe_save_kv_layer_to_connector("", [])
+            return
+        q_ns, k_ns, v_ns = rearrange(q_ns), rearrange(k_ns), rearrange(v_ns)
+        metadata = attn_metadata_narrowed
+        decode_tokens = metadata.num_decode_tokens if metadata.num_prefills > 0 else q_ns.shape[1]
+        output = None
+        if metadata.num_decodes > 0:
+            output = recurrent_kda(
+                q_ns[:, :decode_tokens],
+                k_ns[:, :decode_tokens],
+                v_ns[:, :decode_tokens],
+                g1_ns[:, :decode_tokens],
+                beta_ns[:, :decode_tokens],
                 recurrent_state,
-                last_recurrent_state,
+                non_spec_query_start_loc[: metadata.num_decodes + 1],
                 non_spec_state_indices_tensor,
+                self.A_log,
+                self.dt_bias,
+                lower_bound,
+                output_buffer=core_attn_out if direct_output else None,
             )
-        elif attn_metadata_narrowed.num_decodes > 0:
-            assert non_spec_query_start_loc is not None
-            assert non_spec_state_indices_tensor is not None
-            # Plain decode step (no spec tokens): token order is dense, so the
-            # kernel can write straight into the layer output buffer. A mixed
-            # step scatters non-spec output via non_spec_token_indx instead.
-            # Gate computed in-kernel (COMPUTE_GATE), beta sigmoided in-kernel.
-            if not use_spec:
-                ns_out = spec_out
-            core_attn_out_non_spec, _ = fused_recurrent_kda(
-                q=_rearr(q_ns),
-                k=_rearr(k_ns),
-                v=_rearr(v_ns),
-                g=g1_ns,
-                beta=beta_ns,
-                initial_state=recurrent_state,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=non_spec_query_start_loc[: attn_metadata_narrowed.num_decodes + 1],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                out=ns_out,
-                sigmoid_beta=True,
-                a_log=self.A_log,
-                g_bias=self.dt_bias,
-                compute_gate=True,
-                lower_bound=lower_bound,
+        if metadata.num_prefills > 0:
+            prefill_output = chunk_kda(
+                q_ns[:, decode_tokens:],
+                k_ns[:, decode_tokens:],
+                v_ns[:, decode_tokens:],
+                g1_ns[:, decode_tokens:],
+                beta_ns[:, decode_tokens:],
+                recurrent_state,
+                metadata.prefill_state_indices,
+                metadata.prefill_has_initial_state,
+                metadata.non_spec_prefill_metadata.chunk,
+                self.A_log,
+                self.dt_bias,
+                lower_bound,
             )
-
-        # --- merge spec / non-spec outputs back into token order ---
-        if use_spec and core_attn_out_non_spec is not None:
-            assert core_attn_out_spec is not None
-            merged = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
-            )
-            merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[0, :num_actual_tokens] = merged.squeeze(0)
-        elif use_spec:
-            assert core_attn_out_spec is not None
-            if spec_out is None:
-                core_attn_out[0, :num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            output = prefill_output if output is None else torch.cat((output, prefill_output), dim=1)
+        assert output is not None
+        if direct_output:
+            maybe_save_kv_layer_to_connector("", [])
+            return
+        if use_spec:
+            core_attn_out[0].index_copy_(0, non_spec_token_indx, output[0])
         else:
-            assert core_attn_out_non_spec is not None
-            if ns_out is None:
-                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[0, :num_actual_tokens]
+            core_attn_out[0, : output.shape[1]].copy_(output[0])
+        maybe_save_kv_layer_to_connector("", [])
+
+
+@eager_break_during_capture
+def glm5next_kda_forward_with_output(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward(hidden_states, output)
+
+
+def glm5next_kda_forward_with_output_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward_with_output",
+    op_func=glm5next_kda_forward_with_output,
+    mutates_args=["output"],
+    fake_impl=glm5next_kda_forward_with_output_fake,
+)
+
+
+# Returning variant for an unsplit FX graph. No eager_break_during_capture:
+# a freshly returned tensor would change address on each eager replay, which
+# is exactly what the breakable-capture contract forbids. forward() selects
+# this one only when the layer is not a splitting op.
+def glm5next_kda_forward(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    output = layer._forward(hidden_states, None)
+    assert output is not None
+    return output
+
+
+def glm5next_kda_forward_fake(hidden_states: torch.Tensor, layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="glm5next_kda_forward",
+    op_func=glm5next_kda_forward,
+    mutates_args=[],
+    fake_impl=glm5next_kda_forward_fake,
+)

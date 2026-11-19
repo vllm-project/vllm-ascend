@@ -29,6 +29,41 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @dataclass(frozen=True, slots=True)
+class MegamoeSharedWeights:
+    """Shared-expert weights rebuilt for the A5 MegaMoe operator.
+
+    Produced by ``AscendSharedExperts`` after weight loading and carried by
+    ``MegamoeSharedExpertFusion`` on the routed-expert layer; quant methods
+    forward it into ``MoEWeights.shared_*`` for the operator call.
+    Field names mirror the ``MoEWeights.shared_*`` fields: one tensor per
+    shared expert, w1 (2*intermediate, hidden) + scale
+    (2*intermediate, k//2, 2), w2 (hidden, intermediate) + scale
+    (hidden, k//2, 2).
+    """
+
+    w1: list[torch.Tensor]
+    w2: list[torch.Tensor]
+    w1_scale: list[torch.Tensor]
+    w2_scale: list[torch.Tensor]
+
+
+@dataclass(slots=True)
+class MegamoeSharedExpertFusion:
+    """Live handle for the shared expert fused into the A5 MegaMoe operator.
+
+    ``AscendSharedExperts.megamoe_shared_fusion()`` returns one instance and
+    ``AscendMoERunner`` installs it on the routed-expert layer at
+    construction. Weight loading runs after construction, so the fields stay
+    ``None`` until both shared linears have been rebuilt for the MegaMoe
+    layout; consumers treat ``weights is None`` as "fusion inactive".
+    """
+
+    weights: MegamoeSharedWeights | None = None
+    quant_out_dtype: int | None = None
+    weight_type: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MoEWeights:
     """Dense and quantized weight payloads consumed by MoE execution."""
 
@@ -42,6 +77,14 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
+    # Shared-expert weights in the A5 MegaMoe layout, one tensor per shared
+    # expert: w1 (2*intermediate, hidden) + scale (2*intermediate, k//2, 2),
+    # w2 (hidden, intermediate) + scale (hidden, k//2, 2). Populated only when
+    # shared-expert fusion into the MegaMoe operator is active.
+    shared_w1: list[torch.Tensor] | None = None
+    shared_w2: list[torch.Tensor] | None = None
+    shared_w1_scale: list[torch.Tensor] | None = None
+    shared_w2_scale: list[torch.Tensor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +97,11 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoeRouterInput
     quant: MoEQuantParams
+    # The routed-expert layer owning the weights. The MLP stage reads the
+    # quant-method-specific weights (e.g. ``w13_weight_list``) from here, so
+    # quant methods do not need to thread every weight tensor through
+    # ``build_fused_experts_input``.
+    layer: torch.nn.Module | None = None
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -68,10 +116,11 @@ def build_fused_experts_input(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
+    layer=None,
     quant_type: QuantType,
     dynamic_eplb: bool,
+    w1: torch.Tensor | list[torch.Tensor] | None = None,
+    w2: torch.Tensor | list[torch.Tensor] | None = None,
     expert_map: torch.Tensor | None = None,
     global_redundant_expert_num: int = 0,
     mc2_mask: torch.Tensor | None = None,
@@ -100,6 +149,7 @@ def build_fused_experts_input(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        # These params will be deprecated after 310p refactoring.
         weights=MoEWeights(
             w1=w1,
             w2=w2,
@@ -122,6 +172,7 @@ def build_fused_experts_input(
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
+        layer=layer,
         quant=build_quant_params(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,

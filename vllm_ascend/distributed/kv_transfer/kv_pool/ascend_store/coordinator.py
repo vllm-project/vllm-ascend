@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
+from functools import lru_cache, partial
 from importlib import import_module
 from typing import Any, cast
+from weakref import proxy
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -18,10 +22,57 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
+    get_block_hashes,
+    infer_cacheable_group_ids,
 )
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
+_REACHABLE_MASK_CACHE_SIZE = 32
+
+# kwargs every reachable_block_mask implementation must accept. Used when the
+# manager's signature cannot be introspected.
+_REACHABLE_MASK_BASE_KWARGS = frozenset(("start_block", "end_block", "alignment_tokens", "kv_cache_spec", "use_eagle"))
+_REACHABLE_MASK_OPTIONAL_KWARGS = frozenset(("retention_interval", "num_prompt_tokens", "reachable_boundaries"))
+# manager class -> accepted reachable_block_mask parameter names.
+_REACHABLE_MASK_KWARGS_CACHE: dict[type[SingleTypeKVCacheManager], frozenset[str]] = {}
+
+# Per-group pool query used by the shared reachable hit lookup: returns the
+# subset of ``group_block_hashes`` present in the pool (all replicas valid).
+# A None ``lookup_mask`` means the group has no reachability limits.
+GroupHitQuery = Callable[[int, Sequence[BlockHash | str], Sequence[bool] | None], Iterable[BlockHash | str]]
+
+
+class _HBMBlockHash(bytes):
+    """A hash whose complete hash block is already computed locally."""
+
+
+class _HBMPrefixBlockHashes(Sequence[BlockHash]):
+    """Mark local hashes on access, without expanding per-group hit sets.
+
+    Managers select each group's terminal hash without copying it. That hash
+    is local exactly when the complete group block ends within the HBM prefix;
+    an interior hash cannot make a larger, partially local block hit.
+    """
+
+    def __init__(self, block_hashes: Sequence[BlockHash], num_hbm_hashes: int) -> None:
+        self._block_hashes = block_hashes
+        self._num_hbm_hashes = num_hbm_hashes
+
+    def __len__(self) -> int:
+        return len(self._block_hashes)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        block_hash = self._block_hashes[index]
+        if index < self._num_hbm_hashes:
+            return cast(BlockHash, _HBMBlockHash(block_hash_to_bytes(block_hash)))
+        return block_hash
 
 
 class ExternalCachedBlockPool:
@@ -44,7 +95,7 @@ class ExternalCachedBlockPool:
         block_hash: BlockHash,
         group_ids: list[int],
     ) -> list[KVCacheBlock] | None:
-        if self._exists is None:
+        if self._exists is None or isinstance(block_hash, _HBMBlockHash):
             return [self._present_block] * len(group_ids)
         h = block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
@@ -55,7 +106,7 @@ class ExternalCachedBlockPool:
 class AscendStoreCoordinator:
     """Hybrid cache-hit/mask coordinator for AscendStore external KV Pool.
 
-    This mirrors vLLM MooncakeStoreCoordinator but uses AscendStore's external
+    This mirrors vLLM's external KV coordinator but uses AscendStore's external
     key granularity. Compressed specs already expose raw-token block sizes,
     while transfer addresses remain in cache-domain blocks.
     """
@@ -84,7 +135,9 @@ class AscendStoreCoordinator:
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
-        for effective_block_size in self.group_effective_block_sizes:
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        for group_id in self.cacheable_group_ids:
+            effective_block_size = self.group_effective_block_sizes[group_id]
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert scheduler_block_size % effective_block_size == 0, (
                 "scheduler_block_size must be a multiple of each group's effective block_size"
@@ -95,6 +148,10 @@ class AscendStoreCoordinator:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
 
         self._verify_and_split_kv_cache_groups()
+        # Do not keep the coordinator alive through its cache while GC is frozen.
+        self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
+            partial(type(self)._reachable_masks, proxy(self))
+        )
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
@@ -104,6 +161,8 @@ class AscendStoreCoordinator:
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
+            if group_id not in self.cacheable_group_ids:
+                continue
             manager_cls = _get_manager_class(spec)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
@@ -131,7 +190,7 @@ class AscendStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -168,8 +227,19 @@ class AscendStoreCoordinator:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of lcm_block_size ({self.lcm_block_size})"
         )
+        # Stores retain the request's replay checkpoint. Lookups must probe
+        # every possible checkpoint: a shorter request may have published a
+        # boundary that is not the current request's replay/segment boundary.
+        reachable_boundaries = (
+            (max(0, num_prompt_tokens - 1),)
+            if num_prompt_tokens is not None
+            else range(self.lcm_block_size, aligned_token_len + 1, self.lcm_block_size)
+        )
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
+            if group_id not in self.cacheable_group_ids:
+                masks.append((0, []))
+                continue
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
@@ -184,6 +254,7 @@ class AscendStoreCoordinator:
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
+                reachable_boundaries=reachable_boundaries,
             )
             masks.append((num_chunks, mask))
         return masks
@@ -193,25 +264,81 @@ class AscendStoreCoordinator:
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool], ...]:
-        masks = self._reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
-        return tuple([True] * num_chunks if mask is None else mask for num_chunks, mask in masks)
+        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, num_prompt_tokens)
+        return tuple([True] * num_chunks if mask is None else mask.copy() for num_chunks, mask in masks)
 
     def lookup_mask(
         self,
         aligned_token_len: int,
     ) -> tuple[list[bool] | None, ...]:
-        masks = self._reachable_masks(aligned_token_len, None, None)
+        # Probe candidate replay boundaries as well as segment boundaries;
+        # find_longest_cache_hit still requires all necessary states to exist.
+        masks = self._cached_reachable_masks(aligned_token_len, self.retention_interval, None)
         for num_chunks, mask in masks:
             if mask is not None:
                 assert len(mask) == num_chunks
-        return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
+        return tuple(None if mask is None or all(mask) else mask.copy() for _, mask in masks)
 
-    def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
-        return block_hashes
+    def find_reachable_hit_tokens(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        log_context: str = "reachable_lookup",
+        hbm_hit_tokens: int = 0,
+    ) -> int:
+        """Reachability-aware external hit lookup shared by both transfer paths.
+
+        Queries, per group, only the blocks the group's lookup mask allows —
+        the subset the save paths persist for reachability-limited groups —
+        and derives the hit length via find_longest_cache_hit so sparsely
+        stored pools still yield correct prefix hits. Both the scheduler-side
+        layerwise lookup and the worker-side non-layerwise lookup delegate
+        here so the hit semantics cannot drift between them.
+
+        ``query_group_hits(group_id, group_block_hashes, lookup_mask)`` must
+        return the subset of ``group_block_hashes`` present in the pool for
+        that group, using whichever key layout and query backend the caller
+        owns. When ``hbm_hit_tokens`` is provided, the callback only returns
+        external hits; locally computed complete blocks are marked lazily for
+        the existing managers, including each group's terminal-hash selection.
+        """
+        aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
+        lookup_masks = self.lookup_mask(aligned_len)
+        exists: set[tuple[int, bytes]] = set()
+        block_hashes_to_check = block_hashes[: token_len // self.hash_block_size]
+
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.group_effective_block_sizes[group_id]
+            group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
+            hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
+            exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
+
+        if not exists and hbm_hit_tokens <= 0:
+            logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
+            return 0
+        hit_hashes: Sequence[BlockHash] = block_hashes
+        if hbm_hit_tokens > 0:
+            num_hbm_hashes = min(hbm_hit_tokens // self.hash_block_size, token_len // self.hash_block_size)
+            hit_hashes = _HBMPrefixBlockHashes(block_hashes, num_hbm_hashes)
+        _, hit_length = self.find_longest_cache_hit(
+            hit_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists),
+            apply_eagle=False,
+        )
+        logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
+        return hit_length
+
+    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+        # Managers accept lazy sequences and preserve their terminal hashes
+        # when resolving each group's block-size view.
+        return cast(BlockHashList, block_hashes)
 
     def _find_hit_blocks(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -362,6 +489,33 @@ def _find_longest_cache_hit(
     return cast(tuple[tuple[list[KVCacheBlock], ...], int], hit_result)
 
 
+def _reachable_mask_accepted_kwargs(
+    manager_cls: type[SingleTypeKVCacheManager],
+    reachable_block_mask: Any,
+) -> frozenset[str]:
+    """Parameter names a manager's ``reachable_block_mask`` accepts.
+
+    Falls back to the base contract when introspection is unavailable or the
+    implementation swallows everything via ``**kwargs``.
+    """
+    cached = _REACHABLE_MASK_KWARGS_CACHE.get(manager_cls, _CACHE_MISSING)
+    if cached is not _CACHE_MISSING:
+        return cast(frozenset[str], cached)
+
+    accepted = _REACHABLE_MASK_BASE_KWARGS
+    try:
+        parameters = inspect.signature(reachable_block_mask).parameters
+    except (TypeError, ValueError):
+        pass
+    else:
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            accepted = _REACHABLE_MASK_BASE_KWARGS | _REACHABLE_MASK_OPTIONAL_KWARGS
+        else:
+            accepted = frozenset(parameters)
+    _REACHABLE_MASK_KWARGS_CACHE[manager_cls] = accepted
+    return accepted
+
+
 def _reachable_block_mask(
     manager_cls: type[SingleTypeKVCacheManager],
     **kwargs: Any,
@@ -369,21 +523,19 @@ def _reachable_block_mask(
     reachable_block_mask = getattr(manager_cls, "reachable_block_mask", None)
     if reachable_block_mask is None:
         return None
-    try:
-        return reachable_block_mask(**kwargs)
-    except TypeError as exc:
-        if "retention_interval" not in str(exc) and "num_prompt_tokens" not in str(exc):
-            logger.debug("KV cache manager does not support reachable_block_mask kwargs: %s", exc)
-            return reachable_block_mask(
-                start_block=kwargs["start_block"],
-                end_block=kwargs["end_block"],
-                alignment_tokens=kwargs["alignment_tokens"],
-                kv_cache_spec=kwargs["kv_cache_spec"],
-                use_eagle=kwargs["use_eagle"],
-            )
-        kwargs.pop("retention_interval", None)
-        kwargs.pop("num_prompt_tokens", None)
-        return reachable_block_mask(**kwargs)
+    # Filter by signature instead of sniffing TypeError text: the old fallback
+    # keyed on a keyword no manager accepts and therefore dropped
+    # retention_interval on every call, silently degrading every sparse-retention
+    # mask to the dense default.
+    accepted = _reachable_mask_accepted_kwargs(manager_cls, reachable_block_mask)
+    unsupported = set(kwargs) - accepted
+    if unsupported:
+        logger.debug(
+            "KV cache manager %s does not accept reachable_block_mask kwargs %s; ignoring them.",
+            manager_cls.__name__,
+            sorted(unsupported),
+        )
+    return reachable_block_mask(**{name: value for name, value in kwargs.items() if name in accepted})
 
 
 def _uses_reachable_mask(cache_family: str | None) -> bool:

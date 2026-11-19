@@ -6,8 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
-from vllm_ascend.distributed.eplb.state import AscendEplbState
+from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
     is_eplb_load_collection_phase_matched,
@@ -38,15 +41,23 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 )
 
     @staticmethod
-    def _make_controller(load_collection_phase="all", log_balancedness=False):
+    def _make_controller(load_collection_phase="all", log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=True,
-            eplb_config=SimpleNamespace(log_balancedness=log_balancedness),
+            # Explicit communicator skips the group-wide consensus, which
+            # needs a live EPLB group that unit tests do not have.
+            eplb_config=SimpleNamespace(
+                log_balancedness=log_balancedness,
+                policy=policy,
+                communicator="torch_gloo",
+            ),
         )
         controller = AscendEPLBController(
             parallel_config,
             torch.device("cpu"),
-            load_collection_phase=load_collection_phase,
+            ascend_eplb_config=EplbConfig(
+                load_collection_phase=load_collection_phase,
+            ),
         )
         controller._has_registered_models = True
         return controller
@@ -61,51 +72,40 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             controller.prepare_load()
 
         self.assertIsInstance(controller.state, AscendEplbState)
+        self.assertIs(controller.state.policy, controller.eplb_policy)
+
+    def test_policy_selection_uses_upstream_config(self):
+        default_controller = self._make_controller(policy="default")
+        stair_controller = self._make_controller(policy="stair")
+
+        self.assertIsInstance(default_controller.eplb_policy, DefaultEplbPolicy)
+        self.assertIsInstance(stair_controller.eplb_policy, StairEplbPolicy)
 
     def test_setup_from_mapping_uses_current_upstream_contract(self):
         controller = self._make_controller()
-        model = MagicMock()
         model_config = object()
         mapping = torch.zeros((1, 1), dtype=torch.int32)
         state = MagicMock()
 
-        with (
-            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
-            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
-        ):
-            controller.setup_from_mapping(model, model_config, mapping)
-
-        from_mapping.assert_called_once_with(
-            model=model,
-            model_config=model_config,
-            device=controller.device,
-            parallel_config=controller.parallel_config,
-            expanded_physical_to_logical=mapping,
-        )
+        controller.state = state
+        with patch.object(AscendEplbState, "from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
-    def test_setup_from_mapping_accepts_release_upstream_contract(self):
+    def test_setup_from_mapping_preserves_registered_state(self):
         controller = self._make_controller()
-        model = MagicMock()
+        state = MagicMock()
+        controller.state = state
+        controller._has_registered_models = True
         model_config = object()
         mapping = torch.zeros((1, 2), dtype=torch.int32)
-        state = MagicMock()
-
-        with (
-            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
-            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
-        ):
-            controller.setup_from_mapping(model, model_config, mapping, 1)
-
-        from_mapping.assert_called_once_with(
-            model=model,
-            model_config=model_config,
-            device=controller.device,
-            parallel_config=controller.parallel_config,
-            expanded_physical_to_logical=mapping,
-            num_valid_physical_experts=1,
-        )
+        with patch.object(AscendEplbState, "from_mapping") as from_mapping:
+            controller.setup_from_mapping(model_config, mapping)
+        state.update_mapping.assert_called_once_with(model_config, mapping)
+        from_mapping.assert_not_called()
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
 
@@ -122,9 +122,11 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 controller.prepare_forward(object(), 7)
 
-                state.prepare_forward.assert_called_once()
+                state.prepare_forward.assert_not_called()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
                 self.assertIs(bool(state.should_record_tensor), expected_record)
+                self.assertTrue(state._is_load_sampling_step)
+                self.assertIs(state._should_collect_local_load, expected_record)
                 self.assertIs(state._has_fresh_recorded_load, expected_record)
 
 
@@ -132,6 +134,9 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
     @staticmethod
     def _make_state(*, rearrangement_step=1):
         state = object.__new__(AscendEplbState)
+        state._hixl_session = None
+        state._close_error = None
+        state._suspended = False
         state.parallel_config = SimpleNamespace(
             enable_elastic_ep=False,
             eplb_config=SimpleNamespace(log_balancedness_interval=1),
@@ -211,11 +216,11 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.distributed.eplb.state.get_ep_group",
+                "vllm_ascend.distributed.eplb.eplb_state.get_ep_group",
                 return_value=ep_group,
             ),
             patch(
-                "vllm_ascend.distributed.eplb.state.all_reduce",
+                "vllm_ascend.distributed.eplb.eplb_state.all_reduce",
                 side_effect=set_remote_fresh_load,
             ) as sync_fresh_load,
         ):

@@ -64,7 +64,7 @@ REG_OP(SituMxQuant)
 - axis 必须为 -1（尾轴量化）
 - beta 必须 > 0
 - dst_type 必须为 36 (FP8_E4M3FN) 或 35 (FP8_E5M2)
-- 仅支持 Ascend950 平台
+- 仅支持 Ascend 950PR&950DT 系列产品平台
 
 ## mxscale Shape 计算
 

@@ -43,8 +43,33 @@ try:
     import batch_invariant_ops  # type: ignore[import-not-found] # noqa
 
     HAS_ASCENDC_BATCH_INVARIANT = True
+    # Workspace query of the batch-invariant FIA kernel. Resolved together with the
+    # package so that builds without it (older batch_invariant_ops) keep working.
+    _BI_FIA_MAX_WORKSPACE = getattr(
+        batch_invariant_ops,
+        "_npu_fused_infer_attention_score_batch_invariant_get_max_workspace",
+        None,
+    )
 except ImportError:
     HAS_ASCENDC_BATCH_INVARIANT = False
+    _BI_FIA_MAX_WORKSPACE = None
+
+
+def _missing_bi_fia_workspace_query(*args, **kwargs):
+    """Stand-in for the BI FIA workspace query on older batch_invariant_ops builds.
+
+    Binding it keeps initialization working, because the query is only reached from graph
+    capture, and makes a captured FIA fail loudly instead of silently sizing the workspace
+    with the non-batch-invariant query.
+    """
+    raise RuntimeError(
+        "Batch-invariant FIA graph capture requires "
+        "_npu_fused_infer_attention_score_batch_invariant_get_max_workspace, which is not "
+        "available in the installed batch_invariant_ops package. Upgrade batch_invariant_ops, "
+        "or keep FIA out of the graph: eager or pure PIECEWISE decoding alone is not enough, "
+        "because multimodal encoder attention is captured by cudagraph_mm_encoder, which is "
+        "independent of cudagraph_mode, so set cudagraph_mm_encoder=False as well."
+    )
 
 
 def add_rms_norm(
@@ -62,15 +87,41 @@ def add_rms_norm(
     return x_, None, residual_
 
 
-def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
+_SUPPORTED_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
+
+
+def reduce_sum(
+    x: torch.Tensor,
+    dim: int | None = None,
+    keepdim: bool = False,
+    *,
+    axis: int | None = None,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
+
+    Mirrors ``torch.Tensor.sum``, which also accepts the NumPy-style ``axis``
+    alias and an output ``dtype``. ``axis`` is mapped to ``dim`` and ``dtype``
+    forces the native fallback so the returned type keeps the caller's intent.
     """
+    if axis is not None:
+        if dim is not None:
+            raise TypeError("reduce_sum() received both 'dim' and 'axis'")
+        dim = axis
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. The last dim can only be spelled as -1 or x.dim() - 1, so
+    # only those take the batch-invariant path, and the caller's dim is forwarded
+    # unchanged. Everything else (non-last-dim, tuple dim, full reduction when dim
+    # is None, CPU tensors, unsupported dtypes, explicit dtype) falls back to the
+    # saved native torch.sum.
+    if dtype is None and x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
-    return torch_sum(x, dim, keepdim)
+    if dtype is None:
+        return torch_sum(x, dim, keepdim)
+    return torch_sum(x, dim, keepdim, dtype=dtype)
 
 
 def override_envs_for_invariance():
@@ -82,13 +133,17 @@ def override_envs_for_invariance():
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
-    # Enable deterministic computation for operators. Some operators on Ascend A5
-    # do not have deterministic mode enabled by default and must be explicitly set.
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    # NOTE: To enable the batch invariance calculation of operators:
+    # 1) The strict environment requirement for ensuring batch invariance of operators
+    # with deterministic level 3 is that torch-npu must be 2.10.0.post7 or later and CANN
+    # must be 9.2.0 or later (The current main branch already meets this requirement.).
+    # 2) Do not use `torch.use_deterministic_algorithms` after `torch_npu.npu.set_deterministic_level`.
+    # Otherwise, unknown errors may occur. This is mentioned in the `set_deterministic_level` API.
+    torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
         "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
-        "LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
+        "LCCL_DETERMINISTIC=1, deterministic_level=3",
     )
 
 
@@ -103,6 +158,9 @@ def enable_batch_invariant_mode():
         HAS_TRITON,
         HAS_ASCENDC_BATCH_INVARIANT,
     )
+
+    # patch npu_add_rms_norm to ensure batch invariance.
+    torch_npu.npu_add_rms_norm = add_rms_norm
 
     # Register operators only implemented in triton.
     if HAS_TRITON:
@@ -120,8 +178,13 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
-        # patch npu_add_rms_norm to ensure batch invariant.
-        torch_npu.npu_add_rms_norm = add_rms_norm
+        # full_graph_fia() sizes the FIA workspace with this query and then registers the task
+        # for the batch-invariant kernel above, so both must come from the same kernel. The
+        # non-BI query under-reports and capture fails with EZ1010 (A3 on CANN 9.2.0:
+        # 235,274,240 B vs 820,904,960 B required; Ascend 950: 203,456,512 B vs 487,327,744 B).
+        torch_npu._npu_fused_infer_attention_score_get_max_workspace = (
+            _BI_FIA_MAX_WORKSPACE if _BI_FIA_MAX_WORKSPACE is not None else _missing_bi_fia_workspace_query
+        )
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
         # Tensor.sum uses the same batch-invariant reduce_sum implementation.

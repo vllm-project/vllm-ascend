@@ -2,6 +2,7 @@
 
 Run the following commands in the container. The container is ready when the output includes `vLLM Ascend environment: OK`.
 
+<!-- doctest: quickstart-container-verify -->
 ```bash
 npu-smi info
 

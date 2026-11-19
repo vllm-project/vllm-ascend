@@ -7,6 +7,8 @@ import gc
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
 
 
@@ -29,6 +31,9 @@ def _torch_reference(topk_indices: torch.Tensor, dcp_size: int, dcp_rank: int, i
     return torch.gather(remapped, dim=-1, index=pack_order.to(torch.int64)).to(topk_indices.dtype)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dcp_size", [2, 4, 6])
 @pytest.mark.parametrize("interleave_size", [1, 2, 4])
 @pytest.mark.parametrize("topk", [1, 8, 48, 256, 2048])
@@ -59,6 +64,9 @@ def test_sparse_index_remap_triton_matches_reference(dcp_size: int, interleave_s
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("interleave_size", [1, 2, 4])
 @torch.inference_mode()
 def test_sparse_index_remap_triton_3d_input(interleave_size: int) -> None:

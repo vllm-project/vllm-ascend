@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -61,8 +61,8 @@ def executor_env(monkeypatch):
     allocations: list[str] = []
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
-    event_names = iter(("inputs", "reusable", "compressor", "indexer", "attention", "indexer-2"))
-    external_event_names = iter(f"external-{index}" for index in range(6))
+    event_names = iter(("inputs", "reusable", "compressor", "attention", "indexer", "extra-0", "extra-1", "extra-2"))
+    external_event_names = iter(f"external-{index}" for index in range(12))
 
     def make_stream():
         allocations.append("stream")
@@ -122,8 +122,8 @@ def test_stream_lifecycle_and_stage_frontiers(executor_env):
         "inputs",
         "reusable",
         "compressor",
-        "indexer",
         "attention",
+        "indexer",
     ]
 
     assert calls == [
@@ -131,10 +131,10 @@ def test_stream_lifecycle_and_stage_frontiers(executor_env):
         ("metadata", "wait", "inputs"),
         ("task", "compressor"),
         ("metadata", "record", "compressor"),
-        ("task", "indexer"),
-        ("metadata", "record", "indexer"),
         ("task", "attention"),
         ("metadata", "record", "attention"),
+        ("task", "indexer"),
+        ("metadata", "record", "indexer"),
     ]
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     executor.wait(DeviceMetadataStage.INDEXER, 2)
@@ -167,12 +167,12 @@ def test_external_events_are_reused_per_batch_descriptor(executor_env):
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     assert calls[-2:] == [
-        ("model", "external_wait", "external-1"),
-        ("model", "reset", "external-1"),
+        ("model", "external_wait", "external-2"),
+        ("model", "reset", "external-2"),
     ]
-    assert calls.count(("model", "external_wait", "external-1")) == 1
-    assert calls.count(("model", "reset", "external-1")) == 1
-    assert calls.index(("metadata", "record", "external-1")) < calls.index(("model", "external_wait", "external-1"))
+    assert calls.count(("model", "external_wait", "external-2")) == 1
+    assert calls.count(("model", "reset", "external-2")) == 1
+    assert calls.index(("metadata", "record", "external-2")) < calls.index(("model", "external_wait", "external-2"))
     executor.release()
     assert not executor.uses_external_events
     executor.submit(_tasks(calls), descriptor)
@@ -182,7 +182,8 @@ def test_external_events_are_reused_per_batch_descriptor(executor_env):
     assert allocations[-3:] == ["external-3", "external-4", "external-5"]
 
 
-def test_external_event_frontiers_must_remain_stable(executor_env):
+@pytest.mark.parametrize("changed_task", ["removed", "added", "replaced"])
+def test_external_event_frontiers_must_remain_stable(executor_env, changed_task):
     executor, calls, allocations = executor_env
     descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
 
@@ -191,12 +192,77 @@ def test_external_event_frontiers_must_remain_stable(executor_env):
     calls.clear()
     allocations_before = list(allocations)
 
+    tasks = _tasks(calls)[:-1]
+    if changed_task == "added":
+        tasks = _tasks(calls)
+    if changed_task != "removed":
+        tasks += (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 99),)
     with pytest.raises(RuntimeError, match="frontiers changed"):
-        executor.submit(_tasks(calls)[:-1], descriptor)
+        executor.submit(tasks, descriptor)
 
     assert calls == []
     assert allocations == allocations_before
     assert not executor.submission_in_flight
+
+
+@pytest.mark.parametrize("consumer_order", [(10, 20), (20, 10)])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_sas_order_follows_first_consumption(executor_env, consumer_order, full_graph):
+    executor, calls, allocations = executor_env
+    compressor = DeviceMetadataStage.COMPRESSOR
+    attention = DeviceMetadataStage.ATTENTION
+    indexer = DeviceMetadataStage.INDEXER
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=4) if full_graph else None
+
+    def task(stage, group_id):
+        return DeviceMetadataTask(stage, lambda: calls.append(("task", stage, group_id)), group_id)
+
+    tasks = (task(indexer, 1), task(attention, 10), task(compressor, 10), task(attention, 20), task(compressor, 20))
+    executor.submit(tasks, descriptor)
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        (attention, 10),
+        (attention, 20),
+        (indexer, 1),
+    ]
+    for group_id in consumer_order:
+        executor.wait(attention, group_id)
+        executor.wait(attention, group_id)
+    executor.release()
+    allocations_before = list(allocations)
+    calls.clear()
+
+    executor.submit(tasks, descriptor)
+    assert allocations == allocations_before
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        *((attention, group_id) for group_id in consumer_order),
+        (indexer, 1),
+    ]
+    first_sas = calls.index(("task", attention, consumer_order[0]))
+    ready_event = calls[first_sas + 1][2]
+    assert calls[first_sas + 1][:2] == ("metadata", "record")
+    assert first_sas < calls.index(("task", indexer, 1))
+    executor.wait(attention, consumer_order[0])
+    executor.wait(attention, consumer_order[0])
+    wait_kind = "external_wait" if full_graph else "wait"
+    assert calls.count(("model", wait_kind, ready_event)) == 1
+    executor.release()
+    calls.clear()
+
+    # A new graph shape reuses the order and keeps unseen SAS groups at the tail.
+    next_descriptor = BatchDescriptor(num_tokens=8, num_reqs=8) if full_graph else None
+    executor.submit((task(attention, 30), *tasks), next_descriptor)
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        *((attention, group_id) for group_id in consumer_order),
+        (attention, 30),
+        (indexer, 1),
+    ]
+    executor.release()
 
 
 def test_submit_failure_keeps_partial_submission_in_flight(executor_env):
@@ -269,3 +335,166 @@ def test_wait_helper_is_noop_without_forward_context(monkeypatch):
     )
 
     wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 7)
+
+
+@contextmanager
+def execution(state):
+    try:
+        yield
+    finally:
+        state.finish()
+
+
+class Executor:
+    submission_in_flight = False
+
+    def __init__(self, **kwargs):
+        self.calls = []
+
+    def submit(self, tasks):
+        self.calls.append("submit")
+        self.submission_in_flight = True
+
+    def wait(self, stage, group_id):
+        self.calls.append("wait")
+
+    def release(self):
+        self.calls.append("release")
+        self.submission_in_flight = False
+
+
+class Builder:
+    enabled = False
+    tasks = ()
+
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph=False):
+        self.enabled = True
+        self.in_graph = in_graph
+        try:
+            yield
+        finally:
+            self.enabled = False
+
+    def take_device_metadata_tasks(self):
+        tasks, self.tasks = self.tasks, ()
+        return tasks
+
+
+@pytest.fixture
+def state(monkeypatch):
+    monkeypatch.setattr(device_metadata, "DeviceMetadataExecutor", Executor)
+    return device_metadata.TargetDeviceMetadata()
+
+
+def prepare(state, builder, full=False, fail=False):
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _: builder)]]
+    with state.build(groups, full):
+        assert builder.enabled and builder.in_graph == full
+        builder.tasks = (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 1),)
+        if fail:
+            raise ValueError("build failure")
+    assert not builder.enabled
+
+
+def test_eager_lifecycle(state):
+    with execution(state):
+        prepare(state, Builder())
+        assert state.executor.calls == ["submit"]
+    assert state.executor.calls == ["submit", "wait", "release"]
+
+
+def test_graph_producers_only_run_inside_forward_not_runtime_prepare(state):
+    with execution(state):
+        prepare(state, Builder(), full=True)
+        assert state.executor.calls == []
+        state.begin_forward()  # ModelWithContext, inside capture
+        state.finish()
+        assert state.executor.calls == ["submit", "wait", "release"]
+        prepare(state, Builder(), full=True)
+        state.finish_replay()  # all device work comes from captured nodes
+    assert state.executor.calls == ["submit", "wait", "release"]
+
+
+def test_build_failure_clears_provider(state):
+    builder = Builder()
+    with pytest.raises(ValueError), execution(state):
+        prepare(state, builder, fail=True)
+    assert not builder.enabled and builder.tasks == ()
+    assert state.executor.calls == []
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_unretired_inputs_cannot_be_rebuilt(state, full):
+    with execution(state):
+        prepare(state, Builder(), full=full)
+        with pytest.raises(RuntimeError, match="not retired"):
+            prepare(state, Builder(), full=full)
+
+
+def test_failure_joins_only_submitted_stream(state, monkeypatch):
+    waits: list[object] = []
+    state.executor.stream = object()
+    monkeypatch.setattr(device_metadata.torch.npu, "current_stream", lambda: SimpleNamespace(wait_stream=waits.append))
+
+    def fail(tasks):
+        state.executor.submission_in_flight = True
+        raise ValueError("producer failure")
+
+    state.executor.submit = fail
+    with pytest.raises(ValueError), execution(state):
+        prepare(state, Builder(), full=True)
+        state.begin_forward()
+    assert waits == [state.executor.stream]
+    assert state.executor.calls == ["release"]
+    with pytest.raises(RuntimeError, match="recreate"):
+        prepare(state, Builder(), full=True)
+
+
+def test_executor_belongs_to_built_metadata(state):
+    builder = Builder()
+    resource = SimpleNamespace()
+    result = state.run_build(
+        lambda **kwargs: {"cache": resource},
+        attn_groups=[[SimpleNamespace(get_metadata_builder=lambda _: builder)]],
+        full_graph_mode=True,
+    )
+    assert result["cache"].device_metadata_executor is state.executor
+
+
+def test_wait_uses_forward_metadata_without_leaking_into_draft(monkeypatch):
+    import vllm_ascend.worker.device_metadata as common
+
+    calls = []
+    executor = SimpleNamespace(wait=lambda *args: calls.append(args))
+    context = SimpleNamespace(attn_metadata={"cache": SimpleNamespace(device_metadata_executor=executor)})
+    monkeypatch.setattr(common, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(common, "get_forward_context", lambda: context)
+    common.wait_for_device_metadata(DeviceMetadataStage.INDEXER, 7)
+    context.attn_metadata = {"draft": SimpleNamespace()}
+    common.wait_for_device_metadata(DeviceMetadataStage.INDEXER, 8)
+    assert calls == [(DeviceMetadataStage.INDEXER, 7)]
+
+
+def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
+    from contextlib import nullcontext
+
+    import torch
+
+    from vllm_ascend.worker.v2 import aclgraph_utils
+
+    prepare(state, Builder(), full=True)
+    manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
+    manager.model_runner = SimpleNamespace()
+    monkeypatch.setattr(aclgraph_utils, "communicator_switch", nullcontext)
+
+    def fail(*args, **kwargs):
+        raise ValueError("capture input preparation failed")
+
+    monkeypatch.setattr(aclgraph_utils.ModelCudaGraphManager, "capture", fail)
+    with pytest.raises(ValueError, match="capture input preparation"):
+        manager.capture(torch.nn.Identity(), SimpleNamespace(device_metadata=state), None, None, None, [], None)
+    # A new preparation succeeds; stale work from the failed capture is gone.
+    prepare(state, Builder(), full=True)
+    state.finish()
+    assert state.executor.calls == []

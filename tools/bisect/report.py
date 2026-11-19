@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tools.bisect.config import BisectInput, Candidate, TrialResult
 
-# ANSI colors (mirrors the style used in multi_node/scripts/run.sh).
+# ANSI colors (mirrors the style used in common/multi_node/run.sh).
 _GREEN = "\033[0;32m"
 _RED = "\033[0;31m"
 _YELLOW = "\033[0;33m"
@@ -86,6 +86,7 @@ def write_report_json(
     bad: Candidate,
     first_bad: Candidate | None,
     trials: list[TrialResult],
+    mock_tests: bool = False,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -95,6 +96,7 @@ def write_report_json(
         return c
 
     payload = {
+        "mode": "mock-tests" if mock_tests else "real",
         "case_key": inp.case_key,
         "scene": inp.scene,
         "config_yaml": inp.config_yaml,

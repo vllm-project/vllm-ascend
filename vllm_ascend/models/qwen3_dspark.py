@@ -1,71 +1,8 @@
-from collections.abc import Iterable
-from pathlib import Path
-
 import torch
-from torch import nn
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
-from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
-from vllm_ascend.utils import (
-    get_rotation_matrix,
-    get_rotation_path,
-    vllm_version_is,
-)
-
-TARGET_EMBED_WEIGHT_NAMES = (
-    "language_model.model.embed_tokens.weight",
-    "model.embed_tokens.weight",
-)
-TARGET_LM_HEAD_WEIGHT_NAMES = (
-    "language_model.lm_head.weight",
-    "lm_head.weight",
-)
-
-
-# Process the first linear weight with rotation matrix, if the target model uses rotary quantization
-def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
-    assert linear_weight.shape[1] % rotation_weight.shape[0] == 0, (
-        f"Linear weight shape[1] must be a multiple of rotation weight shape[0],"
-        f" but get {linear_weight.shape[1]=} and {rotation_weight.shape[0]=}"
-    )
-    if rotation_weight.dtype != torch.float32:
-        rotation_weight = rotation_weight.to(torch.float32)
-    hidden_size = rotation_weight.shape[0]
-    ori_dtype = linear_weight.dtype
-    processed_weight = torch.empty(linear_weight.shape, dtype=torch.float32)
-    for start_pos in range(0, linear_weight.shape[1], hidden_size):
-        linear_weight_chunked = linear_weight[:, start_pos : start_pos + hidden_size].to(torch.float32)
-        processed_weight[:, start_pos : start_pos + hidden_size].copy_(
-            torch.matmul(linear_weight_chunked, rotation_weight)
-        )
-    return processed_weight.to(ori_dtype)
-
-
-class DSparkConfidenceHead(nn.Module):
-    def __init__(self, config, prefix: str) -> None:
-        super().__init__()
-
-        rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
-        self.proj = ReplicatedLinear(
-            config.hidden_size + rank,
-            1,
-            bias=True,  # released dspark_qwen3_*_block7 ckpt has confidence_head.proj.bias
-            params_dtype=torch.float32,
-            quant_config=None,
-            prefix=maybe_prefix(prefix, "proj"),
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        markov_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        x = torch.cat([hidden_states, markov_embeds], dim=-1)
-        confidence, _ = self.proj(x.float())  # ReplicatedLinear returns (output, bias)
-        return confidence.squeeze(-1)
+from vllm_ascend.models.quarot_utils import align_draft_weights
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
@@ -74,100 +11,26 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        if vllm_version_is("0.27.1") and self.enable_confidence_head:
-            model_prefix = maybe_prefix(prefix, "model")
-            self.model.confidence_head = DSparkConfidenceHead(
-                config=config,
-                prefix=maybe_prefix(model_prefix, "confidence_head"),
-            )
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
-        self.target_model_path = Path(vllm_config.model_config.model)
-
-    @staticmethod
-    def _get_confidence_relative_name(
-        checkpoint_name: str,
-    ) -> str | None:
-        marker = "confidence_head."
-        marker_pos = checkpoint_name.find(marker)
-
-        if marker_pos == -1:
-            return None
-
-        return checkpoint_name[marker_pos + len(marker) :]
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
         if not self.enable_confidence_head:
             raise RuntimeError("The DSpark confidence head is disabled.")
         assert self.model.confidence_head is not None
-        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+        confidence = torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+        # Non-finite estimates must not poison the adaptive budget or its
+        # device-side draft ranking. Target verification checks every draft.
+        return torch.nan_to_num(confidence, nan=1.0)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        all_weights = list(weights)
-        includes_embed_tokens = any("embed_tokens" in name for name, _ in all_weights)
-        includes_lm_head = any("lm_head" in name for name, _ in all_weights)
-        rotation_weight = None
-        if self.rotation_path is not None:
-            processed_weights: list[tuple[str, torch.Tensor]] = []
-            rotation_weight = get_rotation_matrix(self.rotation_path)
-            for name, loaded_weight in all_weights:
-                if "fc." in name:
-                    loaded_weight = process_weight(loaded_weight, rotation_weight)
-                processed_weights.append((name, loaded_weight))
-            all_weights = processed_weights
+    def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
+        """Select draft auxiliary inputs, without changing target Eager/Graph mode."""
+        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is not None:
+            set_capture_mode(True)
 
-        if not vllm_version_is("0.27.1"):
-            # main (cdc4824a21): upstream load_weights already manages
-            # confidence_head (vllm#47808).
-            result = super().load_weights(all_weights)
-        else:
-            base_weights: list[tuple[str, torch.Tensor]] = []
-            confidence_weights: list[tuple[str, torch.Tensor]] = []
-
-            for name, loaded_weight in all_weights:
-                confidence_name = self._get_confidence_relative_name(name)
-                if confidence_name is None:
-                    base_weights.append((name, loaded_weight))
-                else:
-                    confidence_weights.append((confidence_name, loaded_weight))
-
-            result = super().load_weights(base_weights)
-
-            if self.enable_confidence_head:
-                if not confidence_weights:
-                    self.enable_confidence_head = False
-                else:
-                    confidence_weights.sort(key=lambda item: item[0])
-                    loaded_parameters = AutoWeightsLoader(self.model.confidence_head).load_weights(confidence_weights)
-                    expected_parameters = set(self.model.confidence_head.state_dict().keys())
-                    missing_parameters = expected_parameters - loaded_parameters
-
-                    if missing_parameters:
-                        raise RuntimeError(
-                            "Failed to load all confidence-head "
-                            "parameters. Missing: "
-                            f"{sorted(missing_parameters)}; loaded: "
-                            f"{sorted(loaded_parameters)}"
-                        )
-
-        if rotation_weight is not None:
-            if not includes_embed_tokens:
-                load_quarot_target_layer(
-                    self.model.embed_tokens,
-                    self.target_model_path,
-                    TARGET_EMBED_WEIGHT_NAMES,
-                    rotation_weight,
-                    "draft embed_tokens.weight",
-                )
-                self.has_own_embed_tokens = True
-            if not includes_lm_head:
-                load_quarot_target_layer(
-                    self.lm_head,
-                    self.target_model_path,
-                    TARGET_LM_HEAD_WEIGHT_NAMES,
-                    rotation_weight,
-                    "draft lm_head.weight",
-                )
-                self.has_own_lm_head = True
-
-        return result
+    def post_process(self, vllm_config: VllmConfig) -> None:
+        align_draft_weights(self, self.model.fc, vllm_config)

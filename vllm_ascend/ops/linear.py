@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -37,15 +37,13 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
-from vllm_ascend.utils import (
-    maybe_trans_nz,
-)
+from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
 def unquantized_gemm(
@@ -81,26 +79,57 @@ def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
     )
 
 
-class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
+def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
+    """Whether a DSV4 wo_a weight must be reshaped to
+    [n_local_groups, hidden_size, o_lora_rank] for npu_transpose_batchmatmul.
+
+    For bf16 wo_a (unquantized), the reshape must happen here regardless of
+    whether the model has a global quant config: partially-quantized checkpoints
+    (e.g. ModelSlim) keep unquantized FLOAT wo_a alongside a non-None quant
+    config, and no quant method's process_weights_after_loading will run for
+    those layers. Quantized (fp8/int8) wo_a is unaffected and still handled by
+    the quantization path.
+    """
+    supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
+        HardwareCapability.DYNAMIC_MX_QUANT_FUSION
+    )
+    reshape_bf16_wo_a = "wo_a" in prefix and supports_dynamic_mx_quant_fusion and dtype == torch.bfloat16
+    return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
+
+
+class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
-    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_tp_weight_switch = True
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+    supports_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
+        skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
-        if "conv1d" not in layer.prefix:
+            new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
+            # keep the captured graph's weight reference to the updated weight
+            # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
+            # and keeps the parameter object by default.
+            replace_parameter(layer, "weight_fp32", new_fp32)
+        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+        # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
+        # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
+        # applies to load-format=dummy too, where weight_loader never runs.
+        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            )
 
     def apply(
         self,
@@ -209,6 +238,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,
@@ -249,6 +280,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
         self.output_sizes = output_sizes
+        self.shard_ids = tuple(range(len(output_sizes)))
         assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
         AscendColumnParallelLinear.__init__(
             self,
@@ -263,6 +295,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,
@@ -408,6 +442,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
+        # Ascend initializes this layer without calling ColumnParallelLinear's
+        # constructor, which normally sets the allowance before create_weights.
+        self.allow_fp8_block_shape_mismatch = False
+        allow_fp8_mismatch = getattr(self, "_maybe_allow_fp8_block_shape_mismatch", None)
+        if allow_fp8_mismatch is not None:
+            allow_fp8_mismatch()
+
         self.gather_output = gather_output
 
         if output_sizes is None:
@@ -457,21 +498,12 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
-            HardwareCapability.DYNAMIC_MX_QUANT_FUSION
-        )
-        reshape_bf16_wo_a = (
-            "wo_a" in self.prefix
-            and supports_dynamic_mx_quant_fusion
-            and self.quant_config is None
-            and loaded_weight.dtype == torch.bfloat16
-        )
-        if "wo_a" in self.prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a):
+        if _should_reshape_wo_a_to_3d(self.prefix, loaded_weight.dtype):
             if self.weight.ndim == 2:
+                # Keep the raw 2D layout here. The 2D -> 3D reshape happens in
+                # process_weights_after_loading so it also runs for
+                # load-format=dummy, where weight_loader is never called.
                 super().weight_loader(param, loaded_weight)
-                self.weight.data = (
-                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
-                )
             else:
                 # In RL update flows, wo_a can be loaded again after being
                 # transformed into [n_local_groups, hidden_size, o_lora_rank].
@@ -497,6 +529,37 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 self.weight.data.copy_(loaded_weight)
         else:
             super().weight_loader(param, loaded_weight)
+
+
+class AscendDCPGroupColumnParallelLinear(AscendColumnParallelLinear):
+    """Project group Q heads for every token, then select local heads for prefill."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        parallel = get_current_vllm_config().parallel_config
+        self.group_size = parallel.decode_context_parallel_size
+        tp_size = parallel.tensor_parallel_size
+        if output_size % tp_size:
+            raise ValueError("DCP Q output size must be divisible by TP size")
+        self.qrep_active = self.group_size > 1
+        self.rank_in_group = get_tensor_model_parallel_rank() % self.group_size
+        super().__init__(input_size, output_size, bias=bias, quant_config=quant_config, prefix=prefix)
+        self.update_param_tp_status()
+
+    def _local_view(self, out: torch.Tensor) -> torch.Tensor:
+        """Select this TP rank's heads from a (..., group_heads, head_dim) output."""
+        if self.group_size == 1:
+            return out
+        local_num_heads = out.shape[-2] // self.group_size
+        start = self.rank_in_group * local_num_heads
+        return out[..., start : start + local_num_heads, :].contiguous()
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

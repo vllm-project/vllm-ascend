@@ -17,7 +17,18 @@ from tests.e2e.pull_request.one_card.attention_utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, sync_v2_extra_kwargs
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
+
+@pytest.fixture(autouse=True)
+def _enable_default_v2_extra_kwargs() -> None:
+    """Default V2 stores extras in ``additional_kwargs``.
+
+    This harness does not build a real runner config. Sync the extra-kwargs
+    cache so ``_EXTRA_CTX`` writes reach the MLA backend.
+    """
+    sync_v2_extra_kwargs(MagicMock())
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +45,7 @@ def default_vllm_config():
     mock_config.speculative_config = None
     mock_config.cache_config = MagicMock()
     mock_config.cache_config.block_size = 128
+    mock_config.cache_config.cache_dtype = "float16"
     mock_config.kv_transfer_config = None
 
     with set_current_vllm_config(mock_config):
@@ -593,13 +605,10 @@ def _test_mla_attention_correctness(
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
     with set_forward_context(attn_metadata=None, vllm_config=vllm_config):
-        from vllm.forward_context import get_forward_context
-
-        forward_ctx = get_forward_context()
-        forward_ctx.num_tokens = num_tokens
-        forward_ctx.is_draft_model = False
-        forward_ctx.is_draft_model_prefill = False
-        forward_ctx.capturing = False
+        _EXTRA_CTX.num_tokens = num_tokens
+        _EXTRA_CTX.is_draft_model = False
+        _EXTRA_CTX.is_draft_model_prefill = False
+        _EXTRA_CTX.capturing = False
 
         backend_output, impl = run_mla_attention_backend(
             kv_cache_spec,

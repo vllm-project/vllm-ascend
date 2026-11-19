@@ -78,11 +78,6 @@ enum class X_DTYPE : std::uint8_t {
     FP16 = static_cast<std::uint8_t>(1)
 };
 
-enum class ROPE_DTYPE : std::uint8_t {
-    SAME_AS_X = static_cast<std::uint8_t>(0),
-    FP32 = static_cast<std::uint8_t>(1)
-};
-
 enum class COFF : std::uint8_t {
     DISABLE = static_cast<std::uint8_t>(1),
     OVERLAP = static_cast<std::uint8_t>(2)
@@ -101,16 +96,56 @@ enum class CACHE_MODE : std::uint8_t {
 enum class TEMPLATE_ID : uint8_t {
     NORMAL = 0,
     EMPTY_X = 1,
-    PERF = 2
+    FULL_LOAD = 2
 };
 
-template <X_LAYOUT X_L, X_DTYPE X_T, ROPE_DTYPE R_T, COFF C, ROTARY_MODE Rotary_Mode, typename... Args>
+template <X_LAYOUT X_L, X_DTYPE X_T, COFF C, ROTARY_MODE Rotary_Mode, typename... Args>
 struct COMPType {
     static constexpr X_LAYOUT xLayout = X_L;
     static constexpr X_DTYPE xDtype = X_T;
-    static constexpr ROPE_DTYPE ropeDtype = R_T;
     static constexpr COFF coff = C;
     static constexpr ROTARY_MODE rotaryMode = Rotary_Mode;
+};
+
+struct LoopInfo {
+    uint32_t groupSize = 0U;
+    uint32_t groupNum = 0U;
+    uint32_t coreRowIdx = 0U;
+    uint32_t coreColIdx = 0U;
+    uint32_t dLoopIdx = 0U;
+    bool isCoreRowFirst = false;
+    bool isCoreRowLast = false;
+    bool isCoreLoopFirst = false;
+    bool isCoreLoopLast = false;
+};
+
+struct Vec1SplitInfo {
+    uint32_t dealSeqStartIdx = 0;
+    uint32_t dealSeqCnt = 0;
+    uint32_t dBaseSize = 0;
+    uint32_t vec1GroupSize = 0;
+    uint32_t vec1GroupNum = 0;
+    uint32_t dealTcSize = 0;
+    uint32_t dealTcNum = 0;
+    uint32_t dealBatchNum = 0;
+    uint32_t preDealTcSize = 0;
+    uint32_t preDealBatchNum = 0;
+    uint32_t curBStart = 0;
+    uint32_t curSStart = 0;
+    uint32_t curCompressedCnt = 0;
+    uint32_t preCompressedCnt = 0;
+    uint32_t totalCompressedCnt = 0;
+    uint32_t tcSplitSize = 0;
+    uint32_t dSplitSize = 0;
+    uint32_t dLoopCount = 0;
+};
+
+struct Vec2SplitInfo {
+    uint32_t dealedScCnt = 0;
+    uint32_t preScCnt = 0;
+    uint32_t dealScNum = 0;
+    uint32_t curBStart = 0;
+    uint32_t curScStart = 0;
 };
 
 struct ConstInfo {
@@ -124,6 +159,8 @@ struct ConstInfo {
     uint32_t usedCoreNum = 0;
     uint32_t dBaseSize = 0;
     uint32_t mBaseSize = 0;
+    uint32_t kBaseSize = 0;
+    uint32_t kBaseNum = 0;
     uint32_t tcSize = 0;
     uint32_t tcBaseSize = 0;
     uint32_t tcBasicBlockNum = 0;
@@ -131,8 +168,17 @@ struct ConstInfo {
     uint32_t coreGroupNum = 0;
     uint32_t singleCoreDealTcBasicNum = 0;
     uint32_t dIdx = 0;
+    uint32_t mStart = 0;
+    uint32_t mEnd = 0;
+    uint32_t nStart = 0;
+    uint32_t nEnd = 0;
+    uint32_t kStart = 0;
+    uint32_t kEnd = 0;
+    uint32_t mLoopNum = 0;
     uint32_t bIdxOfLastTc = 0;
     uint32_t sIdxOfLastTc = 0;
+    uint32_t mGroupNum = 0;
+    uint32_t mCurGroupIdx = 0;
 
     // shape及参数
     uint32_t batchSize = 0;
@@ -143,6 +189,7 @@ struct ConstInfo {
     uint32_t cmpRatio = 0;
     float normEps = 1e-6;
     float reciprocalD = 0;
+    uint64_t stateCacheStrideDim0 = 0;
 
     uint32_t curGroupIdx = 0;
     uint32_t tailGroupIdx = 0;
@@ -153,7 +200,6 @@ struct ConstInfo {
     uint32_t blockNum = 0;
     uint32_t blockSize = 0;
     uint32_t maxBlockNumPerBatch = 0;
-    uint64_t stateCacheStrideDim0 = 0;
 
     // workSpace
     uint32_t dbWorkspaceRatio = 1;
@@ -161,7 +207,7 @@ struct ConstInfo {
     uint32_t mm1ScoreResSize = 0;
     uint32_t vec1TailCacheSize = 0;
     uint32_t vec1ResSize = 0;
-    uint32_t mm1ResSize = 0;    // 所有cube输出kv/score结果的总大小
+    uint32_t mm1ResSize = 0; // 所有cube输出kv/score结果的总大小
 
     uint32_t aiCoreIdx = 0;
     uint32_t nSize = 0;
@@ -171,7 +217,7 @@ struct ConstInfo {
 
 struct RunInfo {
     bool isValid = false;
-    uint32_t cubeDbIdx = 0;         // kernel主循环索引
+    uint32_t cubeDbIdx = 0; // kernel主循环索引
 
     // 增加字段
     uint32_t dealTcNum = 0;
@@ -182,9 +228,12 @@ struct RunInfo {
     // 左边相关信息
     uint32_t preBStart = 0;
     uint32_t preSStart = 0;
-    uint32_t preDealSeqCnt  = 0;     // 左边需要处理的s大小
-    uint32_t preFirstSeqCnt = 0;    // 左边首块大小
+    uint32_t preDealSeqCnt = 0;  // 左边需要处理的s大小
+    uint32_t preFirstSeqCnt = 0; // 左边首块大小
 
+    uint32_t kStartIdx = 0;
+    uint32_t dealKSize = 0;
+    uint32_t hStart = 0;
 
     uint32_t bEnd = 0;
     uint32_t sEnd = 0;
@@ -240,24 +289,6 @@ struct MSplitInfo {
     uint64_t vec1ResOffset = 0;
 };
 
-struct BlockInfo {
-    __aicore__ inline BlockInfo(uint32_t bIdx, uint32_t sIdx, uint32_t dealSeqSize) :
-        bIdx(bIdx), sIdx(sIdx), dealSeqSize(dealSeqSize) {};
-    uint32_t bIdx = 0U;
-    uint32_t sIdx = 0U;
-    uint32_t dealSeqSize = 0;
-
-    uint32_t isFirst = true;
-    uint32_t bSeqUsed = 0U;
-    uint32_t bStartPos = 0U;
-    uint32_t headHolderSeqCnt = 0U;
-    uint32_t validSeqCnt = 0U;
-    uint32_t tailHolderSeqCnt = 0U;
-    uint32_t dealTcSize = 0U;
-    uint32_t tailValidSeqCnt = 0U;
-    uint32_t compressTcSize = 0U;
-};
-
 // BUFFER的字节数
 inline constexpr uint32_t BUFFER_SIZE_BYTE_32B = 32;
 inline constexpr uint32_t BUFFER_SIZE_BYTE_64B = 64;
@@ -274,8 +305,21 @@ inline constexpr uint32_t BUFFER_SIZE_BYTE_64K = 65536;
 // BLOCK和REPEAT的字节数
 inline constexpr uint64_t BYTE_BLOCK = 32UL;
 inline constexpr uint32_t REPEAT_BLOCK_BYTE = 256U;
+
+template <typename T>
+__aicore__ inline constexpr T BlockElementNum()
+{
+    return BYTE_BLOCK / sizeof(T);
+}
+
+template <typename T>
+__aicore__ inline constexpr T RepeatElementNum()
+{
+    return REPEAT_BLOCK_BYTE / sizeof(T);
+}
 // BLOCK和REPEAT的FP32元素数
 inline constexpr uint32_t FP32_BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(float); // 8
+inline constexpr uint32_t FP16_BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(bfloat16_t);    // 16
 inline constexpr uint32_t FP32_REPEAT_ELEMENT_NUM = REPEAT_BLOCK_BYTE / sizeof(float); // 64
 inline constexpr uint32_t REPEAT_STRIDE_NUM = REPEAT_BLOCK_BYTE / BYTE_BLOCK; // 8
 inline constexpr uint32_t REPEAT_MAX_NUM = 255;

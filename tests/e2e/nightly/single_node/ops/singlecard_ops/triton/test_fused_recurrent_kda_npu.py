@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.kda.kda import fused_recurrent_kda
 
 DEVICE = "npu"
@@ -93,6 +95,9 @@ def assert_close(
 # ---------------------------------------------------------------------------
 # Test 1: Non-inplace varlen (clean output / state comparison)
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens", "dtype"),
     [
@@ -192,6 +197,9 @@ def test_fused_recurrent_kda(
 # ---------------------------------------------------------------------------
 # Test 2: Inplace decode with ssm_state_indices (vllm actual pattern)
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("H", "D", "N", "dtype"),
     [
@@ -290,6 +298,9 @@ def test_fused_recurrent_kda_decode_inplace(
 # ---------------------------------------------------------------------------
 # Test 3: Float32 — isolate algorithmic error from dtype precision
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens"),
     [

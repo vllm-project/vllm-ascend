@@ -74,6 +74,11 @@ else
     DEFAULT_INSTALL_DIR="/usr/local/Ascend/latest"
 fi
 CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
+# Keep this csrc-relative default aligned with the CMake adapter and Docker
+# restore/export paths; those paths must refer to the same cache directory.
+BUILD_CACHE_DIR="${VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache}"
+# Local source-hash slots per SOC/operator; <=0 disables cleanup.
+BUILD_CACHE_MAX_OPERATOR_VERSIONS=2
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
@@ -389,8 +394,8 @@ function clean_third_party()
 function cmake_config()
 {
     local extra_option="$1"
-    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} ."
-    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option}
+    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} build_cache=${BUILD_CACHE_DIR} ."
+    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option} -DVLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
 }
 
 function build()
@@ -1172,6 +1177,8 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+BUILD_CACHE_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "${BUILD_CACHE_DIR}")
+export VLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
 set_ut_mode
 
 if [ -n "${vendor_name}" ];then
@@ -1638,4 +1645,10 @@ else
         build ${BUILD}
     fi
 fi
+
+# Prune only after all foreground csrc build commands have succeeded.
+# Do not share this cache directory with another concurrent build or prune.
+python3 "$CURRENT_DIR/scripts/build_cache.py" prune \
+    --cache-root "$BUILD_CACHE_DIR" \
+    --max-operator-versions "$BUILD_CACHE_MAX_OPERATOR_VERSIONS" || true
 } | awk '{print strftime("[%Y-%m-%d %H:%M:%S]"), $0}'

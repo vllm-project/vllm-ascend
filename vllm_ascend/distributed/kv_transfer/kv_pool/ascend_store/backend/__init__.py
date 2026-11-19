@@ -14,12 +14,11 @@
 # limitations under the License.
 #
 
+import importlib
+from collections.abc import Mapping
 from typing import Any
 
-# Entries are heterogeneous (a marker boolean next to path/name strings), so
-# the registry is annotated explicitly: without it mypy joins the per-backend
-# dicts to object and every .get()/[] on an entry fails to type-check.
-backend_map: dict[str, dict[str, Any]] = {
+backend_map: dict[str, dict[str, str]] = {
     "mooncake": {
         "name": "MooncakeBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
@@ -27,11 +26,6 @@ backend_map: dict[str, dict[str, Any]] = {
     "memcache": {
         "name": "MemcacheBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-        # The backend module opts into the layerwise transfer protocol:
-        # it exposes make_full_key / make_partial_key / make_hit_check_keys /
-        # extract_layout_config at module level. Generic layers resolve the
-        # module through get_layerwise_protocol() and never import it by name.
-        "layerwise_protocol": True,
     },
     "yuanrong": {
         "name": "YuanrongBackend",
@@ -40,18 +34,19 @@ backend_map: dict[str, dict[str, Any]] = {
 }
 
 
-def get_layerwise_protocol(backend_name: str):
-    """Return the backend module carrying the layerwise transfer protocol
-    registered under ``backend_name`` (None when the backend opts out).
+def get_backend_class(backend_name: str) -> type[Any] | None:
+    """Resolve a backend without constructing its store client."""
+    return _load_backend_class(backend_name.strip().lower())
 
-    The protocol functions live in the backend module itself, so resolving
-    reuses the registered ``path``: no second module path to drift, and
-    backends without the marker (e.g. mooncake, whose module pulls heavy
-    third-party imports at top level) are never imported here."""
-    normalized_name = backend_name.strip().lower()
-    backend = backend_map.get(normalized_name, {})
-    if not backend.get("layerwise_protocol"):
+
+def resolve_backend(extra_config: Mapping[str, Any]) -> tuple[str, type[Any] | None]:
+    """Resolve the configured name and class, preserving strict whitespace validation."""
+    backend_name = str(extra_config.get("backend", "mooncake")).lower()
+    return backend_name, _load_backend_class(backend_name)
+
+
+def _load_backend_class(backend_name: str) -> type[Any] | None:
+    backend = backend_map.get(backend_name)
+    if backend is None:
         return None
-    import importlib
-
-    return importlib.import_module(backend["path"])
+    return getattr(importlib.import_module(backend["path"]), backend["name"])

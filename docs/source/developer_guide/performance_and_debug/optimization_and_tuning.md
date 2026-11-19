@@ -65,20 +65,7 @@ Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/l
 
 ### 1. Memory Allocator Optimization
 
-#### 1.1. jemalloc
-
-**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock contention between threads and can hugely optimize performance.
-
-```bash
-# Install jemalloc
-sudo apt update
-sudo apt install libjemalloc2
-
-# Configure jemalloc
-export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-```
-
-#### 1.2. TCMalloc
+#### 1.1. TCMalloc
 
 **TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing lock contention and optimizing large object processing flow. Find more [details](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
@@ -122,6 +109,10 @@ Scheduling optimization:
 
 ```bash
 # Optimize operator delivery queue. This will affect the memory peak value, and may degrade if the memory is tight.
+# Note: TASK_QUEUE_ENABLE=2 cannot be used together with NPU graph capture (ACLGraph). Enabling graph capture
+# with this value makes model startup fail during capture_model with:
+#   RuntimeError: Do not support TASK_QUEUE_ENABLE = 2 during NPU graph capture, please export TASK_QUEUE_ENABLE=1/0.
+# Use TASK_QUEUE_ENABLE=1 (or 0) when NPU graph capture is enabled.
 export TASK_QUEUE_ENABLE=2
 
 # This will greatly improve the CPU bottleneck model and ensure the same performance for the NPU bottleneck model.

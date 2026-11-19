@@ -16,7 +16,13 @@
 import vllm.lora.utils as lora_utils
 
 from vllm_ascend.lora.fused_moe import AscendFusedMoE3DWithLoRA, AscendFusedMoEWithLoRA
-from vllm_ascend.lora.utils import refresh_all_lora_classes
+from vllm_ascend.lora.utils import (
+    AscendColumnParallelLinearWithLoRA,
+    AscendMergedColumnParallelLinearWithLoRA,
+    AscendMergedQKVParallelLinearWithLoRA,
+    AscendRowParallelLinearWithLoRA,
+    refresh_all_lora_classes,
+)
 
 
 def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
@@ -26,8 +32,15 @@ def test_refresh_all_lora_classes_prepends_ascend_wrappers() -> None:
         lora_utils._all_lora_classes = (sentinel,)
         refresh_all_lora_classes()
         classes = list(lora_utils._all_lora_classes)
-        assert classes[0] is AscendFusedMoEWithLoRA
-        assert classes[1] is AscendFusedMoE3DWithLoRA
+        expected_prefix = [
+            AscendRowParallelLinearWithLoRA,
+            AscendColumnParallelLinearWithLoRA,
+            AscendMergedColumnParallelLinearWithLoRA,
+            AscendMergedQKVParallelLinearWithLoRA,
+            AscendFusedMoEWithLoRA,
+            AscendFusedMoE3DWithLoRA,
+        ]
+        assert classes[: len(expected_prefix)] == expected_prefix
         assert classes[-1] is sentinel
         # Upstream model_manager still matches the GPU class names.
         assert AscendFusedMoEWithLoRA.__name__ == "FusedMoEWithLoRA"

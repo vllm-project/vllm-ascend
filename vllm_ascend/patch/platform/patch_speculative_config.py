@@ -1,8 +1,29 @@
+import math
+from copy import copy
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Literal, get_args
+
+import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
+from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
+
+from vllm_ascend.utils import is_deepseek_v41, is_gqa_pcp_dcp_config
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
+
+# Standalone MiniMax DSpark draft architecture. The adapter, its checkpoint
+# contract and ``draft_hf_override`` live in
+# ``vllm_ascend.models.minimax_m3.minimax_m3_dspark``.
+_MINIMAX_DRAFT_ARCHITECTURE = "DSparkMiniMaxDraftModel"
+
+# MiniMax-M3 target architectures that ship the DSpark draft as a standalone
+# checkpoint in the ``dspark/`` subfolder of the target checkpoint.
+_MINIMAX_M3_ARCHITECTURES = frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"})
+_MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
 
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
@@ -22,10 +43,100 @@ if hasattr(DeepseekV2Config, "__class_validators__"):
     ]
 
 
-def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
+# Identify the deployed z-lab/Kimi-K2.5-DFlash checkpoint independently of its
+# local directory name. Other DFlash checkpoints may require the new YaRN math.
+_KIMI_DFLASH_CONFIG = (
+    ("model_type", "qwen3"),
+    ("hidden_size", 7168),
+    ("vocab_size", 163840),
+    ("num_target_layers", 61),
+)
+_KIMI_DFLASH_TARGET_LAYER_IDS = (1, 12, 24, 35, 47, 58)
+_KIMI_DFLASH_YARN_PARAMS = (
+    ("rope_type", "yarn"),
+    ("factor", 64.0),
+    ("mscale", 1.0),
+    ("mscale_all_dim", 1.0),
+    ("original_max_position_embeddings", 4096),
+)
+
+
+def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
+    """Preserve this legacy Kimi draft's vLLM 0.29 YaRN amplitude.
+
+    vLLM #56446 starts honoring mscale/mscale_all_dim for plain YaRN. For
+    this checkpoint their ratio is 1, instead of the old 1 + 0.1 * log(64),
+    which reduces draft acceptance. Make the old amplitude explicit only for
+    the known config; an explicit attention_factor always takes precedence.
+    This compatibility shim can go away once the checkpoint specifies it.
+    """
+    if "DFlashDraftModel" not in (getattr(hf_config, "architectures", None) or ()):
+        return
+    if any(getattr(hf_config, key, None) != value for key, value in _KIMI_DFLASH_CONFIG):
+        return
+    dflash_config = getattr(hf_config, "dflash_config", None) or {}
+    if tuple(dflash_config.get("target_layer_ids") or ()) != _KIMI_DFLASH_TARGET_LAYER_IDS:
+        return
+
+    # Transformers 5 stores the old rope_scaling field in rope_parameters.
+    # Copy before updating so a shared source dict is not modified in place.
+    rope_field = "rope_parameters"
+    rope_params = getattr(hf_config, rope_field, None)
+    if rope_params is None:
+        rope_field = "rope_scaling"
+        rope_params = getattr(hf_config, rope_field, None)
+    if not isinstance(rope_params, dict) or rope_params.get("attention_factor") is not None:
+        return
+    if any(rope_params.get(key) != value for key, value in _KIMI_DFLASH_YARN_PARAMS):
+        return
+
+    legacy_attention_factor = 1.0 + 0.1 * math.log(rope_params["factor"])
+    setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
+
+
+def _is_minimax_dspark_draft_config(hf_config: PretrainedConfig) -> bool:
+    return hf_config.model_type in ("minimax_m3_vl", "minimax_m3_text") and _MINIMAX_DRAFT_ARCHITECTURE in (
+        getattr(hf_config, "architectures", None) or ()
+    )
+
+
+def _normalize_legacy_qwen3_dspark_config(
+    hf_config: PretrainedConfig,
+    transformers_mtp_overrides: dict[str, Any] | None = None,
+) -> PretrainedConfig:
+    if transformers_mtp_overrides is not None:
+        # The Transformers MTP draft is built from the target config: upstream
+        # applies the overrides and none of the checkpoint rewrites below apply.
+        return _orig_hf_config_override(  # type: ignore[call-arg]
+            hf_config, transformers_mtp_overrides
+        )
+    if _is_minimax_dspark_draft_config(hf_config):
+        # The MiniMax-M3 DSpark draft loads from its own ``dspark/``
+        # subfolder checkpoint; normalize it here, before the generic
+        # override, which rewrites every minimax_m3_vl config into an MTP
+        # draft. The lazy import keeps this picklable callable light: riding
+        # on hf_overrides into spawned workers, it must not import the model
+        # package when this patch module itself is imported.
+        from vllm_ascend.models.minimax_m3.minimax_m3_dspark import draft_hf_override
+
+        return draft_hf_override(hf_config)
+    # #63205 renames this legacy architecture before returning to our hook.
+    legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
     hf_config = _orig_hf_config_override(hf_config)
-    architectures = hf_config.architectures or ()
-    if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
+    _normalize_kimi_dflash_rope(hf_config)
+    # Plain glm5_next MTP remapping is handled natively by upstream
+    # SpeculativeConfig.hf_config_override since v0.32.0; the VL
+    # glm5_next_text wrapper is not.
+    if hf_config.model_type == "glm5_next_text":
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.model_type = "glm5_next_mtp"
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["Glm5NextMTPModel"],
+            }
+        )
+    if legacy_qwen3_dspark:
         dflash_config = hf_config.dflash_config
         hf_config.update(
             {
@@ -37,18 +148,204 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
     return hf_config
 
 
+def _normalize_deepseek_dspark_draft(draft_model_config) -> None:
+    """Restore the DSpark draft architecture after VL config conversion.
+
+    DeepSeek-V4-Vision uses the same checkpoint for the target and DSpark
+    drafter.  vLLM first rewrites that checkpoint to ``DSparkDraftModel``, but
+    rebuilding ``model_arch_config`` with multimodal detection can restore the
+    top-level ``*ForConditionalGeneration`` architecture.  The drafter would
+    then instantiate a second full VL target and register duplicate attention
+    layer names.  Update both config representations without re-running the
+    multimodal architecture conversion.
+    """
+    hf_config = getattr(draft_model_config, "hf_config", None)
+    text_config = getattr(hf_config, "text_config", None)
+    draft_text_config = text_config if text_config is not None else hf_config
+    root_model_type = getattr(hf_config, "model_type", None)
+    is_deepseek_v41_model = is_deepseek_v41(hf_config)
+    if (
+        hf_config is None
+        or (root_model_type != "deepseek_v4" and not is_deepseek_v41_model)
+        or getattr(draft_text_config, "dspark_target_layer_ids", None) is None
+    ):
+        return
+
+    architecture = "DeepseekV41DSparkModel" if is_deepseek_v41_model else "DSparkDraftModel"
+    if is_deepseek_v41_model:
+        # The DeepSeek V4.1 target and draft experts intentionally have different
+        # widths.  SpeculativeConfig owns a private config copy, so adapting
+        # these fields cannot alter the target model.
+        draft_experts_per_token = getattr(draft_text_config, "dspark_num_experts_per_tok", None)
+        draft_updates = {
+            "n_routed_experts": draft_text_config.dspark_n_routed_experts,
+            "n_mtp_layers": getattr(draft_text_config, "num_nextn_predict_layers", 3),
+        }
+        if draft_experts_per_token is not None:
+            draft_updates["num_experts_per_tok"] = draft_experts_per_token
+        draft_text_config.update(draft_updates)
+    normalized_model_type = "deepseek_v41" if is_deepseek_v41_model else str(root_model_type)
+    hf_config.update(
+        {
+            "architectures": [architecture],
+            "model_type": normalized_model_type,
+        }
+    )
+    arch_updates = dict(
+        architectures=[architecture],
+        model_type=normalized_model_type,
+        is_mm_prefix_lm=False,
+    )
+    if is_deepseek_v41_model:
+        arch_updates.update(
+            num_experts=draft_text_config.n_routed_experts,
+            text_model_type=getattr(draft_text_config, "model_type", None),
+        )
+        if draft_experts_per_token is not None:
+            arch_updates["num_experts_per_token"] = draft_experts_per_token
+    draft_model_config.model_arch_config = replace(
+        draft_model_config.model_arch_config,
+        **arch_updates,
+    )
+    architectures = draft_model_config.model_arch_config.architectures
+    model_info, architecture = draft_model_config.registry.inspect_model_cls(
+        architectures,
+        draft_model_config,
+    )
+    draft_model_config._model_info = model_info
+    draft_model_config._architecture = architecture
+
+
 def _dspark_post_init(self):
+    # TODO: Minimax-M3.1 specified function will be deleted after main2main to v0.34.0
+    draft_checkpoint = _default_minimax_m3_dspark_draft(self)
+    if draft_checkpoint is not None:
+        # The DSpark draft ships as a standalone checkpoint in the target's
+        # ``dspark/`` subfolder (upstream PR #64111): build the draft
+        # ModelConfig from that directory so the checkpoint's own
+        # ``config.json`` and weights drive loading; the normalization in
+        # SpeculativeConfig.hf_config_override applies on top of it.
+        self.model = str(draft_checkpoint)
     _orig_post_init(self)
+    if draft_checkpoint is not None:
+        hf_config = self.draft_model_config.hf_config
+        if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+            # Core's dspark normalization rewrites every architecture it
+            # does not know into the generic DeepSeek DSpark draft (model
+            # type, architectures and target-quantization inheritance).
+            # Restore the MiniMax draft identity, mirroring
+            # _normalize_deepseek_dspark_draft; drop this once upstream
+            # recognizes the standalone DSparkMiniMaxDraftModel.
+            hf_config.update(
+                {
+                    "model_type": "minimax_m3_text",
+                    "architectures": [_MINIMAX_DRAFT_ARCHITECTURE],
+                }
+            )
+            self.draft_model_config.quantization = None
+            self.update_arch_()
+        if getattr(hf_config, "quantization_config", None):
+            # The derived ascend quantization_config (per-weight W8A8_MXFP8
+            # sections read from the draft tensor header) resolves like the
+            # target's --quantization ascend: pin the draft to that method.
+            self.draft_model_config.quantization = "ascend"
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        _normalize_deepseek_dspark_draft(draft_model_config)
         # deepseek v4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore
         # gqa backend dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
+        _normalize_glm_mla_dspark(self)
+
+
+def _get_minimax_m3_dspark_draft(target_model_config: ModelConfig) -> Path:
+    """MiniMax-M3 checkpoints ship the DSpark draft as a standalone checkpoint
+    in their ``dspark/`` subfolder.
+
+    Mirrors upstream ``_get_minimax_m3_dspark_draft`` (vllm PR #64111); the
+    local path resolution stands in for the upstream ``get_subfolder_path``
+    helper, which the pinned vLLM revision does not provide.
+    """
+    draft = Path(target_model_config.model).resolve() / _MINIMAX_M3_DSPARK_SUBFOLDER
+    if not (draft / "config.json").is_file():
+        raise ValueError(
+            f"MiniMax-M3 DSpark found no draft checkpoint in the "
+            f"'{_MINIMAX_M3_DSPARK_SUBFOLDER}/' subfolder of "
+            f"{target_model_config.model}. Set speculative_config.model to the "
+            "draft checkpoint."
+        )
+    return draft
+
+
+def _default_minimax_m3_dspark_draft(self):
+    """Resolve the default draft for a MiniMax-M3 dspark request, or None when
+    this config is not one or pins a separate draft checkpoint."""
+    target = getattr(self, "target_model_config", None)
+    if target is None:
+        return None
+    architectures = getattr(getattr(target, "hf_config", None), "architectures", None) or ()
+    if getattr(self, "method", None) != "dspark" or not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+        return None
+    root = Path(target.model).resolve()
+    requested = getattr(self, "model", None)
+    if requested is not None and Path(requested).resolve() not in (root, root / _MINIMAX_M3_DSPARK_SUBFOLDER):
+        return None
+    return _get_minimax_m3_dspark_draft(target)
+
+
+def _normalize_glm_mla_dspark(self):
+    """Restore MLA architecture erased by the pinned Speculators DSpark converter.
+
+    Remove this narrow compatibility shim when upstream Speculators conversion
+    preserves Glm5DSparkForCausalLM and its MLA architecture metadata.
+    """
+    draft = getattr(self, "draft_model_config", None)
+    config = getattr(draft, "hf_config", None)
+    if draft is None or not isinstance(config, SpeculatorsConfig):
+        return
+    source, _ = SpeculatorsConfig.get_config_dict(draft.model)
+    if "Glm5DSparkForCausalLM" not in (source.get("architectures") or ()):
+        return
+    mla_fields = ("q_lora_rank", "kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+    if any(not isinstance(getattr(config, name, None), int) or getattr(config, name) <= 0 for name in mla_fields):
+        raise ValueError("Glm5DSparkForCausalLM requires dense MLA projection dimensions; cannot use GQA weights.")
+    config.architectures = ["Glm5DSparkForCausalLM"]
+    self.update_arch_()
+    draft.model_arch_config = replace(draft.model_arch_config, is_deepseek_mla=True)
 
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+
+# The pinned vLLM revision propagates enable_expert_parallel to the draft
+# parallel config (upstream #55914) but no longer disables it for dense
+# drafts (upstream #56930 is not on this revision). Non-MoE draft models
+# (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+# _verify_with_expert_parallelism check in
+# ModelConfig.verify_with_parallel_config. Skip the EP check for non-MoE
+# draft model configs; the target EP check and MoE draft models are
+# unaffected.
+
+_orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
+
+
+def _ascend_verify_with_parallel_config(self, parallel_config):
+    if parallel_config.enable_expert_parallel and not self.is_moe and getattr(self, "runner_type", None) == "draft":
+        return
+    # TODO: Remove this guard once upstream GQA/MQA DCP validation supports
+    # PCP-based KV-head replica groups.
+    if is_gqa_pcp_dcp_config(self, parallel_config):
+        guard_parallel_config = copy(parallel_config)
+        guard_parallel_config.decode_context_parallel_size = 1
+        return _orig_verify_with_parallel_config(self, guard_parallel_config)
+    return _orig_verify_with_parallel_config(self, parallel_config)
+
+
+ModelConfig.verify_with_parallel_config = _ascend_verify_with_parallel_config
+
+if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
+    speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]

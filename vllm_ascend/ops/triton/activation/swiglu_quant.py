@@ -22,7 +22,7 @@ def _swiglu_quant_kernel(
 ):
     # calc real total_rows
     if GROUP_LIST_TYPE == 0:  # cusum
-        total_rows = tl.load(group_list_ptr + NUM_EXPERTS).to(tl.int32)
+        total_rows = tl.load(group_list_ptr + NUM_EXPERTS - 1).to(tl.int32)
     else:
         gl_offsets = tl.arange(0, NUM_EXPERTS_ALGIN)
         gl_mask = gl_offsets < NUM_EXPERTS
@@ -42,7 +42,7 @@ def _swiglu_quant_kernel(
         cur_x = tl.load(x_ptr + x_offsets)
         x1 = extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
         x2 = extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
-        out = x1 * tl.sigmoid(x1) * x2
+        out = x1 * tl.sigmoid(x1.to(tl.float32)) * x2
 
         # quant
         if SCALE:

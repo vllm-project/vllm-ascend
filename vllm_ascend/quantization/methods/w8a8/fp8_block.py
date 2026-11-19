@@ -26,11 +26,15 @@ result is handed to a layout the hardware does support:
   32 elements along the reduction dim). The native ``npu_quant_matmul`` path then
   runs and weights stay at one byte per element, which is what makes a 27B FP8
   checkpoint fit on a single card.
-* On every other Ascend generation the resolved matrix is kept in the model dtype
-  and served by the ordinary unquantized GEMM. Correct, but the footprint doubles.
+* A few matrices stay dense in the model dtype even there: the ones the attention
+  backend absorbs (``kv_b_proj``) and the ones whose reduction dim is not a
+  multiple of the MXFP8 group size. Those never reach the FP8 matmul.
 
-Both paths read the same checkpoint, so no per-model patch or offline
-re-quantization step is needed.
+Any other Ascend generation is rejected instead. A2/A3 and Atlas 300I DUO have no
+FP8 matmul, so the only way to serve such a checkpoint there is to rewrite it
+into the model dtype, which doubles the weight footprint to run an unquantized
+GEMM. That is silent dequantization rather than a fallback, so it is refused up
+front.
 """
 
 from typing import Any
@@ -38,14 +42,24 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardware_profile
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
+from vllm_ascend.utils import FP8_METHOD, maybe_trans_nz
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
+from ..base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    PreparedLinearInput,
+    QuantType,
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchRepeatSpec,
+)
 from ..registry import register_scheme
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
 
@@ -97,6 +111,23 @@ def resolve_block_scales(
     return resolved
 
 
+def _require_fp8_weight_matmul() -> None:
+    """Reject a block-wise FP8 checkpoint on hardware with no FP8 matmul.
+
+    Dequantizing such a checkpoint into the model dtype is not a fallback: the
+    result runs an unquantized GEMM from a checkpoint the device can never
+    execute as published, at twice the weight footprint. Failing here keeps the
+    failure visible instead of serving something else under the FP8 name.
+    """
+    if get_current_hardware_profile().supports_weight_format(WeightFormat.FP8):
+        return
+    raise NotImplementedError(
+        "Native block-wise FP8 checkpoints run on Ascend 950 only, and this device has no "
+        "FP8 matmul. Serve the BF16 release of this model instead, or a checkpoint "
+        "re-quantized with ModelSlim or LLM-Compressor."
+    )
+
+
 def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Re-quantize a dense matrix to MXFP8, returning the weight and uint8 scale.
 
@@ -127,20 +158,94 @@ def _is_absorbed_by_attention(layer: torch.nn.Module) -> bool:
     return getattr(layer, "prefix", "").endswith("kv_b_proj")
 
 
+def _get_layer_tp_size(layer: torch.nn.Module) -> int:
+    tp_size = getattr(layer, "tp_size", None)
+    return get_tensor_model_parallel_world_size() if tp_size is None else tp_size
+
+
 @register_scheme(FP8_METHOD, "linear")
 class AscendFp8BlockLinearMethod(AscendLinearScheme):
     """Linear method for native block-wise FP8 checkpoints.
 
     Weights arrive as ``float8_e4m3fn`` plus a float32 ``weight_scale_inv`` with
     one entry per ``block_n x block_k`` tile. ``process_weights_after_loading``
-    resolves those tiles and then either re-quantizes to MXFP8 (Ascend 950) or
-    keeps the model dtype (everything else).
+    resolves those tiles and re-quantizes them to MXFP8. Building the scheme on a
+    device without an FP8 matmul fails, so the dense path is reserved for matrices
+    the attention backend absorbs or for shapes MXFP8 cannot regroup.
     """
 
+    supports_weight_switch = True
+
+    # Dense post-processing keeps weight in [output, input] layout.
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+
+    def _get_weight_switch_specs(
+        self,
+        layer: torch.nn.Module,
+        config: WeightSwitchConfig,
+    ) -> tuple[
+        tuple[WeightSwitchGatherSpec, ...],
+        tuple[WeightSwitchRepeatSpec, ...],
+        str,
+    ]:
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        if not self.use_mxfp8:
+            return gather_specs, repeat_specs, shard_axis
+        if shard_axis == "input":
+            return (
+                self.mxfp8_method.weight_switch_gather_specs,
+                self.mxfp8_method.weight_switch_repeat_specs,
+                shard_axis,
+            )
+        return (
+            self.mxfp8_method.weight_switch_output_gather_specs,
+            self.mxfp8_method.weight_switch_output_repeat_specs,
+            shard_axis,
+        )
+
     def __init__(self, weight_block_size: tuple[int, int]):
+        _require_fp8_weight_matmul()
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
-        self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod() if is_950() else None
+        self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod()
+        self.use_mxfp8 = True
+
+    def validate_weight_shapes(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> None:
+        # Upstream explicitly permits some packed projections with padded
+        # block scales. Preserve the loader's policy for those layers.
+        if getattr(layer, "allow_fp8_block_shape_mismatch", False):
+            return
+
+        tp_size = _get_layer_tp_size(layer)
+        if tp_size > 1 and input_size == input_size_per_partition * tp_size and input_size_per_partition % self.block_k:
+            raise ValueError(
+                f"Weight input_size_per_partition = {input_size_per_partition} is not divisible by "
+                f"weight quantization block_k = {self.block_k}."
+            )
+
+        # Internal packed boundaries must align even for replicated weights.
+        # A replicated final projection may own a partial tile at its tail.
+        # QKV layers can replicate K/V independently of Q, so the packed
+        # output size alone cannot establish whether the last slice is sharded.
+        logical_sizes = getattr(layer, "output_sizes", [output_size])
+        last_size = output_partition_sizes[-1]
+        kv_replicas = getattr(layer, "num_kv_head_replicas", 1)
+        last_is_sharded = tp_size > kv_replicas and logical_sizes[-1] == last_size * tp_size
+        sizes_to_check = output_partition_sizes if last_is_sharded else output_partition_sizes[:-1]
+        for size in sizes_to_check:
+            if size % self.block_n:
+                raise ValueError(
+                    f"Weight output_partition_size = {size} is not divisible by "
+                    f"weight quantization block_n = {self.block_n}."
+                )
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         return {"weight": torch.empty(output_size, input_size, dtype=BLOCK_FP8_WEIGHT_DTYPE)}
@@ -169,13 +274,16 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         del layer.weight_scale_inv
 
         if _is_absorbed_by_attention(layer):
-            # Decided locally rather than on the scheme: the attention backend
-            # splits this layer and disposes of it, so apply() is never reached
-            # and nothing about this layer should speak for any other.
+            # The attention backend splits this layer and disposes of it, so
+            # apply() is never reached. The matrix it absorbs is dense, so neither
+            # the matmul nor the weight switch may describe this layer as MXFP8;
+            # and since each layer owns its own scheme instance, this stays local.
+            self.use_mxfp8 = False
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 
-        if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
+        self.use_mxfp8 = _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size)
+        if not self.use_mxfp8:
             logger.warning_once(
                 "Reduction dim %d of %s is not a multiple of the MXFP8 group size %d; serving this "
                 "layer in %s instead of MXFP8.",
@@ -184,9 +292,6 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
                 self.mxfp8_method.group_size,
                 self.model_dtype,
             )
-            self.mxfp8_method = None
-
-        if self.mxfp8_method is None:
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 
@@ -200,14 +305,23 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
 
-    def apply(
+    def prepare_input_for_overlap(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if not self.use_mxfp8:
+            return None
+        return self.mxfp8_method.prepare_input_for_overlap(layer, x)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        if self.mxfp8_method is not None:
+        if self.use_mxfp8:
             return self.mxfp8_method.apply(layer, x, bias, tp_rank)
         return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
@@ -223,6 +337,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.NONE
 
     def __init__(self, weight_block_size: tuple[int, int], moe_config):
+        _require_fp8_weight_matmul()
         self.block_n, self.block_k = weight_block_size
         # AscendFusedMoEMethod tags a scale as group-wise when the scheme reports
         # a group size, which is how the upstream loader learns to narrow
@@ -230,13 +345,24 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         self.group_size = self.block_k
         self.model_dtype = get_current_vllm_config().model_config.dtype
         self.moe_config = moe_config
-        self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod() if is_950() else None
+        self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod()
         # MoE MXFP8 has group_size only. Snapshot the Linear helper here so
         # requantize does not call get_current_vllm_config() at load time.
-        self._mx_scale_alg = (
-            get_dynamic_mx_quant_scale_alg(get_current_vllm_config()) if self.mxfp8_method is not None else 0
-        )
+        self._mx_scale_alg = get_dynamic_mx_quant_scale_alg(get_current_vllm_config())
+        self.use_mxfp8 = True
         self._bf16_method: Any = None
+
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        if intermediate_size_per_partition % self.block_n:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_n = {self.block_n}."
+            )
+        if _get_layer_tp_size(layer) > 1 and intermediate_size_per_partition % self.block_k:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_k = {self.block_k}."
+            )
 
     @property
     def bf16_method(self):
@@ -280,9 +406,10 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_names = ("w13_weight", "w2_weight")
-        if self.mxfp8_method is not None and not all(
+        self.use_mxfp8 = all(
             _supports_mx_regroup(getattr(layer, name).shape[-1], self.mxfp8_method.group_size) for name in weight_names
-        ):
+        )
+        if not self.use_mxfp8:
             logger.warning_once(
                 "Expert reduction dims of %s are not all multiples of the MXFP8 group size %d; "
                 "serving this layer in %s instead of MXFP8.",
@@ -290,22 +417,21 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
                 self.mxfp8_method.group_size,
                 self.model_dtype,
             )
-            self.mxfp8_method = None
 
         for weight_name in weight_names:
             scale_name = f"{weight_name}_scale_inv"
-            if self.mxfp8_method is None:
-                replace_parameter(layer, weight_name, self._resolve_experts(layer, weight_name, scale_name))
-            else:
+            if self.use_mxfp8:
                 mx_scale = self._requantize_experts_inplace(layer, weight_name, scale_name)
                 layer.register_parameter(f"{weight_name}_scale", torch.nn.Parameter(mx_scale, requires_grad=False))
+            else:
+                replace_parameter(layer, weight_name, self._resolve_experts(layer, weight_name, scale_name))
             delattr(layer, scale_name)
 
-        if self.mxfp8_method is None:
-            self.bf16_method.process_weights_after_loading(layer)
-        else:
+        if self.use_mxfp8:
             self.quant_type = self.mxfp8_method.quant_type
             self.mxfp8_method.process_weights_after_loading(layer)
+        else:
+            self.bf16_method.process_weights_after_loading(layer)
 
     def _resolve_experts(self, layer: torch.nn.Module, weight_name: str, scale_name: str) -> torch.Tensor:
         """Expand every expert of one MoE weight into the model dtype."""
@@ -324,15 +450,13 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         The FP8 weight buffer is reused, so peak memory is one expert of staging
         rather than a dense copy of the whole expert stack.
         """
-        mxfp8_method = self.mxfp8_method
-        if mxfp8_method is None:
-            raise RuntimeError("Block-wise FP8 expert requantize requires the MXFP8 method.")
         scale_alg = self._mx_scale_alg
         weight = getattr(layer, weight_name).data
         scale_inv = getattr(layer, scale_name).data
         num_experts, _, in_features = weight.shape
+        group_size = self.mxfp8_method.group_size
         mx_scale = torch.empty(
-            (num_experts, weight.shape[1], in_features // mxfp8_method.group_size),
+            (num_experts, weight.shape[1], in_features // group_size),
             dtype=torch.uint8,
             device=weight.device,
         )
@@ -346,7 +470,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         return mx_scale
 
     def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
-        active = self.mxfp8_method if self.mxfp8_method is not None else self.bf16_method
+        active = self.mxfp8_method if self.use_mxfp8 else self.bf16_method
         return active.get_eplb_weight_views(layer)
 
     def apply(
@@ -358,7 +482,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        active = self.mxfp8_method if self.mxfp8_method is not None else self.bf16_method
+        active = self.mxfp8_method if self.use_mxfp8 else self.bf16_method
         return active.apply(
             layer=layer,
             x=x,

@@ -99,7 +99,7 @@ Python 返回顺序为：
 
 ## 支持范围
 
-- A2 (`ascend910b`)、A3 (`ascend910_93`)、A5 (`ascend950`)。
+- A2 (`ascend910b`)、A3 (`ascend910_93`)、Ascend 950PR&950DT 系列产品 (`ascend950`)。
 - `K/V` 为 `[16,256]` 内 16 的倍数；交付重点覆盖 K=128、V=128/256。
 - `chunk_size` 为 64/128。
 - TND/NTD 均支持多 head。

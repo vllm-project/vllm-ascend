@@ -33,7 +33,8 @@ class Ascend310PStagedWriteTensor:
             self._uva_buffer = UvaBuffer(size, dtype)
             self.cpu = self._uva_buffer.cpu
             self.np = self._uva_buffer.np
-            self.gpu = self._uva_buffer.uva
+            # vLLM main (#56908) turned UvaBuffer.uva into a method.
+            self.gpu = self._uva_buffer.uva()
         else:
             self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
             self.np = self.cpu.numpy()
@@ -58,18 +59,16 @@ class Ascend310PStagedWriteTensor:
         if not self._dirty_indices:
             return
         if self.uva_instead_of_gpu:
-            self.gpu = self._uva_buffer.uva
+            self.gpu = self._uva_buffer.uva()
             self._dirty_indices.clear()
             return
-        indices = sorted(self._dirty_indices)
-        indices_device = torch.tensor(indices, dtype=torch.int64, device=self.device)
-        values = self.cpu[indices].to(self.device, non_blocking=True)
-        self.gpu.index_copy_(0, indices_device, values)
+        # Small request vectors favor one bulk H2D.
+        self.gpu.copy_(self.cpu, non_blocking=True)
         self._dirty_indices.clear()
 
 
 class Ascend310PRequestState(AscendRequestState):
-    """MRV2 request state using the same CPU-owner model as MRV1 310P."""
+    """MRV2 request state with CPU-owned bookkeeping for Ascend 310P."""
 
     # TODO: Refactor staged writes to use Triton Dispatcher after vLLM RFC
     # #45133 lands while retaining the 310P implementation.
@@ -107,6 +106,7 @@ class Ascend310PRequestState(AscendRequestState):
         self.num_computed_tokens_np = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = torch.zeros(max_num_reqs, dtype=torch.int32, device="cpu")
         self.last_sampled_tokens = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device=device)
+        self.last_sampled_tokens_cpu = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device="cpu")
         self.max_seq_len = np.zeros(max_num_reqs, dtype=np.int32)
         self.draft_tokens = torch.zeros(
             max_num_reqs,
@@ -134,4 +134,4 @@ class Ascend310PRequestState(AscendRequestState):
         req_idx = self.req_id_to_index[req_id]
         self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
         if num_computed_tokens > 0:
-            self.last_sampled_tokens[req_idx, 0] = all_token_ids[num_computed_tokens - 1]
+            self.last_sampled_tokens_cpu[req_idx, 0] = all_token_ids[num_computed_tokens - 1]

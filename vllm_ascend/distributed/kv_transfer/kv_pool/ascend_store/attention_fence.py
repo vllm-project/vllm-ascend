@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 
 import torch
 
@@ -36,6 +38,8 @@ class AttentionComputeStartGate:
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
+        self.on_start: Callable[[], None] | None = None
+        self.on_finish: Callable[[], None] | None = None
         self._event: torch.npu.Event | None = None
 
     def record(
@@ -49,6 +53,14 @@ class AttentionComputeStartGate:
             if self._event is None:
                 self._event = event
                 self._condition.notify_all()
+                if self.on_start is not None:
+                    self.on_start()
+
+    def cancel(self) -> None:
+        """Release gated tasks after their caller has set its transfer abort flag."""
+        self.on_start = None
+        self.on_finish = None
+        self.record()
 
     def wait(self, timeout: float = 10.0) -> bool:
         with self._condition:
@@ -89,3 +101,24 @@ def record_attention_compute_start() -> None:
         gate = _attention_compute_start_gate
     if gate is not None:
         gate.record()
+
+
+@contextmanager
+def attention_transfer_window():
+    """Run the configured transfer completion policy after attention submission.
+
+    The event is recorded after cache writes and any preceding collectives. The
+    host then submits the attention kernel. The registered connector callback
+    decides whether to drain, bound, or retain its asynchronous transfer work.
+    """
+    with _lock:
+        gate = _attention_compute_start_gate
+    if gate is None:
+        yield
+        return
+    try:
+        gate.record()
+        yield
+    finally:
+        if gate.on_finish is not None:
+            gate.on_finish()

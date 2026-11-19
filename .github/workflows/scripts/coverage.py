@@ -9,6 +9,8 @@ import yaml
 
 with open(".github/workflows/scripts/test_config.yaml") as f:
     meta = yaml.safe_load(f) or {}
+with open(".github/workflows/scripts/estimated_times.yaml") as f:
+    _et_meta = yaml.safe_load(f) or {}
 
 
 def pytest_node_file_path(path: str) -> str:
@@ -33,7 +35,7 @@ broken = sorted(p for p in _configured_paths if not Path(pytest_node_file_path(p
 # ============================================================
 # 2. estimated_times coverage
 # ============================================================
-_et = dict(meta.get("estimated_times", {}) or {})
+_et = dict(_et_meta.get("estimated_times", {}) or {})
 _rm = dict(meta.get("runner_mapping", {}) or {})
 _part = dict(meta.get("partition", {}) or {})
 

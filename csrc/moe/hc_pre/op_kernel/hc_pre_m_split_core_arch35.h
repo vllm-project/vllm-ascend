@@ -9,40 +9,42 @@
  */
 
 /*!
- * \file hc_pre_m_k_split_core.h
+ * \file hc_pre_m_split_core_arch35.h
  * \brief
  */
 
-#ifndef HC_PRE_M_SPLIT_CORE_H
-#define HC_PRE_M_SPLIT_CORE_H
+#ifndef HC_PRE_M_SPLIT_CORE_ARCH35_H
+#define HC_PRE_M_SPLIT_CORE_ARCH35_H
 
-#include "kernel_operator.h"
 #include "hc_pre_base_arch35.h"
 #include "hc_pre_cube_compute_arch35.h"
+#include "kernel_operator.h"
 
 namespace HcPreNs {
 using namespace AscendC;
 
-template <typename T>
-class HcPreMSplitCorePart1 {
+template <typename T> class HcPreMSplitCoreArch35 {
 public:
-    __aicore__ inline HcPreMSplitCorePart1()
-    {}
+    __aicore__ inline HcPreMSplitCoreArch35() {}
 
-    __aicore__ inline void Init(
-        GM_ADDR x, GM_ADDR hcFn, GM_ADDR hcScale, GM_ADDR hcBase,
-        GM_ADDR y, GM_ADDR post, GM_ADDR combFrag, const HcPreTilingData* tilingDataPtr, TPipe* pipePtr)
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR hcFn, GM_ADDR hcScale, GM_ADDR hcBase, GM_ADDR y, GM_ADDR post,
+                                GM_ADDR combFrag, GM_ADDR pre, const HcPreTilingData *tilingDataPtr, TPipe *pipePtr)
     {
         pipe = pipePtr;
         tilingData = tilingDataPtr;
-        xGm.SetGlobalBuffer((__gm__ T*)x);
-        hcFnGm.SetGlobalBuffer((__gm__ float*)hcFn);
-        yGm.SetGlobalBuffer((__gm__ T*)y);
+        xGm.SetGlobalBuffer((__gm__ T *)x);
+        hcFnGm.SetGlobalBuffer((__gm__ float *)hcFn);
+        yGm.SetGlobalBuffer((__gm__ T *)y);
 
-        hcScaleGm.SetGlobalBuffer((__gm__ float*)hcScale);
-        hcBaseGm.SetGlobalBuffer((__gm__ float*)hcBase);
-        postGm.SetGlobalBuffer((__gm__ float*)post);
-        combFragGm.SetGlobalBuffer((__gm__ float*)combFrag);
+        hcScaleGm.SetGlobalBuffer((__gm__ float *)hcScale);
+        hcBaseGm.SetGlobalBuffer((__gm__ float *)hcBase);
+        postGm.SetGlobalBuffer((__gm__ float *)post);
+        combFragGm.SetGlobalBuffer((__gm__ float *)combFrag);
+        hasPreOut_ = (pre != nullptr);
+        if (hasPreOut_) {
+            preGm.SetGlobalBuffer((__gm__ float *)pre);
+        }
+        ubRowGapBlocks_ = UbRowGapBlocks(tilingData->hcMult, tilingData->hcMix);
 
         TBuf<TPosition::A1> l1Buffer;
         pipe->InitBuffer(l1Buffer, L1_ALLOC_SIZE);
@@ -50,7 +52,9 @@ public:
         wL1_ = l1Buffer.Get<float>()[L1_BUF_NUM * L1_BUF_OFFSET];
 
         pipe->InitBufPool(tbufPool0, tilingData->bufferPool0Size);
-        tbufPool0.InitBuffer(mmXBuf, CeilDiv(tilingData->mL1Size, 2) * RoundUp<float>(tilingData->hcMix) * sizeof(float));
+        tbufPool0.InitBuffer(mmXBuf,
+                             CeilDiv(tilingData->mL1Size, AIVS_PER_AIC) * RoundUp<float>(tilingData->hcMix) *
+                                 sizeof(float));
         mmXLocal = mmXBuf.Get<float>();
 
         if ASCEND_IS_AIC {
@@ -81,16 +85,22 @@ public:
             logicalBlockIdx = curBlockIdx / 2;
         }
         if (logicalBlockIdx >= tilingData->cubeBlockDimM) {
+            if ASCEND_IS_AIV {
+                CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+                CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+            } else {
+                mmService_.End();
+            }
             return;
         }
 
         if ASCEND_IS_AIV {
-          CopyIn(hcBaseGm, hcBase0Local, 1, tilingData->hcMult);
-          CopyIn(hcBaseGm[tilingData->hcMult], hcBase1Local, 1, tilingData->hcMult);
-          CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, 1, tilingData->hcMult * tilingData->hcMult);
-          event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-          SetFlag<HardEvent::MTE2_V>(eventId);
-          WaitFlag<HardEvent::MTE2_V>(eventId);
+            CopyIn(hcBaseGm, hcBase0Local, 1, tilingData->hcMult);
+            CopyIn(hcBaseGm[tilingData->hcMult], hcBase1Local, 1, tilingData->hcMult);
+            CopyIn(hcBaseGm[tilingData->hcMult * 2], hcBase2Local, 1, tilingData->hcMult * tilingData->hcMult);
+            event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventId);
+            WaitFlag<HardEvent::MTE2_V>(eventId);
         }
 
         int64_t totalBlockNum = GetBlockNum();
@@ -102,19 +112,24 @@ public:
         uint64_t mCnt = CeilDiv(tilingData->bs, tilingData->mL1Size);
         uint64_t singleCoreMaxRound = CeilDiv(mCnt, tilingData->cubeBlockDimM);
         uint64_t mainCoreCount = mCnt % tilingData->cubeBlockDimM;
-        uint64_t singleCoreRound = (mainCoreCount == 0 || logicalBlockIdx < mainCoreCount) ? singleCoreMaxRound : singleCoreMaxRound - 1;
+        uint64_t singleCoreRound =
+            (mainCoreCount == 0 || logicalBlockIdx < mainCoreCount) ? singleCoreMaxRound : singleCoreMaxRound - 1;
         uint64_t mGmOffset = 0;
         if ASCEND_IS_AIC {
             if (mainCoreCount == 0 || curBlockIdx <= mainCoreCount) {
                 mGmOffset = curBlockIdx * singleCoreMaxRound * tilingData->mL1Size;
             } else {
-                mGmOffset = (mainCoreCount * singleCoreMaxRound + (curBlockIdx - mainCoreCount) * (singleCoreMaxRound - 1)) * tilingData->mL1Size;
+                mGmOffset =
+                    (mainCoreCount * singleCoreMaxRound + (curBlockIdx - mainCoreCount) * (singleCoreMaxRound - 1)) *
+                    tilingData->mL1Size;
             }
         } else {
             if (mainCoreCount == 0 || (curBlockIdx / 2) <= mainCoreCount) {
                 mGmOffset = curBlockIdx / 2 * singleCoreMaxRound * tilingData->mL1Size;
             } else {
-                mGmOffset = (mainCoreCount * singleCoreMaxRound + (curBlockIdx / 2 - mainCoreCount) * (singleCoreMaxRound - 1)) * tilingData->mL1Size;
+                mGmOffset = (mainCoreCount * singleCoreMaxRound +
+                             (curBlockIdx / 2 - mainCoreCount) * (singleCoreMaxRound - 1)) *
+                            tilingData->mL1Size;
             }
         }
         int64_t xGmBaseOffset = 0;
@@ -136,8 +151,7 @@ public:
         int64_t combFragSplitOffset = 0;
         int64_t xOutSplitOffset = 0;
         // m轴切分 按照0 0 1 1..分核
-        for (uint64_t roundIdx = 0; roundIdx < singleCoreRound; mGmOffset += tilingData->mL1Size, ++roundIdx)
-        {
+        for (uint64_t roundIdx = 0; roundIdx < singleCoreRound; mGmOffset += tilingData->mL1Size, ++roundIdx) {
             uint64_t mL1RealSize = AscendC::Std::min(tilingData->bs - mGmOffset, (uint64_t)tilingData->mL1Size);
             uint64_t kGmStartOffset = 0;
             uint64_t kGmEndOffset = tilingData->multCoreSplitKSize;
@@ -145,7 +159,8 @@ public:
             if ASCEND_IS_AIV {
                 tbufPool1.Reset();
                 tbufPool1.InitBuffer(xQue, 2, tilingData->mUbSize * RoundUp<T>(tilingData->kUbSize) * sizeof(T));
-                tbufPool1.InitBuffer(castBuf, tilingData->mUbSize * (RoundUp<float>(tilingData->kUbSize) * sizeof(float) + BLOCK_SIZE));
+                tbufPool1.InitBuffer(castBuf, tilingData->mUbSize *
+                                                  (RoundUp<float>(tilingData->kUbSize) * sizeof(float) + BLOCK_SIZE));
                 tbufPool1.InitBuffer(nd2NzBuf, nd2NzBufSize * sizeof(float) * DOUBLE_BUFFER);
 
                 xCastLocal = castBuf.Get<float>();
@@ -171,27 +186,28 @@ public:
                     bool isFirstKL1 = kGmOffset == kGmStartOffset;
                     bool isLastKL1 = (kGmOffset + tilingData->kL1Size) >= kGmEndOffset;
                     uint64_t kL1RealSize = AscendC::Std::min(kGmEndOffset - kGmOffset, (uint64_t)tilingData->kL1Size);
-                    mmService_.CopyInB1Nd2Nz(tilingData->multCoreSplitKSize, kL1RealSize,
-                                             tilingData->hcMix, hcFnGm[kGmOffset],
-                                             wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
+                    mmService_.CopyInB1Nd2Nz(tilingData->multCoreSplitKSize, kL1RealSize, tilingData->hcMix,
+                                             hcFnGm[kGmOffset], wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
                     CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIV_AIC_FLAG + FLAG_ID_MAX);
                     CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIV_AIC_FLAG);
                     uint64_t mL1AlignSize = Align(mL1RealSize, AscendC::BLOCK_CUBE);
                     uint64_t nL1AlignSize = Align((uint64_t)tilingData->hcMix, AscendC::BLOCK_CUBE);
-                    mmService_.Process(tilingData->bs, tilingData->hcMix, mL1RealSize, (256 / AscendC::Std::max(mL1AlignSize, nL1AlignSize)) * 32,
-                                       isFirstKL1, isLastKL1, xL1_[aL1BufferID_ * L1_BUF_OFFSET], wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
+                    mmService_.Process(tilingData->bs, tilingData->hcMix, mL1RealSize,
+                                       (256 / AscendC::Std::max(mL1AlignSize, nL1AlignSize)) * 32, isFirstKL1,
+                                       isLastKL1, xL1_[aL1BufferID_ * L1_BUF_OFFSET],
+                                       wL1_[mmService_.GetBL1BufferId() * L1_BUF_OFFSET]);
                     if (isLastKL1) {
                         mmService_.CopyOut(mmXLocal);
                         CrossCoreSetFlag<SYNC_MODE4, PIPE_FIX>(SYNC_AIC_AIV_PRE_POST_FLAG);
                         CrossCoreSetFlag<SYNC_MODE4, PIPE_FIX>(SYNC_AIC_AIV_PRE_POST_FLAG + FLAG_ID_MAX);
                     }
-                    CrossCoreSetFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIC_AIV_FLAG); // 写出ub搬出，cv流水同步比较复杂，暂不讨论
+                    CrossCoreSetFlag<SYNC_MODE4, PIPE_MTE1>(
+                        SYNC_AIC_AIV_FLAG); // 写出ub搬出，cv流水同步比较复杂，暂不讨论
                     CrossCoreSetFlag<SYNC_MODE4, PIPE_MTE1>(SYNC_AIC_AIV_FLAG + FLAG_ID_MAX);
                 } else {
                     CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
-                    // Even cores take the first half with CeilDiv, and odd cores take the second half.
-                    // This must match the Sinkhorn/output row split; otherwise odd mL1RealSize shifts the
-                    // second half by one row.
+                    // 偶数核取前半段(CeilDiv，多处理一行)、奇数核取后半段，须与 sinkhorn/输出阶段的行划分一致，
+                    // 否则 mL1RealSize 为奇数时后半段错位一行。
                     int64_t rowFactor = CeilDiv(mL1RealSize, 2);
                     int64_t tailRowFactor = mL1RealSize - rowFactor;
                     int64_t curRowFactor = rowFactor;
@@ -201,22 +217,29 @@ public:
                     }
                     float coeff = 1 / static_cast<float>(tilingData->hcMult * tilingData->d);
                     for (int64_t cvLoopIdx = 0; cvLoopIdx < cvLoopKSize; cvLoopIdx++) {
-                        uint64_t kRealSize = kGmOffset + tilingData->kUbSize >= kGmEndOffset ? kGmEndOffset - kGmOffset : tilingData->kUbSize;
+                        uint64_t kRealSize = kGmOffset + tilingData->kUbSize >= kGmEndOffset ? kGmEndOffset - kGmOffset
+                                                                                             : tilingData->kUbSize;
 
                         xLocal = xQue.template AllocTensor<T>();
-                        CopyIn(xGm[xGmBaseOffset + xSplitOffset + roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->d + kGmOffset + cvLoopIdx * tilingData->kUbSize],
-                               xLocal, curRowFactor, tilingData->kUbSize, tilingData->hcMult * tilingData->d - tilingData->kUbSize);
+                        CopyIn(xGm[xGmBaseOffset + xSplitOffset +
+                                   roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->d + kGmOffset +
+                                   cvLoopIdx * tilingData->kUbSize],
+                               xLocal, curRowFactor, tilingData->kUbSize,
+                               tilingData->hcMult * tilingData->d - tilingData->kUbSize);
                         xQue.template EnQue(xLocal);
                         xLocal = xQue.template DeQue<T>();
                         if (kGmOffset == kGmStartOffset && cvLoopIdx == 0) {
-                            VFProcessCastAndInvRmsPart1<T, false>(rmsNormLocal, xCastLocal, xLocal, coeff, curRowFactor, tilingData->kUbSize);
+                            VFProcessCastAndInvRmsPart1<T, false>(rmsNormLocal, xCastLocal, xLocal, coeff, curRowFactor,
+                                                                  tilingData->kUbSize);
                         } else {
-                            VFProcessCastAndInvRmsPart1<T, true>(rmsNormLocal, xCastLocal, xLocal, coeff, curRowFactor, tilingData->kUbSize);
+                            VFProcessCastAndInvRmsPart1<T, true>(rmsNormLocal, xCastLocal, xLocal, coeff, curRowFactor,
+                                                                 tilingData->kUbSize);
                         }
                         xQue.template FreeTensor(xLocal);
 
                         WaitFlag<HardEvent::MTE3_V>(static_cast<event_t>(bufferIdx & 1));
-                        VFTransND2NZ(xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)], xCastLocal, curRowFactor, tilingData->kUbSize);
+                        VFTransND2NZ(xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)], xCastLocal, curRowFactor,
+                                     tilingData->kUbSize);
                         SetFlag<HardEvent::V_MTE3>(static_cast<event_t>(bufferIdx & 1));
                         WaitFlag<HardEvent::V_MTE3>(static_cast<event_t>(bufferIdx & 1));
 
@@ -226,14 +249,20 @@ public:
                             dataCopyXParams.blockLen = curRowFactor * C0_SIZE * sizeof(float) / BLOCK_SIZE;
                             dataCopyXParams.srcStride = CeilAlign(curRowFactor, C0_SIZE) - curRowFactor;
                             dataCopyXParams.dstStride = CeilAlign(mL1RealSize, 16) - curRowFactor;
-                            CopyToL1(xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)], xL1_[(aL1BufferID_ * L1_BUF_OFFSET) + cvLoopIdx * tilingData->kUbSize * mL1SizeAlign], dataCopyXParams);
+                            CopyToL1(
+                                xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)],
+                                xL1_[(aL1BufferID_ * L1_BUF_OFFSET) + cvLoopIdx * tilingData->kUbSize * mL1SizeAlign],
+                                dataCopyXParams);
                         } else {
                             DataCopyParams dataCopyXParams;
                             dataCopyXParams.blockCount = CeilDiv(tilingData->kUbSize, C0_SIZE);
                             dataCopyXParams.blockLen = curRowFactor * C0_SIZE * sizeof(float) / BLOCK_SIZE;
-                            dataCopyXParams.srcStride = CeilAlign(curRowFactor, C0_SIZE) -  curRowFactor;
+                            dataCopyXParams.srcStride = CeilAlign(curRowFactor, C0_SIZE) - curRowFactor;
                             dataCopyXParams.dstStride = CeilAlign(mL1RealSize, 16) - curRowFactor;
-                            CopyToL1(xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)], xL1_[(aL1BufferID_ * L1_BUF_OFFSET) + rowFactor * (BLOCK_SIZE / sizeof(float)) + cvLoopIdx * tilingData->kUbSize * mL1SizeAlign], dataCopyXParams);
+                            CopyToL1(xNd2NzLocal[nd2NzBufSize * (bufferIdx & 1)],
+                                     xL1_[(aL1BufferID_ * L1_BUF_OFFSET) + rowFactor * (BLOCK_SIZE / sizeof(float)) +
+                                          cvLoopIdx * tilingData->kUbSize * mL1SizeAlign],
+                                     dataCopyXParams);
                         }
                         SetFlag<HardEvent::MTE3_V>(static_cast<event_t>(bufferIdx & 1));
                         bufferIdx++;
@@ -249,15 +278,22 @@ public:
                 CrossCoreWaitFlag<SYNC_MODE4, PIPE_V>(SYNC_AIC_AIV_PRE_POST_FLAG);
                 // mm计算结果存入mmXLocal，mmXLocal每轮循环需要累加;
                 tbufPool1.Reset();
-                tbufPool1.InitBuffer(xQue, 2, tilingData->rowInnerFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor) * sizeof(T));
-                tbufPool1.InitBuffer(
-                    yQue, 2, tilingData->rowInnerFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
+                tbufPool1.InitBuffer(xQue, 2,
+                                     tilingData->rowInnerFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor) *
+                                         sizeof(T));
+                tbufPool1.InitBuffer(yQue, 2, tilingData->rowInnerFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
                 tbufPool1.InitBuffer(postQue, 2, tilingData->rowInnerFactor * tilingData->hcMultAlign * sizeof(float));
                 tbufPool1.InitBuffer(combFragQue, DOUBLE_BUFFER,
-                    tilingData->rowInnerFactor * tilingData->hcMult * tilingData->hcMult * sizeof(float));
+                                     tilingData->rowInnerFactor * tilingData->hcMult * tilingData->hcMult *
+                                         sizeof(float));
 
                 // TBuf
-                tbufPool1.InitBuffer(mixesBuf, tilingData->rowInnerFactor * RoundUp<float>(tilingData->hcMix) * sizeof(float));
+                tbufPool1.InitBuffer(mixesBuf,
+                                     tilingData->rowInnerFactor * RoundUp<float>(tilingData->hcMix) * sizeof(float));
+                if (hasPreOut_) {
+                    tbufPool1.InitBuffer(preQue, DOUBLE_BUFFER,
+                                         tilingData->rowInnerFactor * tilingData->hcMultAlign * sizeof(float));
+                }
 
                 mixesLocal = mixesBuf.Get<float>();
 
@@ -270,56 +306,78 @@ public:
                     currentRow += 1;
                 }
                 for (int64_t innerRowIdx = 0; innerRowIdx < currentRow; innerRowIdx += tilingData->rowInnerFactor) {
-                    int64_t currentInnerRowFactor = innerRowIdx + tilingData->rowInnerFactor >= currentRow ? currentRow - innerRowIdx :
-                                                    tilingData->rowInnerFactor;
-                    VFProcessInvRmsPart3(mixesLocal, mmXLocal[innerRowIdx * tilingData->hcMix], rmsNormLocal[innerRowIdx],
-                                         tilingData->normEps, currentInnerRowFactor, tilingData->hcMix);
+                    int64_t currentInnerRowFactor = innerRowIdx + tilingData->rowInnerFactor >= currentRow
+                                                        ? currentRow - innerRowIdx
+                                                        : tilingData->rowInnerFactor;
+                    VFProcessInvRmsPart3(mixesLocal, mmXLocal[innerRowIdx * tilingData->hcMix],
+                                         rmsNormLocal[innerRowIdx], tilingData->normEps, currentInnerRowFactor,
+                                         tilingData->hcMix);
 
-                    VFProcessPre(
-                        mixesLocal, mixesLocal, hcBase0Local, hcScaleGm.GetValue(0), tilingData->hcEps,
-                        currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
-                    for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++)
-                    {
+                    VFProcessPre(mixesLocal, mixesLocal, hcBase0Local, hcScaleGm.GetValue(0), tilingData->hcEps,
+                                 currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
+                    if (hasPreOut_) {
+                        preLocal = preQue.AllocTensor<float>();
+                        CopyOut(mixesLocal, preLocal, currentInnerRowFactor, tilingData->hcMult, 0, ubRowGapBlocks_);
+                        preQue.EnQue(preLocal);
+                        preLocal = preQue.DeQue<float>();
+                        CopyOut(preLocal,
+                                preGm[postGmBaseOffset + postSplitOffset +
+                                      roundIdx * tilingData->mL1Size * tilingData->hcMult +
+                                      innerRowIdx * tilingData->hcMult],
+                                currentInnerRowFactor, tilingData->hcMult);
+                        preQue.FreeTensor(preLocal);
+                    }
+                    for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
                         int64_t curDFactor =
                             (dLoopIdx == tilingData->dLoop - 1) ? tilingData->tailDFactor : tilingData->dFactor;
                         xLocal = xQue.template AllocTensor<T>();
-                        CopyIn(
-                            xGm[xGmBaseOffset + xOutSplitOffset + roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->d +
-                                innerRowIdx * tilingData->hcMult * tilingData->d + dLoopIdx * tilingData->dFactor],
-                            xLocal, currentInnerRowFactor * tilingData->hcMult, curDFactor, tilingData->d - curDFactor);
+                        CopyIn(xGm[xGmBaseOffset + xOutSplitOffset +
+                                   roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->d +
+                                   innerRowIdx * tilingData->hcMult * tilingData->d + dLoopIdx * tilingData->dFactor],
+                               xLocal, currentInnerRowFactor * tilingData->hcMult, curDFactor,
+                               tilingData->d - curDFactor);
                         xQue.template EnQue(xLocal);
                         xLocal = xQue.template DeQue<T>();
 
                         yLocal = yQue.template AllocTensor<T>();
-                        VFProcessY(yLocal, mixesLocal, xLocal, currentInnerRowFactor, tilingData->hcMult, curDFactor, tilingData->hcMix);
+                        VFProcessY(yLocal, mixesLocal, xLocal, currentInnerRowFactor, tilingData->hcMult, curDFactor,
+                                   tilingData->hcMix);
                         xQue.template FreeTensor(xLocal);
                         yQue.template EnQue(yLocal);
                         yLocal = yQue.template DeQue<T>();
-                        CopyOut(yLocal, yGm[yGmBaseOffset + ySplitOffset + roundIdx * tilingData->mL1Size * tilingData->d + innerRowIdx * tilingData->d + dLoopIdx * tilingData->dFactor],
+                        CopyOut(yLocal,
+                                yGm[yGmBaseOffset + ySplitOffset + roundIdx * tilingData->mL1Size * tilingData->d +
+                                    innerRowIdx * tilingData->d + dLoopIdx * tilingData->dFactor],
                                 currentInnerRowFactor, curDFactor, tilingData->d - curDFactor);
                         yQue.template FreeTensor(yLocal);
                     }
 
                     // post
                     postLocal = postQue.AllocTensor<float>();
-                    VFProcessPost(
-                        postLocal, mixesLocal[tilingData->hcMult], hcBase1Local,
-                        hcScaleGm.GetValue(1), tilingData->hcEps, currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
+                    VFProcessPost(postLocal, mixesLocal[tilingData->hcMult], hcBase1Local, hcScaleGm.GetValue(1),
+                                  tilingData->hcEps, currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
 
                     postQue.EnQue(postLocal);
                     postLocal = postQue.DeQue<float>();
-                    CopyOut(postLocal, postGm[postGmBaseOffset + postSplitOffset + roundIdx * tilingData->mL1Size * tilingData->hcMult + innerRowIdx * tilingData->hcMult], currentInnerRowFactor, tilingData->hcMult);
+                    CopyOut(
+                        postLocal,
+                        postGm[postGmBaseOffset + postSplitOffset +
+                               roundIdx * tilingData->mL1Size * tilingData->hcMult + innerRowIdx * tilingData->hcMult],
+                        currentInnerRowFactor, tilingData->hcMult);
                     postQue.FreeTensor(postLocal);
 
                     // combFrag
                     combFragLocal = combFragQue.AllocTensor<float>();
-                    VFProcessCombFragPacked(
-                        combFragLocal, mixesLocal[tilingData->hcMult * 2], hcBase2Local, hcScaleGm.GetValue(2), tilingData->hcEps,
-                        tilingData->iterTimes - 1, currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
+                    VFProcessCombFragPacked(combFragLocal, mixesLocal[tilingData->hcMult * 2], hcBase2Local,
+                                            hcScaleGm.GetValue(2), tilingData->hcEps, tilingData->iterTimes - 1,
+                                            currentInnerRowFactor, tilingData->hcMult, tilingData->hcMix);
 
                     combFragQue.EnQue(combFragLocal);
                     combFragLocal = combFragQue.DeQue<float>();
-                    CopyOut(combFragLocal, combFragGm[combFragGmBaseOffset + combFragSplitOffset + roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->hcMult + innerRowIdx * tilingData->hcMult * tilingData->hcMult],
+                    CopyOut(combFragLocal,
+                            combFragGm[combFragGmBaseOffset + combFragSplitOffset +
+                                       roundIdx * tilingData->mL1Size * tilingData->hcMult * tilingData->hcMult +
+                                       innerRowIdx * tilingData->hcMult * tilingData->hcMult],
                             currentInnerRowFactor, tilingData->hcMult * tilingData->hcMult);
                     combFragQue.FreeTensor(combFragLocal);
                 }
@@ -328,6 +386,8 @@ public:
         }
         if ASCEND_IS_AIV {
             WaitFlag<HardEvent::MTE3_MTE2>(static_cast<event_t>(0));
+            CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
+            CrossCoreWaitFlag<SYNC_MODE4, PIPE_MTE3>(SYNC_AIC_AIV_FLAG);
         } else {
             mmService_.End();
         }
@@ -347,11 +407,13 @@ private:
     GlobalTensor<float> hcBaseGm;
     GlobalTensor<float> postGm;
     GlobalTensor<float> combFragGm;
+    GlobalTensor<float> preGm;
 
     TQue<QuePosition::VECIN, 1> xQue;
     TQue<QuePosition::VECOUT, 1> yQue;
     TQue<QuePosition::VECOUT, 1> postQue;
     TQue<QuePosition::VECOUT, 1> combFragQue;
+    TQue<QuePosition::VECOUT, 1> preQue;
 
     TBuf<QuePosition::VECCALC> castBuf;
     TBuf<QuePosition::VECCALC> nd2NzBuf;
@@ -391,10 +453,14 @@ private:
     LocalTensor<float> hcBase0Local;
     LocalTensor<float> hcBase1Local;
     LocalTensor<float> hcBase2Local;
+    LocalTensor<float> preLocal;
+    bool hasPreOut_ = false;
+    uint32_t ubRowGapBlocks_ = 0;
 
     HcPreCubeCompute mmService_;
     LocalTensor<float> xL1_;
     LocalTensor<float> wL1_;
+    static constexpr uint32_t AIVS_PER_AIC = 2;
     static constexpr uint64_t SYNC_AIV_AIC_FLAG = 8;
     static constexpr uint64_t SYNC_AIC_AIV_FLAG = 9;
     static constexpr uint64_t SYNC_AIC_AIV_PRE_POST_FLAG = 10;
@@ -402,10 +468,11 @@ private:
     uint64_t cvLoopIdx_ = 0;
     uint8_t aL1BufferID_{0};
 
-    TBufPool<QuePosition::VECCALC, 12> tbufPool0;
-    TBufPool<QuePosition::VECCALC, 12> tbufPool1;
+    static constexpr uint32_t UB_POOL_BUFFER_COUNT = 12;
+    TBufPool<QuePosition::VECCALC, UB_POOL_BUFFER_COUNT> tbufPool0;
+    TBufPool<QuePosition::VECCALC, UB_POOL_BUFFER_COUNT> tbufPool1;
 };
 
-} // namespace HCPreSinkhorn
+} // namespace HcPreNs
 
 #endif

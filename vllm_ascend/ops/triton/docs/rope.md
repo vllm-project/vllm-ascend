@@ -26,7 +26,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton`).
   4. Kernel side: load the rotation coefficients for the row and cast them to fp32. With `USE_COS_SIN=True`, `pos_idx = positions[row_idx]` indexes `cos_sin_cache`, whose row holds `[cos(0 : rope_dim // 2), sin(rope_dim // 2 : rope_dim)]`; otherwise `cos`/`sin` are indexed by `row_idx` directly. `cos_mask = arange(0, pad_rope_dim // 2) < rope_dim // 2` masks the padding.
   5. Kernel side: tile the Q heads in chunks of `BLOCK_SIZE_HEAD`. For NeoX style, load the two halves `[BLOCK_SIZE_HEAD, pad_rope_dim // 2]` at offsets `0` and `rope_dim // 2`, rotate, and store both halves back. For GPT-J style, load the `[BLOCK_SIZE_HEAD, pad_rope_dim // 2, 2]` pairs with `tl.split`, rotate, re-interleave with `tl.join`, and store. Head and rotary masks keep the tail heads and the padded rotary lanes inactive.
   6. Kernel side: repeat the same tiled loop for the K heads (`n_kh`), then advance to the next row.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products.
 
 ### FP8 E4M3 output variant
 
@@ -52,7 +52,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton`).
   4. For each row, the kernel indexes `cos_sin_cache` with `positions[row_idx]`, loads the cosine and sine halves, and converts them to fp32.
   5. It processes Q heads in `BLOCK_QH` tiles, rotates in fp32, clamps each result to `[-448, 448]`, and stores directly as E4M3. A non-rotary tail is clipped and converted in the same way.
   6. It repeats the operation for K using `BLOCK_KH`, then advances to the next token row.
-- **Supported modes**: Ascend 950 (A5). Atlas A2 and Atlas A3 do not support this FP8 execution path.
+- **Supported modes**: 950PR&950DT Products. Atlas A2 and Atlas A3 do not support this FP8 execution path.
 
 ## Parameters
 
@@ -144,7 +144,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton`).
 
 - **Origin**: Developed from `_triton_rope` to support the MiniMax-M3 sparse index path with a native E4M3 index cache.
 - **Differences**:
-    - NPU adaptation for performance: fuses RoPE and fixed-scale E4M3 conversion into the output stores, uses separate Q/K head tiles capped at `16`, and launches up to `max(get_vectorcore_num() * 8, 256)` programs to expose enough row parallelism on A5;
+    - NPU adaptation for performance: fuses RoPE and fixed-scale E4M3 conversion into the output stores, uses separate Q/K head tiles capped at `16`, and launches up to `max(get_vectorcore_num() * 8, 256)` programs to expose enough row parallelism on 950PR&950DT Products;
     - Modified for a specific vllm-ascend logic or different input parameters: writes separate FP8 outputs instead of updating bf16 Q/K in place, accepts only `cos_sin_cache` + `positions`, supports only NeoX layout, clips the rotated values and partial-RoPE tail to the E4M3 finite range, and uses a fixed quantization scale of `1.0`.
 
 ## Test Cases

@@ -1,0 +1,4 @@
+pr: 19744
+entries:
+  - category: bugfix
+    text: Fixed Mooncake V1/V2 endpoint and AscendStore lookup IPC collisions between independent dense-model data-parallel replicas.

@@ -31,21 +31,26 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
+
+# DeepseekV4Config is provided by Transformers on both supported versions.
+from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
+from vllm_ascend.utils import (
+    npu_stream_switch,
+)
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
@@ -79,6 +84,48 @@ def _is_w8a8_dynamic(linear) -> bool:
     return isinstance(inner_method, AscendW8A8DynamicLinearMethod)
 
 
+def _is_mxfp8_dynamic(linear) -> bool:
+    """True iff ``linear`` is wired up with ``AscendW8A8MXFP8DynamicLinearMethod``."""
+    quant_method = getattr(linear, "quant_method", None)
+    if quant_method is None or isinstance(quant_method, AscendUnquantizedLinearMethod):
+        return False
+    if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        return True
+    inner_method = getattr(quant_method, "quant_method", None)
+    return isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
+
+
+# The indexer K cache dtype each Ascend part implements. A5 quantizes to fp8
+# inside ``indexer_compress_epilog_v2``; A3's scatter
+# (``npu_scatter_nd_update_sk``) only takes int8 updates. Same shape as
+# ``DSA_INDEXER_KV_DTYPES`` in ``vllm/v1/attention/backends/mla/indexer.py``.
+_A5_INDEXER_KV_DTYPES = ("fp8",)
+_A3_INDEXER_KV_DTYPES = ("int8",)
+
+
+def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """Resolve the DeepSeek V4 indexer K cache dtype.
+
+    The indexer K cache has no bf16 write path, so ``indexer_kv_dtype="auto"``
+    resolves to the dtype this part implements and any other request is rejected
+    up front, instead of failing later with a cryptic ACLNN dtype mismatch.
+    """
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        supported, default_kv_dtype, expected_dtype = _A5_INDEXER_KV_DTYPES, "fp8", torch.float8_e4m3fn
+    else:
+        supported, default_kv_dtype, expected_dtype = _A3_INDEXER_KV_DTYPES, "int8", torch.int8
+    indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
+    if indexer_kv_dtype not in supported:
+        raise ValueError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the DeepSeek V4 "
+            f"indexer on this platform (expected one of {supported})."
+        )
+    # The compute dtype the indexer kernels expect. Do not derive it from
+    # upstream's ``STR_DTYPE_TO_TORCH_DTYPE``: that table maps ``"fp8"`` to the
+    # storage dtype ``torch.uint8``, not ``torch.float8_e4m3fn``.
+    return expected_dtype
+
+
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def __init__(
         self,
@@ -91,27 +138,25 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            self.dtype = torch.float8_e4m3fn
-            if not is_a5_bf16_kv_enabled(vllm_config):
-                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
+        # AttentionSpec.tokens_per_state on main.
+        ratio_kwargs = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             model_version="deepseek_v4",
-            compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
+            **ratio_kwargs,
         )
 
     def forward(self): ...
@@ -119,9 +164,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def get_attn_backend(self):
         # Keep these imports lazy to avoid a model-inspection circular import.
         if self.compress_ratio == 4:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
+            from vllm_ascend.attention.dsa_v1 import AscendDSAIndexerBackend
 
-            return AscendDSAC4Backend
+            return AscendDSAIndexerBackend
         if self.compress_ratio == 128:
             from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
 
@@ -192,26 +237,24 @@ class AscendIndexerOps:
         metadata: typing.Any,
     ) -> torch.Tensor:
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
-        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
             weights=self.device_operator.prepare_dsa_indexer_weights(weights),
             query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
-            actual_seq_lengths_query=metadata.query_start_loc[1:],
-            actual_seq_lengths_key=metadata.seq_lens,
+            topk=self.index_topk,
+            quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
+            cu_seqlens_q=metadata.qli_cu_seqlens_q,
+            seqused_k=metadata.qli_seqused_k,
+            cmp_residual_k=metadata.qli_cmp_residual_k,
             block_table=metadata.block_table,
             metadata=metadata.qli_metadata,
-            query_quant_mode=0,
-            key_quant_mode=0,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=self.index_topk,
-            sparse_mode=3,
-            pre_tokens=(1 << 63) - 1,
-            next_tokens=(1 << 63) - 1,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
             cmp_ratio=4,
-            return_value=False,
+            return_value=0,
         )
         return topk_idxs
 
@@ -292,11 +335,7 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        k_dtype = (
-            torch.float8_e4m3fn
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-            else torch.int8
-        )
+        k_dtype = get_indexer_k_dtype(vllm_config)
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
@@ -479,7 +518,9 @@ class DeepseekV4Indexer(nn.Module):
         assert compressor is not None
 
         # ===== Part0: Pre-compute on main =====
-        if _is_w8a8_dynamic(self.wq_b) and qr_pertoken_scale is not None:
+        # Reuse the prolog's pre-quantized qr when this layer's scheme
+        # matches (W8A8 fused quant / MXFP8 split-quant).
+        if qr_pertoken_scale is not None and (_is_w8a8_dynamic(self.wq_b) or _is_mxfp8_dynamic(self.wq_b)):
             qr_quant_ready = qr
             qr_scale_ready = qr_pertoken_scale
         else:

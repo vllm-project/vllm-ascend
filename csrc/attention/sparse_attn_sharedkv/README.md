@@ -4,9 +4,9 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>                        | ×  |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>        | √  |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>        | √  |
+|<term>Ascend 950PR&950DT 系列产品</term>                        | ×  |
+|<term>Atlas A3 系列产品</term>        | √  |
+|<term>Atlas A2 系列产品</term>        | √  |
 |<term>Atlas 200I/500 A2 推理系列产品</term>                    | ×  |
 |<term>Atlas 推理系列产品</term>                                | ×  |
 |<term>Atlas 训练系列产品</term>                                | ×  |
@@ -86,7 +86,7 @@
 - 当`layout_kv`为BSND时，功能使用限制如下：
     - `ori_kv`和`cmp_kv`的layout都必须为BSND，ori_kv的shape为[B, S2, N2,D]，cmp_kv的shape为[B, S3, N2,D]。
 
-## Atlas A3 推理系列产品 调用说明
+## Atlas A3 系列产品 调用说明
 
 - 单算子模式调用
 

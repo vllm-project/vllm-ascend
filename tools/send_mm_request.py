@@ -10,7 +10,7 @@ import requests
 from modelscope import snapshot_download  # type: ignore
 
 if TYPE_CHECKING:
-    from tests.e2e.nightly.single_node.models.scripts.single_node_config import SingleNodeConfig
+    from tests.e2e.common.single_node.single_node_config import SingleNodeConfig
 
 DEFAULT_TEXT_PROMPT = "What is the content of this image?"
 
@@ -38,6 +38,15 @@ def _load_image_data(image_path: str | None = None) -> str:
     if not image_path:
         mm_dir = snapshot_download(
             "vllm-ascend/mm_request",
+            repo_type="dataset",
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
+        image_path = os.path.join(mm_dir, "test_mm2.jpg")
+    elif not os.path.exists(_resolve_fs_path(image_path)):
+        if "/" not in image_path or any(image_path.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            raise FileNotFoundError(f"Image path '{image_path}' does not exist locally.")
+        mm_dir = snapshot_download(
+            image_path,
             repo_type="dataset",
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )

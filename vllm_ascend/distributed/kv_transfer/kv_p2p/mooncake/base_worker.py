@@ -1,0 +1,694 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+"""Common worker-side logic for Mooncake KV transfer connectors."""
+
+import math
+import os
+from typing import TYPE_CHECKING
+
+import torch
+import torch_npu  # noqa: F401
+from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+    KVConnectorTransferResults,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tp_group,
+)
+from vllm.logger import logger
+from vllm.utils.network_utils import get_ip
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
+
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    MooncakeConnectorMetadata,
+    MooncakePPTransferMetadata,
+    MooncakeTransferMetadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+    MooncakeKVConnectorStats,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+    as_kv_cache_tensors,
+    collect_configured_register_regions,
+)
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
+    global_te,
+)
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    get_transfer_timeout_value,
+    tensor_storage_key,
+    validate_register_region_count,
+)
+from vllm_ascend.distributed.utils import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size,
+)
+from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _is_component_major_mla_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
+    """Whether NoPE and RoPE are component-major views of one MLA slot.
+
+    The supported geometry is ``[all NoPE][all RoPE][padding]`` inside each
+    physical slot.  Both views share one storage and first-axis stride, while
+    each component remains internally contiguous.  This is deliberately
+    different from a token-interleaved parent page, where NoPE and RoPE are
+    sliced along the trailing dimension of every token.
+    """
+    # Require the two-view MLA cache contract.
+    if not isinstance(spec, MLAAttentionSpec) or len(caches) != 2:
+        return False
+
+    nope, rope = caches
+    if nope.dtype != rope.dtype:
+        return False
+    # Both views must share one storage.
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        return False
+    # Their first-axis layout must match.
+    if nope.shape[0] != rope.shape[0] or nope.stride(0) != rope.stride(0):
+        return False
+
+    # Component-major views are 4-D and internally contiguous apart from the
+    # first-axis page stride.  A generic packed K/scale page or a token-
+    # interleaved parent does not satisfy both component strides.
+    if nope.ndim != 4 or rope.ndim != 4:
+        return False
+    # All axes other than the first axis must be contiguous.
+    if nope.stride(1) != nope.shape[2] * nope.shape[3]:
+        return False
+    if rope.stride(1) != rope.shape[2] * rope.shape[3]:
+        return False
+
+    nope_block_elems = nope.shape[1] * nope.shape[2] * nope.shape[3]
+    return rope.storage_offset() - nope.storage_offset() == nope_block_elems
+
+
+class MooncakeTransferAddressMixin:
+    """Direction-independent local/remote address calculation."""
+
+    # Supplied by the worker and its registered cache descriptors.
+    tp_rank: int
+    tp_size: int
+    pcp_rank: int
+    pcp_size: int
+    layer_names: list[str]
+    kv_caches_base_addr: list[list[int]]
+    block_shapes: list[list[tuple[int, ...]]]
+    block_strides: list[list[int]]
+    block_lens: list[list[int]]
+
+    def _append_mamba_transfer_addresses(
+        self,
+        spec: MambaSpec,
+        remote_pcp_rank: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+        transfer_entries_by_layer: dict[tuple[int, int], list[tuple[str, list[int], list[int]]]],
+        remote_metadata: MooncakePPTransferMetadata,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+    ) -> None:
+        """Append a replicated Mamba state or one producer PCP/TP head shard."""
+        tp_replicated = getattr(spec, "tp_replicated", False)
+        remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
+        local_rank = self.tp_rank * self.pcp_size + self.pcp_rank
+        local_size = self.pcp_size * self.tp_size
+        remote_rank = remote_tp_rank * len(remote_metadata.metadata_by_pcp_rank) + remote_pcp_rank
+        remote_size = len(remote_metadata.metadata_by_pcp_rank) * remote_tp_size
+        larger_tp_size = max(local_size, remote_size)
+        smaller_tp_size = min(local_size, remote_size)
+        if smaller_tp_size <= 0 or (not tp_replicated and larger_tp_size % smaller_tp_size != 0):
+            raise ValueError(
+                f"Mooncake Mamba TP sizes must have an integer ratio, got local={local_size}, remote={remote_size}"
+            )
+        tp_ratio = larger_tp_size // smaller_tp_size
+        if tp_replicated:
+            rank_offset = 0
+        elif remote_size >= local_size:
+            rank_offset = remote_rank % tp_ratio
+            if remote_rank // tp_ratio != local_rank:
+                raise ValueError(f"Mooncake Mamba remote TP {remote_rank} does not belong to local TP {local_rank}")
+        else:
+            rank_offset = local_rank % tp_ratio
+            if local_rank // tp_ratio != remote_rank:
+                raise ValueError(f"Mooncake Mamba local TP {local_rank} does not belong to remote TP {remote_rank}")
+
+        for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
+            local_base_addrs = self.kv_caches_base_addr[local_layer_index]
+            remote_base_addrs = remote_tp_metadata.kv_caches_base_addr[remote_layer_index]
+            local_shapes = self.block_shapes[local_layer_index]
+            remote_shapes = remote_metadata.block_shapes[remote_layer_index]
+            if not (
+                len(local_base_addrs)
+                == len(remote_base_addrs)
+                == len(local_shapes)
+                == len(remote_shapes)
+                == len(spec.dtypes)
+            ):
+                raise ValueError(
+                    f"Mooncake Mamba cache metadata count mismatch for layer {self.layer_names[local_layer_index]!r}"
+                )
+
+            for cache_index, (local_base_addr, remote_base_addr) in enumerate(zip(local_base_addrs, remote_base_addrs)):
+                local_block_stride = self.block_strides[local_layer_index][cache_index]
+                remote_block_stride = remote_metadata.block_strides[remote_layer_index][cache_index]
+                local_block_len = self.block_lens[local_layer_index][cache_index]
+                remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
+                local_shape = local_shapes[cache_index]
+                remote_shape = remote_shapes[cache_index]
+
+                address_slices: list[tuple[int, int, int]]
+                if tp_replicated:
+                    if local_shape != remote_shape or local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake replicated Mamba metadata mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, 0, local_block_len)]
+                elif local_size == remote_size:
+                    if remote_rank != local_rank or local_block_len != remote_block_len:
+                        raise ValueError(
+                            f"Mooncake Mamba equal-TP metadata mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, 0, local_block_len)]
+                elif cache_index == 0 and len(local_shape) == len(remote_shape) == 2:
+                    if local_shape[0] != remote_shape[0]:
+                        raise ValueError(
+                            f"Mooncake Mamba conv row mismatch for layer {self.layer_names[local_layer_index]!r}: "
+                            f"local={local_shape}, remote={remote_shape}"
+                        )
+                    dtype_size = torch.tensor([], dtype=spec.dtypes[cache_index]).element_size()
+                    mamba_type = spec.mamba_type
+                    local_projection_widths: tuple[int, ...]
+                    remote_projection_widths: tuple[int, ...]
+                    if mamba_type == MambaAttentionBackendEnum.MAMBA1:
+                        local_projection_widths = (local_shape[1],)
+                        remote_projection_widths = (remote_shape[1],)
+                    elif mamba_type in (MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN):
+                        if len(local_shapes) < 2 or len(remote_shapes) < 2:
+                            raise ValueError(
+                                f"Mooncake {mamba_type.name} conv transfer requires a temporal state shape"
+                            )
+                        local_state_shape = local_shapes[1]
+                        remote_state_shape = remote_shapes[1]
+                        local_state_width = local_state_shape[0] * local_state_shape[1]
+                        remote_state_width = remote_state_shape[0] * remote_state_shape[1]
+                        local_remainder = local_shape[1] - local_state_width
+                        remote_remainder = remote_shape[1] - remote_state_width
+                        if local_remainder <= 0 or remote_remainder <= 0 or local_remainder % 2 or remote_remainder % 2:
+                            raise ValueError(
+                                f"Mooncake {mamba_type.name} conv shape cannot be decomposed: "
+                                f"local={local_shape}, remote={remote_shape}, "
+                                f"local_state={local_state_shape}, remote_state={remote_state_shape}"
+                            )
+                        if mamba_type == MambaAttentionBackendEnum.MAMBA2:
+                            local_projection_widths = (
+                                local_state_width,
+                                local_remainder // 2,
+                                local_remainder // 2,
+                            )
+                            remote_projection_widths = (
+                                remote_state_width,
+                                remote_remainder // 2,
+                                remote_remainder // 2,
+                            )
+                        else:
+                            local_projection_widths = (
+                                local_remainder // 2,
+                                local_remainder // 2,
+                                local_state_width,
+                            )
+                            remote_projection_widths = (
+                                remote_remainder // 2,
+                                remote_remainder // 2,
+                                remote_state_width,
+                            )
+                    else:
+                        raise NotImplementedError(
+                            f"Mooncake unequal-TP conv transfer does not support Mamba type {mamba_type!r}"
+                        )
+                    if (
+                        sum(local_projection_widths) != local_shape[1]
+                        or sum(remote_projection_widths) != remote_shape[1]
+                    ):
+                        raise ValueError(
+                            f"Mooncake Mamba conv projections do not match cache shapes for layer "
+                            f"{self.layer_names[local_layer_index]!r}: local={local_shape}, remote={remote_shape}"
+                        )
+
+                    address_slices = []
+                    local_projection_offset = 0
+                    remote_projection_offset = 0
+                    for local_projection_width, remote_projection_width in zip(
+                        local_projection_widths, remote_projection_widths
+                    ):
+                        if remote_size > local_size:
+                            if local_projection_width != remote_projection_width * tp_ratio:
+                                raise ValueError("Mooncake Mamba conv projection TP ratio mismatch")
+                            local_slice_offset = local_projection_offset + rank_offset * remote_projection_width
+                            remote_slice_offset = remote_projection_offset
+                            transfer_width = remote_projection_width
+                        else:
+                            if remote_projection_width != local_projection_width * tp_ratio:
+                                raise ValueError("Mooncake Mamba conv projection TP ratio mismatch")
+                            local_slice_offset = local_projection_offset
+                            remote_slice_offset = remote_projection_offset + rank_offset * local_projection_width
+                            transfer_width = local_projection_width
+                        for row_index in range(local_shape[0]):
+                            address_slices.append(
+                                (
+                                    (row_index * local_shape[1] + local_slice_offset) * dtype_size,
+                                    (row_index * remote_shape[1] + remote_slice_offset) * dtype_size,
+                                    transfer_width * dtype_size,
+                                )
+                            )
+                        local_projection_offset += local_projection_width
+                        remote_projection_offset += remote_projection_width
+                elif remote_size > local_size:
+                    if local_block_len != remote_block_len * tp_ratio:
+                        raise ValueError(
+                            f"Mooncake Mamba state TP ratio mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(rank_offset * remote_block_len, 0, remote_block_len)]
+                else:
+                    if remote_block_len != local_block_len * tp_ratio:
+                        raise ValueError(
+                            f"Mooncake Mamba state TP ratio mismatch for layer "
+                            f"{self.layer_names[local_layer_index]!r}, cache {cache_index}"
+                        )
+                    address_slices = [(0, rank_offset * local_block_len, local_block_len)]
+
+                for _, local_block_ids, remote_block_ids in transfer_entries:
+                    for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
+                        local_block_addr = local_base_addr + local_block_id * local_block_stride
+                        remote_block_addr = remote_base_addr + remote_block_id * remote_block_stride
+                        for local_inner_offset, remote_inner_offset, transfer_len in address_slices:
+                            src_list.append(local_block_addr + local_inner_offset)
+                            dst_list.append(remote_block_addr + remote_inner_offset)
+                            length_list.append(transfer_len)
+
+
+class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
+    """Worker implementation shared by Mooncake transfer modes."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig",
+    ) -> None:
+        assert vllm_config.kv_transfer_config is not None
+
+        self.vllm_config = vllm_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
+        if self.kv_transfer_config.is_kv_consumer == self.kv_transfer_config.is_kv_producer:
+            raise ValueError(
+                f"Mooncake worker requires exactly one KV transfer role, got {self.kv_transfer_config.kv_role!r}"
+            )
+        self.engine_id = engine_id
+        self.kv_cache_config = kv_cache_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.num_blocks = kv_cache_config.num_blocks
+
+        init_ascend_config(vllm_config)
+        self.ascend_config = get_ascend_config()
+        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.tp_group = get_tp_group()
+        self.pp_rank = get_pp_group().rank_in_group
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        if self.dp_rank is None:
+            raise ValueError("Mooncake worker requires a local DP rank")
+        self.dp_size = vllm_config.parallel_config.data_parallel_size_local
+        pcp_group = get_pcp_group()
+        self.pcp_rank = pcp_group.rank_in_group
+        self.pcp_size = pcp_group.world_size
+        self.dcp_size = get_decode_context_model_parallel_world_size()
+        self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+
+        self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
+        self.side_channel_host = get_ip()
+        # Use the serving index, which survives dense-engine DP rank reset.
+        self.side_channel_port = (
+            self.kv_transfer_config.kv_port
+            + vllm_config.parallel_config.data_parallel_index * self.tp_size * self.pp_size * self.pcp_size
+        )
+        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+        self.handshake_port = self.side_channel_port + device_index
+
+        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        self.engine = global_te.get_transfer_engine(
+            self.side_channel_host,
+            device_name=device_name,
+        )
+        self.te_rpc_port = self.engine.get_rpc_port()
+        self.xfer_handshake_metadata: KVConnectorHandshakeMetadata | None = None
+        self.xfer_stats = MooncakeKVConnectorStats()
+
+        logger.info("Initializing Mooncake worker %s", engine_id)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """Return the registered cache descriptor for either transfer mode."""
+        return self.xfer_handshake_metadata
+
+    def _build_kv_cache_spec_mappings(self) -> None:
+        """Flatten group specs and map each layer to its group and spec.
+
+        A regular KV cache group contributes one spec. A uniform-type group
+        contributes each distinct inner spec in layer order. Spec uniqueness is
+        scoped to a group because different groups have different block tables,
+        even when their specs compare equal.
+        """
+        self.kv_cache_specs: list[KVCacheSpec] = []
+        self.layer_name_to_group_index: dict[str, int] = {}
+        self.layer_name_to_spec_index: dict[str, int] = {}
+
+        for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            group_spec_indices: list[int] = []
+
+            for layer_name in group.layer_names:
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_spec = group_spec
+                spec_index = next(
+                    (index for index in group_spec_indices if self.kv_cache_specs[index] == layer_spec),
+                    -1,
+                )
+                if spec_index < 0:
+                    spec_index = len(self.kv_cache_specs)
+                    self.kv_cache_specs.append(layer_spec)
+                    group_spec_indices.append(spec_index)
+
+                self.layer_name_to_group_index[layer_name] = group_index
+                self.layer_name_to_spec_index[layer_name] = spec_index
+
+    def _get_shared_page_metadata(
+        self,
+        caches: tuple[torch.Tensor, ...],
+    ) -> tuple[int, int, tuple[int, ...], int] | None:
+        """Describe views packed into one physical page allocation.
+
+        Sharing a storage alone is insufficient: conventional planar K/V
+        views can share one allocation while their first blocks are many pages
+        apart. A packed layout must place every view's first block inside one
+        common page stride and use the same physical block count and stride.
+        Their contiguous block spans must cover that entire stride.
+        """
+        if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
+            return None
+
+        tensor_num_blocks = {cache.shape[0] for cache in caches}
+        page_strides = {cache.stride(0) * cache.element_size() for cache in caches}
+        if len(tensor_num_blocks) != 1 or len(page_strides) != 1:
+            return None
+
+        num_tensor_blocks = next(iter(tensor_num_blocks))
+        page_stride = next(iter(page_strides))
+        if num_tensor_blocks <= 0 or page_stride <= 0 or num_tensor_blocks % self.num_blocks:
+            return None
+
+        page_base_addr = min(cache.data_ptr() for cache in caches)
+        block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
+        # Storage capacity does not prove that this layer owns a whole page:
+        # its views may occupy only a subregion of a larger shared allocation.
+        # Merge only internally contiguous blocks whose union covers the full
+        # stride. Overlapping aliases are allowed, but holes and padding are not.
+        if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
+            return None
+        block_ranges = sorted(
+            (cache.data_ptr() - page_base_addr, cache.data_ptr() - page_base_addr + block_len)
+            for cache, block_len in zip(caches, block_lens)
+        )
+        covered_end = 0
+        for start, end in block_ranges:
+            if start > covered_end or end > page_stride:
+                return None
+            covered_end = max(covered_end, end)
+        if covered_end != page_stride:
+            return None
+
+        storage = caches[0].untyped_storage()
+        storage_base_addr = storage.data_ptr()
+        storage_end_addr = storage_base_addr + storage.nbytes()
+        if page_base_addr < storage_base_addr or page_base_addr + num_tensor_blocks * page_stride > storage_end_addr:
+            return None
+
+        selected_cache = max(
+            zip(caches, block_lens),
+            key=lambda cache_and_len: cache_and_len[1],
+        )[0]
+        return (
+            page_base_addr,
+            page_stride,
+            tuple(selected_cache.shape[1:]),
+            num_tensor_blocks // self.num_blocks,
+        )
+
+    @staticmethod
+    def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
+        """Describe single-head NHD as byte-equivalent HND without changing the cache."""
+        shape = tuple(cache.shape[1:])
+        if (
+            not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
+            or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec))
+            or is_circular_kv_cache_spec(spec)
+        ):
+            return shape
+
+        heads = spec.num_kv_heads
+        if len(shape) > 3:
+            # Packed/blocked HND caches (for example C8-MXFP PA_NZ K/V and
+            # E8M0 scale caches) keep the KV-head axis first while splitting
+            # the token or head-dimension axes into additional fragments.
+            # Mooncake transfers raw bytes, so preserve that physical shape;
+            # the pull worker can still shard it by the leading head axis.
+            if shape[0] != heads:
+                raise ValueError(
+                    f"MooncakeConnector packed GQA block shape {shape} does not match the spec's {heads} KV heads."
+                )
+            if not cache[0].is_contiguous():
+                raise ValueError("MooncakeConnector packed HND requires contiguous bytes within each KV block.")
+            return shape
+        if len(shape) != 3:
+            raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
+        if shape[0] == shape[1] == heads and heads > 1:
+            raise ValueError(f"MooncakeConnector cannot distinguish HND from NHD for {shape} with {heads} KV heads.")
+        if shape[0] == heads:
+            return shape  # HND
+        if shape[1] != heads:
+            raise ValueError(f"MooncakeConnector KV block shape {shape} does not match the spec's {heads} KV heads.")
+        if heads != 1:
+            raise ValueError("MooncakeConnector NHD requires exactly one KV head per TP rank.")
+        if not cache[0].is_contiguous():
+            raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
+        return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
+
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+    ) -> None:
+        """Register configured KV cache allocations and publish metadata."""
+        self.num_blocks = self.kv_cache_config.num_blocks
+        logger.info("num_blocks: %s", self.num_blocks)
+        self.kv_caches = kv_caches
+        self._build_kv_cache_spec_mappings()
+        self.kvpp_layer_owners = (
+            map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            if self.ascend_config.kvpp_config.size > 1
+            else {}
+        )
+        kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
+        layer_names: list[str] = []
+        layer_block_sizes: list[int] = []
+        group_indices: list[int] = []
+        kv_caches_base_addr: list[list[int]] = []
+        block_strides_per_layer: list[list[int]] = []
+        block_lens_per_layer: list[list[int]] = []
+        block_shapes_per_layer: list[list[tuple[int, ...]]] = []
+        block_size_scales_per_layer: list[list[int]] = []
+        indexer_replication_sizes: list[int] = []
+        configured_layer_names: set[str] = set()
+
+        for tensor_config in self.kv_cache_config.kv_cache_tensors:
+            for layer_name in get_kv_cache_tensor_layers(tensor_config):
+                if layer_name in configured_layer_names:
+                    raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
+                if layer_name not in self.layer_name_to_group_index:
+                    raise ValueError(f"Configured KV cache layer {layer_name!r} does not belong to a KV cache group.")
+
+                cache_or_caches = kv_caches.get(layer_name)
+                if cache_or_caches is None:
+                    raise ValueError(f"No KV cache was registered for configured layer {layer_name!r}.")
+
+                configured_layer_names.add(layer_name)
+                # Foreign target layers alias scratch. Publish persistent owners
+                # only; MTP caches are absent from owners and remain replicated.
+                owner = self.kvpp_layer_owners.get(layer_name)
+                if owner is not None and owner != kvpp_rank:
+                    continue
+
+                base_addrs: list[int] = []
+                block_strides: list[int] = []
+                block_lens: list[int] = []
+                block_shapes: list[tuple[int, ...]] = []
+                block_size_scales: list[int] = []
+
+                spec_index = self.layer_name_to_spec_index[layer_name]
+                spec = self.kv_cache_specs[spec_index]
+                caches = as_kv_cache_tensors(cache_or_caches)
+                shared_page_metadata = (
+                    self._get_shared_page_metadata(caches)
+                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    else None
+                )
+                if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
+                    # MooncakeV2 is layout-agnostic: it only needs the raw
+                    # block's base address, length, and stride.  Publish the
+                    # complete physical slot as a flat byte descriptor instead
+                    # of the larger NoPE view's semantic shape.
+                    page_base_addr, page_stride, _, block_size_scale = shared_page_metadata
+                    element_size = caches[0].element_size()
+                    shared_page_metadata = (
+                        page_base_addr,
+                        page_stride,
+                        (page_stride // element_size,),
+                        block_size_scale,
+                    )
+                if shared_page_metadata is not None:
+                    page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
+                    base_addrs.append(page_base_addr)
+                    block_strides.append(page_stride)
+                    block_lens.append(page_stride)
+                    block_shapes.append(block_shape)
+                    block_size_scales.append(block_size_scale)
+                else:
+                    for cache in caches:
+                        tensor_num_blocks = cache.shape[0]
+                        element_size = cache.element_size()
+                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        base_addrs.append(cache.data_ptr())
+                        block_strides.append(cache.stride(0) * element_size)
+                        block_lens.append(math.prod(block_shape) * element_size)
+                        block_shapes.append(block_shape)
+                        block_size_scales.append(tensor_num_blocks // self.num_blocks)
+
+                layer_names.append(layer_name)
+                layer_block_size = spec.block_size
+                if isinstance(spec, AscendSFAIndexerCacheSpec):
+                    # A replicated SFA indexer stores one physical kernel block
+                    # per DCP rank behind each scheduler block. Publish their
+                    # aggregate token span; replication size 1 deliberately
+                    # remains an ordinary DCP-sharded FA block.
+                    layer_block_size *= spec.sfa_dcp_replicated_indexer_size
+                layer_block_sizes.append(layer_block_size)
+                group_indices.append(self.layer_name_to_group_index[layer_name])
+                kv_caches_base_addr.append(base_addrs)
+                block_strides_per_layer.append(block_strides)
+                block_lens_per_layer.append(block_lens)
+                block_shapes_per_layer.append(block_shapes)
+                block_size_scales_per_layer.append(block_size_scales)
+                indexer_replication_sizes.append(
+                    spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
+                )
+
+        unexpected_layers = kv_caches.keys() - configured_layer_names
+        if unexpected_layers:
+            raise ValueError(f"KV caches contain layers absent from kv_cache_tensors: {sorted(unexpected_layers)}.")
+
+        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+
+        transfer_metadata = MooncakeTransferMetadata(
+            engine_id=self.engine_id,
+            te_rpc_port=self.te_rpc_port,
+            block_size=self.block_size,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            num_blocks=self.num_blocks,
+            layer_names=layer_names,
+            layer_block_sizes=layer_block_sizes,
+            group_indices=group_indices,
+            kv_caches_base_addr=kv_caches_base_addr,
+            block_strides=block_strides_per_layer,
+            block_lens=block_lens_per_layer,
+            block_shapes=block_shapes_per_layer,
+            block_size_scales=block_size_scales_per_layer,
+            indexer_replication_sizes=indexer_replication_sizes,
+            dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
+            local_ip=self.side_channel_host,
+            handshake_port=self.handshake_port,
+        )
+        self.transfer_metadata = transfer_metadata
+        self.xfer_handshake_metadata = transfer_metadata
+
+        logger.info(
+            "Registered Mooncake KV caches: engine_id=%s, num_layers=%d, "
+            "num_blocks=%d, num_regions=%d, registered_bytes=%d",
+            self.engine_id,
+            len(layer_names),
+            self.num_blocks,
+            len(register_regions.ptrs),
+            sum(register_regions.lengths),
+        )
+
+        logger.debug(
+            "Mooncake KV cache transfer metadata: metadata=%s, register_ptrs=%s, register_lengths=%s",
+            transfer_metadata,
+            register_regions.ptrs,
+            register_regions.lengths,
+        )
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Return completed transfers and receive failures together."""
+        raise NotImplementedError
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return local block IDs whose KV load failed."""
+        raise NotImplementedError
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return and reset transfer statistics for the current interval."""
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
+
+    def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
+        """Start D2D KV loading described by scheduler metadata."""
+        raise NotImplementedError
+
+
+__all__ = ["MooncakeBaseConnectorWorker"]
