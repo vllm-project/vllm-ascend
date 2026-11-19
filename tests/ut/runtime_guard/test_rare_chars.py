@@ -35,6 +35,8 @@ from vllm_ascend.observability.runtime_guard.detector.rare import (
 )
 from vllm_ascend.observability.runtime_guard.detector.rare_chars import (
     RareCharsDetector,
+    align_sampled_token_ids_to_logits,
+    build_rare_feed_arrays,
     last_sampled_token_ids,
 )
 from vllm_ascend.observability.runtime_guard.hooks import need_pre_sample_hook
@@ -42,9 +44,11 @@ from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
 
 
 def _require_native() -> None:
+    rare_native._NATIVE_EXT = None
+    rare_native._NATIVE_EXT_TRIED = False
     rare_native._MOD = None
     rare_native._MOD_TRIED = False
-    if rare_native._module() is None:
+    if rare_native._load_native_ext() is None:
         pytest.skip("rare_feed_native not built")
 
 
@@ -157,6 +161,100 @@ def test_last_sampled_token_ids_stay_on_device():
     assert chosen.tolist() == [7, -1, 9]
 
 
+def test_align_sampled_token_ids_mtp_flattens_request_major_slots():
+    # 2 reqs × (1+5) MTP slots ↔ 12 logit rows.
+    ids = torch.tensor(
+        [
+            [1, 2, 3, -1, -1, -1],
+            [4, 5, -1, -1, -1, -1],
+        ],
+        dtype=torch.int32,
+    )
+    aligned = align_sampled_token_ids_to_logits(ids, num_logit_rows=12)
+    assert aligned is not None
+    flat, slots, cu = aligned
+    assert slots == 6 and cu is None
+    assert flat.tolist() == [1, 2, 3, -1, -1, -1, 4, 5, -1, -1, -1, -1]
+    # Non-spec: one logit row per request → last valid id.
+    aligned_last = align_sampled_token_ids_to_logits(ids, num_logit_rows=2)
+    assert aligned_last is not None
+    last, slots_last, cu_last = aligned_last
+    assert slots_last == 1 and cu_last is None
+    assert last.tolist() == [3, 5]
+    assert align_sampled_token_ids_to_logits(ids, num_logit_rows=7) is None
+
+
+def test_align_sampled_token_ids_adaptive_uses_cu_num_logits():
+    # max slots=6, but adaptive gives spans 3 and 5 → 8 logit rows.
+    ids = torch.tensor(
+        [
+            [1, 2, 3, -1, -1, -1],
+            [4, 5, 6, 7, 8, -1],
+        ],
+        dtype=torch.int32,
+    )
+    cu = [0, 3, 8]
+    aligned = align_sampled_token_ids_to_logits(ids, num_logit_rows=8, cu_num_logits=cu)
+    assert aligned is not None
+    flat, slots, cu_out = aligned
+    assert slots == 0
+    assert cu_out == [0, 3, 8]
+    assert flat.tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
+    # Wrong total rows still rejected.
+    assert align_sampled_token_ids_to_logits(ids, num_logit_rows=7, cu_num_logits=cu) is None
+
+
+def test_build_rare_feed_arrays_expands_req_ids_for_mtp_slots():
+    pairs = np.asarray(
+        [
+            [0.1, 0.2],
+            [0.3, 0.4],
+            [0.5, 0.6],
+            [0.7, 0.8],
+        ],
+        dtype=np.float32,
+    )
+    toks = np.asarray([10, 11, -1, 12], dtype=np.int64)
+    token_ids, top1, chosen, expanded = build_rare_feed_arrays(
+        pairs,
+        sampled=None,
+        n_req=2,
+        host_token_ids=toks,
+        slots_per_req=2,
+        req_ids=["a", "b"],
+    )
+    assert token_ids.tolist() == [10, 11, -1, 12]
+    assert top1.tolist() == pytest.approx([0.1, 0.3, 0.5, 0.7])
+    assert chosen.tolist() == pytest.approx([0.2, 0.4, 0.6, 0.8])
+    assert expanded == ["a", "a", "b", "b"]
+
+
+def test_build_rare_feed_arrays_expands_req_ids_via_cu_num_logits():
+    pairs = np.asarray(
+        [
+            [0.1, 0.2],
+            [0.3, 0.4],
+            [0.5, 0.6],
+            [0.7, 0.8],
+            [0.9, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    toks = np.asarray([10, 11, 12, 13, 14], dtype=np.int64)
+    token_ids, top1, chosen, expanded = build_rare_feed_arrays(
+        pairs,
+        sampled=None,
+        n_req=2,
+        host_token_ids=toks,
+        slots_per_req=0,
+        req_ids=["a", "b"],
+        cu_num_logits=[0, 2, 5],
+    )
+    assert token_ids.tolist() == [10, 11, 12, 13, 14]
+    assert expanded == ["a", "a", "b", "b", "b"]
+    assert top1.tolist() == pytest.approx([0.1, 0.3, 0.5, 0.7, 0.9])
+
+
 def test_rare_chars_disabled_is_quiet(tmp_path: Path):
     cfg = _cfg(tmp_path)
     cfg._data["detector"]["rare_chars"]["enabled"] = False
@@ -176,6 +274,7 @@ def test_warmup_fail_latches_off_until_config_disable(tmp_path: Path):
     with contextlib.suppress(Exception):
         det.warmup(tokenizer=None)
     assert det.warmup_failed is True
+    assert det._session.can_feed() is False
 
     def _active() -> bool:
         return (not det.warmup_failed) and bool(cfg.detector_get("rare_chars", "enabled", False))
@@ -193,3 +292,19 @@ def test_warmup_fail_latches_off_until_config_disable(tmp_path: Path):
     cfg._invalidate_hot_path_gates()
     det.refresh_from_config()
     assert det.warmup_failed is False
+    assert det._session.can_feed() is True
+
+
+def test_rare_chars_session_transitions():
+    from vllm_ascend.observability.runtime_guard.detector.rare_chars import RareCharsSession
+
+    sess = RareCharsSession()
+    assert sess.can_feed() is True
+    assert sess.warmed is False
+    sess.mark_failed()
+    assert sess.warmup_failed is True
+    assert sess.can_feed() is False
+    sess.clear_fail_latch()
+    assert sess.warmup_failed is False
+    sess.mark_ready()
+    assert sess.warmed is True and sess.warmup_failed is False

@@ -14,7 +14,8 @@
 
 """Load the GIL-releasing rare_chars feed and adapt ``RareDetector`` tables to it.
 
-Feature ids and GB input kinds are the enums in ``rare_feed_native.c``.
+Feature ids and GB input kinds are loaded from ``rare_feed_native.c`` via
+``rare_enums`` (single source; CI asserts no drift).
 """
 
 from __future__ import annotations
@@ -28,61 +29,37 @@ import numpy as np
 from vllm_ascend.logger import init_logger_ascend
 
 from .rare import GB_GATE, LN10, WIN, describe
+from .rare_enums import FEAT as _FEAT
+from .rare_enums import INPUT as _INPUT
 from .rare_vocab import CI
 from .result import Result
 
 logger = init_logger_ascend(__name__)
 
-# Rule features. Must match FT_* in rare_feed_native.c.
-_FEAT = {
-    "lp1": 0,
-    "lpc": 1,
-    "gap": 2,
-    "fs": 3,
-    "fsw": 4,
-    "caseless_after_latin": 5,
-    "bad_utf8": 6,
-    "gb": 7,
-    "answer": 8,
-}
-# GB input columns, in the order stored on the model. Must match IN_* .
-_INPUT = {
-    "lp1": 0,
-    "lpc": 1,
-    "gap": 2,
-    "cls": 3,
-    "pcls": 4,
-    "ncls": 5,
-    "first": 6,
-    "last": 7,
-    "lead": 8,
-    "pcat": 9,
-    "ncat": 10,
-    "fs": 11,
-    "fsw": 12,
-    "answer": 13,
-    "bad_utf8": 14,
-}
-
-_MOD = None
+_NATIVE_EXT = None
+_NATIVE_EXT_TRIED = False
+# Back-compat aliases for unit tests that reset the loader cache.
+_MOD = None  # noqa: F841 — kept in sync by _load_native_ext
 _MOD_TRIED = False
 
 
-def _module():
+def _load_native_ext():
     """Load the setuptools Extension (``pip install`` / ``build_ext``).
 
     Also accepts an editable sidecar ``rare_feed_native*.so`` next to this file
     for local ``build_ext --inplace`` without reinstall.
     """
-    global _MOD, _MOD_TRIED
-    if _MOD_TRIED:
-        return _MOD
+    global _NATIVE_EXT, _NATIVE_EXT_TRIED, _MOD, _MOD_TRIED
+    if _NATIVE_EXT_TRIED:
+        return _NATIVE_EXT
+    _NATIVE_EXT_TRIED = True
     _MOD_TRIED = True
 
     pkg_name = "vllm_ascend.observability.runtime_guard.detector.rare.rare_feed_native"
     try:
-        _MOD = importlib.import_module(pkg_name)
-        return _MOD
+        _NATIVE_EXT = importlib.import_module(pkg_name)
+        _MOD = _NATIVE_EXT
+        return _NATIVE_EXT
     except Exception:
         pass
 
@@ -99,15 +76,23 @@ def _module():
             spec.loader.exec_module(module)
         except Exception:
             continue
+        _NATIVE_EXT = module
         _MOD = module
         return module
+    _MOD = None
     return None
 
 
-def _literal_fffd(boff: np.ndarray, bflat: np.ndarray, n: int) -> np.ndarray:
-    out = np.zeros(n, np.uint8)
-    for i in range(n):
-        raw = bflat[int(boff[i]) : int(boff[i + 1])].tobytes()
+def _module():
+    """Deprecated alias for ``_load_native_ext`` (tests may still call this)."""
+    return _load_native_ext()
+
+
+def _literal_fffd(byte_offsets: np.ndarray, byte_flat: np.ndarray, vocab_size: int) -> np.ndarray:
+    """Count literal U+FFFD codepoints in each token's UTF-8 bytes."""
+    out = np.zeros(vocab_size, np.uint8)
+    for i in range(vocab_size):
+        raw = byte_flat[int(byte_offsets[i]) : int(byte_offsets[i + 1])].tobytes()
         out[i] = raw.decode("utf-8", "ignore").count("\ufffd")
     return out
 
@@ -117,34 +102,34 @@ class NativeFeed:
 
     def __init__(self, detector) -> None:
         """Copy vocab, rule, and GB tables into buffers the extension can hold."""
-        module = _module()
+        module = _load_native_ext()
         if module is None:
             raise RuntimeError("rare_feed_native.so is not built")
-        gbm = detector.gbm
-        if gbm is None:
+        gb_model = detector.gbm
+        if gb_model is None:
             raise RuntimeError("native feed requires the rare gb model")
         table = detector.T
         ref = detector.ref
         if ref is None or "lcat_s" not in ref:
             raise RuntimeError("native feed requires category tables")
         rcls = np.ascontiguousarray(table["rcls"], np.int8)
-        n = int(rcls.shape[0])
-        self._V = n
+        vocab_size = int(rcls.shape[0])
+        self._V = vocab_size
         # Cumulative token ids outside [0, V) skipped by native apply_token.
         self.oob_tokens = 0
-        boff = np.ascontiguousarray(table["boff"], np.int64)
-        bflat = np.ascontiguousarray(table["bflat"], np.uint8)
-        if boff.shape[0] != n + 1:
+        byte_offsets = np.ascontiguousarray(table["boff"], np.int64)
+        byte_flat = np.ascontiguousarray(table["bflat"], np.uint8)
+        if byte_offsets.shape[0] != vocab_size + 1:
             raise RuntimeError("boff must have length vocab + 1")
         lcat = np.ascontiguousarray(ref["lcat_s"], np.int64)
         fcat = np.ascontiguousarray(ref["fcat_s"], np.int64)
-        if lcat.shape[0] != n + 1 or fcat.shape[0] != n + 1:
+        if lcat.shape[0] != vocab_size + 1 or fcat.shape[0] != vocab_size + 1:
             raise RuntimeError("category sentinel must have length vocab + 1")
         is_letter = np.zeros(len(CI), np.uint8)
         from .rare import _LET
 
         is_letter[np.asarray(_LET, bool)] = 1
-        in_kind = np.array([_INPUT[name] for name in gbm.inputs], np.int8)
+        in_kind = np.array([_INPUT[name] for name in gb_model.inputs], np.int8)
         atoms_f: list[int] = []
         atoms_k: list[int] = []
         atoms_t: list[float] = []
@@ -171,32 +156,34 @@ class NativeFeed:
             strict.append(1 if is_strict else 0)
         if not atoms_f:
             raise RuntimeError("native feed requires at least one rule atom")
-        qcat = np.zeros(len(gbm._qfeat), np.uint8)
-        qcmask = np.zeros(len(gbm._qfeat), np.int64)
-        qcat[np.asarray(gbm._qcat, np.int64)] = 1
-        qcmask[np.asarray(gbm._qcat, np.int64)] = np.asarray(gbm._qcmask, np.int64)
-        qstart = np.concatenate([np.asarray(gbm._qstart, np.int64), np.array([len(gbm._qfeat)], np.int64)])
+        qcat = np.zeros(len(gb_model._qfeat), np.uint8)
+        qcmask = np.zeros(len(gb_model._qfeat), np.int64)
+        qcat[np.asarray(gb_model._qcat, np.int64)] = 1
+        qcmask[np.asarray(gb_model._qcat, np.int64)] = np.asarray(gb_model._qcmask, np.int64)
+        qstart = np.concatenate(
+            [np.asarray(gb_model._qstart, np.int64), np.array([len(gb_model._qfeat)], np.int64)]
+        )
         self._keep = {
             "rcls": rcls,
             "first": np.ascontiguousarray(table["first"], np.int8),
             "last": np.ascontiguousarray(table["last"], np.int8),
             "lead": np.ascontiguousarray(table["lead"], np.uint8),
             "u8": np.ascontiguousarray(table["u8"], np.uint8),
-            "boff": boff,
-            "bflat": bflat,
-            "lit": _literal_fffd(boff, bflat, n),
+            "boff": byte_offsets,
+            "bflat": byte_flat,
+            "lit": _literal_fffd(byte_offsets, byte_flat, vocab_size),
             "lcat": lcat,
             "fcat": fcat,
             "is_letter": is_letter,
             "in_kind": in_kind,
-            "qfeat": np.ascontiguousarray(gbm._qfeat, np.int32),
-            "qthr": np.ascontiguousarray(gbm._qthr, np.float64),
+            "qfeat": np.ascontiguousarray(gb_model._qfeat, np.int32),
+            "qthr": np.ascontiguousarray(gb_model._qthr, np.float64),
             "qcat": qcat,
             "qcmask": qcmask,
-            "qrule": np.ascontiguousarray(gbm._qrule, np.int64),
+            "qrule": np.ascontiguousarray(gb_model._qrule, np.int64),
             "qstart": np.ascontiguousarray(qstart, np.int32),
-            "qleaf": np.ascontiguousarray(gbm._qleaf, np.float64),
-            "qleaf0": np.ascontiguousarray(gbm._qleaf0, np.int32),
+            "qleaf": np.ascontiguousarray(gb_model._qleaf, np.float64),
+            "qleaf0": np.ascontiguousarray(gb_model._qleaf0, np.int32),
             "atom_feat": np.asarray(atoms_f, np.int16),
             "atom_kind": np.asarray(atoms_k, np.int8),
             "atom_thr": np.asarray(atoms_t, np.float64),
@@ -206,18 +193,18 @@ class NativeFeed:
         }
         think = detector.think_end
         self._ctx = module.make_ctx(
-            n,
+            vocab_size,
             len(CI),
             int(in_kind.shape[0]),
             int(self._keep["qfeat"].shape[0]),
-            int(gbm._qleaf0.shape[0]),
+            int(gb_model._qleaf0.shape[0]),
             int(self._keep["atom_feat"].shape[0]),
             int(self._keep["rule_begin"].shape[0]),
             1 if think is None else 0,
             0 if think is None else int(think),
             float(LN10),
-            float(gbm.quant),
-            float(gbm.base),
+            float(gb_model.quant),
+            float(gb_model.base),
             float(GB_GATE["fs"]),
             self._keep["rcls"],
             self._keep["first"],

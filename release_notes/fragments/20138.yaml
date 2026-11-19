@@ -19,3 +19,8 @@ entries:
       (runtime_config only has enabled). rare_feed_native is always a
       setuptools Extension so wheels include it for both
       COMPILE_CUSTOM_KERNELS=0 and =1.
+  - category: config
+    text: >-
+      VLLM_ASCEND_RG_RARE_SYNC_FEED=1 runs rare_chars collect-wait + D2H + feed
+      on the caller thread (skips RareLogprobFeedQueue). Default remains the
+      async hide path; use only for debug / A-B.

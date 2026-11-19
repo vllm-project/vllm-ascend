@@ -141,6 +141,13 @@ pack+feeds. Request finish flushes look-ahead at reap after ``rare_feed_jobs``
 drain. Prefer shadow/`report` first — strict-tier holdout false-positive
 rate can exceed 0.1% on some corpora.
 
+If warmup/native bind fails, a process-local ``RareCharsSession.warmup_failed`` latch
+skips further stash/collect until ``enabled`` is set false then true again (hot-reload).
+Feature / GB-input numeric ids are owned by ``rare_feed_native.c`` and loaded through
+``rare_enums`` (CI asserts agreement). Debug: ``VLLM_ASCEND_RG_RARE_SYNC_FEED=1`` runs
+D2H+feed inline. Pipeline and state details:
+[Runtime Guard feature guide — rare_chars pipeline](../feature_guide/runtime_guard.md#rare_chars-pipeline).
+
 ### manual_trigger
 
 Not a detector — control-plane for `dump.manual_dump`. Always runs `dump_kv` over the live batch (`scope=all_requests`; configured `dump_kv.scope` is ignored). `on_trigger` may still list `report` / other actions; if omitted, `actions.defaults` apply and `dump_kv` is injected.
