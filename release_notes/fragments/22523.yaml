@@ -1,0 +1,4 @@
+pr: 22523
+entries:
+  - category: bugfix
+    text: Fixed KDA speculative-decoding accuracy for near-zero query and key vectors when using RecoverSSM.
