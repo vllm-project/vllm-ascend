@@ -36,14 +36,15 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, SlidingMLACacheLayer
+from vllm_ascend.core.kv_cache_interface import make_sliding_mla_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
-class AscendCompressorStateCache(SlidingMLACacheLayer, CompressorStateCache):
+class AscendCompressorStateCache(CompressorStateCache):
     def __init__(
         self,
         state_dim: int,
@@ -56,11 +57,12 @@ class AscendCompressorStateCache(SlidingMLACacheLayer, CompressorStateCache):
         self.compress_ratio = compress_ratio
         self.block_size = block_size
 
-    @property
-    def _cache_window(self):
-        return self.sliding_window
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return SlidingWindowManager.layer_config(spec, sliding_window=self.sliding_window)
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         from vllm_ascend.models.layer.attention.layer import dsv4_block_sizes
 
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
@@ -74,11 +76,7 @@ class AscendCompressorStateCache(SlidingMLACacheLayer, CompressorStateCache):
             alignment=None,
             page_size_padded=page_size_padded,
         )
-        if HAS_LAYER_CONFIG:
-            return MLAAttentionSpec(**fields)
-        from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-
-        return AscendSlidingWindowMLASpec(**fields, sliding_window=self._cache_window)
+        return make_sliding_mla_spec(sliding_window=self.sliding_window, **fields)
 
     def forward(self): ...
 

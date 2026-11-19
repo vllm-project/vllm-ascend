@@ -19,12 +19,13 @@ from tests.kv_cache_groups import (
     ring_spec_type,
     window_requirement,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
     get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
 )
+from vllm_ascend.utils import vllm_version_is
 
 BLOCK = 128
 MAIN_PAGE = 98304
@@ -96,7 +97,7 @@ def _plan(num_blocks: int = 3):
     groups = get_step5_kv_cache_groups(
         vllm_config,
         {n: ring_requirement(s) if n == RING else layer_config(s) for n, s in specs.items()}
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else specs,
         _orig_groups,
     )

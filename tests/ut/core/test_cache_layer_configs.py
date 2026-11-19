@@ -8,38 +8,24 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 from tests.kv_cache_groups import ascend_ring_spec_type, ring_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
-    CacheGroup,
-    FullAttentionCacheLayer,
-    group_block_size,
-    group_layer_specs,
-)
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_block_size, group_layer_specs, group_uses_slot_mapping
 from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
 from vllm_ascend.models.deepseek_v4.cache_config import _place_deepseek_v4_cache
+from vllm_ascend.utils import vllm_version_is
 
 
 def _layout(width):
     return AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=width, dtype=torch.bfloat16)
 
 
-class _Layer(FullAttentionCacheLayer):
-    def __init__(self, layout):
-        self.layout = layout
-
-    def _get_cache_layout(self, config):
-        return self.layout
-
-
 def _group(members):
-    if HAS_LAYER_CONFIG:
-        configs = {name: _Layer(spec).get_kv_cache_config(None) for name, spec in members.items()}
+    if not vllm_version_is("0.33.0"):
+        configs = {name: FullAttentionManager.layer_config(spec) for name, spec in members.items()}
         assert all(c.manager_cls is FullAttentionManager for c in configs.values())
         return CacheGroup.from_layers(configs)
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
-    specs = {name: _Layer(spec).get_kv_cache_spec(None) for name, spec in members.items()}
-    return CacheGroup(list(specs), UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=specs))
+    return CacheGroup(list(members), UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=members))
 
 
 def test_shared_tuple_preserves_component_offsets_and_block_strides():
@@ -60,7 +46,9 @@ def test_ascend_ring_claims_one_page_and_reports_it_for_zeroing():
     ring = ascend_ring_spec_type(block_size=32, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32)
     assert ring.page_size_bytes == 131072
     allocation = (
-        CacheGroup.from_layers({"ring": AscendCircularBufferManager.layer_config(ring)}) if HAS_LAYER_CONFIG else ring
+        CacheGroup.from_layers({"ring": AscendCircularBufferManager.layer_config(ring)})
+        if not vllm_version_is("0.33.0")
+        else ring
     )
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=32)
     manager = AscendCircularBufferManager(
@@ -80,7 +68,7 @@ def test_ascend_ring_claims_one_page_and_reports_it_for_zeroing():
 
 
 def test_plain_attention_with_ring_policy_preserves_its_physical_page():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         layout = ring_spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
         assert layout.page_size_bytes == 2048
         assert not layout.uses_slot_mapping
@@ -114,3 +102,54 @@ def test_plain_attention_with_ring_policy_preserves_its_physical_page():
     assert ring.page_size_bytes == layout.page_size_bytes == 2048
     assert group.manager_cls is CircularBufferManager
     assert not group.uses_slot_mapping
+
+
+def test_hisparse_hot_group_skips_slot_mapping():
+    if vllm_version_is("0.33.0"):
+        from vllm.v1.kv_cache_interface import HiSparseHotSpec
+
+        spec = HiSparseHotSpec(block_size=16, page_size=64, blocks_per_request=2)
+        group = CacheGroup(["hot"], spec)
+    else:
+        from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager
+        from vllm.v1.kv_cache_interface import HiSparseHotPageSpec
+
+        spec = HiSparseHotPageSpec(block_size=16, page_size=64)
+        group = CacheGroup.from_layers({"hot": HiSparseHotManager.layer_config(spec, blocks_per_request=2)})
+
+    assert not group_uses_slot_mapping(group)
+
+
+def test_shared_layout_keeps_draft_ownership_at_grouping():
+    if vllm_version_is("0.33.0"):
+        import pytest
+
+        pytest.skip("v0.33.0 keeps draft ownership on the spec")
+
+    from types import SimpleNamespace
+
+    from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
+
+    from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
+    from vllm_ascend.core.kv_cache_layers import configure_cache_transfer
+
+    target = FullAttentionManager.layer_config(_layout(16))
+    draft = replace(target, is_draft=True)
+    runtime = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test"), supports_kv_cache_grouping=False),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        speculative_config=SimpleNamespace(method="dspark"),
+    )
+    builder = AscendKVCacheConfigBuilder()
+    groups = builder.get_kv_cache_groups(runtime, {"target": target, "draft": draft})
+    projected = _project_kv_cache_groups_to_worker(groups, {"draft": draft})
+    worker_config = SimpleNamespace(kv_cache_groups=projected)
+    configure_cache_transfer(runtime, worker_config)
+    assert type(projected[0]) is CacheGroup
+    assert projected[0].layer_names == ["draft"]
+    assert worker_config.dspark_draft_only_group_ids == ()
+
+    worker_config.kv_cache_groups = builder.get_kv_cache_groups(runtime, {"draft": draft})
+    configure_cache_transfer(runtime, worker_config)
+    assert worker_config.dspark_draft_only_group_ids == (0,)

@@ -42,7 +42,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, MLA_LAYOUT_TYPES
+from vllm_ascend.core.kv_cache_layers import MLA_LAYOUT_TYPES
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
@@ -54,6 +54,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -888,7 +889,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         self._window_size = window_size
-        if self._cache_kind == "swa" and not HAS_LAYER_CONFIG:
+        if self._cache_kind == "swa" and vllm_version_is("0.33.0"):
             # Replay padding and query masking must use the same fixed window.
             spec_window = int(kv_cache_spec.sliding_window)
             assert spec_window == window_size, (
@@ -1939,14 +1940,12 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         """Bind a single cache view or a tuple of component views."""
         self.kv_cache = kv_cache
 
-    if HAS_LAYER_CONFIG:
+    def get_kv_cache_config(self, vllm_config):
+        return self.manager_cls.layer_config(self.spec)
 
-        def get_kv_cache_config(self, vllm_config):
-            return self.manager_cls.layer_config(self.spec)
-    else:
-
-        def get_kv_cache_spec(self, vllm_config):
-            return self.spec
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config):
+        return self.spec
 
     def get_attn_backend(self):
         spec = self.spec

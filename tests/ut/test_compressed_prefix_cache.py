@@ -19,9 +19,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, MLAAttentionSpec
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.fixture(autouse=True)
 def _init_hash_seed():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     init_none_hash(sha256)
 
@@ -75,7 +75,7 @@ def _make_full_manager(
         hash_block_size=physical_block_size,
     )
     manager = FullAttentionManager(
-        cache_group(["layer"], spec) if HAS_LAYER_CONFIG else spec,
+        cache_group(["layer"], spec) if not vllm_version_is("0.33.0") else spec,
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -92,7 +92,7 @@ def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
         dtypes=(torch.float32,),
     )
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.kv_cache_planning import can_share_block_table
 
         assert not can_share_block_table({"mla": layer_config(mla_spec), "mamba": layer_config(mamba_spec)})
@@ -127,7 +127,7 @@ def test_compressed_spec_separates_logical_and_storage_blocks(
             prefill_context_parallel_size=1,
         ),
     )
-    requirement = layer_config(spec) if HAS_LAYER_CONFIG else spec
+    requirement = layer_config(spec) if not vllm_version_is("0.33.0") else spec
     assert requirement.max_memory_usage_bytes(config) == spec.page_size_bytes * 3
 
     request_id = f"p{physical_block_size}-c{compress_ratio}"
@@ -194,7 +194,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         block_pool=block_pool,
         **(
             {"manager_config": FullAttentionManager.config(), "block_size": spec.block_size}
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else {"kv_cache_spec": spec}
         ),
         drop_eagle_block=False,
@@ -238,7 +238,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         block_pool=block_pool,
         **(
             {"manager_config": FullAttentionManager.config(), "block_size": spec.block_size}
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else {"kv_cache_spec": spec}
         ),
         drop_eagle_block=False,

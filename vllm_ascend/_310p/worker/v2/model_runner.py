@@ -18,7 +18,6 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_s
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1 import kv_cache_interface
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
@@ -55,11 +54,11 @@ from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend._310p.worker.v2.structured_outputs import apply_grammar_bitmask
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     group_block_size,
     group_distinct_specs,
     group_layer_specs,
     group_params,
+    group_uses_slot_mapping,
 )
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import (
@@ -778,7 +777,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if pending_copies:
             self._copy_kv_cache_blocks_310p(pending_copies)
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
 
         def get_kv_cache_layer_configs(self):
             return self._include_linear_attention(super().get_kv_cache_layer_configs(), "get_kv_cache_config")
@@ -815,10 +814,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             size = group_block_size(kv_cache_group)
             block_sizes.append(size)
             specs = group_distinct_specs(kv_cache_group)
-            if HAS_LAYER_CONFIG:
-                slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
-            else:
-                slot_mapping_enabled.append(not isinstance(specs[0], kv_cache_interface.CircularBufferSpec))
+            slot_mapping_enabled.append(group_uses_slot_mapping(kv_cache_group))
             max_num_blocks = cdiv(self.max_model_len, size)
             if size <= 128:
                 alignment = 128 // size
@@ -934,7 +930,7 @@ class NPUModelRunner310V2(NPUModelRunner):
     def _init_kv_zero_meta(self) -> None:
         self.kv_block_zeroer = AscendKVBlockZeroer310V2(self.device, is_pin_memory_available())
         groups = (group for backend_groups in self.attn_groups for group in backend_groups)
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             # Full and sliding attention can have identical layouts. Only full
             # attention participated in 310P's speculative block zeroing.
             groups = (

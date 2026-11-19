@@ -41,9 +41,10 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 
 from tests.kv_cache_groups import full_attention_spec_type
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup
+from vllm_ascend.core.kv_cache_layers import CacheGroup
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import PrefixLookupGroup
 else:
     from vllm.v1.core.kv_cache_coordinator import SpecGroup
@@ -69,7 +70,7 @@ MAMBA_SPEC = MambaSpec(
     block_size=1536,
     shapes=((1,),),
     dtypes=(torch.float32,),
-    **({} if HAS_LAYER_CONFIG else {"mamba_cache_mode": "align"}),
+    **({} if not vllm_version_is("0.33.0") else {"mamba_cache_mode": "align"}),
 )
 
 
@@ -102,7 +103,7 @@ def _fake_manager_factory(**kwargs):
 
 
 def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         groups = [
             CacheGroup.from_layers({"fa-layer": FullAttentionManager.layer_config(FA_SPEC)}),
             CacheGroup.from_layers(
@@ -131,7 +132,7 @@ def _make_coordinator(
     mamba_eagle: bool = False,
     retention_interval: int | None = None,
 ):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
         monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
         monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
@@ -270,7 +271,7 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 
         builder = AscendKVCacheConfigBuilder()
@@ -350,7 +351,7 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator.enable_partial_hash_hits = False
     coordinator.enable_caching = True
     coordinator.block_pool = object()
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         groups = [
             CacheGroup.from_layers({"fa": _RecordingFA.layer_config(FA_SPEC)}),
             CacheGroup.from_layers({"mamba": _RecordingMamba.layer_config(MAMBA_SPEC, mamba_cache_mode="align")}),
@@ -448,14 +449,26 @@ def test_per_group_lookup_matches_scheduler_call_convention():
 def test_per_group_lookup_preserves_replicated_draft_positions():
     coordinator = _make_lookup_coordinator(producer=True)
     coordinator.dcp_world_size = 2
-    draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
-    coordinator.attention_groups = [
-        SpecGroup(FA_SPEC, [0], _RecordingFA, False),
-        SpecGroup(draft_spec, [1], _RecordingMamba, True),
-    ]
+    draft_spec = replace(FA_SPEC, dcp_sharded=False)
+    if vllm_version_is("0.33.0"):
+        coordinator.attention_groups = [
+            SpecGroup(FA_SPEC, [0], _RecordingFA, False),
+            SpecGroup(replace(draft_spec, is_draft=True), [1], _RecordingFA, True),
+        ]
+    else:
+        groups = [
+            CacheGroup.from_layers({"target": _RecordingFA.layer_config(FA_SPEC)}),
+            CacheGroup.from_layers(
+                {"draft": replace(_RecordingFA.layer_config(draft_spec), is_draft=True)}, is_eagle_group=True
+            ),
+        ]
+        coordinator.kv_cache_config.kv_cache_groups = groups
+        coordinator.attention_groups = [
+            PrefixLookupGroup(group.manager_config, group.block_size, [i], group.is_eagle_group)
+            for i, group in enumerate(groups)
+        ]
     coordinator.find_longest_cache_hit_per_group([], 2048)
-    assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
-    assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
+    assert [call["dcp_world_size"] for call in _RecordingFA.calls[-2:]] == [2, 1]
 
 
 if __name__ == "__main__":

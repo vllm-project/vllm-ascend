@@ -51,7 +51,6 @@ for _m in _to_remove:
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type  # noqa: E402
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
@@ -72,6 +71,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Restore the mocked modules so other test files still work correctly.
 # For keys that our real import loaded, overwrite with the saved mock.
@@ -1698,7 +1698,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 worker.enable_c8_quant = worker.enable_kv_quant = True
                 indexer_name = "model.layers.0.self_attn.indexer.k_cache"
                 group = worker.kv_cache_config.kv_cache_groups[0]
-                if HAS_LAYER_CONFIG:
+                if not vllm_version_is("0.33.0"):
                     group.kv_cache_specs[indexer_name] = full_attention_spec_type(
                         block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
                     )
@@ -1748,7 +1748,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         spec = C8Spec(block_size=16, num_kv_heads=1, head_size=656, dtype=torch.float8_e4m3fn)
         self.assertFalse(hasattr(spec, "uses_packed_sfa_main_cache"))
         group = worker.kv_cache_groups[0]
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             group.kv_cache_specs[layer_name] = spec
         else:
             group.kv_cache_spec.kv_cache_specs[layer_name] = spec

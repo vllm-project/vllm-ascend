@@ -19,7 +19,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, FullAttentionCacheLayer
+from vllm_ascend.utils import vllm_version_is
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
@@ -66,7 +66,7 @@ def format_indexer_kpool_slot_mapping(
     return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
 
 
-class Glm5NextIndexerCache(FullAttentionCacheLayer, nn.Module, AttentionLayerBase):
+class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
     """Independently allocated compressed-K cache for the GLM-Next indexer."""
 
     # Auxiliary caches use the GLM-specific small-page class instead of the
@@ -105,7 +105,12 @@ class Glm5NextIndexerCache(FullAttentionCacheLayer, nn.Module, AttentionLayerBas
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return FullAttentionManager.layer_config(spec)
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
@@ -164,14 +169,12 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         static_context[prefix] = self
 
-    if HAS_LAYER_CONFIG:
+    def get_kv_cache_config(self, vllm_config):
+        return KpoolTailManager.layer_config(self._get_cache_layout())
 
-        def get_kv_cache_config(self, vllm_config):
-            return KpoolTailManager.layer_config(self._get_cache_layout())
-    else:
-
-        def get_kv_cache_spec(self, vllm_config):
-            return self._get_cache_layout()
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config):
+        return self._get_cache_layout()
 
     def _get_cache_layout(self):
         return AscendIndexerKPoolTailSpec(
@@ -180,7 +183,7 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": self.compress_ratio}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": self.compress_ratio}),
             compress_ratio=self.compress_ratio,
         )
 
@@ -203,7 +206,7 @@ class KpoolTailManager(FullAttentionManager):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         block_table_token_alignment = None
 
         @classmethod

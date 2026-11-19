@@ -10,11 +10,12 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type, window_requirement
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
+from vllm_ascend.utils import vllm_version_is
 
 from .helpers import (
     make_circular_spec,
@@ -60,7 +61,11 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     sliding_window: bool,
 ) -> None:
     config = make_scheduler_config()
-    spec = window_requirement(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16, sliding_window=64) if sliding_window else make_full_spec()
+    spec = (
+        window_requirement(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16, sliding_window=64)
+        if sliding_window
+        else make_full_spec()
+    )
     group = cache_group(layer_names=["layer.0"], kv_cache_spec=spec)
     kv_cache_config = SimpleNamespace(kv_cache_groups=[group])
     ascend_config = object()
@@ -175,7 +180,7 @@ def test_base_scheduler_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     full = make_full_spec()
-    sliding = replace(full, head_size=16)
+    sliding = make_sliding_spec() if vllm_version_is("0.33.0") else replace(full, head_size=16)
     uniform = {"layer.0": full, "layer.1": full, "layer.2": sliding}
     group = cache_group(
         layer_names=["layer.1", "layer.0", "layer.2"],
@@ -185,8 +190,9 @@ def test_base_scheduler_expands_unique_uniform_specs_in_layer_order() -> None:
     assert MooncakeBaseConnectorScheduler._get_group_unique_specs(group) == [full, sliding]
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    scheduler.kv_cache_groups = [group]
     scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
-    assert scheduler._needs_prefill_token_truncation() is True
+    assert scheduler._needs_prefill_token_truncation() is vllm_version_is("0.33.0")
 
 
 def test_base_scheduler_transfer_blocks_handles_empty_and_state_without_speculation() -> None:
@@ -211,7 +217,7 @@ def test_base_scheduler_keeps_recoverssm_checkpoint_and_trims_native_scratch_blo
     state = make_mamba_spec()
     scratch = (
         MambaManager.layer_config(state, num_speculative_blocks=5)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else replace(state, num_speculative_blocks=5)
     )
     scheduler.kv_cache_groups = [cache_group(["state"], state), cache_group(["scratch"], scratch)]

@@ -727,17 +727,17 @@ class _StopLoop(BaseException):
 def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    scheduler.kv_cache_groups = [cache_group(["full"], make_full_spec())]
     assert scheduler._needs_prefill_token_truncation() is False
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = [2]
     assert scheduler._needs_prefill_token_truncation() is True
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.kv_cache_groups.append(cache_group(["state"], make_mamba_spec()))
     assert scheduler._needs_prefill_token_truncation() is True
 
-    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    scheduler.kv_cache_groups[1] = cache_group(["ring"], make_circular_spec())
     assert scheduler._needs_prefill_token_truncation() is False
 
 

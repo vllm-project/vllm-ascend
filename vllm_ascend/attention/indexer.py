@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
@@ -45,7 +46,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import FullAttentionCacheLayer, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
@@ -132,7 +133,7 @@ class AscendSFAIndexerMetadata:
     qli_metadata_group_id: int | None = None
 
 
-class AscendSFAIndexerCache(FullAttentionCacheLayer, DeepseekV32IndexerCache):
+class AscendSFAIndexerCache(DeepseekV32IndexerCache):
     """Cache owner whose storage spec is supplied by its indexer backend."""
 
     align_kv_cache_with_mamba = False
@@ -151,7 +152,12 @@ class AscendSFAIndexerCache(FullAttentionCacheLayer, DeepseekV32IndexerCache):
         self.cache_enabled = True
         get_current_vllm_config().compilation_config.static_forward_context[self.prefix] = self
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return FullAttentionManager.layer_config(spec) if spec is not None else None
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
         if not self.cache_enabled:
             return None
         # mypy --follow-imports skip cannot see the upstream dataclass fields.

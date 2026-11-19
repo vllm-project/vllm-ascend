@@ -10,19 +10,20 @@ import torch.nn.functional as F
 
 from tests.kv_cache_groups import ring_spec_type, window_mla_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_block_size, group_layer_specs, group_manager
+from vllm_ascend.core.kv_cache_layers import group_block_size, group_layer_specs, group_manager
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 
 
 def v41_groups(specs, window=128):
     from vllm_ascend.models.deepseek_v41.cache_config import group_layer_configs
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         return group_layer_configs(specs)
     from vllm.v1.core.single_type_kv_cache_manager import (
         CircularBufferManager,
@@ -58,7 +59,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             num_kv_heads=1,
             head_size=width,
             dtype=torch.bfloat16,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": window}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": window}),
             model_version="deepseek_v41",
         )
         if not role.is_kv_source:
@@ -319,7 +320,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             num_kv_heads=1,
             head_size=head_size,
             dtype=torch.bfloat16,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": config.sliding_window}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": config.sliding_window}),
             cache_dtype_str="bfloat16",
             model_version="deepseek_v41",
         )

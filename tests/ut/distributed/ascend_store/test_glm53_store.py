@@ -19,9 +19,10 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 from tests.kv_cache_groups import cache_group, layer_config
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -47,7 +48,7 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     specs = {}
     for name, spec in make_specs(pool=4).items():
@@ -56,7 +57,7 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
         if isinstance(spec, MambaSpec):
             spec = replace(
                 spec,
-                **({} if HAS_LAYER_CONFIG else {"mamba_cache_mode": "align"}),
+                **({} if not vllm_version_is("0.33.0") else {"mamba_cache_mode": "align"}),
                 mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
             )
             if use_recoverssm:
@@ -73,7 +74,7 @@ def make_glm53_plan(layer_offset=0, *, use_recoverssm=False):
             n: (MambaManager.layer_config(s, mamba_cache_mode="align") if isinstance(s, MambaSpec) else layer_config(s))
             for n, s in specs.items()
         }
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else specs,
     )
     return get_glm5_next_kv_cache_config(config, groups, 24 * get_glm5_next_pool_bytes_per_block(groups))
@@ -313,7 +314,7 @@ class TestGLM53Store(unittest.TestCase):
                 shapes=(*spec.shapes, (1, 6))[:components],
                 dtypes=(*spec.dtypes, torch.float32)[:components],
             )
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 group.kv_cache_specs = dict.fromkeys(group.layer_names, spec)
                 group.unprojected_specs = ()
             else:

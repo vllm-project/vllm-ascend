@@ -6,16 +6,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from tests.kv_cache_groups import cache_group, mamba_requirement
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
@@ -23,7 +22,7 @@ from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
 def make_coordinator():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     specs = [
@@ -117,7 +116,7 @@ def test_external_extension_of_partial_local_hit_keeps_extra_reservation():
 
 
 def test_dcp8_prefix_reuses_checkpoint_and_copies_partial_attention_tail():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     specs = [full_attention_spec_type(block_size=1536, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)] + [

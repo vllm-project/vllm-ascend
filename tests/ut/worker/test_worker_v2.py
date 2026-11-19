@@ -11,7 +11,6 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.kv_cache_groups import cache_group
 from tests.ut.base import TestBase
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -362,7 +361,9 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
             "linear_attn": mamba_spec,
         }
     )
-    setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
+    setattr(
+        worker, "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec", worker_cache
+    )
     for use_sparse in (False, True):
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,

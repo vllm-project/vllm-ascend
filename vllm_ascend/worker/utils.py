@@ -14,7 +14,7 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_block_size, group_distinct_specs
+from vllm_ascend.core.kv_cache_layers import group_block_size, group_distinct_specs
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -163,7 +163,7 @@ def prepare_ascend_kernel_block_sizes(
     index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = next(iter(group_distinct_specs(group)))
-        if not HAS_LAYER_CONFIG:
+        if vllm_version_is("0.33.0"):
             from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 
             if isinstance(spec, EncoderOnlyAttentionSpec):

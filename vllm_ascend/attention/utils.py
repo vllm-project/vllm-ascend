@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, MLA_LAYOUT_TYPES
+from vllm_ascend.core.kv_cache_layers import MLA_LAYOUT_TYPES
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
@@ -735,7 +735,7 @@ def _select_seq_lens(
     else:
         seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
         is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)

@@ -82,12 +82,11 @@ from vllm_ascend.core.kv_cache_interface import (
     supports_component_major_mla_pd,
 )
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     cache_layouts,
     group_distinct_specs,
-    group_draft_layers,
     group_layer_specs,
     is_plain_full_attention,
+    with_cache_layouts,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_shared_indexer_cache,
@@ -140,7 +139,7 @@ else:
     QSAMetadataBuilder = qsa_indexer.QSAIndexerMetadataBuilder
 
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager, SlidingWindowManager
     from vllm.v1.worker.utils import customize_layer_config
 
@@ -222,7 +221,7 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
 
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             config = attn_module.get_kv_cache_config(vllm_config)
             if config is None:
                 continue
@@ -242,7 +241,7 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
             layer_config = copy(vllm_config)
             layer_config.cache_config = copy(vllm_config.cache_config)
             layer_config.cache_config.skip_page_size_padded = None
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 config = attn_module.get_kv_cache_config(layer_config)
                 spec = config.spec
             else:
@@ -252,10 +251,12 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
 
         # Speculator.load_model marks draft modules before cache planning.
         # Apply the upstream ownership tag before Ascend rebuilds MLA specs.
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             if config.manager_cls is MambaManager:
                 config = replace(config, manager_config=replace(config.manager_config, manager_cls=AscendMambaManager))
-            layer_configs[layer_name] = replace(config, is_draft=config.is_draft or attn_module.is_draft_layer)
+            if config.is_draft:
+                attn_module.is_draft_layer = True
+            layer_configs[layer_name] = replace(config, is_draft=attn_module.is_draft_layer)
         elif attn_module.is_draft_layer:
             spec = replace(spec, is_draft=True)
 
@@ -278,7 +279,7 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
             continue
         if isinstance(spec, AttentionSpec):
             # Match upstream customization, including kernel-block stride alignment.
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 config = customize_layer_config(attn_module.get_attn_backend(), layer_configs[layer_name])
                 layer_configs[layer_name] = config
                 spec = config.spec
@@ -296,7 +297,7 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
             # K3.1 recurrent padding is settled by NPUPlatform before the
             # layers construct their specs. Keep indexer/draft pages native.
             kv_cache_spec.update(mamba_specs)
-            return _with_layouts(layer_configs, kv_cache_spec)
+            return with_cache_layouts(layer_configs, kv_cache_spec)
         # QSA/CSA hybrid models (descriptor-native cache owners) need
         # the descriptor-native cache alignment: every align_kv_cache_with_mamba
         # attention layer (including the QSA main owners) pads its page up
@@ -330,7 +331,7 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
-    requirements = _with_layouts(layer_configs, kv_cache_spec)
+    requirements = with_cache_layouts(layer_configs, kv_cache_spec)
     if vllm_config.attention_config.hisparse_config is not None:
         from vllm.v1.hisparse.binding import resolve_hisparse_specs
 
@@ -343,17 +344,11 @@ def _collect_cache_requirements(vllm_config: VllmConfig):
             packed_row_bytes = C8_ROW_BYTES
         requirements = resolve_hisparse_specs(vllm_config, requirements, attn_layers)
         aligned = align_hisparse_indexer_specs(cache_layouts(requirements), packed_row_bytes=packed_row_bytes)
-        return _with_layouts(requirements, aligned)
+        return with_cache_layouts(requirements, aligned)
     return requirements
 
 
-def _with_layouts(configs, specs):
-    if HAS_LAYER_CONFIG:
-        return {name: replace(configs[name], spec=spec) for name, spec in specs.items()}
-    return specs
-
-
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     get_kv_cache_layer_configs = _collect_cache_requirements
 else:
     get_kv_cache_spec = _collect_cache_requirements
@@ -919,7 +914,7 @@ def can_share_full_and_sliding_kv_cache(vllm_config: VllmConfig, specs: Iterable
     if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
         return False
     specs = tuple(specs)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         if {group.manager_cls for group in groups} != {FullAttentionManager, SlidingWindowManager}:
             return False
         if any(type(spec) is not AttentionSpec for spec in specs):
@@ -1643,6 +1638,7 @@ def allocate_kv_cache_main(
         kernel_block_sizes=kernel_block_sizes,
         shared_kv_cache_layers=shared_layers,
         kv_cache_config=kv_cache_config,
+        draft_layer_names={name for name, layer in attn_layers.items() if getattr(layer, "is_draft_layer", False)},
     )
 
 
@@ -1673,6 +1669,8 @@ def _reshape_kv_cache_v2(
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
     kv_cache_config: "KVCacheConfig | None" = None,
+    *,
+    draft_layer_names: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     if kv_cache_config is None:
         raise ValueError("Reshape KV cache requires KVCacheConfig.")
@@ -2073,11 +2071,7 @@ def _reshape_kv_cache_v2(
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
                 (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto")
-                if (
-                    layer_name in group_draft_layers(kv_cache_config.kv_cache_groups[group.kv_cache_group_id])
-                    if HAS_LAYER_CONFIG
-                    else kv_cache_spec.is_draft
-                )
+                if (layer_name in draft_layer_names if not vllm_version_is("0.33.0") else kv_cache_spec.is_draft)
                 else cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)

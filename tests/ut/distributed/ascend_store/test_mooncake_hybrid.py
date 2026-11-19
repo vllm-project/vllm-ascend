@@ -17,7 +17,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, mamba_requirement, window_requirement
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
+from vllm_ascend.utils import vllm_version_is
 
 
 class MemoryRangeStore:
@@ -162,7 +163,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
             name = "model.layers.2.indexer.tail_cache"
             tail = PrivateTailSpec(block_size=7, num_kv_heads=1, head_size=1, dtype="uint8")
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 
                 tail = CircularBufferManager.layer_config(tail)
@@ -672,7 +673,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"),
             patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"),
             patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+                "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
                 side_effect=lambda spec: (
                     scheduler_tests._SparseSWAHitManager
                     if getattr(spec, "sliding_window", None) is not None

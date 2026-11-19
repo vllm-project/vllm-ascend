@@ -14,9 +14,10 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec, MLAAttentionSpec
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, group_distinct_specs, group_manager
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_distinct_specs, group_manager
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import (
         CircularBufferSpec,
         FullAttentionSpec,
@@ -27,6 +28,12 @@ if not HAS_LAYER_CONFIG:
     from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+def make_sliding_mla_spec(*, sliding_window, bounded_replay=False, **fields):
+    if vllm_version_is("0.33.0"):
+        return AscendSlidingWindowMLASpec(sliding_window=sliding_window, bounded_replay=bounded_replay, **fields)
+    return MLAAttentionSpec(**fields)
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
@@ -34,13 +41,13 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
-    if not HAS_LAYER_CONFIG and isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+    if vllm_version_is("0.33.0") and isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
     # vLLM #53906 added an optional MLA storage-view override. It is not
     # Ascend's derived number of physical rows per logical block.
-    if not HAS_LAYER_CONFIG and isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
+    if vllm_version_is("0.33.0") and isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
         return kv_cache_spec.storage_block_size
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
@@ -52,7 +59,7 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
 def is_circular_cache_group(group: CacheGroup) -> bool:
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
-    if not HAS_LAYER_CONFIG and any(
+    if vllm_version_is("0.33.0") and any(
         isinstance(spec, (CircularBufferSpec, AscendIndexerKPoolTailSpec)) for spec in group_distinct_specs(group)
     ):
         return True
@@ -66,7 +73,7 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     ``prefix_cacheable`` is the upstream API on the lanes that define it; the
     release lane predates it, so an unset attribute means cacheable.
     """
-    if not HAS_LAYER_CONFIG and isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+    if vllm_version_is("0.33.0") and isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
     return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
         getattr(kv_cache_spec, "participates_in_prefix_caching", True)
@@ -260,7 +267,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def unpadded_page_size_bytes(self) -> int:
         return self.real_page_size_bytes
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
 
         @classmethod
         def merge(cls, specs: list[Self]) -> Self:
@@ -363,7 +370,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         num_heads_per_page = self.block_size * self.num_kv_heads
         return num_heads_per_page * self.state_content_size_bytes
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
 
         @classmethod
         def merge(cls, specs: list[Self]) -> Self:
@@ -399,7 +406,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             )
 
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
 
     @dataclass(frozen=True, kw_only=True)
     class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
@@ -426,7 +433,7 @@ if not HAS_LAYER_CONFIG:
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolTailSpec(AttentionSpec if HAS_LAYER_CONFIG else SlidingWindowSpec):
+class AscendIndexerKPoolTailSpec(AttentionSpec if not vllm_version_is("0.33.0") else SlidingWindowSpec):
     """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the logical pool size (``compress_ratio``), while
@@ -445,7 +452,7 @@ class AscendIndexerKPoolTailSpec(AttentionSpec if HAS_LAYER_CONFIG else SlidingW
     def is_circular(self) -> bool:
         return True
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
 
         @property
         def prefix_cacheable(self) -> bool:
@@ -474,10 +481,10 @@ class AscendIndexerKPoolTailSpec(AttentionSpec if HAS_LAYER_CONFIG else SlidingW
             raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
         if self.block_size != self.compress_ratio:
             raise ValueError("Tail logical block size must equal the compression ratio.")
-        if not HAS_LAYER_CONFIG and self.sliding_window != self.compress_ratio:
+        if vllm_version_is("0.33.0") and self.sliding_window != self.compress_ratio:
             raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
 
         @classmethod
         def merge(cls, specs: list[Self]) -> Self:
@@ -504,7 +511,7 @@ class AscendIndexerKPoolTailSpec(AttentionSpec if HAS_LAYER_CONFIG else SlidingW
             )
 
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
 
     @dataclass(frozen=True, kw_only=True)
     class AscendCircularBufferSpec(CircularBufferSpec):

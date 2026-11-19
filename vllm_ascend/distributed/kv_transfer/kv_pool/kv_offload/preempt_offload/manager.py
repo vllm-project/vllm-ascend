@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
-from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size, resolve_kv_cache_block_sizes
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
@@ -26,8 +26,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_manager
 from vllm_ascend.core.kv_cache_layers import group_block_size as cache_group_block_size
+from vllm_ascend.core.kv_cache_layers import group_dcp_block_size, group_distinct_specs, group_manager
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
     PreemptOffloadMetadata,
@@ -304,9 +304,7 @@ class PreemptOffloadScheduler:
                         gpu_blocks.append(gpu_block)
                         effective_hashes.append(None)
             else:
-                group_block_size = resolve_dcp_kv_block_size(
-                    kv_cache_groups[g] if HAS_LAYER_CONFIG else kv_cache_groups[g].kv_cache_spec, self.dcp_world_size
-                )
+                group_block_size = group_dcp_block_size(kv_cache_groups[g], self.dcp_world_size)
                 is_circular = is_circular_cache_group(kv_cache_groups[g])
                 # A ring owns one private block, independent of token position.
                 if is_circular and (len(group_gpu_ids) != 1 or group_gpu_ids[0] <= 0):
@@ -513,11 +511,8 @@ class PreemptOffloadScheduler:
                 cpu_block_ids.append(group_cpu_ids[0])
                 gpu_block_ids.append(group_gpu_ids[0])
             else:
-                group_block_size = resolve_dcp_kv_block_size(
-                    self.cpu_kv_cache_config.kv_cache_groups[g]
-                    if HAS_LAYER_CONFIG
-                    else self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec,
-                    self.dcp_world_size,
+                group_block_size = group_dcp_block_size(
+                    self.cpu_kv_cache_config.kv_cache_groups[g], self.dcp_world_size
                 )
                 start_block = load_start_tokens // group_block_size
                 end_block = min(

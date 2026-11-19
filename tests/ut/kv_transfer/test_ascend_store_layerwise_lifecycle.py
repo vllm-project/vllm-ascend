@@ -26,9 +26,9 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -165,7 +165,7 @@ def memory_store(monkeypatch, tmp_path):
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_rank", lambda: 0)
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     init_none_hash(sha256)
     return store

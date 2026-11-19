@@ -207,9 +207,9 @@ def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
         mamba_cache_mode="none",
     )
     layer.cache_config = cache
-    from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+    from vllm_ascend.utils import vllm_version_is
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         requirement = layer.get_kv_cache_config(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
         spec = requirement.spec
         policy = requirement.manager_config.params

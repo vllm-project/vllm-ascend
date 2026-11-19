@@ -24,9 +24,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1 import kv_cache_spec_registry
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -54,7 +54,7 @@ HIT_BOUNDARY_BLOCKS = 4
 @pytest.fixture(autouse=True)
 def _preserve_global_kv_state():
     """Restore the KVCacheSpec registry and prefix-cache hash state on exit."""
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         spec_registry = dict(kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST)
         role_managers = dict(kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS)
     none_hash_seed = kv_cache_utils._NONE_HASH_SEED
@@ -63,7 +63,7 @@ def _preserve_global_kv_state():
     # In-place clear+update also covers code holding a direct reference to
     # the dicts (the registry class methods resolve them through the module
     # globals, so rebinding the attributes would work for them as well).
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST.clear()
         kv_cache_spec_registry._REGISTRY_KVCACHESPEC_LIST.update(spec_registry)
         kv_cache_spec_registry._REGISTRY_ROLE_MANAGERS.clear()
@@ -103,9 +103,9 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, kv_
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": block_size}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": block_size}),
     )
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         swa = SlidingWindowManager.layer_config(swa, sliding_window=block_size)
     ring = ring_spec_type(block_size=RING_BLOCK_SIZE, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
     plan = KVCacheConfig(
@@ -119,7 +119,7 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, kv_
     )
     plan.kv_transfer_config = config.kv_transfer_config
     config.cache_config.num_gpu_blocks = plan.num_blocks
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     init_none_hash(sha256)
     resolved_block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)

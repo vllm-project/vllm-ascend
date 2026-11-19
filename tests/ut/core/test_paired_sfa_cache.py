@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from tests.kv_cache_groups import full_attention_spec_type, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_pool_bytes,
@@ -19,15 +19,16 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_groups as group_requirements,
 )
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm_ascend.core import kv_cache_layer_config_builder as planner
 else:
     from vllm_ascend.patch.platform import patch_kv_cache_utils as planner
 
 
 def paired_sfa_cache_groups(config, specs, drafts=()):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
         configs = {
@@ -42,7 +43,7 @@ def paired_sfa_cache_groups(config, specs, drafts=()):
 
 
 def project(group, names):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return replace(
             group, kv_cache_specs={n: group.kv_cache_specs[n] for n in names}, unprojected_specs=group.distinct_specs
         )
@@ -76,7 +77,7 @@ def make_specs():
                 block_size=1536,
                 shapes=((3, 4608), (12, 128, 128)),
                 dtypes=(torch.bfloat16, torch.float32),
-                **({} if HAS_LAYER_CONFIG else {"mamba_cache_mode": "align"}),
+                **({} if not vllm_version_is("0.33.0") else {"mamba_cache_mode": "align"}),
                 page_size_padded=1536 * 656,
             )
     return specs
@@ -152,9 +153,9 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
         f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
             block_size=1536,
             num_kv_heads=1,
-            head_size=576,
+            head_size=576 if layer % 2 else 512,
             dtype=torch.bfloat16,
-            **({} if HAS_LAYER_CONFIG else {"is_draft": True, "non_causal_multi_token_decode": True}),
+            **({} if not vllm_version_is("0.33.0") else {"is_draft": True, "non_causal_multi_token_decode": True}),
         )
         for layer in reversed(range(93, 108))
     }
@@ -177,6 +178,17 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
     projected = [project(g, [n for n in g.layer_names if n in draft]) for g in groups]
     assert group_distinct_specs(projected[0]) == group_distinct_specs(groups[0])
     assert paired_sfa_pool_bytes(projected) == draft_bytes
+    plan = paired_sfa_cache_config(config, projected, num_blocks=3)
+    offset = 0
+    for tensor, name in zip((t for t in plan.kv_cache_tensors if t.layers), draft_names, strict=True):
+        page = draft[name].page_size_bytes
+        assert (tensor.layers, tensor.offset, tensor.block_stride, tensor.size) == (
+            [name],
+            offset,
+            page,
+            3 * draft_bytes,
+        )
+        offset += 3 * page
 
 
 @pytest.mark.parametrize("dcp_size", [1, 8])
@@ -193,7 +205,7 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
         num_kv_heads=2,
         head_size=64,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"is_draft": True}),
+        **({} if not vllm_version_is("0.33.0") else {"is_draft": True}),
         dcp_sharded=dcp_sharded,
     )
     config.speculative_config = SimpleNamespace(
@@ -203,7 +215,7 @@ def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dc
     draft_group = next(group for group in groups if name in group.layer_names)
     assert group_distinct_specs(draft_group)[0].dcp_sharded == dcp_sharded
     assert not draft_group.is_eagle_group
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         assert draft_group.max_num_blocks_per_req(config, 32768) == (
             32768 + 1536 * (dcp_size if dcp_sharded else 1) - 1
         ) // (1536 * (dcp_size if dcp_sharded else 1))
@@ -243,7 +255,7 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     paired = Mock(return_value=[])
     upstream = Mock(return_value=[])
     monkeypatch.setattr(planner, "paired_sfa_cache_groups", paired)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         monkeypatch.setattr(planner.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
         specs = {n: layer_config(s) for n, s in specs.items()}
     else:
@@ -252,7 +264,7 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
 
     actual = (
         planner.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else planner._get_ascend_kv_cache_groups(config, specs)
     )
 

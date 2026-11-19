@@ -4,7 +4,6 @@ import inspect
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache, partial
-from importlib import import_module
 from typing import Any, cast
 from weakref import proxy
 
@@ -17,15 +16,15 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, group_distinct_specs, group_manager
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_distinct_specs, group_manager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
-_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 _REACHABLE_MASK_CACHE_SIZE = 32
 
 # kwargs every reachable_block_mask implementation must accept. Used when the
@@ -161,11 +160,12 @@ class AscendStoreCoordinator:
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
-            manager_cls = group_manager(group) if HAS_LAYER_CONFIG else _get_manager_class(spec)
+            manager_cls = group_manager(group, required=True)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
                 same_policy = (
-                    not HAS_LAYER_CONFIG or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                    vllm_version_is("0.33.0")
+                    or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
                 )
                 if existing_spec == effective_spec and same_policy:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
@@ -245,11 +245,7 @@ class AscendStoreCoordinator:
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
-            manager_cls = (
-                group_manager(self.kv_cache_groups[group_id])
-                if HAS_LAYER_CONFIG
-                else _get_manager_class(group_distinct_specs(self.kv_cache_groups[group_id])[0])
-            )
+            manager_cls = group_manager(self.kv_cache_groups[group_id], required=True)
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
@@ -337,7 +333,7 @@ class AscendStoreCoordinator:
         return hit_length
 
     def _policy_arguments(self, group_id, effective_spec):
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             return {
                 "manager_config": self.kv_cache_groups[group_id].manager_config,
                 "block_size": self.group_effective_block_sizes[group_id],
@@ -446,46 +442,6 @@ def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpe
     if copy_with_new_block_size is not None:
         return copy_with_new_block_size(block_size)
     return replace(spec, block_size=block_size)
-
-
-def _get_manager_class_cache() -> dict[str, Any]:
-    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
-    return cast(dict[str, Any], cache)
-
-
-def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    cache = _get_manager_class_cache()
-    registry = cache.get("registry", _CACHE_MISSING)
-    if registry is _CACHE_MISSING:
-        try:
-            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
-            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-        except ImportError:
-            registry = None
-        cache["registry"] = registry
-
-    if registry is not None:
-        manager_cls = registry.get_manager_class(spec)
-        if manager_cls is not None:
-            return manager_cls
-
-    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
-    if spec_manager_map is _CACHE_MISSING:
-        try:
-            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
-            spec_manager_map = vars(manager_module)["spec_manager_map"]
-        except Exception as exc:
-            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-        cache["spec_manager_map"] = spec_manager_map
-
-    try:
-        manager_cls = spec_manager_map[type(spec)]
-    except Exception as exc:
-        raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-    return manager_cls
 
 
 def _find_longest_cache_hit(

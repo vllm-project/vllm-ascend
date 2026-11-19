@@ -91,13 +91,13 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, FullAttentionCacheLayer
+from vllm_ascend.core.kv_cache_layers import full_attention_spec_type
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -126,10 +126,6 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
-
-if not HAS_LAYER_CONFIG:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
 
 _FP8_E4M3_MAX = 448.0
 _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
@@ -210,7 +206,7 @@ def _scatter_index_cache(
     )
 
 
-class MiniMaxM3SparseAttention(FullAttentionCacheLayer, nn.Module, AttentionLayerBase):
+class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     """Block-sparse attention with lightning indexer on Ascend."""
 
     def __init__(
@@ -360,8 +356,13 @@ class MiniMaxM3SparseAttention(FullAttentionCacheLayer, nn.Module, AttentionLaye
     def get_attn_backend(self) -> type[AscendMiniMaxM3SparseBackend]:
         return self.attn_backend
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec_type = AttentionSpec if HAS_LAYER_CONFIG else FullAttentionSpec
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return FullAttentionManager.layer_config(spec)
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec_type = full_attention_spec_type()
         return spec_type(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,

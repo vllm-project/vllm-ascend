@@ -13,9 +13,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup
+from vllm_ascend.core.kv_cache_layers import CacheGroup
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
     ring_spec_type = ascend_ring_spec_type = AttentionSpec
@@ -33,7 +34,7 @@ else:
 
 
 def window_requirement(*, sliding_window, extra_retained_tokens=0, **fields):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return SlidingWindowManager.layer_config(
             AttentionSpec(**fields), sliding_window=sliding_window, extra_retained_tokens=extra_retained_tokens
         )
@@ -44,7 +45,7 @@ def window_requirement(*, sliding_window, extra_retained_tokens=0, **fields):
 
 def mamba_requirement(*, mamba_cache_mode="none", num_speculative_blocks=0, **layout):
     policy = dict(mamba_cache_mode=mamba_cache_mode, num_speculative_blocks=num_speculative_blocks)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
         return AscendMambaManager.layer_config(MambaSpec(**layout), **policy)
@@ -52,7 +53,7 @@ def mamba_requirement(*, mamba_cache_mode="none", num_speculative_blocks=0, **la
 
 
 def ring_requirement(spec, *, zero_new_blocks=False):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         return spec
     if zero_new_blocks:
         from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
@@ -76,7 +77,7 @@ def layer_config(layout):
 
 
 def cache_group(layer_names, kv_cache_spec, is_eagle_group=False, **group_fields):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         if isinstance(kv_cache_spec, dict):
             from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
@@ -85,13 +86,11 @@ def cache_group(layer_names, kv_cache_spec, is_eagle_group=False, **group_fields
             )
         return CacheGroup(layer_names, kv_cache_spec, is_eagle_group=is_eagle_group, **group_fields)
 
-    from vllm_ascend.core.kv_cache_layers import AscendCacheGroup
-
     members = (
         kv_cache_spec if isinstance(kv_cache_spec, dict) else dict.fromkeys(layer_names or ["layer"], kv_cache_spec)
     )
     configs = {name: layer_config(layout) for name, layout in members.items()}
-    group = AscendCacheGroup.from_layers(configs, is_eagle_group=is_eagle_group, **group_fields)
+    group = CacheGroup.from_layers(configs, is_eagle_group=is_eagle_group, **group_fields)
     if list(configs) == layer_names:
         return group
     return replace(

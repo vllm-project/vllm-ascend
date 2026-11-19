@@ -32,8 +32,9 @@ def main():
     from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-    from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts
+    from vllm_ascend.core.kv_cache_layers import cache_layouts
     from vllm_ascend.models.kimi_k3 import paired_sfa_cache
+    from vllm_ascend.utils import vllm_version_is
     from vllm_ascend.worker.v2 import attn_utils
 
     config = SimpleNamespace(
@@ -126,7 +127,9 @@ def main():
         patch.object(attn_utils, "get_ascend_config", return_value=ascend_config),
     ):
         requirements = (
-            attn_utils.get_kv_cache_layer_configs(config) if HAS_LAYER_CONFIG else attn_utils.get_kv_cache_spec(config)
+            attn_utils.get_kv_cache_layer_configs(config)
+            if not vllm_version_is("0.33.0")
+            else attn_utils.get_kv_cache_spec(config)
         )
         captured = cache_layouts(requirements)
 

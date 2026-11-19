@@ -20,7 +20,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
 
 def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -251,7 +251,7 @@ def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> AttentionSpec:
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": vllm_config.model_config.get_sliding_window()}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": vllm_config.model_config.get_sliding_window()}),
     )
 
 

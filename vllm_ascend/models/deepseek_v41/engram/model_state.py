@@ -150,12 +150,13 @@ class EngramModelState(AscendModelState):
         # this step is only known here; engram overlap dispatch keys off it.
         self._cg_mode = cudagraph_mode
         if self._replay_groups is None:
-            from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_params, group_prefix_cacheable
+            from vllm_ascend.core.kv_cache_layers import group_params, group_prefix_cacheable
+            from vllm_ascend.utils import vllm_version_is
 
             groups = kv_cache_config.kv_cache_groups
             windows = [
                 g.prefix_replay_tokens
-                if HAS_LAYER_CONFIG
+                if not vllm_version_is("0.33.0")
                 else int(
                     getattr(group_params(g), "prefix_replay_tokens", getattr(group_params(g), "sliding_window", 0))
                 )

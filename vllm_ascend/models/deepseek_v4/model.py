@@ -78,11 +78,12 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, SlidingMLACacheLayer
+from vllm_ascend.core.kv_cache_interface import make_sliding_mla_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -114,7 +115,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 sequence_parallel_chunk = sp_shard
 
 
-class AscendDeepseekV4SWACache(SlidingMLACacheLayer, VllmDeepseekV4SWACache):
+class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def __init__(
         self,
         head_dim: int,
@@ -130,11 +131,12 @@ class AscendDeepseekV4SWACache(SlidingMLACacheLayer, VllmDeepseekV4SWACache):
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
-    @property
-    def _cache_window(self):
-        return self.window_size
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return SlidingWindowManager.layer_config(spec, sliding_window=self.window_size)
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
         # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
         cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
@@ -147,11 +149,7 @@ class AscendDeepseekV4SWACache(SlidingMLACacheLayer, VllmDeepseekV4SWACache):
             model_version="deepseek_v4",
             alignment=None,
         )
-        if HAS_LAYER_CONFIG:
-            return MLAAttentionSpec(**fields)
-        from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-
-        return AscendSlidingWindowMLASpec(**fields, sliding_window=self._cache_window)
+        return make_sliding_mla_spec(sliding_window=self.window_size, **fields)
 
     def forward(self): ...
 

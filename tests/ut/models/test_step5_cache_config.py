@@ -25,7 +25,7 @@ from tests.kv_cache_groups import (
     ring_spec_type,
     window_requirement,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_layer_specs
 from vllm_ascend.models.step5.cache_config import (
     _padded_page,
     get_step5_kv_cache_config_from_groups,
@@ -35,8 +35,9 @@ from vllm_ascend.models.step5.cache_config import (
     is_step5_groups,
     is_step5_kv_cache_spec,
 )
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 else:
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
@@ -130,7 +131,7 @@ def _fake_orig_get_kv_cache_groups(vllm_config, kv_cache_spec):
 def _requirements(specs):
     return (
         {n: ring_requirement(s) if n == RING else layer_config(s) for n, s in specs.items()}
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else specs
     )
 
@@ -342,10 +343,10 @@ def test_builder_and_patch_dispatch_step5_groups_to_step5_planner() -> None:
 
     builder = AscendKVCacheConfigBuilder.__new__(AscendKVCacheConfigBuilder)
     assert builder._get_pool_bytes_per_block(vllm_config, groups) == envelope
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert _ascend_pool_bytes_per_block(vllm_config, groups) == envelope
     expected_usage = (64 + 65 + 1) * envelope
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.kv_cache_planning import _max_memory_usage_bytes_from_groups
 
         assert _max_memory_usage_bytes_from_groups(builder, vllm_config, groups) == expected_usage

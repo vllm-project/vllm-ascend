@@ -12,14 +12,13 @@ from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
-    MLAAttentionSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
+    make_sliding_mla_spec,
 )
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     CacheGroup,
     cache_layouts,
     group_distinct_specs,
@@ -30,6 +29,7 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
+from vllm_ascend.utils import vllm_version_is
 
 STATE_RING_ROWS = 32
 
@@ -63,11 +63,7 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
         model_version="deepseek_v41",
         alignment=None,
     )
-    if HAS_LAYER_CONFIG:
-        return MLAAttentionSpec(**fields)
-    from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-
-    return AscendSlidingWindowMLASpec(**fields, sliding_window=window_size, bounded_replay=bounded_replay)
+    return make_sliding_mla_spec(sliding_window=window_size, bounded_replay=bounded_replay, **fields)
 
 
 def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
@@ -254,7 +250,7 @@ def group_layer_configs(configs):
     return groups
 
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
     def group_cache_specs(specs):

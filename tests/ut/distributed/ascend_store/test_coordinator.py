@@ -151,7 +151,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
 
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
             return_value=_FakeCompressedManager,
         ):
             coord = AscendStoreCoordinator(
@@ -437,7 +437,7 @@ class TestFindReachableHitTokens(unittest.TestCase):
 
     def test_hit_length_derived_from_callback_hits(self):
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
             return_value=_FakePrefixManager,
         ):
             coord = AscendStoreCoordinator(
@@ -466,7 +466,7 @@ class TestFindReachableHitTokens(unittest.TestCase):
 
     def test_no_hits_returns_zero_without_deriving(self):
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
             return_value=_FakePrefixManager,
         ):
             coord = AscendStoreCoordinator(

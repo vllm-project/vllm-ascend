@@ -11,9 +11,9 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -50,9 +50,9 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
     )
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         swa = SlidingWindowManager.layer_config(swa, sliding_window=128)
     ring = ring_spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
     plan = KVCacheConfig(
@@ -66,7 +66,7 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     )
     plan.kv_transfer_config = config.kv_transfer_config
     config.cache_config.num_gpu_blocks = plan.num_blocks
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     init_none_hash(sha256)
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)

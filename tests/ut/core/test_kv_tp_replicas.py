@@ -12,7 +12,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
+from vllm_ascend.utils import vllm_version_is
 
 # vLLM #61183 moved the planner helpers out of kv_cache_utils on main.
 try:
@@ -74,7 +75,7 @@ def test_mla_replication_metadata_survives_merge(spec_type):
     spec = spec_type(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
 
     def representative(layout):
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             return group_layer_specs(cache_group(["a", "b"], layout))["a"]
         return spec_type.merge([layout, layout])
 

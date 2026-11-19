@@ -17,7 +17,6 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type, window_requirement
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -32,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     group_concurrent_contiguous,
 )
+from vllm_ascend.utils import vllm_version_is
 
 from .helpers import (
     make_circular_spec,
@@ -779,7 +779,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
     state = make_mamba_spec()
     requirement = (
         MambaManager.layer_config(state, num_speculative_blocks=num_speculative_blocks)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else replace(state, num_speculative_blocks=num_speculative_blocks)
     )
 
@@ -798,7 +798,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
         0,
         1,
         1,
-        state if HAS_LAYER_CONFIG else requirement,
+        state if not vllm_version_is("0.33.0") else requirement,
         0,
         remote_interleave_size=16,
     )

@@ -13,17 +13,12 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
-    group_block_size,
-    group_layer_specs,
-    group_manager,
-    group_params,
-)
+from vllm_ascend.core.kv_cache_layers import group_block_size, group_layer_specs, group_manager, group_params
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 from vllm_ascend.kv_trace.kv_trace_connector import record_output, record_plan
 from vllm_ascend.kv_trace.kv_trace_plan import AccessPlan, PlanSnapshotter, audit_access_plan
 from vllm_ascend.kv_trace.kv_trace_state import KVCacheState
+from vllm_ascend.utils import vllm_version_is
 
 _MAX_REPORT_KEYS = 1024
 
@@ -134,7 +129,7 @@ class KVTraceRuntime:
                     and getattr(layer_spec, "compress_ratio", 1) == 1
                     and (
                         group_manager(group).uses_slot_mapping
-                        if HAS_LAYER_CONFIG
+                        if not vllm_version_is("0.33.0")
                         else type(layer_spec).__name__ != "CircularBufferSpec"
                     )
                 )

@@ -180,9 +180,9 @@ class TestCompressorStateCache:
             cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         )
 
-        from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+        from vllm_ascend.utils import vllm_version_is
 
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             requirement = cache.get_kv_cache_config(vllm_config)
             spec = requirement.spec
             policy = requirement.manager_config.params

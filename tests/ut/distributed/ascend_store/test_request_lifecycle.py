@@ -18,14 +18,10 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
-    group_distinct_specs,
-    group_layer_specs,
-    group_prefix_cacheable,
-)
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs, group_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
@@ -126,9 +122,9 @@ def cache_layout(request, speculative_method):
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
     )
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
         swa = SlidingWindowManager.layer_config(swa, sliding_window=128)
@@ -179,7 +175,7 @@ def devices_and_store(monkeypatch):
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_decode_context_model_parallel_rank", lambda: 0)
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     init_none_hash(sha256)
     # Unix-domain socket paths have a short platform-dependent size limit.

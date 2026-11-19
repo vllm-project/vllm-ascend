@@ -10,8 +10,9 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, ring_spec_type
 from vllm_ascend.core.kv_cache_interface import is_circular_cache_group, is_prefix_cacheable
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_prefix_cacheable
+from vllm_ascend.core.kv_cache_layers import group_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 
 
 def ring_spec():
@@ -27,7 +28,7 @@ def ring_spec():
 def test_ring_lifetime_reuse_and_external_tokens():
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=32)
     manager = CircularBufferManager(
-        cache_group(["ring"], ring_requirement(ring_spec())) if HAS_LAYER_CONFIG else ring_spec(),
+        cache_group(["ring"], ring_requirement(ring_spec())) if not vllm_version_is("0.33.0") else ring_spec(),
         pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -70,7 +71,7 @@ def test_uniform_properties_and_single_plane_size():
     assert spec.page_size_bytes == 131072
     assert is_circular_cache_group(group)
     assert not group_prefix_cacheable(group)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         assert group.max_num_blocks_per_req(None, 65536) == 1
     else:
         assert spec.max_memory_usage_bytes(None) == 131072

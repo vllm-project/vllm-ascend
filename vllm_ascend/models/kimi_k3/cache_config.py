@@ -10,13 +10,14 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, cache_layouts, make_cache_group
+from vllm_ascend.core.kv_cache_layers import CacheGroup, cache_layouts, make_cache_group
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
@@ -76,7 +77,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     def full_history(name, spec):
         return (
             issubclass(configs[name].manager_cls, FullAttentionManager)
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else isinstance(spec, FullAttentionSpec)
         )
 

@@ -22,7 +22,6 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -76,7 +75,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts
+from vllm_ascend.core.kv_cache_layers import cache_layouts, get_cache_requirements, with_cache_layouts
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -413,12 +412,12 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data()
         return output
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
 
         def get_kv_cache_layer_configs(self):
             configs = super().get_kv_cache_layer_configs()
             specs = self._resident_cache_layouts(cache_layouts(configs))
-            return {name: replace(config, spec=specs[name]) for name, config in configs.items()}
+            return with_cache_layouts(configs, specs)
     else:
 
         def get_kv_cache_spec(self):
@@ -853,7 +852,7 @@ class NPUModelRunner(GPUModelRunner):
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
             allocate_kv_offload_topk_profile_buffers(
-                cache_layouts(self.get_kv_cache_layer_configs()) if HAS_LAYER_CONFIG else self.get_kv_cache_spec(),
+                cache_layouts(get_cache_requirements(self)),
                 self.vllm_config,
                 sparse_cfg,
             )

@@ -22,8 +22,9 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerMetadataBuilder,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import cache_layouts, get_layer_spec
 from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.utils import vllm_version_is
 
 _KERNEL_BLOCK_SIZE = 128
 
@@ -632,13 +633,13 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
         head_size=132,
         dtype=torch.uint8,
         cache_role=SparseCacheRole.INDEXER,
-        **({} if HAS_LAYER_CONFIG else {"is_draft": True}),
+        **({} if not vllm_version_is("0.33.0") else {"is_draft": True}),
     )
     spec = backend._build_cache_spec(source, config)
     assert backend.customize_spec(spec) is spec
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.cache_role is source.cache_role
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert spec.is_draft
     assert spec.sfa_dcp_replicated_indexer_size == replicas
     assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
@@ -651,8 +652,10 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     owner = AscendSFAIndexerCache(old_owner, spec, backend_cls=AscendSFAIndexerBackend)
     assert config.compilation_config.static_forward_context[prefix] is owner
     assert get_layer_spec(owner, config) == spec
+    assert owner.get_kv_cache_spec(config) == spec
     owner.cache_enabled = False
     assert get_layer_spec(owner, config) is None
+    assert owner.get_kv_cache_spec(config) is None
     owner.cache_enabled = True
     assert get_layer_spec(owner, config) == spec
     assert owner.get_attn_backend() is AscendSFAIndexerBackend
@@ -686,7 +689,7 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
         assert owner.cache_enabled is enabled
         specs = (
             cache_layouts(attn_utils.get_kv_cache_layer_configs(config))
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else attn_utils.get_kv_cache_spec(config)
         )
         assert ("cache_owner" in specs) is enabled

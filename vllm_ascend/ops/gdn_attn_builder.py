@@ -32,7 +32,6 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -41,6 +40,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -400,7 +400,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         context = getattr(vllm_config.compilation_config, "static_forward_context", {}) or {}
         exports_checkpoints = (
             self.checkpoint_alignment is not None
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
         )
         self._ascend_gdn_checkpoints = (
@@ -856,7 +856,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             m.seq_lens,
             self.kv_cache_spec,
             mamba_cache_mode,
-            **({"num_speculative_blocks": self.num_speculative_blocks} if HAS_LAYER_CONFIG else {}),
+            **({"num_speculative_blocks": self.num_speculative_blocks} if not vllm_version_is("0.33.0") else {}),
         )
 
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
@@ -1213,7 +1213,11 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             or self.vllm_config.cache_config.mamba_cache_mode != "align"
             or (
                 num_spec_decodes > 0
-                and (self.num_speculative_blocks if HAS_LAYER_CONFIG else self.kv_cache_spec.num_speculative_blocks)
+                and (
+                    self.num_speculative_blocks
+                    if not vllm_version_is("0.33.0")
+                    else self.kv_cache_spec.num_speculative_blocks
+                )
                 < self.num_spec
             )
         ):

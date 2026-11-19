@@ -13,10 +13,10 @@ from vllm.config import CUDAGraphMode, get_current_vllm_config
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, ring_spec_type
 from vllm_ascend.attention.utils import uses_pcp_sharded_layout
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -250,7 +250,11 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
     monkeypatch.setattr(replay_mod, "AscendDSAV41MetadataBuilder", Builder)
     state.slots = None
     spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
-    ring = spec if HAS_LAYER_CONFIG else ring_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    ring = (
+        spec
+        if not vllm_version_is("0.33.0")
+        else ring_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    )
     group = SimpleNamespace(
         kv_cache_spec=spec, layer_names=["decoder.attention"], backend=SimpleNamespace(get_builder_cls=lambda: Builder)
     )

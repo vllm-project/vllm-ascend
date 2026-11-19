@@ -7,13 +7,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs, group_manager
+from vllm_ascend.core.kv_cache_layers import group_layer_specs, group_manager
 from vllm_ascend.core.kv_cache_placement import (
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
     create_kvpp_cache_allocation_plan,
 )
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
+from vllm_ascend.utils import vllm_version_is
 
 KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
@@ -24,7 +25,7 @@ def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
 
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
-    if HAS_LAYER_CONFIG and any(
+    if not vllm_version_is("0.33.0") and any(
         group_manager(group) is not FullAttentionManager for group in kv_cache_config.kv_cache_groups
     ):
         raise ValueError("KVPP requires full-attention cache allocation.")

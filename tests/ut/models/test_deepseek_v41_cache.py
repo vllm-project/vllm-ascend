@@ -47,7 +47,6 @@ from vllm_ascend.attention.dsa_v41 import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, declared_kwarg, get_storage_block_size
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     get_layer_spec,
     group_block_size,
     group_layer_specs,
@@ -67,12 +66,13 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, build_layer_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 
 def _pool_bytes_per_block(runtime, groups):
     """vLLM #57169 added a leading ``vllm_config`` argument on main."""
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 
         return AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(runtime, groups)
@@ -80,7 +80,7 @@ def _pool_bytes_per_block(runtime, groups):
 
 
 def _place_groups(runtime, groups, num_blocks):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 
         return AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks)
@@ -188,7 +188,7 @@ def test_compressor_registers_state_cache_and_preserves_norm_weights(config, run
     runtime.scheduler_config.max_num_batched_tokens = 8
     compressor = DeepseekV41Compressor(config, 2, runtime, prefix="compressor")
     state = compressor.state_cache
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 
         from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
@@ -238,7 +238,7 @@ def test_swa_only_reduced_backbone_uses_independent_slots(config, runtime, packe
 
     groups = (
         v41_groups(specs)
-        if packed_groups or HAS_LAYER_CONFIG
+        if packed_groups or not vllm_version_is("0.33.0")
         else kv_cache_planning.get_kv_cache_groups(runtime, specs)
     )
     assert is_deepseek_v41_cache(groups)
@@ -559,7 +559,7 @@ def test_model_registration_and_binding(runtime):
         not state.get_kv_cache_config(runtime).manager_cls.prefix_cacheable(
             state.get_kv_cache_config(runtime).manager_config
         )
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else not state.spec.prefix_cacheable
     )
     assert get_storage_block_size(state.spec) == 32
@@ -1421,7 +1421,7 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.tokens_per_state == 1
     assert get_storage_block_size(spec) == 32
     assert spec.page_size_bytes == 32 * 16 * 4
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 
         config = CircularBufferManager.layer_config(spec)
@@ -1503,7 +1503,7 @@ def test_state_page_reuse_does_not_require_request_reset(config):
 def test_state_registers_circular_manager():
     from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         owner = SimpleNamespace(
             manager_cls=CircularBufferManager,
             spec=ring_spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
@@ -1567,7 +1567,7 @@ def test_dspark_v41_indices_keep_capture_addresses(runtime):
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
         cache_dtype_str="bfloat16",
         model_version="deepseek_v41",
     )
@@ -1636,7 +1636,7 @@ def _swa_builder(runtime, window=REPLAY_WINDOW):
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": window}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": window}),
         cache_dtype_str="bfloat16",
         model_version="deepseek_v41",
     )
@@ -1677,7 +1677,9 @@ def test_a_replayed_window_is_floored_at_the_replay_start(runtime):
     assert metadata.ori_sparse_indices is None
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="The native layout carries no second window value to compare.")
+@pytest.mark.skipif(
+    not vllm_version_is("0.33.0"), reason="The native layout carries no second window value to compare."
+)
 def test_a_window_that_drifts_between_the_spec_and_the_config_is_rejected(runtime):
     """The write side pads out the spec's window and this mask floors on the text
     config's. Both are read from the model today, so they agree -- but they are

@@ -23,11 +23,12 @@ from vllm.v1.kv_offload.base import CanonicalKVCaches
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
 from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup
+from vllm_ascend.core.kv_cache_layers import CacheGroup
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
 from vllm_ascend.hisparse.binding import _bind_indexer_views
+from vllm_ascend.utils import vllm_version_is
 
 NUM_BLOCKS = 4
 BLOCK_SIZE = 2
@@ -241,7 +242,7 @@ def test_hisparse_host_pool_registers_only_indexer_groups(
         _group(
             "model.layers.0.hisparse_source",
             enable_kv_transfer=False,
-            role=KVCacheGroupRole.DEFAULT if HAS_LAYER_CONFIG else KVCacheGroupRole.HISPARSE_SOURCE,
+            role=KVCacheGroupRole.DEFAULT if not vllm_version_is("0.33.0") else KVCacheGroupRole.HISPARSE_SOURCE,
         ),
         _group(
             "model.layers.0.hisparse_indexer",

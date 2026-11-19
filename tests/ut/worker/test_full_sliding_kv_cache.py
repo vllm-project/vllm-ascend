@@ -12,7 +12,8 @@ from vllm.config import AttentionConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, KVQuantMode
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import worker as worker_module
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
@@ -36,7 +37,7 @@ def _cache_config(sliding_groups=5, dtype=torch.bfloat16):
     # Different head dimensions and block sizes, but equal physical pages.
     full = full_attention_spec_type(block_size=2, num_kv_heads=1, head_size=8, dtype=dtype)
     sliding = window_requirement(block_size=4, num_kv_heads=1, head_size=4, dtype=dtype, sliding_window=8)
-    assert full.page_size_bytes == (sliding.spec if HAS_LAYER_CONFIG else sliding).page_size_bytes
+    assert full.page_size_bytes == (sliding.spec if not vllm_version_is("0.33.0") else sliding).page_size_bytes
     num_blocks = 8
     layer_size = num_blocks * full.page_size_bytes
     groups = []
@@ -86,7 +87,7 @@ def test_budget_tracks_physical_shared_allocation(monkeypatch, sliding_groups, s
     worker.vllm_config = config
     worker.use_v2_model_runner = use_v2
     worker.model_config = config.model_config
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
         worker.get_kv_cache_layer_configs = lambda: {
@@ -130,7 +131,7 @@ def test_memory_budget_sources_preserve_physical_capacity(
     worker.device = torch.device("cpu")
     worker.init_snapshot = SimpleNamespace(free_memory=2 * available)
     worker.requested_memory = available + 3
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
         worker.get_kv_cache_layer_configs = lambda: {
@@ -243,7 +244,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
 
 def test_uniform_group_wrappers_share_the_same_pool():
     cache = _cache_config()
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         cache.kv_cache_groups = [cache_group(g.layer_names, group_layer_specs(g)) for g in cache.kv_cache_groups]
     allocate = Mock(side_effect=lambda size: torch.zeros(size, dtype=torch.int8))
     raw = allocate_shared_attention_kv_cache(cache, allocate)

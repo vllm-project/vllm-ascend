@@ -19,9 +19,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_layer_specs, group_max_blocks
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs, group_max_blocks
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import KVCacheGroup
 else:
     from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
@@ -42,7 +43,7 @@ def uses_turboquant_groups(groups):
     return any(
         getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
         for group in groups
-        if group is not None and (HAS_LAYER_CONFIG or getattr(group, "kv_cache_spec", None) is not None)
+        if group is not None and (not vllm_version_is("0.33.0") or getattr(group, "kv_cache_spec", None) is not None)
         for spec in group_distinct_specs(group)
     )
 

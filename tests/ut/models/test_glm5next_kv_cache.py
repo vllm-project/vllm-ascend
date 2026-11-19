@@ -12,9 +12,10 @@ import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import CacheGroup, get_layer_spec
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
     from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -79,13 +80,13 @@ def test_tail_uses_one_full_precision_page(capacity):
     # Register built-in specs first; register_ascend_kv_cache_specs() alone
     # leaves the global registry partially populated, which breaks later
     # lookups of built-in specs on fresh xdist workers.
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=capacity,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=128,
@@ -105,7 +106,7 @@ def test_tail_uses_one_full_precision_page(capacity):
     assert padded_spec.real_page_size_bytes == padded_spec.unpadded_page_size_bytes == spec.page_size_bytes
     with pytest.raises(AssertionError):
         _ = replace(spec, page_size_padded=spec.page_size_bytes - 1).page_size_bytes
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         config = KpoolTailManager.layer_config(spec)
         assert not config.manager_cls.prefix_cacheable(config.manager_config)
         assert config.manager_cls.max_admission_blocks(config.manager_config, 4, 16, 1024) == 1
@@ -150,7 +151,7 @@ def test_invalid_state_layout_is_rejected(dtype, block_size, sliding_window):
         AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=block_size,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": sliding_window}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": sliding_window}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=256,
@@ -169,7 +170,7 @@ def test_tail_manager_retains_one_private_block_until_free():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=4,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=128,
@@ -177,7 +178,9 @@ def test_tail_manager_retains_one_private_block_until_free():
     )
     pool = BlockPool(12, True, 4)
     manager = KpoolTailManager(
-        CacheGroup.from_layers({"tail": KpoolTailManager.layer_config(spec)}) if HAS_LAYER_CONFIG else spec,
+        CacheGroup.from_layers({"tail": KpoolTailManager.layer_config(spec)})
+        if not vllm_version_is("0.33.0")
+        else spec,
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=1,
@@ -213,7 +216,7 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=4,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=128,
@@ -221,14 +224,20 @@ def test_tail_manager_prefix_hit_has_no_shared_blocks():
     )
     pool = BlockPool(8, True, 4)
     manager = KpoolTailManager(
-        CacheGroup.from_layers({"tail": KpoolTailManager.layer_config(spec)}) if HAS_LAYER_CONFIG else spec,
+        CacheGroup.from_layers({"tail": KpoolTailManager.layer_config(spec)})
+        if not vllm_version_is("0.33.0")
+        else spec,
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=1,
         scheduler_block_size=16,
         needs_kv_cache_zeroing=True,
     )
-    policy = (spec.block_size, KpoolTailManager.layer_config(spec).manager_config) if HAS_LAYER_CONFIG else (spec,)
+    policy = (
+        (spec.block_size, KpoolTailManager.layer_config(spec).manager_config)
+        if not vllm_version_is("0.33.0")
+        else (spec,)
+    )
     blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, *policy, False, 16)
     assert blocks == ([], []) and hit == 0
     manager.allocate_external_computed_blocks("hit", 1024, 0, record_for_zeroing=False)
@@ -535,7 +544,7 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
         AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=4,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=128,
@@ -765,7 +774,7 @@ def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, ring_capac
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float32,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         page_size_padded=81920,
     )

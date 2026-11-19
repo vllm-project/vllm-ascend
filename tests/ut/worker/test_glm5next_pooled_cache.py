@@ -8,13 +8,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import MambaSpec
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from tests.kv_cache_groups import cache_group, layer_config
@@ -115,7 +115,7 @@ def _make_specs(main_head_size=4):
         STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
             ring_capacity=2,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 2}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 2}),
             compress_ratio=2,
             num_kv_heads=1,
             head_size=1,
@@ -133,12 +133,12 @@ def _make_specs(main_head_size=4):
 
 def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     config = _make_config()
     specs = _make_specs(main_head_size)
     groups = get_glm5_next_kv_cache_groups(
-        config, {n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs
+        config, {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
     )
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
@@ -154,7 +154,7 @@ def v2_glm_cache_plan(request, monkeypatch):
     config, _, plan = _make_plan()
     if not request.param:
         for group in plan.kv_cache_groups:
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 group.kv_cache_specs = {
                     n: replace(s, model_version=None) if hasattr(s, "model_version") else s
                     for n, s in group.kv_cache_specs.items()
@@ -255,10 +255,10 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
         scale_dtype=torch.float32,
         page_size_padded=640,
     )
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     groups = get_glm5_next_kv_cache_groups(
-        config, {n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs
+        config, {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
     )
     plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
     config.model_config.get_num_layers = lambda _: 2
@@ -316,7 +316,7 @@ def test_speculative_tail_view_preserves_all_nine_physical_rows():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=9,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=2,

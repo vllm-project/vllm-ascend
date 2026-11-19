@@ -14,8 +14,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from tests.kv_cache_groups import cache_group, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 NUM_BLOCKS = 4
@@ -76,15 +76,15 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
                 num_kv_heads=1,
                 head_size=576,
                 dtype=dtype,
-                **({} if HAS_LAYER_CONFIG else {"is_draft": True, "non_causal_multi_token_decode": True}),
+                **({} if not vllm_version_is("0.33.0") else {"is_draft": True, "non_causal_multi_token_decode": True}),
             )
-    if HAS_LAYER_CONFIG and with_draft:
+    if not vllm_version_is("0.33.0") and with_draft:
         config.speculative_config = SimpleNamespace(
             draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(full_attention_causal=False))
         )
     configs = (
         {n: replace(layer_config(s), is_draft=extract_layer_index(n) in (8, 9)) for n, s in specs.items()}
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else specs
     )
     groups = paired_sfa_cache_groups(config, configs)
@@ -97,7 +97,7 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
                 },
                 unprojected_specs=group.distinct_specs,
             )
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else replace(
                 group, layer_names=[name for name in group.layer_names if extract_layer_index(name) in local_layers]
             )
@@ -197,6 +197,7 @@ def test_draft_fia_reshape_uses_draft_cache_dtype_in_packed_target_group(monkeyp
         kernel_block_sizes=[BLOCK_SIZE],
         shared_kv_cache_layers={},
         kv_cache_config=plan,
+        draft_layer_names={name},
     )
 
     backend.get_kv_cache_shape.assert_called_once_with(NUM_BLOCKS, BLOCK_SIZE, 1, 576, "auto")

@@ -12,7 +12,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts
+from vllm_ascend.core.kv_cache_layers import cache_layouts
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -22,14 +22,15 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
-CACHE_METHOD = "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec"
+CACHE_METHOD = "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
 
 
 def requirements(specs):
-    return {n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs
+    return {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
 
 
 def _mla_spec(*, host=True, non_causal=False, block_size=128):
@@ -39,7 +40,7 @@ def _mla_spec(*, host=True, non_causal=False, block_size=128):
         head_size=576,
         dtype=torch.bfloat16,
         store_on_host=host,
-        **({} if HAS_LAYER_CONFIG else {"non_causal_multi_token_decode": non_causal}),
+        **({} if not vllm_version_is("0.33.0") else {"non_causal_multi_token_decode": non_causal}),
     )
 
 
@@ -303,7 +304,7 @@ def test_draft_placement_changes_only_dspark_sparse(method, sparse):
     assert result["model.layers.0.attn"] is target
     resident = method == "dspark" and sparse
     assert result["draft.layers.0.attn"].store_on_host is not resident
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert result["draft.layers.0.attn"].non_causal_multi_token_decode
     assert draft.store_on_host  # No mutation of upstream specs.
 

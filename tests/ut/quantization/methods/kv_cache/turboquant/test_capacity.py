@@ -16,8 +16,9 @@ from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from tests.kv_cache_groups import cache_group, layer_config, window_mla_spec_type
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs, group_max_blocks
+from vllm_ascend.core.kv_cache_layers import group_layer_specs, group_max_blocks
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -73,7 +74,7 @@ def mixed_specs(tq, block_size=128):
             num_kv_heads=1,
             head_size=512,
             dtype=torch.bfloat16,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
         )
         for i in range(43)
     }
@@ -83,7 +84,7 @@ def mixed_specs(tq, block_size=128):
             num_kv_heads=1,
             head_size=2048,
             dtype=torch.float32,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 8}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 8}),
             page_size_padded=block_size * 1024,
         )
         for i in range(21)
@@ -94,7 +95,7 @@ def mixed_specs(tq, block_size=128):
             num_kv_heads=1,
             head_size=512,
             dtype=torch.float32,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 8}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 8}),
             page_size_padded=block_size * 130,
         )
         for i in range(21)
@@ -105,7 +106,7 @@ def mixed_specs(tq, block_size=128):
             num_kv_heads=1,
             head_size=1024,
             dtype=torch.float32,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
         )
         for i in range(20)
     }
@@ -115,7 +116,7 @@ def mixed_specs(tq, block_size=128):
 
 
 def requirements(members):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         return members
     return {
         n: SlidingWindowManager.layer_config(s, sliding_window=8 if n.startswith(("state4.", "index_state.")) else 128)
@@ -126,7 +127,7 @@ def requirements(members):
 
 
 def group_specs(grouped):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return cache.group_layers([requirements(members) for members in grouped])
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 

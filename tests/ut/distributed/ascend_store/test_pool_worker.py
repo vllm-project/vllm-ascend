@@ -443,9 +443,9 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
     def make_worker(self, kv_role="kv_both"):
         target_names = [f"model.layers.{layer}.attn" for layer in range(4)]
         draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+        spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
         plan = SimpleNamespace(
-            kv_cache_groups=[KVCacheGroupSpec(target_names + draft_names, spec)],
+            kv_cache_groups=[cache_group(target_names + draft_names, spec)],
             prefix_cache_retention_interval=None,
             dflash_draft_layer_names=tuple(draft_names),
         )
@@ -1060,12 +1060,10 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         import torch
 
         from tests.kv_cache_groups import cache_group
-        from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 
-        manager_lookup = "group_manager" if HAS_LAYER_CONFIG else "_get_manager_class"
         with patch(
-            f"vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator.{manager_lookup}",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator.group_manager",
             return_value=_SparseSWAHitManager,
         ):
             return AscendStoreCoordinator(

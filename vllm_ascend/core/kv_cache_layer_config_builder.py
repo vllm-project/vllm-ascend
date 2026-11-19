@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import Counter, defaultdict
-from dataclasses import fields, replace
+from dataclasses import replace
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_layers import AscendCacheGroup, configure_cache_transfer
+from vllm_ascend.core.kv_cache_layers import configure_cache_transfer
 from vllm_ascend.models.deepseek_v4.cache_config import _get_deepseek_v4_cache_layout, _place_deepseek_v4_cache
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -71,6 +71,12 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     def get_kv_cache_groups(
         self, vllm_config: VllmConfig, layer_configs: dict[str, KVCacheLayerConfig]
     ) -> list[KVCacheGroup]:
+        speculative = getattr(vllm_config, "speculative_config", None)
+        drafts = (
+            {name for name, config in layer_configs.items() if config.is_draft}
+            if speculative is not None and speculative.method == "dspark"
+            else None
+        )
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             groups = paired_sfa_cache_groups(vllm_config, layer_configs)
         else:
@@ -92,24 +98,14 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
                     groups = get_qwen4_exp_kv_cache_groups(vllm_config, layer_configs, default_groups)
                 if groups is None:
                     groups = default_groups(vllm_config, layer_configs)
-        speculative = getattr(vllm_config, "speculative_config", None)
-        if not any(config.is_draft for config in layer_configs.values()) and (
-            speculative is None or speculative.method != "dspark"
-        ):
-            return groups
-        # Core projects groups with dataclasses.replace. Carry per-layer draft
-        # ownership through that projection for mixed DSpark/Kimi groups.
-        return [
-            group
-            if isinstance(group, AscendCacheGroup)
-            else AscendCacheGroup(
-                **{f.name: getattr(group, f.name) for f in fields(KVCacheGroup)},
-                **AscendCacheGroup.ownership(
-                    {n: replace(layer_configs[n], spec=s) for n, s in group.kv_cache_specs.items()}
-                ),
+        if drafts is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import (
+                draft_only_group_ids,
             )
-            for group in groups
-        ]
+
+            # PP projection discards remote names. The prefix store needs the global IDs.
+            vllm_config.dspark_draft_only_group_ids = draft_only_group_ids(groups, drafts)
+        return groups
 
     def get_kv_cache_config_from_groups(
         self, vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup], num_blocks: int

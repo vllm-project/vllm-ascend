@@ -26,7 +26,6 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, mamba_requirement, window_requirement
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerPoolKey,
     masked_block_runs,
@@ -48,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
@@ -62,7 +62,7 @@ class TestCacheLayoutHelpers(unittest.TestCase):
             full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
             mamba_spec,
             replace(mamba_spec, spec=replace(mamba_spec.spec, tp_replicated=True))
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else replace(mamba_spec, tp_replicated=True),
             {"layer.3": mamba_spec},
         ]

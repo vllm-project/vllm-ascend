@@ -17,7 +17,6 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
 from tests.kv_cache_groups import window_mla_spec_type
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41 import model as deepseek_v41_module
 from vllm_ascend.models.deepseek_v41.dspark import (
@@ -32,6 +31,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41Model,
 )
 from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
@@ -40,7 +40,7 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
         num_kv_heads=1,
         head_size=512,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
         cache_dtype_str="bfloat16",
         model_version="deepseek_v41",
     )
@@ -48,7 +48,7 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     cache.spec = spec
     cache.window_size = 128
     cache.bounded_replay = False
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         config = cache.get_kv_cache_config(None)
         assert config.manager_cls is SlidingWindowManager
         assert config.manager_config.params.sliding_window == 128
@@ -62,7 +62,7 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     assert draft.page_size_bytes == 131072
     assert DeepseekV41DSparkDecoderLayer.attention_cls is DeepseekV41DSparkAttention
     assert DeepseekV41DSparkAttention.swa_cache_cls is DeepseekV41DSparkSWACache
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return
     from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 

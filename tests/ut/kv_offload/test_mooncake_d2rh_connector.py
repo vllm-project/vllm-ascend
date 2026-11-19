@@ -32,8 +32,8 @@ from tests.kv_cache_groups import (
     full_attention_spec_type,
     window_mla_spec_type,  # noqa: E402
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_p2p import mooncake_d2rh_connector as d2rh  # noqa: E402
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestD2RHPorts:
@@ -743,11 +743,11 @@ class TestSchedulerBlockSize:
             num_kv_heads=1,
             head_size=16,
             dtype=torch.float16,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
             model_version=model_version,
         )
 
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
             return SlidingWindowManager.layer_config(spec, sliding_window=128)
@@ -770,7 +770,7 @@ class TestSchedulerBlockSize:
         )
         assert scheduler._get_scheduler_block_size() == 32
 
-    @pytest.mark.skipif(not HAS_LAYER_CONFIG, reason="Full and sliding MLA share one spec type on main.")
+    @pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Full and sliding MLA share one spec type on main.")
     def test_dsv4_full_mla_does_not_override_scheduler_block_size(self):
         from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 

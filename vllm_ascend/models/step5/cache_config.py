@@ -51,13 +51,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     CacheGroup,
     cache_layouts,
     group_layer_specs,
     group_max_blocks,
     make_cache_group,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _STEP5_RING_SUFFIX = ".csa_tail_ring"
 _STEP5_SUMMARY_SUFFIX = ".sparse_summary_cache"
@@ -140,7 +140,7 @@ def get_step5_kv_cache_groups(
         for idx, extras in per_group_extras.items():
             group = groups[idx]
             members = {**group_layer_specs(group), **cache_layouts(extras)}
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
                 configs = {

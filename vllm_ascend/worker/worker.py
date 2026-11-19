@@ -85,10 +85,10 @@ from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     CacheGroup,
     CacheRequirement,
     cache_layouts,
+    get_cache_requirements,
     group_layer_specs,
 )
 from vllm_ascend.core.kv_cache_placement import (
@@ -136,7 +136,7 @@ if TYPE_CHECKING:
 
 
 # Both supported versions resolve grouping through the platform's builder.
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 else:
     from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -771,9 +771,7 @@ class NPUWorker(GPUWorker):
         if not sparse_kv_offload_config.enabled:
             return int(available_device_memory_bytes)
 
-        kv_cache_spec = getattr(self, "kv_cache_spec", None) or (
-            self.get_kv_cache_layer_configs() if HAS_LAYER_CONFIG else self.get_kv_cache_spec()
-        )
+        kv_cache_spec = getattr(self, "kv_cache_spec", None) or get_cache_requirements(self)
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
@@ -945,7 +943,7 @@ class NPUWorker(GPUWorker):
         if self.vllm_config.attention_config.hisparse_config is not None:
             # Core budgets the shared Resident/Hot/Indexer slab, not per-layer buffers.
             return available_memory
-        kv_cache_spec = self.get_kv_cache_layer_configs() if HAS_LAYER_CONFIG else self.get_kv_cache_spec()
+        kv_cache_spec = get_cache_requirements(self)
         if not isinstance(kv_cache_spec, dict):
             return available_memory
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
@@ -1355,7 +1353,7 @@ class NPUWorker(GPUWorker):
                     break
         return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
 
         def get_kv_cache_layer_configs(self):
             return self._prepare_cache_requirements(self.model_runner.get_kv_cache_layer_configs())
@@ -1394,7 +1392,7 @@ class NPUWorker(GPUWorker):
                 and speculative_config.use_eagle()
                 and (
                     any(issubclass(config.manager_cls, SlidingWindowManager) for config in requirements.values())
-                    if HAS_LAYER_CONFIG
+                    if not vllm_version_is("0.33.0")
                     else any(isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
                 )
             ):
@@ -1407,7 +1405,9 @@ class NPUWorker(GPUWorker):
                 get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
                 + get_tp_group().rank_in_group
             )
-            if HAS_LAYER_CONFIG and any(c.manager_cls is not FullAttentionManager for c in requirements.values()):
+            if not vllm_version_is("0.33.0") and any(
+                c.manager_cls is not FullAttentionManager for c in requirements.values()
+            ):
                 raise ValueError("KVPP requires one full-attention cache group with a common block size.")
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,

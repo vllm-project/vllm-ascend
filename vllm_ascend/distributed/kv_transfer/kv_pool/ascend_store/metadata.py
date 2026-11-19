@@ -14,13 +14,8 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
-from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
-    group_block_size,
-    group_layer_specs,
-    group_manager,
-    group_prefix_cacheable,
-)
+from vllm_ascend.core.kv_cache_layers import group_block_size, group_layer_specs, group_manager, group_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import LayerPoolKey
@@ -213,7 +208,7 @@ def _get_layer_compress_ratio(
 
 
 def _get_group_spec_ratios(group: object) -> set[int | None]:
-    if HAS_LAYER_CONFIG and hasattr(group, "distinct_specs"):
+    if not vllm_version_is("0.33.0") and hasattr(group, "distinct_specs"):
         return {getattr(spec, "compress_ratio", None) for spec in group.distinct_specs}
     kv_cache_spec = getattr(group, "kv_cache_spec", None)
     if kv_cache_spec is None:
@@ -261,7 +256,7 @@ def infer_group_cache_families(
 
 
 def _full_history_group(group):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
         return issubclass(group_manager(group), FullAttentionManager)

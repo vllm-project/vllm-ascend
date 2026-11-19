@@ -15,14 +15,14 @@ from vllm.v1.attention.selector import AttentionSelectorConfig
 from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
 from vllm_ascend.models.minimax_m3 import msa_m3
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
 def _collect_requirement(config):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return attn_utils.get_kv_cache_layer_configs(config)["draft.attn"]
     return attn_utils.get_kv_cache_spec(config)["draft.attn"]
 
@@ -141,7 +141,7 @@ def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
     requirement = _collect_requirement(config)
-    spec = requirement.spec if HAS_LAYER_CONFIG else requirement
+    spec = requirement.spec if not vllm_version_is("0.33.0") else requirement
     physical_size = 256 if backend is AscendFlashAttentionBackend else 192
     assert spec.head_size == spec.head_size_v == physical_size
     assert spec.page_size_bytes == 2 * 128 * 8 * physical_size * 2
@@ -504,13 +504,13 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
     if incompatible:
         with pytest.raises(AssertionError):
             _ = original.page_size_bytes
-    method = "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec"
+    method = "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
     get_spec = Mock(wraps=getattr(layer, method))
     monkeypatch.setattr(layer, method, get_spec)
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
 
     requirement = _collect_requirement(config)
-    spec = requirement.spec if HAS_LAYER_CONFIG else requirement
+    spec = requirement.spec if not vllm_version_is("0.33.0") else requirement
 
     recover = incompatible and is_draft
     if incompatible and not is_draft:

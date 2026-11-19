@@ -11,10 +11,11 @@ from vllm.config import AttentionConfig
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager, SlidingWindowManager
 
 from tests.kv_cache_groups import full_attention_spec_type
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, CacheGroup, group_max_blocks
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_max_blocks
 from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
     from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.kv_cache_interface import (
@@ -38,7 +39,7 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def get_glm5_next_kv_cache_groups(config, layouts, *, speculative_blocks=0):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         configs = {}
         for name, spec in layouts.items():
             if isinstance(spec, AscendIndexerKPoolTailSpec):
@@ -67,7 +68,7 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
     config.attention_config = SimpleNamespace(hisparse_config=None)
     specs = {
         name: replace(spec, num_speculative_blocks=speculative_blocks)
-        if not HAS_LAYER_CONFIG and isinstance(spec, MambaSpec)
+        if vllm_version_is("0.33.0") and isinstance(spec, MambaSpec)
         else spec
         for name, spec in make_specs(pool).items()
     }
@@ -91,7 +92,7 @@ def test_platform_builder_preserves_default_non_glm_accounting():
     layout = replace(make_specs()["model.layers.3.attn"], model_version=None)
     groups = [
         CacheGroup.from_layers({"attn": FullAttentionManager.layer_config(layout)})
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else CacheGroup(["attn"], layout)
     ]
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
@@ -151,7 +152,7 @@ def make_specs(pool: int = 16):
         "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
             ring_capacity=pool,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": pool}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": pool}),
             compress_ratio=pool,
             num_kv_heads=1,
             head_size=128,
@@ -172,7 +173,7 @@ def make_specs(pool: int = 16):
 @pytest.fixture(autouse=True)
 def register_cache_specs():
     # Match production: vLLM registers built-in specs before the Ascend hook.
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
 
 
@@ -315,7 +316,7 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
     local_mamba_name = groups[2].layer_names[0]
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 
         projected_groups = _project_kv_cache_groups_to_worker(
@@ -357,13 +358,13 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
     for layer_idx in range(10, 14):
         name = f"model.layers.{layer_idx}.self_attn.attn"
         draft_names.append(name)
-        cls = full_attention_spec_type if HAS_LAYER_CONFIG else SlidingWindowSpec
+        cls = full_attention_spec_type if not vllm_version_is("0.33.0") else SlidingWindowSpec
         specs[name] = cls(
             block_size=16,
             num_kv_heads=1,
             head_size=8,
             dtype=torch.bfloat16,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 16}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         )
 
     groups = get_glm5_next_kv_cache_groups(config, specs)
@@ -421,7 +422,7 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         worker.get_kv_cache_layer_configs = lambda: specs
     else:
         worker.get_kv_cache_spec = lambda: specs

@@ -21,7 +21,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore, cpu_cache
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise as protocol
@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestMooncakePipeline(unittest.TestCase):
@@ -72,19 +73,19 @@ class TestMooncakePipeline(unittest.TestCase):
             ]
         if empty_tail:
             # The final layer owns only unreachable SWA state in this step.
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 groups[0].kv_cache_specs = dict.fromkeys(
                     ["model.layers.3.kv", "model.layers.5.kv"], group_distinct_specs(groups[0])[0]
                 )
             else:
                 groups[0].layer_names = ["model.layers.3.kv", "model.layers.5.kv"]
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 groups[1].kv_cache_specs = dict.fromkeys(
                     ["model.layers.4.c4", "model.layers.5.c4"], group_distinct_specs(groups[1])[0]
                 )
             else:
                 groups[1].layer_names = ["model.layers.4.c4", "model.layers.5.c4"]
-            if HAS_LAYER_CONFIG:
+            if not vllm_version_is("0.33.0"):
                 groups[2].kv_cache_specs = dict.fromkeys(["model.layers.6.state"], group_distinct_specs(groups[2])[0])
             else:
                 groups[2].layer_names = ["model.layers.6.state"]

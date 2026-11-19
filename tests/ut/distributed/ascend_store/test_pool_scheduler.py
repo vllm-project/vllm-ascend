@@ -39,7 +39,6 @@ from tests.kv_cache_groups import (
     mamba_requirement,
     window_requirement,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -57,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler,
     LookupKeyClient,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -190,7 +190,11 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
 
     target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
     # Ownership comes from is_draft, independently of the attention mask.
-    target = layer_config(target) if HAS_LAYER_CONFIG else replace(target, non_causal_multi_token_decode=non_causal)
+    target = (
+        layer_config(target)
+        if not vllm_version_is("0.33.0")
+        else replace(target, non_causal_multi_token_decode=non_causal)
+    )
     draft = replace(target, is_draft=True)
     layer_specs = {"draft": draft, "target": target} if draft_first else {"target": target, "draft": draft}
     mixed = layer_specs
@@ -210,13 +214,23 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         ],
     )
     original_groups = copy.deepcopy(kv_config.kv_cache_groups)
+    if not vllm_version_is("0.33.0"):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids
+
+        global_groups = [
+            cache_group(["draft-only"], draft),
+            cache_group(list(layer_specs), mixed),
+            cache_group(["target-only"], target),
+            cache_group(["other-draft"], draft),
+        ]
+        config.dspark_draft_only_group_ids = draft_only_group_ids(global_groups, {"draft", "draft-only", "other-draft"})
     configure_cache_transfer(config, kv_config)
     result = kv_config
     assert result.dspark_draft_only_group_ids == (0, 3)
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0, 3)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         assert scheduler_config.kv_cache_groups[1] == original_groups[1]
     else:
         assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
@@ -1852,7 +1866,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
     def setUp(self):
         patcher = patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
             side_effect=self._manager_for_spec,
         )
         patcher.start()

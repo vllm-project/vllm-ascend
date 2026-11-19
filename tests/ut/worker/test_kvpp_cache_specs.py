@@ -6,8 +6,9 @@ import torch
 
 from tests.kv_cache_groups import full_attention_spec_type, layer_config, window_requirement
 from tests.ut.kvpp_utils import make_dspark_kvpp_case
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts
+from vllm_ascend.core.kv_cache_layers import cache_layouts
 from vllm_ascend.core.kv_cache_placement import create_kvpp_cache_allocation_plan
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import worker
 
 
@@ -22,8 +23,8 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
         specs[name] = window_requirement(
             block_size=draft_block_size, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=4
         )
-    requirements = {n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs
-    method = "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec"
+    requirements = {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
+    method = "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
     instance = worker.NPUWorker.__new__(worker.NPUWorker)
     instance.vllm_config = config
     instance.model_runner = SimpleNamespace(
@@ -40,7 +41,7 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
     returned = getattr(instance, method)()
     for name in drafts:
         assert cache_layouts(requirements)[name].block_size == draft_block_size
-        assert (specs[name].manager_config.params if HAS_LAYER_CONFIG else specs[name]).sliding_window == 4
+        assert (specs[name].manager_config.params if not vllm_version_is("0.33.0") else specs[name]).sliding_window == 4
     if not enabled:
         assert returned is requirements
         assert instance._kvpp_cache_allocation_plan is None

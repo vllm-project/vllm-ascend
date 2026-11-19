@@ -23,7 +23,6 @@ from tests.kv_cache_groups import (
     ring_spec_type,
 )
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     CacheGroup,
     cache_layouts,
     group_distinct_specs,
@@ -43,8 +42,9 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
 )
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.core.kv_cache_planning import _max_memory_usage_bytes_from_groups
 
     from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
@@ -55,7 +55,6 @@ else:
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
     from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_max_memory_usage_bytes_from_groups
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -183,7 +182,7 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
     assert len(specs) == 76
     return (
         {n: ring_requirement(s) if n.endswith(".raw_key_cache") else layer_config(s) for n, s in specs.items()}
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else specs
     )
 
@@ -722,7 +721,7 @@ def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
         cache_group(
             ["checkpoint.0"],
             replace(spec, manager_config=spec.manager_config.replace_params(num_prefill_checkpoint_blocks=1))
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else replace(spec, num_prefill_checkpoint_blocks=1),
         ),
         cache_group(["target.1"], spec),
@@ -913,7 +912,7 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         runtime_config,
         torch.device("cpu"),
         kernel_block_size=128,
-        **({"kv_cache_group": compressed_group} if HAS_LAYER_CONFIG else {}),
+        **({"kv_cache_group": compressed_group} if not vllm_version_is("0.33.0") else {}),
     )
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]

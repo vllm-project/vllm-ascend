@@ -25,7 +25,6 @@ from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.indexer import DeepseekV41Indexer
@@ -36,6 +35,7 @@ from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
@@ -345,7 +345,7 @@ def builders(monkeypatch):
         specs = {
             "swa": window_mla_spec_type(
                 **common,
-                **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+                **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             ),
             "long_kv": AscendMLAAttentionSpec(**common, tokens_per_state=2),
             "index_k": AscendMLAAttentionSpec(**common, tokens_per_state=2, scale_dim=1),

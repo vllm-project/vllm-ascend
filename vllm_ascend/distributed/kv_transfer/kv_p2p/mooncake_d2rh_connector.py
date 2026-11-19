@@ -29,7 +29,7 @@ from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_distinct_specs, group_manager, group_params
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_manager, group_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
     GroupTransferInfo,
@@ -64,7 +64,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import RegisterRegions, validate_register_region_count
-from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer, refresh_block_size
+from vllm_ascend.utils import enable_sfa_dcp_replicated_indexer, refresh_block_size, vllm_version_is
 
 # isort: off
 if TYPE_CHECKING:
@@ -2074,7 +2074,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
     @staticmethod
     def _serialize_group_for_scheduler(group: Any) -> dict[str, Any]:
-        kv_cache_spec = group_distinct_specs(group)[0] if HAS_LAYER_CONFIG else group.kv_cache_spec
+        kv_cache_spec = group_distinct_specs(group)[0] if not vllm_version_is("0.33.0") else group.kv_cache_spec
         return {
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": {

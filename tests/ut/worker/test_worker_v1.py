@@ -11,10 +11,11 @@ from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, layer_config
 from tests.ut.base import TestBase
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts
+from vllm_ascend.core.kv_cache_layers import cache_layouts
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
+from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -350,7 +351,9 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(attention_config=AttentionConfig())
         worker_cache = MagicMock(return_value={"attn": spec})
-        setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
+        setattr(
+            worker, "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec", worker_cache
+        )
 
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
@@ -386,7 +389,9 @@ class TestNPUWorker(TestBase):
         )
         worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3"))
         worker_cache = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
-        setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
+        setattr(
+            worker, "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec", worker_cache
+        )
 
         for supports_standardized_backing, expected_budget in (
             (True, 12345),
@@ -441,7 +446,9 @@ class TestNPUWorker(TestBase):
                 "decoder_attn": spec,
             }
         )
-        setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
+        setattr(
+            worker, "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec", worker_cache
+        )
         worker.model_runner = SimpleNamespace(
             supports_standardized_shared_kv_backing=True,
             use_sparse=False,
@@ -1136,7 +1143,7 @@ class TestNPUWorker(TestBase):
             mock_supported_tasks = ("task1", "task2")
 
             mock_model_runner.get_model.return_value = mock_model
-            collector = "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec"
+            collector = "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
             getattr(mock_model_runner, collector).return_value = mock_kv_cache_spec
             mock_model_runner.get_supported_pooling_tasks.return_value = mock_pooling_tasks
             mock_model_runner.get_supported_tasks.return_value = mock_supported_tasks
@@ -1247,7 +1254,9 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = MagicMock()
         worker_cache = MagicMock(return_value={"layer": MagicMock()})
-        setattr(worker, "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec", worker_cache)
+        setattr(
+            worker, "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec", worker_cache
+        )
 
         with patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory") as mock_plan_memory:
             mock_plan_memory.return_value = SimpleNamespace(
@@ -2516,7 +2525,9 @@ class TestKVPPWorkerBudget(TestBase):
             patch.object(worker_module, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
             patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
         ):
-            requirements = worker.get_kv_cache_layer_configs() if HAS_LAYER_CONFIG else worker.get_kv_cache_spec()
+            requirements = (
+                worker.get_kv_cache_layer_configs() if not vllm_version_is("0.33.0") else worker.get_kv_cache_spec()
+            )
             self.assertEqual(cache_layouts(requirements), specs)
         plan = worker._kvpp_cache_allocation_plan
         assert plan is not None
@@ -2553,7 +2564,9 @@ class TestKVPPWorkerBudget(TestBase):
                 worker_module, "create_kvpp_cache_allocation_plan", return_value=allocation_plan
             ) as create_plan,
         ):
-            requirements = worker.get_kv_cache_layer_configs() if HAS_LAYER_CONFIG else worker.get_kv_cache_spec()
+            requirements = (
+                worker.get_kv_cache_layer_configs() if not vllm_version_is("0.33.0") else worker.get_kv_cache_spec()
+            )
             self.assertEqual(cache_layouts(requirements), specs)
 
         create_plan.assert_called_once_with(worker.vllm_config, specs, 2)

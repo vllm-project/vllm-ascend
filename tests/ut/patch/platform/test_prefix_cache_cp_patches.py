@@ -16,9 +16,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -28,7 +28,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
     from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -36,19 +36,18 @@ from vllm.v1.core import kv_cache_planning
 
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups as group_kimi
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from tests.kv_cache_groups import cache_group, layer_config, mamba_requirement, ring_requirement
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
 else:
     from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from tests.kv_cache_groups import ascend_ring_spec_type, window_mla_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.core.kv_cache_layers import (
@@ -63,7 +62,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm_ascend.patch.platform.patch_kv_cache_utils import (
         _ascend_annotate_eagle_groups,
         _get_kv_cache_config_deepseek_v4_main,
@@ -77,11 +76,11 @@ _MAMBA_CACHING_MODE = "align"
 
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(specs):
-    return group_kimi({n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs)
+    return group_kimi({n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs)
 
 
 def _window_requirement(*, sliding_window, bounded_replay=False, **fields):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return SlidingWindowManager.layer_config(
             window_mla_spec_type(**fields), sliding_window=sliding_window, bounded_replay=bounded_replay
         )
@@ -89,17 +88,17 @@ def _window_requirement(*, sliding_window, bounded_replay=False, **fields):
 
 
 def width(group, config, tokens):
-    return (group if HAS_LAYER_CONFIG else group.kv_cache_spec).max_num_blocks_per_req(config, tokens)
+    return (group if not vllm_version_is("0.33.0") else group.kv_cache_spec).max_num_blocks_per_req(config, tokens)
 
 
 def lookup_params(requirement):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return dict(manager_config=requirement.manager_config, block_size=requirement.spec.block_size)
     return dict(kv_cache_spec=requirement)
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     specs = [
@@ -152,7 +151,7 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
 @pytest.mark.parametrize("group_count", [1, 2])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, wrapped):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     spec = _window_requirement(
@@ -185,13 +184,13 @@ def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, w
     coordinator.free("request")
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks
     assert coordinator.find_longest_cache_hit([b"a" * 32], 16) == (tuple([] for _ in groups), 0, 0)
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
 
 
 @pytest.mark.parametrize("with_private_tail", [False, True])
 def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_tail):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     full = full_attention_spec_type(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
@@ -200,7 +199,7 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
         tail = AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=9,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=8,
@@ -260,14 +259,14 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
 def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size, ring_capacity):
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     full = full_attention_spec_type(block_size=scheduler_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     tail = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=ring_capacity,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=8,
@@ -326,14 +325,14 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
 
 @pytest.mark.parametrize("dcp", [1, 2])
 def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     full = full_attention_spec_type(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     tail = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=9,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=8,
@@ -367,7 +366,7 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
 
 
 def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     specs = [
@@ -377,7 +376,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=4,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=8,
@@ -460,7 +459,7 @@ def _make_hybrid_kv_cache_config(
         kv_cache_tensors=[
             _make_kv_cache_tensor(full_spec.page_size_bytes * 10, ["attn"]),
             _make_kv_cache_tensor(
-                (mamba_spec.spec if HAS_LAYER_CONFIG else mamba_spec).page_size_bytes * 10, ["mamba"]
+                (mamba_spec.spec if not vllm_version_is("0.33.0") else mamba_spec).page_size_bytes * 10, ["mamba"]
             ),
         ],
         kv_cache_groups=[
@@ -497,7 +496,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             dtype=torch.bfloat16,
             page_size_padded=page_size,
             cache_dtype_str="auto",
-            **({} if HAS_LAYER_CONFIG else {"non_causal_multi_token_decode": True}),
+            **({} if not vllm_version_is("0.33.0") else {"non_causal_multi_token_decode": True}),
         )
     else:
         draft_attention_spec = full_attention_spec_type(
@@ -648,7 +647,7 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
     assert spec.page_size_bytes == expected_page_size
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     spec = AscendMLAAttentionSpec(
         block_size=512,
@@ -694,7 +693,7 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         mamba_group,
         **(
             {"manager_config": mamba_group.manager_config.replace_params(mamba_cache_mode=mamba_cache_mode)}
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else {"kv_cache_spec": replace(mamba_group.kv_cache_spec, mamba_cache_mode=mamba_cache_mode)}
         ),
     )
@@ -746,7 +745,7 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     state_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
         ring_capacity=16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 16}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         compress_ratio=16,
         num_kv_heads=1,
         head_size=256,
@@ -804,7 +803,11 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     assert vllm_config.cache_config.block_size == 16
     assert state_spec.block_size == state_spec.compress_ratio == 16
     assert not group_prefix_cacheable(cache_group(["state"], state_spec))
-    if HAS_LAYER_CONFIG and prefix_match_unit is not None and prefix_match_unit < indexer_spec.tokens_per_state:
+    if (
+        not vllm_version_is("0.33.0")
+        and prefix_match_unit is not None
+        and prefix_match_unit < indexer_spec.tokens_per_state
+    ):
         with pytest.raises(ValueError, match="per-state compression"):
             resolve_kv_cache_block_sizes(scheduler_config, vllm_config)
         vllm_config.cache_config.prefix_match_unit = expected_hash_block_size = indexer_spec.tokens_per_state
@@ -842,7 +845,7 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     tail_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
         ring_capacity=16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 16}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         compress_ratio=16,
         num_kv_heads=1,
         head_size=256,
@@ -872,7 +875,7 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     assert resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (384, 384)
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
     c128_spec = MLAAttentionSpec(
         block_size=128 * 128,
@@ -932,7 +935,7 @@ def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_u
 
     assert groups is not None
     assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
     mixed_specs = group_layer_specs(groups[0])
     expected_mla_count = 29 if draft_uses_mla else 24
@@ -954,7 +957,7 @@ def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
             # Homogeneous Mamba groups may contain different per-layer layouts.
             specs[f"{kind}.1"] = (
                 replace(mamba, spec=replace(mamba.spec, shapes=((3, 2),)))
-                if HAS_LAYER_CONFIG
+                if not vllm_version_is("0.33.0")
                 else replace(mamba, shapes=((3, 2),))
             )
         group_spec = specs if wrapped else spec
@@ -982,7 +985,7 @@ def test_native_uniform_width_preserves_mamba_speculative_slots(dcp, num_specula
     )
     second = (
         replace(spec, spec=replace(spec.spec, shapes=((3, 2),)))
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else replace(spec, shapes=((3, 2),))
     )
     group = cache_group(["mamba.0", "mamba.1"], {"mamba.0": spec, "mamba.1": second})
@@ -998,7 +1001,7 @@ def test_native_uniform_attention_width_uses_dcp(dcp) -> None:
     assert width(group, config, 65) == math.ceil(65 / (16 * dcp))
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_native_uniform_width_rejects_inconsistent_inner_widths() -> None:
     config = _make_vllm_config(enable_prefix_caching=True, dcp=2)
     spec = mamba_requirement(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
@@ -1043,7 +1046,7 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     page_size = 488448
     expected_num_blocks = 100
     available_memory = page_size * 29 * expected_num_blocks
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.models.deepseek_v4.cache_config import _place_deepseek_v4_cache
 
         num_blocks = expected_num_blocks
@@ -1075,7 +1078,7 @@ def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
     page_size = 940032
     specs = _make_kimi_k3_dspark_kv_cache_specs(block_size=768, page_size=page_size)
     for name, spec in list(specs.items()):
-        layout = spec.spec if HAS_LAYER_CONFIG and hasattr(spec, "manager_config") else spec
+        layout = spec.spec if not vllm_version_is("0.33.0") and hasattr(spec, "manager_config") else spec
         if isinstance(layout, MambaSpec):
             specs[name] = mamba_requirement(
                 block_size=200000,
@@ -1149,7 +1152,7 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
     assert hash_block_size == 512
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
@@ -1194,7 +1197,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert needed_memory == expected_memory
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     groups = kv_cache_config.kv_cache_groups
@@ -1228,7 +1231,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
@@ -1360,7 +1363,10 @@ def test_get_effective_block_size(
     )
 
     spec = spec_factory()
-    assert coordinator._get_effective_block_size(cache_group(["layer"], spec) if HAS_LAYER_CONFIG else spec) == expected
+    assert (
+        coordinator._get_effective_block_size(cache_group(["layer"], spec) if not vllm_version_is("0.33.0") else spec)
+        == expected
+    )
 
 
 def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
@@ -1509,7 +1515,7 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
     target_spec = full_attention_spec_type(
         block_size=16,
@@ -1567,7 +1573,7 @@ def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
         ("qwen4_exp_text", ["Qwen4ExpMTP"]),
     ],
 )
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_mtp_text_config_fallback_annotation(
     text_model_type,
     text_architectures,
@@ -1606,7 +1612,7 @@ def test_qwen4_exp_mtp_text_config_fallback_annotation(
     assert groups[0].is_eagle_group is True
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
     spec = full_attention_spec_type(
         block_size=16,
@@ -1639,7 +1645,7 @@ def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
     assert groups[0].is_eagle_group is False
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises release-only spec or planner hooks.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_mtp_missing_draft_group_fails_fast() -> None:
     spec = full_attention_spec_type(
         block_size=16,
@@ -1742,7 +1748,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching(dcp, p
     manager_kwargs = dict(
         **(
             {"kv_cache_group": cache_group(["state"], mamba_spec)}
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else {"kv_cache_spec": mamba_spec}
         ),
         block_pool=block_pool,
@@ -1844,7 +1850,7 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
     groups = kv_cache_planning._get_kv_cache_groups_uniform_page_size(
-        {n: layer_config(s) for n, s in specs.items()} if HAS_LAYER_CONFIG else specs
+        {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
     )
     assert any(
         not group_distinct_specs(g)[0].dcp_sharded and isinstance(group_distinct_specs(g)[0], full_attention_spec_type)
@@ -1859,7 +1865,7 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     coordinator.dcp_world_size = dcp
     coordinator.enable_caching = True
     for group in groups:
-        spec = group if HAS_LAYER_CONFIG else group.kv_cache_spec
+        spec = group if not vllm_version_is("0.33.0") else group.kv_cache_spec
         assert coordinator._get_effective_block_size(spec) == spec.block_size * (dcp if spec.dcp_sharded else 1)
 
 
@@ -1900,7 +1906,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     builder = AscendKVCacheConfigBuilder()
     bytes_per_block = (
         builder._get_pool_bytes_per_block(config, groups)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
     )
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
@@ -1909,7 +1915,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     expected_blocks = 11 if num_blocks_override is None else num_blocks_override
     planned = (
         builder.get_kv_cache_config_from_groups(config, groups, expected_blocks)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
     )
     assert planned.num_blocks == expected_blocks
@@ -1929,7 +1935,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     # Rank re-planning must retain exactly the agreed block count.
     replanned = (
         builder.get_kv_cache_config_from_groups(config, groups, num_blocks_override or 7)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
     )
     assert replanned.num_blocks == (7 if num_blocks_override is None else num_blocks_override)

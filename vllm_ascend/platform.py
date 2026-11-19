@@ -128,9 +128,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
-        from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
-
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             return "vllm_ascend.core.kv_cache_layer_config_builder.AscendKVCacheConfigBuilder"
         return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 

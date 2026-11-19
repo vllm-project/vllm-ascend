@@ -1,24 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression for SWA page retirement at the P/D handoff."""
 
-from dataclasses import replace
 from types import SimpleNamespace
 
+import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
+from tests.kv_cache_groups import cache_group, window_requirement
+from vllm_ascend.core.kv_cache_layers import group_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeBaseConnectorScheduler
+from vllm_ascend.utils import vllm_version_is
 
-from .helpers import make_request, make_sliding_spec
+from .helpers import make_request
 
 
 def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     block_size, window_size, prompt_len = 128, 512, 1023
-    spec = replace(make_sliding_spec(block_size), sliding_window=window_size)
-    assert spec.extra_retained_tokens == 0
+    requirement = window_requirement(
+        block_size=block_size,
+        sliding_window=window_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        dcp_sharded=False,
+    )
+    group = cache_group(["swa"], requirement)
+    assert group_params(group).extra_retained_tokens == 0
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [[spec]]
+    scheduler.kv_cache_groups = [group]
+    scheduler.group_unique_specs = [scheduler._get_group_unique_specs(group)]
     scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
     tokens = list(range(prompt_len))
     producer = make_request(
@@ -39,7 +51,7 @@ def test_swa_handoff_retains_history_for_last_prompt_token() -> None:
     assert scheduler.get_num_new_matched_tokens(consumer, 0) == (producer.num_prompt_tokens, True)
 
     manager = SlidingWindowManager(
-        kv_cache_spec=spec,
+        requirement if vllm_version_is("0.33.0") else group,
         block_pool=BlockPool(num_gpu_blocks=16, enable_caching=False, hash_block_size=block_size),
         enable_caching=False,
         kv_cache_group_id=0,

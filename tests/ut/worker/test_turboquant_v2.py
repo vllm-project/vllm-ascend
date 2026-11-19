@@ -11,8 +11,8 @@ from tests.kv_cache_groups import cache_group
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend, AscendDSAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -249,7 +249,7 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
     consumer_name = "model.layers.3.attn"
     consumer = Mock(spec=attn_utils.Attention, kv_sharing_target_layer_name=names[1])
     runtime.compilation_config = SimpleNamespace(static_forward_context={**layers, consumer_name: consumer})
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         config.kv_cache_groups[0].kv_cache_specs[consumer_name] = spec
     else:
         config.kv_cache_groups[0].layer_names.append(consumer_name)

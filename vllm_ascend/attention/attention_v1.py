@@ -60,10 +60,10 @@ from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -250,7 +250,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
             self.is_cross_attention = getattr(layer, "attn_type", None) == AttentionType.ENCODER_DECODER
         else:

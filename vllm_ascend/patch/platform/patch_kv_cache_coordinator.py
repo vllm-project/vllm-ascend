@@ -31,59 +31,53 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.core.kv_cache_layers import group_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
-    from vllm.v1.core.single_type_kv_cache_manager import create_single_type_manager
-    from vllm.v1.kv_cache_interface import prefix_lookup_groups
-
-    def _policy(group):
-        return group
-
-    def _is_full(policy):
-        return issubclass(policy.manager_cls, FullAttentionManager) and policy.prefix_cacheable
-
-    def _is_mamba(policy):
-        return issubclass(policy.manager_cls, MambaManager)
-
-    def _cacheable(group):
-        return group.prefix_cacheable
-
-    def _is_align(group):
-        return _is_mamba(group) and group.manager_config.params.mamba_cache_mode == "align"
-
-    def _lookup_args(policy):
-        return dict(manager_config=policy.manager_config, block_size=policy.block_size)
-
-    def _create_manager(group, **kwargs):
-        return create_single_type_manager(group, **kwargs)
-else:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.kv_cache_coordinator import SpecGroup
     from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
     from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import create_single_type_manager
+    from vllm.v1.kv_cache_interface import prefix_lookup_groups
 
-    def _policy(group):
+
+def _policy(group):
+    if vllm_version_is("0.33.0"):
         return _manager_spec(group.kv_cache_spec)
+    return group
 
-    def _is_full(policy):
+
+def _is_full(policy):
+    if vllm_version_is("0.33.0"):
         return isinstance(policy, FullAttentionSpec)
+    return issubclass(policy.manager_cls, FullAttentionManager) and policy.prefix_cacheable
 
-    def _is_mamba(policy):
+
+def _is_mamba(policy):
+    if vllm_version_is("0.33.0"):
         return isinstance(policy, MambaSpec)
+    return issubclass(policy.manager_cls, MambaManager)
 
-    def _cacheable(group):
-        return is_prefix_cacheable(group.kv_cache_spec)
 
-    def _is_align(group):
+def _is_align(group):
+    if vllm_version_is("0.33.0"):
         spec = group.kv_cache_spec
         return isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align"
+    return _is_mamba(group) and group.manager_config.params.mamba_cache_mode == "align"
 
-    def _lookup_args(policy):
+
+def _lookup_args(policy):
+    if vllm_version_is("0.33.0"):
         return dict(kv_cache_spec=policy)
+    return dict(manager_config=policy.manager_config, block_size=policy.block_size)
 
-    def _create_manager(group, **kwargs):
+
+def _create_manager(group, **kwargs):
+    if vllm_version_is("0.33.0"):
         return get_manager_for_kv_cache_spec(kv_cache_spec=_policy(group), **kwargs)
+    return create_single_type_manager(group, **kwargs)
 
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
@@ -133,7 +127,7 @@ def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
 
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
     return any(
-        _is_deepseek_v4_kv_cache_spec(group if HAS_LAYER_CONFIG else group.kv_cache_spec)
+        _is_deepseek_v4_kv_cache_spec(group if not vllm_version_is("0.33.0") else group.kv_cache_spec)
         for group in kv_cache_config.kv_cache_groups
     )
 
@@ -147,7 +141,7 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def _lookup_policy(coordinator, lookup):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return coordinator.kv_cache_config.kv_cache_groups[lookup.group_ids[0]]
     return lookup.spec
 
@@ -252,7 +246,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             self.group_block_sizes = tuple(mgr.block_size for mgr in self.single_type_managers)
         self.hash_block_size = hash_block_size
         if enable_caching:
@@ -262,7 +256,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             assert all(
                 self._get_effective_block_size(_policy(g)) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
-                if _cacheable(g)
+                if group_prefix_cacheable(g)
             ), "block_size must be divisible by hash_block_size"
         self.enable_partial_hash_hits = allow_partial_hash_hits and any(
             _is_align(g)
@@ -274,7 +268,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         )
         if self.enable_partial_hash_hits:
             self.enable_partial_hash_hits = all(
-                not _cacheable(g)
+                not group_prefix_cacheable(g)
                 or getattr(manager, "block_size", self._get_effective_block_size(_policy(g))) == hash_block_size
                 or getattr(manager, "supports_fine_grained_hash_lookup", False)
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
@@ -336,7 +330,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         Groups KV cache groups by their spec type for efficient batch processing
         during cache hit lookup.
         """
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             groups = self.kv_cache_config.kv_cache_groups
             self.attention_groups = [
                 lookup._replace(use_eagle=any(gid in self.eagle_group_ids for gid in lookup.group_ids))
@@ -354,7 +348,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.attention_groups: list[SpecGroup] = []
             self.tail_pool_alignment = 1
             for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-                if not _cacheable(g):
+                if not group_prefix_cacheable(g):
                     specs = (
                         g.kv_cache_spec.kv_cache_specs.values()
                         if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -619,7 +613,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
     if any(
-        (group.host_resident if HAS_LAYER_CONFIG else group.role == KVCacheGroupRole.HISPARSE_SOURCE)
+        (group.host_resident if not vllm_version_is("0.33.0") else group.role == KVCacheGroupRole.HISPARSE_SOURCE)
         for group in kv_cache_config.kv_cache_groups
     ):
         # Core owns HiSparse admission, HMA roles, eviction and prefix state.
@@ -629,13 +623,13 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         )
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
-    num_cacheable_groups = sum(_cacheable(group) for group in kv_cache_config.kv_cache_groups)
+    num_cacheable_groups = sum(group_prefix_cacheable(group) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
     if num_cacheable_groups and (_is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups):
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if num_cacheable_groups == 0 or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        if num_cacheable_groups == 0 and not HAS_LAYER_CONFIG:
+        if num_cacheable_groups == 0 and vllm_version_is("0.33.0"):
             # Upstream's no-prefix coordinator expects scheduler specs rather
             # than the planner's uniform wrappers. Preserve the caller's config.
             kv_cache_config = copy(kv_cache_config)

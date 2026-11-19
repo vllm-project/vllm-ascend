@@ -17,7 +17,8 @@ from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend, AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize(
@@ -41,14 +42,14 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
         page_size_padded=128 * 1152 + 256,
         tokens_per_state=2,
         topk_buffer_width=2048,
-        **({} if HAS_LAYER_CONFIG else dict(is_draft=True, non_causal_multi_token_decode=True)),
+        **({} if not vllm_version_is("0.33.0") else dict(is_draft=True, non_causal_multi_token_decode=True)),
         dcp_sharded=True,
         state_content_bytes=1152,
         block_stride_alignment=256,
         cache_role=SparseCacheRole.SPARSE,
         is_index_group_leader=True,
     )
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         monkeypatch.setattr(
             MLAAttention, "get_kv_cache_config", lambda *_: replace(layer_config(source), is_draft=True)
         )
@@ -68,7 +69,7 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
     )
     actual = get_layer_spec(layer, config)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         assert layer.get_kv_cache_config(config).is_draft
     assert isinstance(actual, AscendMLAAttentionSpec)
     assert actual.num_heads == heads
@@ -80,7 +81,7 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
         "topk_buffer_width",
         "head_size",
         "dtype",
-        *(() if HAS_LAYER_CONFIG else ("is_draft", "non_causal_multi_token_decode")),
+        *(() if not vllm_version_is("0.33.0") else ("is_draft", "non_causal_multi_token_decode")),
         "dcp_sharded",
         "state_content_bytes",
         "block_stride_alignment",
@@ -108,10 +109,8 @@ def _get_owner_spec(monkeypatch, layer):
         head_size=layer.kv_lora_rank + layer.qk_rope_head_dim,
         dtype=torch.bfloat16,
     )
-    if HAS_LAYER_CONFIG:
-        monkeypatch.setattr(
-            MLAAttention, "get_kv_cache_config", lambda *_: layer_config(source)
-        )
+    if not vllm_version_is("0.33.0"):
+        monkeypatch.setattr(MLAAttention, "get_kv_cache_config", lambda *_: layer_config(source))
     else:
         monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
@@ -221,7 +220,7 @@ def test_worker_customizes_spec_once_without_reading_impl(monkeypatch, backend, 
     )
     actual = (
         attn_utils.get_kv_cache_layer_configs(config)["main"].spec
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else attn_utils.get_kv_cache_spec(config)["main"]
     )
     assert calls == [source]

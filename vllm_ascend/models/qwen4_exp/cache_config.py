@@ -11,7 +11,7 @@ import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 
 try:
@@ -32,17 +32,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
 from vllm_ascend.core.kv_cache_layers import (
-    HAS_LAYER_CONFIG,
     CacheGroup,
     cache_layouts,
+    full_attention_spec_type,
     group_layer_specs,
     group_max_blocks,
     make_cache_group,
 )
-
-if not HAS_LAYER_CONFIG:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
+from vllm_ascend.utils import vllm_version_is
 
 QSA_MAIN: Final = "qsa_main"
 QSA_RAW: Final = "qsa_raw"
@@ -114,7 +111,7 @@ class Qwen4KVCacheLayout:
 
 
 def _raw_key_layout(spec):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         # The caller already identifies the raw-key owner by its registered layer name.
         return isinstance(spec, AttentionSpec)
     from vllm.v1.kv_cache_interface import CircularBufferSpec
@@ -133,7 +130,7 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
         and get_kv_cache_compression_ratio(spec) > 1
     ):
         return QSA_COMPRESSED
-    if layer_name.endswith(".attn") and isinstance(spec, AttentionSpec if HAS_LAYER_CONFIG else FullAttentionSpec):
+    if layer_name.endswith(".attn") and isinstance(spec, full_attention_spec_type()):
         return QSA_MAIN
     if isinstance(spec, MambaSpec):
         if len(spec.shapes) == 2:
@@ -442,7 +439,7 @@ def _prepare_qsa_composite_groups(
         name[: -len(".attn")]: (name, spec)
         for name, spec in kv_cache_spec.items()
         if name.endswith(".attn")
-        and isinstance(spec, AttentionSpec if HAS_LAYER_CONFIG else FullAttentionSpec)
+        and isinstance(spec, full_attention_spec_type())
         and not isinstance(spec, MLAAttentionSpec)
     }
     all_compressed = {
@@ -560,7 +557,7 @@ def _merge_mamba_state_groups(
     Each group gets a separate scheduler block table and reuses slot ordinals.
     Geometry and draft/target boundaries remain separate allocation domains.
     """
-    if HAS_LAYER_CONFIG and configs is None:
+    if not vllm_version_is("0.33.0") and configs is None:
         from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
         configs = {
@@ -577,8 +574,8 @@ def _merge_mamba_state_groups(
             key = (
                 member,
                 group.is_eagle_group,
-                configs[name].is_draft if HAS_LAYER_CONFIG else member.is_draft,
-                group.manager_config if HAS_LAYER_CONFIG else None,
+                configs[name].is_draft if not vllm_version_is("0.33.0") else member.is_draft,
+                group.manager_config if not vllm_version_is("0.33.0") else None,
             )
             buckets.setdefault(key, []).append((index, name, member))
     replacements: dict[int, list[CacheGroup]] = {}

@@ -55,14 +55,15 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, cache_layouts, group_distinct_specs
+from vllm_ascend.core.kv_cache_layers import cache_layouts, group_distinct_specs
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm_ascend.patch.platform.patch_kv_cache_utils import (
         _get_kv_cache_config_deepseek_v4_main,
     )
@@ -78,7 +79,7 @@ from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
 def _collect_layouts(vllm_config):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         return cache_layouts(attn_utils.get_kv_cache_layer_configs(vllm_config))
     return attn_utils.get_kv_cache_spec(vllm_config)
 
@@ -163,7 +164,7 @@ def test_main_allocator_attention_layout(
         **extra_args,
     )
     requirement = spec
-    if HAS_LAYER_CONFIG and cache_kind == "sliding_window":
+    if not vllm_version_is("0.33.0") and cache_kind == "sliding_window":
         spec = requirement.spec
     num_blocks = 3
     kv_cache_config = KVCacheConfig(
@@ -1020,7 +1021,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     num_blocks = 3
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm_ascend.models.deepseek_v4.cache_config import _place_deepseek_v4_cache
 
         planned_num_blocks = num_blocks
@@ -1212,20 +1213,23 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
 
     # Ascend delegates to the upstream runner, which marks replicated draft
     # groups using the speculator's effective DCP size before cache planning.
+    name = "model.layers.0.self_attn.attn"
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.dcp_size = 1
-    speculator.draft_attn_layer_names = {"model.layers.0.self_attn.attn"} if is_draft_layer else set()
+    speculator.draft_attn_layer_names = {name} if is_draft_layer else set()
     runner = SimpleNamespace(vllm_config=vllm_config, speculator=speculator, dcp_size=2)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         monkeypatch.setattr(upstream_model_runner, "get_kv_cache_layer_configs", attn_utils.get_kv_cache_layer_configs)
-        config = upstream_model_runner.GPUModelRunner.get_kv_cache_layer_configs(runner)["model.layers.0.self_attn.attn"]
+        config = upstream_model_runner.GPUModelRunner.get_kv_cache_layer_configs(runner)[name]
         spec = config.spec
         assert config.is_draft is is_draft_layer
+        capacity = cache_group([name], config).max_num_blocks_per_req(vllm_config, 1024)
     else:
         monkeypatch.setattr(upstream_model_runner, "get_kv_cache_spec", attn_utils.get_kv_cache_spec)
-        spec = upstream_model_runner.GPUModelRunner.get_kv_cache_spec(runner)["model.layers.0.self_attn.attn"]
+        spec = upstream_model_runner.GPUModelRunner.get_kv_cache_spec(runner)[name]
         assert spec.is_draft is is_draft_layer
-        assert spec.max_num_blocks_per_req(vllm_config, 1024) == (8 if is_draft_layer else 4)
+        capacity = spec.max_num_blocks_per_req(vllm_config, 1024)
+    assert capacity == (8 if is_draft_layer else 4)
     assert spec.dcp_sharded is (not is_draft_layer)
 
 
@@ -1244,7 +1248,11 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"is_draft": source_is_draft, "non_causal_multi_token_decode": non_causal}),
+        **(
+            {}
+            if not vllm_version_is("0.33.0")
+            else {"is_draft": source_is_draft, "non_causal_multi_token_decode": non_causal}
+        ),
         dcp_sharded=dcp_sharded,
     )
     layer = AscendMLAAttention.__new__(AscendMLAAttention)
@@ -1261,8 +1269,12 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     layer.is_draft_layer = is_draft_layer
     monkeypatch.setattr(
         MLAAttention,
-        "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec",
-        lambda *_: replace(layer_config(source_spec), is_draft=source_is_draft) if HAS_LAYER_CONFIG else source_spec,
+        "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec",
+        lambda *_: (
+            replace(layer_config(source_spec), is_draft=source_is_draft)
+            if not vllm_version_is("0.33.0")
+            else source_spec
+        ),
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
@@ -1291,7 +1303,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.page_size_bytes == source_spec.page_size_bytes
     expected_draft = source_is_draft or is_draft_layer
     assert spec.store_on_host is not expected_draft
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         assert (
             attn_utils.get_kv_cache_layer_configs(vllm_config)["model.layers.0.self_attn.attn"].is_draft
             is expected_draft
@@ -1373,7 +1385,11 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert get_storage_block_size(spec) == cache_config.block_size
-    merged_spec = group_distinct_specs(cache_group([layer_name], spec))[0] if HAS_LAYER_CONFIG else spec.merge([spec])
+    merged_spec = (
+        group_distinct_specs(cache_group([layer_name], spec))[0]
+        if not vllm_version_is("0.33.0")
+        else spec.merge([spec])
+    )
     assert merged_spec.tokens_per_state == cache_layer.compress_ratio
     assert get_storage_block_size(merged_spec) == cache_config.block_size
 
@@ -1759,7 +1775,7 @@ def test_tq_batched_slots_use_builder_config_without_global_context(monkeypatch,
     _, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="turboquant_4bit_nc"))
     for group, attn_group in zip(kv_cache_config.kv_cache_groups, attn_groups):
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             for name, layout in group.kv_cache_specs.items():
                 group.kv_cache_specs[name] = replace(layout, cache_dtype_str="turboquant_4bit_nc")
         else:
@@ -2253,7 +2269,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     config.attention_config = SimpleNamespace(hisparse_config=None)
     config.cache_config.get_resolved_kv_cache_layout = lambda: None
     config.compilation_config.static_forward_context = layers
-    collector = "get_kv_cache_layer_configs" if HAS_LAYER_CONFIG else "get_kv_cache_spec"
+    collector = "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
     assert getattr(upstream_model_runner, collector) is getattr(patch_attn_utils, collector)
     assert upstream_model_runner.init_kv_cache is upstream_attn_utils.init_kv_cache
     assert upstream_model_runner.init_kv_cache.__globals__ is vars(upstream_attn_utils)
@@ -2294,11 +2310,11 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         dtype=torch.bfloat16,
         cache_dtype_str="auto",
         model_version=None,
-        **({} if HAS_LAYER_CONFIG else dict(is_draft=False, non_causal_multi_token_decode=False)),
+        **({} if not vllm_version_is("0.33.0") else dict(is_draft=False, non_causal_multi_token_decode=False)),
         tokens_per_state=1,
         cache_sparse_sfa_c8=sparse_c8,
     )
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         layer.get_kv_cache_config = lambda _cfg: layer_config(layout)
     else:
         layer.get_kv_cache_spec = lambda _cfg: layout
@@ -2313,11 +2329,11 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     source_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=512, dtype=torch.bfloat16)
     monkeypatch.setattr(
         MLAAttention,
-        "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec",
-        lambda *_: layer_config(source_spec) if HAS_LAYER_CONFIG else source_spec,
+        "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec",
+        lambda *_: layer_config(source_spec) if not vllm_version_is("0.33.0") else source_spec,
     )
     layer.__class__ = AscendMLAAttention
-    delattr(layer, "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec")
+    delattr(layer, "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec")
     layer.attn_backend = AscendSFABackend
     layer.impl.kv_cache_dtype = "int8"
     layer.impl.c8_cache_dtype = torch.int8
@@ -2368,11 +2384,11 @@ def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
     source_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=192, dtype=torch.bfloat16)
     monkeypatch.setattr(
         MLAAttention,
-        "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec",
-        lambda *_: layer_config(source_spec) if HAS_LAYER_CONFIG else source_spec,
+        "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec",
+        lambda *_: layer_config(source_spec) if not vllm_version_is("0.33.0") else source_spec,
     )
     layer.__class__ = AscendMLAAttention
-    delattr(layer, "get_kv_cache_config" if HAS_LAYER_CONFIG else "get_kv_cache_spec")
+    delattr(layer, "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec")
     layer.attn_backend = AscendSFABackend
     layer.impl.store_kv_cache_on_host = True
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {layer_name: layer})
@@ -2797,7 +2813,7 @@ def test_tq_groups_without_a_dsa_builder_skip_the_formatted_mapping(for_capture,
     # mapping, so nothing on the SFA path loses one.
     layer_names, specs, _, _, kv_cache_config = _make_dsa_metadata_groups()
     for group in kv_cache_config.kv_cache_groups:
-        if HAS_LAYER_CONFIG:
+        if not vllm_version_is("0.33.0"):
             for name, layout in group.kv_cache_specs.items():
                 group.kv_cache_specs[name] = replace(layout, cache_dtype_str="turboquant_4bit_nc")
         else:
@@ -3244,7 +3260,7 @@ def _step5_sw_spec():
         dtype=torch.bfloat16,
         sliding_window=4096,
     )
-    return requirement.spec if HAS_LAYER_CONFIG else requirement
+    return requirement.spec if not vllm_version_is("0.33.0") else requirement
 
 
 def _step5_summary_spec() -> AttentionSpec:

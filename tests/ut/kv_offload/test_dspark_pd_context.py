@@ -13,7 +13,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, layer_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, configure_cache_transfer, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import configure_cache_transfer, group_layer_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     DSparkContextReceiver,
@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     build_draft_kv_metadata,
     build_draft_kv_read_batches,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _descriptor(request_id="request", generation="allocation-1", prompt_tokens=6):
@@ -70,10 +71,10 @@ def test_scheduler_discovers_resident_mla_independent_of_attention_causality(non
         head_size=576,
         dtype=torch.bfloat16,
         store_on_host=False,
-        **({} if HAS_LAYER_CONFIG else {"non_causal_multi_token_decode": non_causal}),
+        **({} if not vllm_version_is("0.33.0") else {"non_causal_multi_token_decode": non_causal}),
     )
     assert _context_scheduler(spec, wrapped=wrapped)._find_dspark_context_groups() == (2,)
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert spec.non_causal_multi_token_decode is non_causal
 
 
@@ -88,10 +89,12 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     host_spec = AscendMLAAttentionSpec(
         block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, store_on_host=True
     )
-    draft_spec = replace(host_spec, store_on_host=False, **({} if HAS_LAYER_CONFIG else {"is_draft": True}))
+    draft_spec = replace(
+        host_spec, store_on_host=False, **({} if not vllm_version_is("0.33.0") else {"is_draft": True})
+    )
     uniform = {
         "target": host_spec,
-        "draft": replace(layer_config(draft_spec), is_draft=True) if HAS_LAYER_CONFIG else draft_spec,
+        "draft": replace(layer_config(draft_spec), is_draft=True) if not vllm_version_is("0.33.0") else draft_spec,
     }
     config = KVCacheConfig(
         num_blocks=8,
@@ -101,6 +104,7 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         speculative_config=SimpleNamespace(method="dspark"),
+        dspark_draft_only_group_ids=(),
         kv_transfer_config=None,
     )
     configure_cache_transfer(vllm_config, config)

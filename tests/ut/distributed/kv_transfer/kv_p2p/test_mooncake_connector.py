@@ -31,9 +31,9 @@ from zmq.sugar.socket import Socket
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
@@ -398,7 +398,7 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             main_layer: main_spec,
             index_layer: index_spec,
         }
-        if not HAS_LAYER_CONFIG:
+        if vllm_version_is("0.33.0"):
             self.assertFalse(is_kv_cache_spec_uniform(layer_specs))
         uniform_spec = layer_specs
         vllm_config = MockVllmConfig()

@@ -134,10 +134,10 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
 
 
 def test_transfer_block_shape_preserves_ring_addressing():
-    from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+    from vllm_ascend.utils import vllm_version_is
 
     ring = make_circular_spec()
-    dense = ring if HAS_LAYER_CONFIG else make_full_spec()
+    dense = ring if not vllm_version_is("0.33.0") else make_full_spec()
     groups = [cache_group(["dense"], dense), cache_group(["ring"], ring_requirement(ring))]
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.kv_cache_config = SimpleNamespace(kv_cache_groups=groups)

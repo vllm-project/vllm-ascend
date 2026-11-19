@@ -16,7 +16,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, ring_spec_type
 from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -1151,7 +1151,7 @@ def test_preempt_offload_ring_uses_single_private_block(glm_tail, uniform, load_
             num_kv_heads=1,
             head_size=8,
             dtype=torch.float32,
-            **({} if HAS_LAYER_CONFIG else {"sliding_window": 4}),
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
         )
     else:

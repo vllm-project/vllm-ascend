@@ -16,13 +16,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec
 from vllm.v1.request import Request
 
@@ -31,7 +31,7 @@ from vllm_ascend.patch.platform import patch_kv_cache_admission  # noqa: F401
 
 
 def _requirement(kind):
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
     if kind == "sliding":
@@ -41,7 +41,7 @@ def _requirement(kind):
         cls = ChunkedLocalAttentionManager
         spec = (
             cls.layer_config(full_attention_spec_type(**kwargs), attention_chunk_size=8)
-            if HAS_LAYER_CONFIG
+            if not vllm_version_is("0.33.0")
             else ChunkedLocalAttentionSpec(attention_chunk_size=8, **kwargs)
         )
     else:
@@ -57,7 +57,7 @@ def _manager(kind="sliding", cap=8197, enable_caching=True, block_pool=None):
         null.is_null = True
         block_pool = SimpleNamespace(null_block=null)
     return cls(
-        cache_group(["layer"], spec) if HAS_LAYER_CONFIG else spec,
+        cache_group(["layer"], spec) if not vllm_version_is("0.33.0") else spec,
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
@@ -197,8 +197,8 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     cache = KVCacheManager(
         config,
         max_model_len=max_model_len,
-        scheduler_block_size=group.block_size if HAS_LAYER_CONFIG else spec.block_size,
-        hash_block_size=group.block_size if HAS_LAYER_CONFIG else spec.block_size,
+        scheduler_block_size=group.block_size if not vllm_version_is("0.33.0") else spec.block_size,
+        hash_block_size=group.block_size if not vllm_version_is("0.33.0") else spec.block_size,
         max_in_flight_tokens=2 * chunk_tokens,
         enable_caching=False,
     )
@@ -252,7 +252,7 @@ def test_async_remote_admission_leaves_capacity_to_resume_prefill():
         window_requirement(block_size=2, sliding_window=8, **common),
         window_requirement(block_size=8, sliding_window=128, **common),
     ]
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
     config = KVCacheConfig(
         num_blocks=13724,

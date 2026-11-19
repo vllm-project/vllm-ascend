@@ -40,7 +40,6 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -96,7 +95,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
 
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         _mamba_spec: MambaSpec | None = None
 
         def _get_mamba_group_info(self, kv_cache_config):

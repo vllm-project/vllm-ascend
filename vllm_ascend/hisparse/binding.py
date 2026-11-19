@@ -13,9 +13,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm.v1.kv_cache_interface import HiSparsePageSpec
 
     HISPARSE_PAGES = (HiSparsePageSpec,)

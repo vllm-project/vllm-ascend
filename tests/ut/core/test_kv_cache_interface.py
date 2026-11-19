@@ -11,9 +11,9 @@ from vllm.v1.core.block_pool import BlockPool
 
 # vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
 # the v0.33.0 lane still ships it in `kv_cache_utils`.
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -48,7 +48,7 @@ def _mla_spec():
 
 
 @pytest.mark.parametrize("indexer_first", [False, True])
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_mixed_mla_indexer_specs_are_not_uniform(indexer_first):
     main_spec = _mla_spec()
     indexer_spec = AscendSFAIndexerCacheSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
@@ -87,7 +87,7 @@ def test_indexer_layout_strides_cover_replicated_keys_and_scales(
     assert spec.unpadded_page_size_bytes == spec.page_size_bytes
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_matching_ascend_mla_specs_merge():
     spec = _mla_spec()
     assert AscendMLAAttentionSpec.merge([spec, spec]) == spec
@@ -95,7 +95,7 @@ def test_matching_ascend_mla_specs_merge():
 
 
 @pytest.mark.parametrize("draft_flags", [(False, False), (True, True), (False, True), (True, False)])
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_mla_merge_preserves_draft_only_ownership_without_changing_grouping(draft_flags):
     specs = [replace(_mla_spec(), is_draft=is_draft) for is_draft in draft_flags]
 
@@ -108,7 +108,7 @@ def test_mla_merge_preserves_draft_only_ownership_without_changing_grouping(draf
 
 @pytest.mark.parametrize("dcp_sharded", [True, False])
 @pytest.mark.parametrize("spec_type", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec, window_mla_spec_type])
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_ascend_spec_merge_preserves_dcp_layout(spec_type, dcp_sharded):
     kwargs = {"sliding_window": 128} if spec_type is window_mla_spec_type else {}
     spec = spec_type(
@@ -132,7 +132,7 @@ def test_ascend_mla_memory_uses_spec_dcp_layout(dcp_sharded, expected_blocks):
         model_config=SimpleNamespace(max_model_len=129),
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
     )
-    requirement = FullAttentionManager.layer_config(spec) if HAS_LAYER_CONFIG else spec
+    requirement = FullAttentionManager.layer_config(spec) if not vllm_version_is("0.33.0") else spec
     assert requirement.max_memory_usage_bytes(config) == expected_blocks * spec.page_size_bytes
 
 
@@ -143,7 +143,7 @@ def test_get_storage_block_size_and_dcp_memory():
     expected = spec.block_size // get_kv_cache_compression_ratio(spec)
     assert get_storage_block_size(spec) == expected
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
         assert get_storage_block_size(uniform) == expected
 
@@ -152,7 +152,7 @@ def test_get_storage_block_size_and_dcp_memory():
         model_config=SimpleNamespace(max_model_len=128),
         parallel_config=SimpleNamespace(decode_context_parallel_size=2),
     )
-    requirement = FullAttentionManager.layer_config(spec) if HAS_LAYER_CONFIG else spec
+    requirement = FullAttentionManager.layer_config(spec) if not vllm_version_is("0.33.0") else spec
     assert requirement.max_memory_usage_bytes(vllm_config) > 0
 
 
@@ -171,7 +171,7 @@ def test_sliding_window_mla_storage_and_page_size():
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 64}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 64}),
     )
     assert get_storage_block_size(spec) == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
@@ -182,12 +182,12 @@ def test_sliding_window_mla_storage_and_page_size():
 def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zeroing):
     from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
 
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
     spec_type = ascend_ring_spec_type if ascend else ring_spec_type
     spec = spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         from vllm.v1.kv_cache_interface import KVCacheGroup
 
         manager_type = AscendCircularBufferManager if ascend else CircularBufferManager
@@ -208,8 +208,8 @@ def test_circular_registry_preserves_spec_and_reports_recycled_pages(ascend, zer
     assert len(blocks) == 1 and blocks[0].block_id in old_ids
     assert manager.new_block_ids == ([blocks[0].block_id] if ascend and zeroing else [])
     assert manager.allocate_new_blocks("request", 2, 2) == []
-    assert not (merged.prefix_cacheable if HAS_LAYER_CONFIG else spec.prefix_cacheable) and not (
-        merged.uses_slot_mapping if HAS_LAYER_CONFIG else spec.uses_slot_mapping
+    assert not (merged.prefix_cacheable if not vllm_version_is("0.33.0") else spec.prefix_cacheable) and not (
+        merged.uses_slot_mapping if not vllm_version_is("0.33.0") else spec.uses_slot_mapping
     )
     manager.free("request")
     assert pool.get_num_free_blocks() == len(old_ids)
@@ -254,12 +254,12 @@ def _swa_spec(**overrides):
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 64}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 64}),
         **overrides,
     )
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_sliding_window_mla_merge_carries_bounded_replay():
     """The release group preserves the replay boundary for every member."""
     merged = window_mla_spec_type.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=True)])
@@ -275,7 +275,7 @@ def test_sliding_window_mla_merge_carries_bounded_replay():
         window_mla_spec_type.merge([_swa_spec(bounded_replay=True), _swa_spec(bounded_replay=False)])
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_sliding_window_mla_merge_carries_the_retained_token_count():
     """The release group retains the extra tokens requested by its layers."""
     if not declared_kwarg(window_mla_spec_type, "extra_retained_tokens", 8):
@@ -312,7 +312,7 @@ def test_the_kwarg_is_spelled_out_only_for_a_constructor_that_takes_it():
     assert declared_kwarg(_WithTheField, "bounded_replay", False) == {"bounded_replay": False}
 
 
-@pytest.mark.skipif(HAS_LAYER_CONFIG, reason="Exercises the release planner spec merge contract.")
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises the release planner spec merge contract.")
 def test_the_swa_spec_accepts_whatever_the_probe_returns():
     """Whatever the pinned vLLM takes, this is the call the merge path makes."""
     replaying = _swa_spec(**declared_kwarg(window_mla_spec_type, "bounded_replay", True))

@@ -15,7 +15,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_packet_size_bytes,
     mxfp_paged_cache_views,
 )
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -74,12 +74,12 @@ def test_spec_keeps_real_head_dimensions_and_metadata():
         head_size=256,
         head_size_v=128,
         dtype=torch.float16,
-        **({} if HAS_LAYER_CONFIG else {"non_causal": True}),
+        **({} if not vllm_version_is("0.33.0") else {"non_causal": True}),
     )
     spec = mxfp_cache_spec(original)
     assert type(spec) is full_attention_spec_type
     assert (spec.head_size, spec.head_size_v) == (256, 128)
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         assert spec.non_causal is True
     assert spec.state_content_bytes == 396
     assert spec.page_size_bytes == 512 * 396

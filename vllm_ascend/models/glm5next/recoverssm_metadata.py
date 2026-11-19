@@ -10,7 +10,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
@@ -20,6 +19,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     _build_actual_seq_lengths,
     _build_non_spec_chunked_prefill_metadata,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @contextmanager
@@ -59,7 +59,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
                 m.seq_lens[: m.num_reqs],
                 self.kv_cache_spec,
                 "align",
-                **({"num_speculative_blocks": self.num_speculative_blocks} if HAS_LAYER_CONFIG else {}),
+                **({"num_speculative_blocks": self.num_speculative_blocks} if not vllm_version_is("0.33.0") else {}),
             )
         with _disable_upstream_graph_staging(self):
             metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)

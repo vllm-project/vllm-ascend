@@ -25,9 +25,10 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Mamb
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from tests.kv_cache_groups import cache_group
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, group_layer_specs
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
+from vllm_ascend.utils import vllm_version_is
 
-if HAS_LAYER_CONFIG:
+if not vllm_version_is("0.33.0"):
     from vllm_ascend.core import kv_cache_layer_config_builder as builder_module
 else:
     from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -45,7 +46,7 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cac
 
 @pytest.fixture(autouse=True)
 def registered_specs():
-    if not HAS_LAYER_CONFIG:
+    if vllm_version_is("0.33.0"):
         register_all_kvcache_specs(None)
         register_ascend_kv_cache_specs()
 
@@ -60,7 +61,7 @@ def make_runtime():
 
 def generic_specs():
     spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16)
-    requirement = FullAttentionManager.layer_config(spec) if HAS_LAYER_CONFIG else spec
+    requirement = FullAttentionManager.layer_config(spec) if not vllm_version_is("0.33.0") else spec
     return {"layer.a": requirement, "layer.b": requirement}
 
 
@@ -107,7 +108,7 @@ def test_kimi_grouping_requires_matching_dcp_layout(draft_sharded):
         "language_model.model.layers.1.state": state,
         "model.layers.0.attn": draft,
     }
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         specs = {n: (MambaManager if s is state else FullAttentionManager).layer_config(s) for n, s in specs.items()}
     groups = builder_module._get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
     if draft_sharded:
@@ -135,7 +136,7 @@ def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):
     monkeypatch.setattr(builder_module, "get_glm5_next_kv_cache_groups", glm_mock)
     monkeypatch.setattr(
         builder_module,
-        "_group_deepseek_v4_layers" if HAS_LAYER_CONFIG else "group_and_unify_kv_cache_specs",
+        "_group_deepseek_v4_layers" if not vllm_version_is("0.33.0") else "group_and_unify_kv_cache_specs",
         ascend_mock,
     )
     assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
@@ -148,7 +149,7 @@ def test_ascend_layout_takes_precedence_over_kimi_dspark(monkeypatch):
     kimi_mock = Mock(return_value=None)
     monkeypatch.setattr(builder_module, "is_glm5_next_cache_spec", lambda spec: False)
     monkeypatch.setattr(builder_module, "is_deepseek_v41_cache", lambda spec: True)
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         monkeypatch.setattr(builder_module, "group_layer_configs", ascend_mock)
     else:
         monkeypatch.setattr(builder_module, "group_cache_specs", Mock(return_value=[]))
@@ -164,13 +165,13 @@ def test_turboquant_groups_use_packed_pool_bytes():
         num_kv_heads=1,
         head_size=SLOT_BYTES,
         dtype=torch.uint8,
-        **({} if HAS_LAYER_CONFIG else {"sliding_window": 128}),
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 128}),
         cache_dtype_str=TURBOQUANT_CACHE_DTYPE,
         model_version="deepseek_v4",
     )
     uniform = (
         SlidingWindowManager.layer_config(tq_spec, sliding_window=128)
-        if HAS_LAYER_CONFIG
+        if not vllm_version_is("0.33.0")
         else {"l0": tq_spec, "l1": tq_spec}
     )
     groups = [cache_group(layer_names=["l0", "l1"], kv_cache_spec=uniform)]

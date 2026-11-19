@@ -6,11 +6,11 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendCircularBufferManager(CircularBufferManager):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
         zeroes_new_blocks = True
     else:
 

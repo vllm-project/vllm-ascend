@@ -10,17 +10,13 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.core.kv_cache_layers import full_attention_spec_type
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, enable_sfa, kv_cache_spec_uses_packed_sfa_main_cache
-
-if not HAS_LAYER_CONFIG:
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
 
 # One buffer for the current layer and one for the next layer's prefetch.
 KVPP_SCRATCH_BUFFER_COUNT = 2
@@ -198,7 +194,7 @@ def create_kvpp_cache_allocation_plan(
 ) -> KVPPPhysicalCachePlan:
     """Keep upstream's logical group while budgeting actual allocations."""
     logical_spec = dict(worker_spec)
-    attention_type = AttentionSpec if HAS_LAYER_CONFIG else FullAttentionSpec
+    attention_type = full_attention_spec_type()
     if (
         any(not isinstance(spec, attention_type) for spec in logical_spec.values())
         or len({spec.block_size for spec in logical_spec.values()}) > 1

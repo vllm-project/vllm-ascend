@@ -15,11 +15,11 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMambaManager(MambaManager):
-    if HAS_LAYER_CONFIG:
+    if not vllm_version_is("0.33.0"):
 
         @classmethod
         def find_longest_cache_hit(
@@ -124,5 +124,5 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
-if not HAS_LAYER_CONFIG:
+if vllm_version_is("0.33.0"):
     single_type_kv_cache_manager.MambaManager = AscendMambaManager

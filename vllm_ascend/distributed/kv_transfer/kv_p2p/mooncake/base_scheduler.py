@@ -17,7 +17,6 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
@@ -30,7 +29,12 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
-from vllm_ascend.core.kv_cache_layers import group_manager, group_block_size, group_distinct_specs, group_params
+from vllm_ascend.core.kv_cache_layers import (
+    group_block_size,
+    group_distinct_specs,
+    group_has_sliding_window,
+    group_params,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -450,15 +454,12 @@ class MooncakeBaseConnectorScheduler:
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         compress_ratios = getattr(hf_config, "compress_ratios", None)
         uses_compressed_cache = isinstance(compress_ratios, (list, tuple, dict))
-        has_state_group = any(
-            isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
-        )
-        has_sliding_window_group = any(
-            issubclass(group_manager(group), SlidingWindowManager) for group in self.kv_cache_groups
-        )
         # D replays the final prompt token. P must retain SWA pages for that
         # same position rather than retire them for the next token's window.
-        return uses_compressed_cache or has_state_group or has_sliding_window_group
+        return uses_compressed_cache or any(
+            group_has_sliding_window(group) or any(isinstance(spec, MambaSpec) for spec in group_distinct_specs(group))
+            for group in self.kv_cache_groups
+        )
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:

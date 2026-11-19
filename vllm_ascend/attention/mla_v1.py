@@ -70,7 +70,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
-from vllm_ascend.core.kv_cache_layers import HAS_LAYER_CONFIG, get_layer_spec
+from vllm_ascend.core.kv_cache_layers import get_layer_spec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
@@ -170,16 +170,16 @@ class AscendMLAAttention(MLAAttention):
 
     supports_pcp_dcp: ClassVar[bool] = True
 
-    if HAS_LAYER_CONFIG:
+    def get_kv_cache_config(self, vllm_config):
+        config = super().get_kv_cache_config(vllm_config)
+        return replace(config, spec=self._ascend_cache_layout(config.spec, vllm_config, config.is_draft))
 
-        def get_kv_cache_config(self, vllm_config):
-            config = super().get_kv_cache_config(vllm_config)
-            return replace(config, spec=self._ascend_cache_layout(config.spec, vllm_config, config.is_draft))
-    else:
-
-        def get_kv_cache_spec(self, vllm_config):
-            spec = super().get_kv_cache_spec(vllm_config)
-            return self._ascend_cache_layout(spec, vllm_config, spec.is_draft)
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config):
+        if not vllm_version_is("0.33.0"):
+            return self.get_kv_cache_config(vllm_config).spec
+        spec = super().get_kv_cache_spec(vllm_config)
+        return self._ascend_cache_layout(spec, vllm_config, spec.is_draft)
 
     def _ascend_cache_layout(self, spec, vllm_config, is_draft):
         if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:

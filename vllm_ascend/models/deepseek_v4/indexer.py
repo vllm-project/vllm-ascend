@@ -38,9 +38,9 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_layers import FullAttentionCacheLayer
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -127,7 +127,7 @@ def get_indexer_k_dtype(vllm_config: VllmConfig) -> torch.dtype:
     return expected_dtype
 
 
-class AscendDeepseekV4IndexerCache(FullAttentionCacheLayer, DeepseekV4IndexerCache):
+class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def __init__(
         self,
         head_dim: int,
@@ -138,7 +138,12 @@ class AscendDeepseekV4IndexerCache(FullAttentionCacheLayer, DeepseekV4IndexerCac
     ):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
-    def _get_cache_layout(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return FullAttentionManager.layer_config(spec)
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
