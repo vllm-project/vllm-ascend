@@ -40,10 +40,10 @@ Diff Coverage column. The output is a 4x3 markdown table:
     | ------------ | --------------   | ------------- |
     | **Total**    | 145055 lines     | 191 lines     |
     | **Missing**  | 41592 lines      | 85 lines      |
-    | **Coverage** | 🟥 <b>71%</b>    | 🟥 <b>55%</b> |
+    | **Coverage** | [REDACTED] <b>71%</b>    | [REDACTED] <b>55%</b> |
 
-Coverage cells render with a red circle when below the threshold
-(Total < 70%, Diff < 80%), bold when at/above.
+Coverage cells render with a red indicator (U+1F7E5) when below the
+threshold (Total < 70%, Diff < 80%), bold when at/above.
 """
 
 import argparse
@@ -145,6 +145,7 @@ def build_table(total: dict, diff: dict | None, summary_url: str = "") -> str:
     diff_missing = diff["missing"] if diff else "N/A"
 
     out = (
+        "## Coverage\n"
         "|              | Total Coverage  | Diff Coverage |\n"
         "| ------------ | --------------- | ------------- |\n"
         f"| **Total**    | {total['total']}         | {diff_total} |\n"
