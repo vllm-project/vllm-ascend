@@ -85,7 +85,8 @@ Set `num_speculative_tokens` to the checkpoint block size minus one. Omit
 `draft_tensor_parallel_size` to inherit the target TP size; the two sizes must
 match for DSpine. Draft sampling defaults
 to `greedy`; use `draft_sample_method="probabilistic"` for probabilistic proposals.
-The adapter uses the existing Ascend DFlash2 candidate walk. Probabilistic
+The adapter inherits the upstream candidate sampler, including proposal-cache
+updates, and uses the existing Ascend DFlash2 candidate walk. Probabilistic
 sampling uses the Ascend RNG, so a fixed seed need not reproduce CUDA drafts.
 
 Adaptive verification, fine-grained LM head TP, PCP vocabulary weight sharding,
