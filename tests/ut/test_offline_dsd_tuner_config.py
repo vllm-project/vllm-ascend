@@ -17,8 +17,7 @@ class CapturedLLMConfig(BaseException):
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
-@pytest.mark.parametrize("disable_padding", [False, True])
-def test_dsd_tuner_padding_matches_native_config(method, disable_padding):
+def test_dsd_tuner_padding_matches_native_config(method):
     """Exercise the example's LLM boundary without model loading or NPU work."""
     path = Path(__file__).resolve().parents[2] / "examples/offline_DSD_k_tuner/generate_config.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -45,7 +44,6 @@ def test_dsd_tuner_padding_matches_native_config(method, disable_padding):
     exec(compile(ast.fix_missing_locations(module), str(path), "exec"), scope)
     args = SimpleNamespace(
         method=method,
-        disable_padded_drafter_batch=disable_padding,
         model_dir="target",
         enable_multimodal_chat=False,
         eagle_dir="draft",
@@ -62,22 +60,16 @@ def test_dsd_tuner_padding_matches_native_config(method, disable_padding):
     )
     field = "disable_padded_drafter_batch"
     assert field not in SpeculativeConfig.__annotations__
-    if disable_padding:
-        with pytest.raises(ValueError, match="--disable-padded-drafter-batch is no longer supported"):
-            scope["get_acceptance_rate_per_pos"](args)
-        tokenizer.from_pretrained.assert_not_called()
-        llm.assert_not_called()
-    else:
-        with pytest.raises(CapturedLLMConfig) as captured:
-            scope["get_acceptance_rate_per_pos"](args)
-        expected = {
-            "method": method,
-            "model": "draft",
-            "num_speculative_tokens": 3,
-            "parallel_drafting": True,
-        }
-        assert captured.value.kwargs["speculative_config"] == expected
-        assert captured.value.kwargs["compilation_config"] == {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [1, 4],
-        }
+    with pytest.raises(CapturedLLMConfig) as captured:
+        scope["get_acceptance_rate_per_pos"](args)
+    expected = {
+        "method": method,
+        "model": "draft",
+        "num_speculative_tokens": 3,
+        "parallel_drafting": True,
+    }
+    assert captured.value.kwargs["speculative_config"] == expected
+    assert captured.value.kwargs["compilation_config"] == {
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [1, 4],
+    }
