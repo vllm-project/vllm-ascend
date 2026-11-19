@@ -23,7 +23,8 @@ from functools import wraps
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextSparseMoeBlock
@@ -35,8 +36,10 @@ except ImportError:
     Qwen3_5MultiTokenPredictor = None
     IntermediateTensors = None
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
+from vllm_ascend.ops.dense_mxfp8_sp import dense_mxfp8_sp_available
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
 
@@ -65,6 +68,88 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
 # FlashComm switch on Ascend. The Qwen3.5 dense family covers Qwen3.5-27B,
 # Qwen3.6-27B and Qwen3.8-27B dense checkpoints (model_type "qwen3_5_text").
 DENSE_SP_MODEL_TYPES = ("qwen3_5_text",)
+DENSE_MXFP8_TP_SIZES = (2, 4, 8)
+DENSE_MXFP8_GROUP_SIZE = 32
+DENSE_MXFP8_K_ALIGNMENT = 2 * DENSE_MXFP8_GROUP_SIZE
+DENSE_MXFP8_MIN_K = 256
+DENSE_MXFP8_MAX_K = 65535
+
+
+def _dense_mxfp8_linear_supported(proj, tp_size: int) -> bool:
+    # Quantization registration imports worker operators; resolve the concrete
+    # scheme after those imports have finished, when building the decoder.
+    from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+    method = getattr(proj, "quant_method", None)
+    if type(method) is not AscendLinearMethod:
+        return False
+    scheme = method.quant_method
+    if type(scheme) is not AscendW8A8MXFP8DynamicLinearMethod or scheme.group_size != DENSE_MXFP8_GROUP_SIZE:
+        return False
+    if (
+        getattr(proj, "custom_op", None) is not None
+        or getattr(proj, "bias", None) is not None
+        or getattr(proj, "tp_size", None) != tp_size
+        or getattr(proj, "_mxfp8_transformed", False)
+        or getattr(proj, "_fused_preprocess_managed", False)
+    ):
+        return False
+    weight = getattr(proj, "weight", None)
+    scale = getattr(proj, "weight_scale", None)
+    if not isinstance(weight, torch.Tensor) or weight.ndim != 2 or weight.dtype != torch.float8_e4m3fn:
+        return False
+    # At construction weights still have their checkpoint [N, K] layout.
+    n, k = weight.shape
+    return (
+        n > 0
+        and DENSE_MXFP8_MIN_K <= k < DENSE_MXFP8_MAX_K
+        and k % DENSE_MXFP8_K_ALIGNMENT == 0
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.uint8
+        and tuple(scale.shape) == (n, k // DENSE_MXFP8_GROUP_SIZE)
+    )
+
+
+def _configure_dense_mxfp8_sp(mlp, vllm_config) -> None:
+    """Opt a complete dense MLP into MXFP8 SP fusion before loading weights.
+
+    FlashComm owns the sequence layout. The existing fuse_gemm_comms switch
+    additionally opts into ND weights and quantized GEMM/collective fusion.
+    Keep the original projections for all other configurations.
+    """
+    pass_config = getattr(getattr(vllm_config, "compilation_config", None), "pass_config", None)
+    if (
+        not getattr(pass_config, "fuse_gemm_comms", False)
+        or getattr(vllm_config, "lora_config", None) is not None
+        or not is_950()
+        or not dense_mxfp8_sp_available()
+    ):
+        return
+    tp_size = get_tp_group().world_size
+    if tp_size not in DENSE_MXFP8_TP_SIZES:
+        return
+    gate_up = getattr(mlp, "gate_up_proj", None)
+    down = getattr(mlp, "down_proj", None)
+    if not all(_dense_mxfp8_linear_supported(proj, tp_size) for proj in (gate_up, down)):
+        return
+    if (
+        getattr(gate_up, "gather_output", True)
+        or not getattr(down, "input_is_parallel", False)
+        or getattr(down, "reduce_results", True)
+        or gate_up.weight.shape[0] != 2 * down.weight.shape[1]
+        or gate_up.weight.shape[1] != down.weight.shape[0]
+    ):
+        return
+    # Fix the storage policy before post-processing, so weight reloads reuse
+    # the original address-stable buffers instead of a separate stale cache.
+    gate_up._mxfp8_keep_nd = down._mxfp8_keep_nd = True
+    mlp._dense_mxfp8_sp_tp_size = tp_size
+    mlp._dense_mxfp8_sp_scale_algs = (
+        int(gate_up.quant_method.quant_method.dynamic_mx_quant_scale_alg),
+        int(down.quant_method.quant_method.dynamic_mx_quant_scale_alg),
+    )
+    logger.info_once("Dense MXFP8 MLP SP fusion enabled with ND weights (TP=%d).", tp_size)
 
 
 def enable_dense_sp(vllm_config=None) -> bool:
@@ -187,6 +272,17 @@ def _sequence_parallel_dense_mlp_forward(mlp: torch.nn.Module, hidden_states: to
     column-parallel / row-parallel GEMMs (``down_proj.reduce_results=False``
     leaves partial sums) and reduce-scatter back to the rank-local shard.
     """
+    tp_size = getattr(mlp, "_dense_mxfp8_sp_tp_size", 0)
+    if tp_size:
+        gate_up, down = mlp.gate_up_proj, mlp.down_proj
+        gate_scale_alg, down_scale_alg = mlp._dense_mxfp8_sp_scale_algs
+        hidden_states = torch.ops.vllm.dense_mxfp8_all_gather_mm(
+            hidden_states, gate_up.weight, gate_up.weight_scale, gate_scale_alg, tp_size
+        )
+        hidden_states = mlp.act_fn(hidden_states)
+        return torch.ops.vllm.dense_mxfp8_mm_reduce_scatter(
+            hidden_states, down.weight, down.weight_scale, down_scale_alg, tp_size
+        )
     hidden_states = sp_all_gather(hidden_states)
     gate_up, _ = mlp.gate_up_proj(hidden_states)
     hidden_states = mlp.act_fn(gate_up)
@@ -299,6 +395,7 @@ def _qwen3_5_decoder_layer_init_with_dense_sp(
         self.self_attn.o_proj.reduce_results = False
     if not isinstance(self.mlp, Qwen3NextSparseMoeBlock):
         self.mlp.down_proj.reduce_results = False
+        _configure_dense_mxfp8_sp(self.mlp, vllm_config)
 
 
 if Qwen3_5MultiTokenPredictor is not None:

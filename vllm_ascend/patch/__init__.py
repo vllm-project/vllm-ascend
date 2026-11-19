@@ -1065,6 +1065,11 @@
 #       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
 #       DeepSeek-V4 pattern); MoE blocks keep the upstream
 #       `already_sequence_parallel=True` contract.
+#       With `fuse_gemm_comms`, eligible group-32 MXFP8 dense MLPs on 950DT
+#       use AG+QMM and QMM+RS at those same boundaries. Both projections
+#       retain ND weights through the existing reload buffers. Small token
+#       counts keep quantized matmul plus separate collectives inside the
+#       opaque ops, so dynamic graphs preserve the sequence layout.
 #       The module-level patch applications are guarded by
 #       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
 #       the lazy import from `utils.enable_sp` stays side-effect-free on

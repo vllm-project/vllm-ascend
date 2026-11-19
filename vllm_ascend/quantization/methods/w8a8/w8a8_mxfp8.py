@@ -276,10 +276,12 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         target_scale = reshaped_scale.transpose(0, 1)
 
         transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        # Quantized SP collectives require ND weights. Select the layout at
+        # construction, before the persistent buffers are first allocated;
+        # reload then updates the same buffers captured by ACL graphs.
+        keep_nd = getattr(layer, "_mxfp8_keep_nd", False) or getattr(layer, "_fused_preprocess_managed", False)
         layer._mxfp8_gmm_nz_layout = (
-            getattr(layer, "_single_group_gmm_nz", False)
-            and not getattr(layer, "_fused_preprocess_managed", False)
-            and _should_trans_nz(transposed_weight)
+            getattr(layer, "_single_group_gmm_nz", False) and not keep_nd and _should_trans_nz(transposed_weight)
         )
         if layer._mxfp8_gmm_nz_layout:
             # Add the group dimension before casting: WeightNz GMM needs
@@ -290,7 +292,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            if not keep_nd:
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
