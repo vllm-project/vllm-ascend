@@ -109,7 +109,7 @@ certification level:
 | Backend | Certification | Consequence under `repair` |
 | :--- | :--- | :--- |
 | Mooncake (default) | `content` by default - the store object keys are content-addressed and its object model guarantees atomic whole-object writes, so a successful read returns the bytes bound to that key. | Repair benefits are available: the healthy prefix before the failure is kept and only the failed range is repaired. |
-| Memcache / Yuanrong | Forced to `none` - these backends provide no service-side write-once guarantee for their keys (no atomic add-if-absent; Yuanrong rewrites keys on every save), so the connector cannot claim content verification. | Behaves as a safe recompute fallback: a failed load is rescheduled to recompute, with no repair benefit. The policy is still safe to configure. |
+| Memcache / Yuanrong | Forced to `none` - the pool storage keys address tokens and model identity but not the full content determinants (dtype, quantization), and neither backend documents a binding the connector could verify against, so the connector cannot claim content verification. | Behaves as a safe recompute fallback: a failed load is rescheduled to recompute, with no repair benefit. The policy is still safe to configure. |
 
 `evidence_certification` is a `kv_connector_extra_config` key (not an engine argument).
 `content` (default for Mooncake) or `none` are accepted; `sha256` is rejected. On

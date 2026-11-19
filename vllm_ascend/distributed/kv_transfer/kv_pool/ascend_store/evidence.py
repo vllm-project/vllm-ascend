@@ -50,16 +50,15 @@ Truthfulness rules
   assumption (atomic per-object writes; GET returns the bytes bound to the
   identity key), mirroring the upstream mooncake producer's claim for the
   same store and key scheme. "none" -- no verification beyond GET success.
-  The memcache and yuanrong backends are FORCED to "none": the only
-  write-once property available to them is a CLIENT-SIDE exists-filter
-  (lookup, then put the missing -- a racy check-then-write, not a
-  service-side add-if-absent), yuanrong additionally re-PUTs every key on
-  every save, and memcache's blockwise put path exposes no
-  atomic-visibility contract (its write-finish handshake exists only in
-  the layerwise plane). The key derivation covers tokens + model +
-  parallel coordinates but NOT the full payload determinants (dtype,
-  quantization, kernel numerics), so same-key-different-bytes cannot be
-  ruled out across deployments. Digest verification ("sha256") is never
+  The memcache and yuanrong backends are FORCED to "none": the memcache
+  service was MEASURED to behave add-if-absently and atomically, but that
+  behavior is undocumented and version-specific (not a citable contract);
+  the load-bearing reason is that the pool key addressing (tokens + model +
+  parallel coordinates) does NOT bind content uniquely (dtype,
+  quantization, kernel numerics are absent from the key), so
+  same-key-different-bytes cannot be ruled out across deployments;
+  yuanrong additionally re-PUTs every key on every save, making its
+  binding continuously mutable. Digest verification ("sha256") is never
   claimed: no AscendStore GET path performs an independent digest
   check.
 * An attempt that did not complete (interrupted, exception before
