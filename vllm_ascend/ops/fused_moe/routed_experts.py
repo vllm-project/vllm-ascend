@@ -711,8 +711,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         # The forward-level selection cannot see per-layer quant types: on A2
-        # only the W4A8 dispatch_ffn_combine variant exists, so an unquantized
-        # MoE layer (e.g. the BF16 dspark draft) must downgrade here.
+        # only the W4A8/W8A8 dispatch_ffn_combine variants exist, so an
+        # unquantized MoE layer (e.g. the BF16 dspark draft) must downgrade here.
         moe_comm_type = _EXTRA_CTX.moe_comm_type
         if moe_comm_type is MoECommType.FUSED_MC2:
             moe_comm_type = resolve_moe_comm_type_for_layer(

@@ -50,10 +50,12 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale2,
                  probs,
                  x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
+                 context.has_value() ? context.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
                  swiglu_limit,
                  world_size,
+                 ccl_buffer_size,
                  out,
                  expert_token_nums);
     } else if (is_int4){

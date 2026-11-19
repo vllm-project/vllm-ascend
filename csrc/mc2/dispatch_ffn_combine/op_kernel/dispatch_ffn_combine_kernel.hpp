@@ -123,6 +123,7 @@ public:
         uint32_t rankSize;
         int32_t ubMoveNum;
         GM_ADDR symmetricPtr;
+        uint64_t kfcSegmentSize;
         //--------------
         GM_ADDR expertIdx;
         GM_ADDR moeInitRoutingQuantV2Scale;
@@ -164,7 +165,8 @@ public:
             GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             GM_ADDR ptrXActiveMask_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_,
-            float swigluLimit_
+            float swigluLimit_,
+            GM_ADDR symmetricPtr_ = nullptr, uint64_t kfcSegmentSize_ = 0
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
             rank(rank_), rankSize(rankSize_), topK(topK_),
@@ -180,6 +182,8 @@ public:
             moeInitRoutingQuantV2Offset(moeInitRoutingQuantV2Offset_),
             expertTokensBeforeCapacity(expertTokensBeforeCapacity_), probs(probs_),
             ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
+            symmetricPtr(symmetricPtr_),
+            kfcSegmentSize(kfcSegmentSize_),
             ptrXActiveMask(ptrXActiveMask_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
             swigluLimit(swigluLimit_)
@@ -234,6 +238,10 @@ private:
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
             shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
+        #else
+            if (params.symmetricPtr != nullptr && params.kfcSegmentSize > 0) {
+                shmem.initKfc(params.symmetricPtr, static_cast<int32_t>(params.rankSize), params.kfcSegmentSize);
+            }
         #endif
         workspaceInfo = WorkspaceInfo(params);
         peermemInfo = PeermemInfo(params, shmem);

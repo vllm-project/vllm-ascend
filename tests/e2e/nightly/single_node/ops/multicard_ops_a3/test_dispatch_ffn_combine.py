@@ -4,11 +4,12 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu
-from torch.distributed.distributed_c10d import _get_default_group
 
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
+
+DEVICE_OFFSET = 0
 
 # The op internally quantizes activations to int8 per token (scale = rowmax/127)
 # before each GEMM, so an fp32 reference on the unquantized inputs matches the op
@@ -28,6 +29,8 @@ class TestDispatchFFNCombine:
         self.world_size = world_size
         self.master_ip = "127.0.0.1"
         self.port = port
+        self.kfc_context = None
+        self.ccl_buffer_size = 0
 
     def get_hcomm(self, comm_group):
         hcomm_info = None
@@ -90,8 +93,30 @@ class TestDispatchFFNCombine:
             hcomm_info_dist["group_tp"] = group_tp
         else:
             if dist.is_available():
-                default_pg = _get_default_group()
-            hcomm_info_dist["default_pg_info"] = self.get_hcomm(default_pg)
+                group_mc2 = dist.new_group(
+                    ranks=list(range(self.world_size)),
+                    backend="hccl",
+                    group_desc="mc2:device",
+                    device_id=torch.device("npu", DEVICE_OFFSET + self.rank),
+                )
+                warm = torch.ones(1, dtype=torch.float32).npu()
+                dist.all_reduce(warm, group=group_mc2)
+                torch.npu.synchronize()
+                hcomm_info_dist["default_pg_info"] = self.get_hcomm(group_mc2)
+
+                # A2 KFC context: symmetric CCL buffers (epHcclBuffer_).
+                from cann_ops_transformer.ops import get_symm_buffer_for_mega_moe
+
+                self.sym_buffer = get_symm_buffer_for_mega_moe(
+                    group_mc2,
+                    num_experts=8,
+                    num_max_tokens_per_rank=128,
+                    num_topk=8,
+                    hidden=1024,
+                    intermediate_hidden=512,
+                )
+                self.kfc_context = self.sym_buffer.context
+                self.ccl_buffer_size = self.sym_buffer.ccl_buffer_size
         hcomm_info = hcomm_info_dist["default_pg_info"]
         self.hcomm_info = hcomm_info
 
@@ -188,6 +213,8 @@ class TestDispatchFFNCombine:
             swiglu_limit=0.0,
             world_size=self.world_size,
             x_active_mask=xactmask,
+            context=self.kfc_context,
+            ccl_buffer_size=self.ccl_buffer_size,
             out=out,
             expert_token_nums=expert_token_nums,
         )

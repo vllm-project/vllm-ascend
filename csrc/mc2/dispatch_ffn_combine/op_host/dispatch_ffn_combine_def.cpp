@@ -60,6 +60,13 @@ class DispatchFFNCombine : public OpDef {
         .DataType({ge::DT_BOOL, ge::DT_BOOL, ge::DT_BOOL})
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+    // A2 KFC comm context (CANN CommContext tensor). Empty/null on A3, where
+    // the HCCL symmetric window from GetHcclContext is used instead.
+    this->Input("context")
+        .ParamType(OPTIONAL)
+        .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
     // Output
     this->Output("out")
@@ -79,6 +86,7 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
     this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
     this->Attr("worldSize").AttrType(REQUIRED).Int();
+    this->Attr("cclBufferSize").AttrType(OPTIONAL).Int(0);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)

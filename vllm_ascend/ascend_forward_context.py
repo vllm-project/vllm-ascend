@@ -367,9 +367,9 @@ def _select_capacity_and_expert_density_moe_comm_method(
     # A2 opt-in for the fused dispatch-FFN-combine path. The A2 default policy
     # predates enable_fused_mc2; without this, enable_fused_mc2=1 is silently
     # ignored on A2 and the run falls back to ALLGATHER/MC2.
-    # Draft (MTP) MoE layers keep the default path: on A2 only the W4A8 variant
-    # of dispatch_ffn_combine is built, and the MTP layer's weight layout /
-    # quant type is not guaranteed to match it. This mirrors the A5 gate in
+    # Draft (MTP) MoE layers keep the default path: the MTP layer's weight
+    # layout / quant type is not guaranteed to match an A2 fused variant.
+    # This mirrors the A5 gate in
     # _select_capacity_and_world_size_moe_comm_method.
     if get_ascend_config().enable_fused_mc2 == 1 and not is_draft_model:
         return MoECommType.FUSED_MC2
@@ -392,7 +392,7 @@ def resolve_moe_comm_type_for_layer(
     The forward-level selection cannot see individual layers, so a model that
     mixes quantized target layers with unquantized ones (e.g. the BF16 dspark
     MTP draft layer) would hand every MoE layer to FUSED_MC2. On A2 only the
-    W4A8 variant of dispatch_ffn_combine is built, so such a layer must fall
+    W4A8/W8A8 variants of dispatch_ffn_combine are built, so such a layer must fall
     back to the device's default (non-fused) policy instead of failing at the
     aclnn lookup.
 
