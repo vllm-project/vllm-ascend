@@ -485,8 +485,10 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
                 buffers = model.make_empty_intermediate_tensors(capacity, dtype, "cpu")
                 assert buffers.tensors.keys() == intermediate.tensors.keys()
                 assert model._aux_slot_base_cached == len(intermediate.tensors) - 2
-                if context.pp.is_last_rank and hasattr(model, "_aux_upstream_total_cached"):
-                    # v0.34.0's mixin totals the upstream slots on the last rank.
+                if context.pp.is_last_rank and namespace["vllm_version_is"]("0.34.0"):
+                    # v0.34.0's mixin totals the upstream slots on the last rank;
+                    # main merges the upstream slots in the runner instead, so
+                    # BaseModel's zero placeholder must not be asserted there.
                     assert model._aux_upstream_total_cached == len(intermediate.tensors) - 2
                 # Boundary tensors are full-sequence replicas under the
                 # stage-boundary gather contract.
