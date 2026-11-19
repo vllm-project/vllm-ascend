@@ -34,6 +34,7 @@ from vllm_ascend.observability.runtime_guard.state import ILL_TYPE_NONE, Inciden
 
 if TYPE_CHECKING:
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardState
 
 logger = init_logger_ascend(__name__)
 
@@ -112,7 +113,7 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         self._high_threshold = float(getter("high_threshold", self._high_threshold))
         self._len_high_threshold = float(getter("len_high_threshold", self._len_high_threshold))
 
-    def clear_finished(self, req_id: str) -> None:
+    def clear_finished(self, req_id: str, *, expected_state: RequestGuardState | None = None) -> None:
         self._history.pop(req_id, None)
         self._short_log_ts.pop(req_id, None)
 

@@ -43,6 +43,4 @@ def test_validate_uses_schema_defaults_for_missing_fields():
     validate_runtime_config(data)
     tr = data["detector"]["token_repeat"]
     assert tr["enabled"] is True
-    assert tr["window"] == 32
-    assert tr["repeat_sum_threshold"] == 64
-    assert tr["ignore_token_ids"] == []
+    assert tr["think_end"] == -1

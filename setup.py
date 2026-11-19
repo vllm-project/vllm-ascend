@@ -326,7 +326,26 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
     def build_extensions(self) -> None:
-        if not envs.COMPILE_CUSTOM_KERNELS:
+        cmake_exts = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
+        other_exts = [ext for ext in self.extensions if not isinstance(ext, CMakeExtension)]
+
+        # Pure-CPU pybind extensions (e.g. token_repeat pattern) use the stock
+        # setuptools builder and must not go through Ascend CMake.
+        if other_exts:
+            # Defer pybind11 import until we actually compile pure-CPU extensions
+            # (metadata / help / non-ext installs do not need it at import time).
+            import pybind11
+
+            pybind_inc = pybind11.get_include()
+            for ext in other_exts:
+                if pybind_inc not in ext.include_dirs:
+                    ext.include_dirs.insert(0, pybind_inc)
+            saved = self.extensions
+            self.extensions = other_exts
+            build_ext.build_extensions(self)
+            self.extensions = saved
+
+        if not envs.COMPILE_CUSTOM_KERNELS or not cmake_exts:
             return
         # Ensure that CMake is present and working
         try:
@@ -345,8 +364,8 @@ class cmake_build_ext(build_ext):
         def target_name(s: str) -> str:
             return s.removeprefix("vllm_ascend.")
 
-        # Build all the extensions
-        for ext in self.extensions:
+        # Build Ascend CMake extensions only
+        for ext in cmake_exts:
             self.configure(ext)
             targets.append(target_name(ext.name))
 
@@ -421,7 +440,26 @@ except LookupError:
 
 ext_modules = []
 if envs.COMPILE_CUSTOM_KERNELS:
-    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+    ext_modules.append(CMakeExtension(name="vllm_ascend.vllm_ascend_C"))
+
+# token_repeat pattern backend: always built (pure CPU, no CANN).
+_PATTERN_DIR = os.path.join(
+    ROOT_DIR,
+    "vllm_ascend",
+    "observability",
+    "runtime_guard",
+    "native_pattern",
+)
+ext_modules.append(
+    Extension(
+        "vllm_ascend.observability.runtime_guard.native_pattern._pattern_native",
+        sources=[os.path.join(_PATTERN_DIR, "pattern_native.cpp")],
+        depends=[os.path.join(_PATTERN_DIR, "position_queue.h")],
+        include_dirs=[_PATTERN_DIR],  # pybind11 include added in cmake_build_ext
+        language="c++",
+        extra_compile_args=["-O3", "-std=c++17", "-fno-fast-math"],
+    )
+)
 
 
 def get_path(*filepath) -> str:
@@ -497,6 +535,7 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
+        "vllm_ascend.observability.runtime_guard.native_pattern": ["pattern.json"],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

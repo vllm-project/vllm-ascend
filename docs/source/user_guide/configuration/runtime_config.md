@@ -104,11 +104,60 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `window` | int | `32` | Sliding content window |
-| `repeat_sum_threshold` | int | `64` | Alert when sum of repeat scores exceeds this |
-| `min_tokens` | int | `32` | Minimum content tokens before alerting |
-| `consecutive_hits` | int | `1` | Required consecutive over-threshold steps |
-| `ignore_token_ids` | list[int] | `[]` | Token ids excluded from window scoring |
+| `enabled` | bool | `false` | Master switch |
+| `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |
+
+`token_repeat` uses a fixed pattern-based rule set with 64 raw-token check
+boundaries and a final partial-block flush. The native CPU extension lives
+in-tree at `vllm_ascend/.../native_pattern/` and is compiled when you build
+or install vllm-ascend; there is no separate pip package.
+
+Alert thresholds, short on-call titles, and long rule ids live in packaged
+`native_pattern/pattern.json` (loaded once at detector init; not a
+`runtime_config` hot-reload field). Feature share windows and the feature-rule
+list are also JSON-driven. Hot-reload still applies when
+`runtime_config_hot_reload` is on (enable/disable and `think_end`).
+
+```json
+"token_repeat": {
+  "enabled": true,
+  "think_end": -1
+}
+```
+
+Use `-1` for chat mode, or the model's explicit `</think>` token ID for
+reasoning. Tables are built from the served model's `tokenizer.json` during
+enable-time warmup. ByteLevel BPE is supported; remote model IDs require
+tokenizer.json in the local HF cache. The table stays in memory and is
+released when the detector is disabled. Warmup logs vocabulary size and
+elapsed time, with a warning above the 5-second target.
+
+Warmup failure is logged once for that enable attempt and latches detection
+off (no CPU enqueue) until disable/re-enable; inference continues. Fix the
+tokenizer/resources and disable/re-enable to retry. Rebinding to a different
+model rebuilds the tables.
+
+Detection uses the existing CPU ActionQueue and Incident actions. If the
+queue is full or stopping, that step's detect job may be dropped (warning
+logged). Terminal tails are checked before Store cleanup after CPU jobs
+drain. Forced cleanup at the deferred-wave limit can skip the terminal check
+for outstanding jobs; this is explicitly logged.
+
+Incident `detail` carries a short on-call `reason` (JSON `title`) and a long
+`rule` id (JSON `reason`), in native evaluation order:
+
+| reason (title) | rule (long id) | meaning (short) |
+|----------------|----------------|-----------------|
+| `exact_x5` / `exact_x3` | `vllm[32,500]x5` / `vllm[32,2000]x3` | exact raw-token period copies |
+| `run_char` | `run>=500` | long same-char run |
+| `a3_dense` / `a5_*` / `p_n8` | `A3_*` / `A5_*` / `P_*` | n-gram density features |
+| `wrep_*` | `wrep_*` | word-repeat share |
+| `sdup_*` | `sdup_*` | sentence-duplicate share |
+
+Focused regression tests:
+`tests/ut/runtime_guard/test_token_repeat_pattern.py`. Native cases and
+Python-gold parity need the `_pattern_native` extension from a normal
+vllm-ascend build/install and skip when that extension is absent.
 
 ### logits_finite
 
@@ -151,8 +200,7 @@ Not a detector — control-plane for `dump.manual_dump`. Always runs `dump_kv` o
   "detector": {
     "token_repeat": {
       "enabled": true,
-      "window": 32,
-      "repeat_sum_threshold": 64,
+      "think_end": -1,
       "on_trigger": ["report", "dump_kv"],
       "dump_kv": { "scope": "request" }
     }

@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -30,6 +30,9 @@ from vllm_ascend.observability.runtime_config._defaults import LOGITS_FINITE_DEF
 from vllm_ascend.observability.runtime_config.schema import ConfigField, DetectorSchema
 from vllm_ascend.observability.runtime_guard.detector.base import ConfigBackedDetector
 from vllm_ascend.observability.runtime_guard.state import ILL_TYPE_NAN, Incident
+
+if TYPE_CHECKING:
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardState
 
 logger = init_logger_ascend(__name__)
 
@@ -142,7 +145,7 @@ class LogitsFiniteDetector(ConfigBackedDetector):
     def _apply_detector_values(self, getter: Callable[[str, Any], Any]) -> None:
         self._item_sync = bool(getter("item_sync", self._item_sync))
 
-    def clear_finished(self, req_id: str) -> None:
+    def clear_finished(self, req_id: str, *, expected_state: RequestGuardState | None = None) -> None:
         del req_id
 
     def _stage_none(self) -> None:

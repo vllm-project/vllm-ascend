@@ -24,6 +24,7 @@ from vllm_ascend.observability.runtime_guard.state import Incident
 if TYPE_CHECKING:
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
     from vllm_ascend.observability.runtime_config.schema import DetectorSchema
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardState
 
 
 def resolve_batch_req_ids(runner: Any, req_ids: list[str] | None) -> list[str]:
@@ -62,8 +63,20 @@ class AnomalyDetector:
         """Pull live knobs from ``RuntimeConfig`` (default: no-op)."""
         return
 
-    def clear_finished(self, req_id: str) -> None:
-        """Drop per-request state when a request finishes."""
+    def rebind_runner(self, runner: Any, *, runtime_config: RuntimeConfig | None = None) -> None:
+        """Replace runner inputs and refresh even if the new config reuses a version."""
+        self._runner = runner
+        if runtime_config is not None:
+            self._runtime_config = runtime_config
+        if hasattr(self, "_applied_config_version"):
+            self._applied_config_version: float | None = None
+        self.refresh_from_config()
+
+    def clear_finished(self, req_id: str, *, expected_state: RequestGuardState | None = None) -> None:
+        """Drop private state, optionally restricted to the supplied request generation.
+
+        Detectors without generation-specific state may ignore ``expected_state``.
+        """
 
     def on_alert_armed(self, alert: Incident) -> None:
         """Optional hook after dump arm or detect-only alert handling."""

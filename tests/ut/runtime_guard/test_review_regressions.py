@@ -169,7 +169,7 @@ def test_v13_jsonc_comments_and_trailing_commas(tmp_path: Path):
         """{
   // enable repeat detection
   "detector": {
-    "token_repeat": { "enabled": true, "window": 8, }, /* trailing comma above */
+    "token_repeat": { "enabled": true, "think_end": 8, }, /* trailing comma above */
   },
 }""",
         encoding="utf-8",
@@ -177,7 +177,7 @@ def test_v13_jsonc_comments_and_trailing_commas(tmp_path: Path):
     os.utime(cfg_path, (time.time() + 10, time.time() + 10))
     assert cfg.reload(force=True) is True
     assert cfg.detector_get("token_repeat", "enabled") is True
-    assert cfg.detector_get("token_repeat", "window") == 8
+    assert cfg.detector_get("token_repeat", "think_end") == 8
 
 
 # ---------------------------------------------------------------- V5 (P0-3)
@@ -1707,7 +1707,9 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
     assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
-    assert rc.detector_get("token_repeat", "window", 0) == int(cfg._DEFAULTS["detector"]["token_repeat"]["window"])
+    assert rc.detector_get("token_repeat", "think_end", -1) == int(
+        cfg._DEFAULTS["detector"]["token_repeat"]["think_end"]
+    )
     assert "output_substring" not in on_disk.get("detector", {})
 
 
@@ -2326,7 +2328,7 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
     RequestGuardStore.reset_for_tests()
     try:
         store = RequestGuardStore.get()
-        store.get_or_create("r1")
+        old_state = store.get_or_create("r1")
         store.append_output_ids("r1", [1, 2])
         store.mark_finished(["r2"], wave=1)
 
@@ -2362,7 +2364,7 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
         assert p._kv_dump_jobs == []
         assert p._deferred_kv_dump_jobs == [{"req_id": "kept", "arm_id": "a0"}]
         p.quota.refund.assert_called_once_with(consume_quota=True)
-        p.detectors.clear_finished.assert_any_call("r1")
+        p.detectors.clear_finished.assert_any_call("r1", expected_state=old_state)
     finally:
         RequestGuardStore.reset_for_tests()
 

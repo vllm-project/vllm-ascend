@@ -85,7 +85,7 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 
 | Type | Stage | Typical use |
 |------|-------|-------------|
-| `token_repeat` | after sample | Stutter / repetition |
+| `token_repeat` | after sample | Pattern-based stutter / repetition (in-tree native CPU extension) |
 | `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
@@ -107,6 +107,7 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 ```json
 "token_repeat": {
   "enabled": true,
+  "think_end": -1,
   "on_trigger": ["report", "dump_kv"],
   "dump_kv": { "scope": "request" }
 }
@@ -127,3 +128,10 @@ Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hard
 
 - [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`
+
+## Token repetition (pattern)
+
+Field reference, warmup, and alert `detail.reason` / `detail.rule` live under
+[runtime_config.md — token_repeat](../configuration/runtime_config.md#token_repeat).
+The native extension builds with vllm-ascend (`native_pattern`); no separate
+pip package.

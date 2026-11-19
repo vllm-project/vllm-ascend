@@ -1,0 +1,9 @@
+pr: 21492
+entries:
+  - category: feature
+    text: >-
+      Replaced sliding-window token_repeat with an in-tree pattern-based native
+      CPU detector (built with vllm-ascend; tokenizer warmup; think_end;
+      thresholds, titles, and feature windows in packaged pattern.json).
+      Incidents expose short reason titles plus long rule ids. Former
+      window/algorithm keys are rejected.
