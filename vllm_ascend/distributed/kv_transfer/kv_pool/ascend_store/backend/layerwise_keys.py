@@ -15,6 +15,7 @@ class LayerwiseKeyBuilder:
     pcp_size: int = 1
     pcp_sharded_group_ids: set[int] = field(default_factory=set)
     dcp_size: int = 1
+    partial_model_namespace: str | None = None
 
     def make_full_key(
         self,
@@ -65,4 +66,5 @@ class LayerwiseKeyBuilder:
         drift from the scheduler's full-key format.
         """
         pp_tag = f"@pp{pp_rank}" if self.pp_size > 1 else ""
-        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+        namespace = self.partial_model_namespace or model_name
+        return f"{namespace}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"

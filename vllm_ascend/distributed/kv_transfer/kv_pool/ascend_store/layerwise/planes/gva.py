@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 from vllm.logger import logger
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     get_partial_block_index,
 )
@@ -61,6 +64,46 @@ class GvaDataPlane(LayerwiseDataPlane):
 
     def __init__(self, worker: LayerwiseKVPoolWorker):
         self._worker = worker
+        self._prompt_window_policy = None
+        layout = get_layerwise_reuse_layout(getattr(worker, "kv_cache_config", None))
+        if (
+            layout is not None
+            and layout.has_layer_reuse
+            and getattr(worker.hf_config, "model_type", None) == "deepseek_v4"
+        ):
+            from vllm_ascend.models.deepseek_v4.cache_transfer import select_prompt_window_masks
+
+            self._prompt_window_policy = select_prompt_window_masks
+
+    def _apply_window_masks(self, request: ReqMeta, token_len: int, *, saving: bool):
+        worker = self._worker
+        if (
+            self._prompt_window_policy is None
+            or worker.cache_coordinator is None
+            or worker.dcp_size != 1
+            or not request.num_prompt_tokens
+            or request.target_token_len > request.num_prompt_tokens
+        ):
+            return {}
+        groups = request.block_ids_by_group_np
+        if groups is None:
+            groups = request.block_ids_by_group
+        windows = (
+            (group, worker.cache_coordinator.continuation_block_range(group, token_len))
+            for group in worker._reused_layers_by_group
+        )
+        masks, public_pages = self._prompt_window_policy(
+            groups,
+            worker.grouped_block_size,
+            request.store_masks if saving else request.load_masks,
+            windows,
+            save_end_token=request.save_end_token if saving else None,
+        )
+        if saving:
+            request.store_masks = masks
+        else:
+            request.load_masks = masks
+        return public_pages
 
     def prepare_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
         """GVA opens no pool sessions; resolve the transfer targets instead.
@@ -70,8 +113,15 @@ class GvaDataPlane(LayerwiseDataPlane):
         step's snapshot, so it must complete before save allocation
         repoints the partial key at a fresh one.
         """
-        self._prepare_load_gvas(requests)
-        self._alloc_gvas_for_save(requests)
+        try:
+            self._prepare_load_gvas(requests)
+            self._alloc_gvas_for_save(requests)
+        except Exception:
+            # Binding aborted before this step could enqueue any DMA or reach its
+            # late draft callback. Return leases already acquired by earlier batches.
+            if self._worker.has_late_draft_loads:
+                self._worker.release_step_load_leases()
+            raise
         return {}
 
     def finish_sessions(self) -> None:
@@ -136,11 +186,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 continue
             block_hashes = request.block_hashes
 
-            window_public_pages = {}
-            if getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None:
-                from vllm_ascend.models.deepseek_v4.cache_transfer import prompt_window_masks
-
-                window_public_pages = prompt_window_masks(worker, request, request.target_token_len, saving=True)
+            window_public_pages = self._apply_window_masks(request, request.target_token_len, saving=True)
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
@@ -212,7 +258,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                     and partial_block_index < len(block_ids_by_group)
                 ):
                     if window_public is not None and block_ids_by_group[partial_block_index] == 0:
-                        raise ValueError("DeepSeek-V4 partial window snapshot has no physical block")
+                        raise ValueError("Partial window snapshot has no physical block")
                     partial_key = worker._make_layerwise_partial_key(
                         request, group_id, partial_block_index, request.target_token_len
                     )
@@ -501,10 +547,8 @@ class GvaDataPlane(LayerwiseDataPlane):
         groups: list[_LoadGroup] = []
         public_keys: dict[str, None] = {}
         restore_previous_step = worker.layerwise_offload and request.load_spec.layerwise_previous_step
-        if restore_previous_step and getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None:
-            from vllm_ascend.models.deepseek_v4.cache_transfer import prompt_window_masks
-
-            prompt_window_masks(worker, request, cached_tokens, saving=False)
+        if restore_previous_step:
+            self._apply_window_masks(request, cached_tokens, saving=False)
         for group_id in range(worker.num_kv_cache_groups):
             if group_id not in worker.cacheable_group_ids:
                 groups.append(_LoadGroup(np.zeros(0, dtype=np.int64), [], [], False))
@@ -521,7 +565,13 @@ class GvaDataPlane(LayerwiseDataPlane):
             get_saved_key = None
             partial_block_index = None
             if restore_previous_step:
-                snapshot = worker._get_layerwise_load_snapshot(request, group_id, cached_tokens, group_block_hashes)
+                snapshot = worker._get_layerwise_load_snapshot(
+                    request,
+                    group_id,
+                    cached_tokens,
+                    group_block_hashes,
+                    prefer_private=self._prompt_window_policy is not None,
+                )
                 if snapshot is None:
                     groups.append(_LoadGroup(np.zeros(0, dtype=np.int64), [], [], False))
                     continue
@@ -556,10 +606,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             if partial_block_index is not None and (
                 partial_block_index < load_start_block
                 or partial_block_index >= full_len
-                or (
-                    getattr(worker.kv_cache_config, "dsv4_cache_format", None) is not None
-                    and block_ids_by_group[partial_block_index] == 0
-                )
+                or (self._prompt_window_policy is not None and block_ids_by_group[partial_block_index] == 0)
             ):
                 return None
 

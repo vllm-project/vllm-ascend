@@ -96,11 +96,30 @@ def test_hbm_prefix_is_ready_while_external_prefix_waits_in_same_batch(num_exter
         assert state.available_layers["model.layers.2.swa"][0] == 32
 
 
-def test_swa_only_attention_ready_does_not_publish_draft_with_same_layer_number():
+@pytest.mark.parametrize("shared", [False, True])
+def test_swa_only_hook_maps_only_to_its_rotating_owner(shared):
     obj = worker()
-    obj.vllm_config.compilation_config.static_forward_context["swa-only.attn"] = SimpleNamespace(
-        swa_cache_layer=SimpleNamespace(prefix="model.layers.2.swa")
-    )
+    if shared:
+        obj._shared_layer_indices["model.layers.2.swa"] = 2
+    ctx = obj.vllm_config.compilation_config.static_forward_context
+    ctx["swa-only.attn"] = SimpleNamespace(layerwise_push_cache_name="model.layers.2.swa")
+    ctx["unrelated"] = SimpleNamespace(swa_cache_layer=SimpleNamespace(prefix="model.layers.2.swa"))
     load(PUSH, "_register_composite_layer_aliases", {}, OWNER)(obj)
-    assert obj._layer_index_by_name["swa-only.attn"] == ("model", 2)
-    assert obj._layer_index_by_name["swa-only.attn"] != obj._layer_index_by_name["draft"]
+    assert obj._layer_index_by_name.get("swa-only.attn") == (("model", 2) if shared else None)
+    assert "unrelated" not in obj._layer_index_by_name
+    assert obj._layer_index_by_name["draft"] != ("model", 2)
+
+    obj._reqs_send_state = {
+        "r": SimpleNamespace(
+            error=None, metadata=SimpleNamespace(num_computed_tokens=16, num_scheduled_tokens=3), available_layers={}
+        )
+    }
+    obj._submit_shared_layer_writes = Mock()
+    save = load(PUSH, "save_kv_layer", {"torch": SimpleNamespace(npu=SimpleNamespace(Event=Mock))}, OWNER)
+    save(obj, "swa-only.attn")
+    if shared:
+        obj._submit_shared_layer_writes.assert_called_once_with(2, ["model.layers.2.swa"])
+        assert obj._reqs_send_state["r"].available_layers["model.layers.2.swa"][0] == 19
+    else:
+        obj._submit_shared_layer_writes.assert_not_called()
+        assert not obj._reqs_send_state["r"].available_layers

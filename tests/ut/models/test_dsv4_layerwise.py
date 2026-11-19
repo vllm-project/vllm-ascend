@@ -32,7 +32,7 @@ def make_layout(
 ):
     count = 43 if model == "flash" else 61
     ratios = ([0, 0] if model == "flash" else [128, 128]) + [4 if i % 2 == 0 else 128 for i in range(2, count)]
-    hf = SimpleNamespace(model_type="deepseek_v4", num_hidden_layers=count)
+    hf = SimpleNamespace(model_type="deepseek_v4", num_hidden_layers=count, compress_ratios=ratios)
     extra = {"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": buffers}
     if independent is not None:
         extra["layerwise_independent_layers"] = independent
@@ -217,16 +217,11 @@ def test_no_reuse_dependencies_keep_native_descriptors(independent, buffers):
     assert plan_layerwise_cache_reuse(plan, runtime) is None
 
 
-@pytest.mark.parametrize("cache_format", ["a3", "a5_bf16", "a5_packed"])
-@pytest.mark.parametrize("mtp", [False, True])
-@pytest.mark.parametrize("model", ["flash", "pro"])
-def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, mtp, model, monkeypatch):
+def allocate_test_views(monkeypatch, runtime, config, specs, cache_format):
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.device.hardware_profile import get_hardware_profile
     from vllm_ascend.worker.v2 import attn_utils
 
-    runtime, groups, specs = make_layout(model, cache_format=cache_format, independent=[0, 1, 4], mtp=mtp)
-    config = make_worker_config(runtime, groups, num_blocks=16)
     allocations = []
 
     def allocate(size, alignment, device):
@@ -239,13 +234,23 @@ def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, mtp, 
     hardware = AscendDeviceType.A3 if cache_format == "a3" else AscendDeviceType.A5
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(hardware))
     raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    assert allocations == [config.kv_cache_tensors[0].size]
-    assert len({value.untyped_storage().data_ptr() for value in raw.values()}) == 1
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
     caches = {}
     for descriptor in config.kv_cache_tensors:
         for name in descriptor.layers:
             caches[name] = attn_utils._view_dsv4_cache(raw[name], specs[name], backend, config, descriptor.block_stride)
+    return caches, allocations
+
+
+@pytest.mark.parametrize("cache_format", ["a3", "a5_bf16", "a5_packed"])
+@pytest.mark.parametrize("mtp", [False, True])
+@pytest.mark.parametrize("model", ["flash", "pro"])
+def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, mtp, model, monkeypatch):
+    runtime, groups, specs = make_layout(model, cache_format=cache_format, independent=[0, 1, 4], mtp=mtp)
+    config = make_worker_config(runtime, groups, num_blocks=16)
+    caches, allocations = allocate_test_views(monkeypatch, runtime, config, specs, cache_format)
+    assert allocations == [config.kv_cache_tensors[0].size]
+    assert len({components[0].untyped_storage().data_ptr() for components in caches.values()}) == 1
     transferred = transfer_cache_views(caches)
     if mtp:
         draft_group = next(gid for gid, group in enumerate(groups) if group.is_eagle_group)
@@ -269,6 +274,93 @@ def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, mtp, 
         assert all(
             torch.all(view[draft_group + 1].float() == 7) for view in transferred["mtp.layers.0.self_attn.swa_cache"]
         )
+
+
+@pytest.mark.parametrize("model", ["flash", "pro"])
+@pytest.mark.parametrize("cache_format", ["a5_bf16", "a5_packed"])
+def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, cache_format, monkeypatch):
+    import ctypes
+    from unittest.mock import Mock
+
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_worker import MooncakePushConnectorWorker
+
+    runtime, groups, specs = make_layout(model, cache_format=cache_format, independent=[0, 1], mtp=True)
+    p_plan = make_worker_config(runtime, groups, 6)
+    runtime.kv_transfer_config = None
+    d_plan = make_worker_config(runtime, groups, 8)
+    assert get_layerwise_reuse_layout(p_plan) and not get_layerwise_reuse_layout(d_plan)
+    monkeypatch.setattr(base_worker, "global_te", Mock())
+
+    def register(plan):
+        caches, _ = allocate_test_views(monkeypatch, runtime, plan, specs, cache_format)
+        worker = object.__new__(MooncakePushConnectorWorker)
+        worker.kv_cache_config = plan
+        worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+        worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1))
+        worker.tp_rank = worker.pcp_rank = 0
+        worker.tp_size = worker.pcp_size = worker.dcp_size = 1
+        worker.block_size = 32
+        worker.engine_id = "test"
+        worker.te_rpc_port = worker.handshake_port = 0
+        worker.side_channel_host = "localhost"
+        base_worker.MooncakeBaseConnectorWorker.register_kv_caches(worker, caches)
+        return worker, caches
+
+    producer, source = register(p_plan)
+    consumer, target = register(d_plan)
+    local, remote = producer.transfer_metadata, consumer.transfer_metadata
+    assert dict(zip(local.layer_names, local.block_lens)) == dict(zip(remote.layer_names, remote.block_lens))
+
+    name = "model.layers.2.self_attn.indexer.k_cache"
+    src, dst = source[name], target[name]
+    src[0][2].view(torch.uint8).fill_(0x37)
+    src[1][2].view(torch.uint8).fill_(0x49)
+    dst[2].view(torch.uint8).fill_(0x55)
+    expected_page = src[2][2].view(torch.uint8)
+    assert {0x37, 0x49} == set(expected_page.unique().tolist())
+    producer._layer_indices = {name: local.layer_names.index(name)}
+    rank_metadata = SimpleNamespace(
+        layer_indices=range(len(remote.layer_names)),
+        kv_caches_base_addr=remote.kv_caches_base_addr,
+        local_ip=remote.local_ip,
+        te_rpc_port=remote.te_rpc_port,
+    )
+    pp = SimpleNamespace(
+        layer_names=remote.layer_names,
+        block_lens=remote.block_lens,
+        block_strides=remote.block_strides,
+        metadata_by_pcp_rank={0: SimpleNamespace(metadata_by_tp_rank={0: rank_metadata})},
+    )
+    batch = SimpleNamespace(
+        layer_name=name,
+        remote_metadata=SimpleNamespace(metadata_by_pp_rank={0: pp}, tp_size=1, pcp_size=1, dcp_size=1),
+        remote_rank=(0, 0, 0),
+        event=Mock(),
+        requests=[SimpleNamespace(local_block_ids=[2], remote_block_ids=[4])],
+    )
+
+    def write(session, sources, destinations, lengths):
+        for address, destination, length in zip(sources, destinations, lengths, strict=True):
+            assert src[2][2].data_ptr() <= address <= src[2][2].data_ptr() + expected_page.nbytes - length
+            assert dst[2][4].data_ptr() <= destination <= dst[2][4].data_ptr() + expected_page.nbytes - length
+            ctypes.memmove(destination, address, length)
+        return 0
+
+    producer.engine = Mock()
+    producer.engine.batch_transfer_sync_write.side_effect = write
+    assert producer._execute_layer_transfer(batch) is None
+    producer.engine.batch_transfer_sync_write.assert_called_once()
+    assert torch.equal(dst[2][4].view(torch.uint8), expected_page)
+    assert (dst[2].view(torch.uint8)[[3, 5]] == 0x55).all()
+
+    # Incompatible peer metadata must fail before a partial WRITE is submitted.
+    remote_index = remote.layer_names.index(name)
+    pp.block_lens = [list(lengths) for lengths in remote.block_lens]
+    pp.block_lens[remote_index][0] -= 1
+    producer.engine.batch_transfer_sync_write.reset_mock()
+    assert producer._execute_layer_transfer(batch) == "P/D cache slice lengths differ"
+    producer.engine.batch_transfer_sync_write.assert_not_called()
 
 
 def test_wire_format_matches_resident_and_reused_but_not_other_quantization():
@@ -319,6 +411,20 @@ def test_full_graph_cannot_skip_reused_page_restore_hooks(mode):
     runtime.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode[mode])
     with pytest.raises(ValueError, match="PIECEWISE layer callbacks"):
         AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=8)
+
+
+def test_direct_worker_planning_checks_final_graph_mode_only_with_real_aliases():
+    from vllm.config import CUDAGraphMode
+
+    runtime, groups, _ = make_layout()
+    extra = runtime.kv_transfer_config.kv_connector_extra_config
+    k = extra.pop("layerwise_num_shared_buffers")
+    native = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=8)
+    runtime.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    assert plan_layerwise_cache_reuse(native, runtime) is None
+    extra["layerwise_num_shared_buffers"] = k
+    with pytest.raises(ValueError, match="PIECEWISE"):
+        plan_layerwise_cache_reuse(native, runtime)
 
 
 def test_piecewise_graph_preserves_the_layerwise_plan():

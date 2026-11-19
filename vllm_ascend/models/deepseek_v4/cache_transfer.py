@@ -11,6 +11,25 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 
 
+def bind_pool_format(cache_config: KVCacheConfig, vllm_config) -> None:
+    """Bind the existing GVA wire identity for resident and rotating producers."""
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+        get_layerwise_gva_config,
+    )
+    from vllm_ascend.models.deepseek_v4.cache_reuse import uses_dspark_push
+
+    if get_layerwise_gva_config(vllm_config.kv_transfer_config) is None:
+        return
+    cache_config.dsv4_cache_format = cache_format_digest(cache_config)
+    if uses_dspark_push(vllm_config):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+
+        keys = DSparkPrefixKeys.from_config(vllm_config)
+        assert keys is not None
+        cache_config.dsv4_dspark_push = True
+        cache_config.dsv4_cache_format += f"-dspark-{keys.identity}"
+
+
 def cache_format_digest(config: KVCacheConfig) -> str:
     """Identify logical bytes, independently of HBM capacity or shared slots.
 
@@ -68,50 +87,37 @@ def transfer_cache_views(caches: dict[str, object]) -> dict[str, object]:
     return selected
 
 
-def prompt_window_masks(worker, request, token_len: int, *, saving: bool):
-    """Select physical pages for a DSV4 prompt step, preserving public checkpoint ownership.
+def select_window_pages(block_ids, window, checkpoint_mask=None, *, public_end: int | None = None):
+    """Return the live transfer mask and, for saves, the shareable subset.
 
-    Return the original public masks separately so newly selected private rows
-    never acquire a shareable hash. A resident draft needs no private reload.
+    Window bounds and public_end are exclusive page indices. A physical block
+    ID of zero represents an unallocated page, even at a retained checkpoint.
     """
-    if (
-        not worker.layerwise_offload
-        or getattr(worker.kv_cache_config, "dsv4_cache_format", None) is None
-        or worker.cache_coordinator is None
-        or worker.dcp_size != 1
-        or not request.num_prompt_tokens
-        or request.target_token_len > request.num_prompt_tokens
-    ):
-        return {}
-    coordinator = worker.cache_coordinator
-    original = request.store_masks if saving else request.load_masks
-    selected = list(original) if original is not None else [None] * worker.num_kv_cache_groups
+    allocated = np.asarray(block_ids) != 0
+    live = np.zeros(len(allocated), dtype=np.bool_)
+    public = None
+    if public_end is not None:
+        end = min(public_end, len(live))
+        if checkpoint_mask is not None:
+            end = min(end, len(checkpoint_mask))
+            live[:end] = checkpoint_mask[:end]
+        else:
+            live[:end] = True
+        public = live & allocated
+    start, end = window
+    live[start:end] = True
+    return live & allocated, public
+
+
+def select_prompt_window_masks(blocks, block_sizes, original_masks, windows, *, save_end_token=None):
+    """Keep other groups' masks intact. Only groups with a continuation window change."""
+    masks = list(original_masks) if original_masks is not None else [None] * len(block_sizes)
     public_pages = {}
-    for group in worker._reused_layers_by_group:
-        window = coordinator.continuation_block_range(group, token_len)
+    for group, window in windows:
         if window is None:
             continue
-        ids = (
-            request.block_ids_by_group_np[group]
-            if request.block_ids_by_group_np is not None
-            else request.block_ids_by_group[group]
-        )
-        allocated = np.asarray(ids) != 0
-        mask = np.zeros(len(ids), dtype=np.bool_)
-        if saving:
-            end = min(request.save_end_token // worker.grouped_block_size[group], len(ids))
-            source = selected[group]
-            if source is not None:
-                end = min(end, len(source))
-                mask[:end] = source[:end]
-            else:
-                mask[:end] = True
-            public_pages[group] = mask.copy()
-        start, end = window
-        mask[start:end] = True
-        selected[group] = mask & allocated
-    if saving:
-        request.store_masks = tuple(selected)
-    else:
-        request.load_masks = tuple(selected)
-    return public_pages
+        end = save_end_token // block_sizes[group] if save_end_token is not None else None
+        masks[group], public = select_window_pages(blocks[group], window, masks[group], public_end=end)
+        if public is not None:
+            public_pages[group] = public
+    return tuple(masks), public_pages

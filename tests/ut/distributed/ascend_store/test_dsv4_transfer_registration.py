@@ -170,21 +170,22 @@ def test_ordinary_store_preserves_legacy_registration_and_object_offsets():
 
 
 @pytest.mark.parametrize("scale_bytes", [2, 4])
-@pytest.mark.parametrize("padding", [0, 64])
+@pytest.mark.parametrize("src_padding,dst_padding", [(0, 0), (64, 64), (0, 64), (64, 0)])
 @pytest.mark.parametrize("first,last", [(0, 16), (16, 32), (0, 32)])
-def test_subpage_copies_only_selected_data_and_scale_rows(scale_bytes, padding, first, last):
+def test_subpage_copies_only_selected_data_and_scale_rows(scale_bytes, src_padding, dst_padding, first, last):
     name = "model.layers.2.self_attn.indexer.k_cache"
-    source = make_indexer_views(scale_bytes, padding)
-    destination = make_indexer_views(scale_bytes, padding)
+    source = make_indexer_views(scale_bytes, src_padding)
+    destination = make_indexer_views(scale_bytes, dst_padding)
     source[0].fill_(17)
     source[1].fill_(5)
-    length = source[2].untyped_storage().nbytes()
+    length = destination[2].untyped_storage().nbytes()
     ctypes.memset(destination[2].data_ptr(), 0xA5, length)
     expected = bytearray([0xA5] * length)
-    stride = 4096 + 32 * scale_bytes + padding
+    page_bytes = 4096 + 32 * scale_bytes
     for start, end in ((first * 128, last * 128), (4096 + first * scale_bytes, 4096 + last * scale_bytes)):
-        offset = stride + start
-        expected[offset : stride + end] = ctypes.string_at(source[2].data_ptr() + offset, end - start)
+        expected[page_bytes + dst_padding + start : page_bytes + dst_padding + end] = ctypes.string_at(
+            source[2].data_ptr() + page_bytes + src_padding + start, end - start
+        )
 
     def segments(views):
         database = ChunkedTokenDatabase([], [32], None)

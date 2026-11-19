@@ -316,10 +316,20 @@ class DeepseekV4DSparkModel(nn.Module):
         if isinstance(context_slot_mapping, torch.Tensor):
             context_slot_mapping = [context_slot_mapping] * len(self.layers)
         connector = None
-        if self.publish_prompt_context:
-            if not has_kv_transfer_group() or not get_kv_transfer_group().has_connector_metadata():
+        if self.publish_prompt_context and has_kv_transfer_group():
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePushConnector
+
+            group = get_kv_transfer_group()
+            # Model construction precedes layout planning. Only a live Push worker
+            # with real slot reuse needs the extra post-scatter callback.
+            if any(
+                isinstance(child, MooncakePushConnector) and child.supports_layerwise_buffer_reuse
+                for child in getattr(group, "sub_connectors", (group,))
+            ):
+                connector = group
+        if connector is not None:
+            if not connector.has_connector_metadata():
                 raise RuntimeError("DSpark Push requires bound connector metadata for prompt context writes.")
-            connector = get_kv_transfer_group()
             if len(context_slot_mapping) != len(self.layers) or any(
                 slots is None or slots.shape[0] != context_states.shape[0] for slots in context_slot_mapping
             ):

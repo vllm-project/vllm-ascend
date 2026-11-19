@@ -468,10 +468,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # V2 collects results before DSpark writes its prompt windows. Late
         # draft loads may still use these addresses until step finalization.
         worker = self.connector_worker
-        if (
-            isinstance(worker, LayerwiseKVPoolWorker)
-            and getattr(worker.kv_cache_config, "dsv4_dspark_push", False) is True
-        ):
+        if isinstance(worker, LayerwiseKVPoolWorker) and worker.has_late_draft_loads:
             worker.release_step_load_leases()
         super().clear_connector_metadata()
 

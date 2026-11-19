@@ -95,8 +95,9 @@ def test_context_wkv_weights_are_duplicated_by_layer():
     assert duplicated[3][1].data_ptr() == duplicated[4][1].data_ptr()
 
 
-@pytest.mark.parametrize("transfer", [False, True])
-def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, transfer):
+@pytest.mark.parametrize("push,sharing", [(False, False), (True, False), (True, True)])
+def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, push, sharing):
+    transfer = push and sharing
     projection_calls = []
     rope = object()
 
@@ -156,9 +157,14 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, transfer):
             )
         )
 
-    model.publish_prompt_context = transfer
+    model.publish_prompt_context = push
     events = []
     store = MagicMock()
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePushConnector
+
+    push_child = MagicMock(spec=MooncakePushConnector)
+    push_child.supports_layerwise_buffer_reuse = sharing
+    store.sub_connectors = [SimpleNamespace(supports_layerwise_buffer_reuse=True), push_child]
     store.has_connector_metadata.return_value = True
     store.wait_for_layer_load.side_effect = lambda name: events.append(("wait", name))
     store.save_kv_layer.side_effect = lambda name, *_: events.append(("save", name))

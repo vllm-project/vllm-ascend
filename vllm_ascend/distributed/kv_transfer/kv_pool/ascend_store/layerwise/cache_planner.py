@@ -296,6 +296,10 @@ def plan_layerwise_cache_reuse(
     if not layout.has_layer_reuse:
         return None
 
+    if vllm_config.model_config.hf_text_config.model_type == "deepseek_v4":
+        from vllm_ascend.models.deepseek_v4.cache_reuse import validate_rotating_config
+
+        validate_rotating_config(vllm_config)
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]
         if isinstance(spec, MambaSpec) and (

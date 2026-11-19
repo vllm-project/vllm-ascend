@@ -173,11 +173,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
         # Both PD sides must derive the same GVA shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
-            self.kv_role,
-            self._extra_config,
-            self.dcp_size,
-            self.pcp_size,
-            replicated_pcp=getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None,
+            self.kv_role, self._extra_config, self.dcp_size, self.pcp_size
         ):
             peer_role = "prefill" if self.kv_role == "kv_consumer" else "decode"
             raise ValueError(
@@ -629,11 +625,16 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self._snapshot_keys:
             for req_id in finished_req_ids | meta.preempted_req_ids:
                 self._snapshot_keys.pop(req_id, None)
-        if getattr(getattr(self, "kv_cache_config", None), "dsv4_dspark_push", False) is not True:
+        if not self.has_late_draft_loads:
             self.release_step_load_leases()
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
         return super().get_finished(finished_req_ids, meta)
+
+    @property
+    def has_late_draft_loads(self) -> bool:
+        """The rotating producer still has a DSpark context writer after get_finished."""
+        return self.layerwise_offload and getattr(self.kv_cache_config, "dsv4_dspark_push", False) is True
 
     def release_step_load_leases(self) -> None:
         if self._step_load_keys:
@@ -799,6 +800,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         group_id: int,
         num_computed_tokens: int,
         block_hashes: Sequence[BlockHash],
+        *,
+        prefer_private: bool = False,
     ) -> tuple[int, Callable[[int], tuple[str, bool] | None]] | None:
         if group_id not in self._reused_layers_by_group:
             # Resident pages remain available for the running request.
@@ -809,7 +812,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
             """Return the pool key and whether it is public."""
-            if getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None and block_idx in snapshot:
+            if prefer_private and block_idx in snapshot:
                 return snapshot[block_idx], False
             if block_idx < full_blocks and block_idx < len(block_hashes):
                 block_hash = block_hash_to_str(block_hashes[block_idx])

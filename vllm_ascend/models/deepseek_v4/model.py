@@ -673,6 +673,10 @@ class DeepseekV4Attention(nn.Module):
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
         )
+        if self.compress_ratio <= 1:
+            # The attention hook uses .attn, but only the SWA cache owns bytes.
+            # Push consumes this alias only when the owner shares a rotating slot.
+            self.dsa_attn.dsa_attn.layerwise_push_cache_name = swa_cache_layer.prefix
 
     def forward(
         self,
