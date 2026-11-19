@@ -9,8 +9,14 @@ returning. The handler snapshots the buffer before the call, reduces the
 snapshot across the EP group itself, and records only on the steps where
 upstream consumed the buffer, so the series follows the upstream logging
 interval instead of every ``log_stats`` step.
+
+Weight transfer tracks the HIXL communicator: one accumulator per layer that
+``set_transfer_context`` resets, ``add_send`` / ``add_recv`` fill, and
+``execute`` records and drops, so a failed execute cannot leave a stale
+accumulator behind.
 """
 
+import weakref
 from typing import Any
 
 from vllm_ascend.observability.ms_metrics.handlers.common import (
@@ -163,4 +169,113 @@ def eplb_load_balance_handler(original_func, state, *args, **kwargs):
             ):
                 if metric_enabled(spec):
                     record_metric(metrics, spec, value, labels)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Expert weight transfer (AscendHixlEplbCommunicator)
+# ---------------------------------------------------------------------------
+
+_TF_KEY = "eplb_transfer"
+_TF_RECORDERS: dict[str, Any] = {}
+
+_SEND_EXPERTS_SPEC = MetricSpec(
+    "eplb:transfer:send_experts",
+    MetricType.GAUGE,
+    ("rank", "layer"),
+)
+_RECV_EXPERTS_SPEC = MetricSpec(
+    "eplb:transfer:recv_experts",
+    MetricType.GAUGE,
+    ("rank", "layer"),
+)
+_COMM_OPS_SPEC = MetricSpec(
+    "eplb:transfer:comm_ops",
+    MetricType.GAUGE,
+    ("rank", "layer"),
+)
+_EST_BYTES_SPEC = MetricSpec(
+    "eplb:transfer:est_bytes",
+    MetricType.GAUGE,
+    ("rank", "layer"),
+)
+_TF_SPECS = (_SEND_EXPERTS_SPEC, _RECV_EXPERTS_SPEC, _COMM_OPS_SPEC, _EST_BYTES_SPEC)
+
+# Per-communicator accumulation for the layer that is currently being moved.
+# Weak keys keep finished communicators from pinning their bookkeeping.
+_pending: "weakref.WeakKeyDictionary[Any, dict[str, Any]]" = weakref.WeakKeyDictionary()
+
+
+def _slot(communicator: Any) -> dict[str, Any]:
+    slot = _pending.get(communicator)
+    if slot is None:
+        slot = {"layer": None, "send": set(), "recv": set(), "ops": 0, "bytes": 0}
+        _pending[communicator] = slot
+    return slot
+
+
+def _reset(communicator: Any, layer: int | None) -> dict[str, Any]:
+    slot = {"layer": layer, "send": set(), "recv": set(), "ops": 0, "bytes": 0}
+    _pending[communicator] = slot
+    return slot
+
+
+def eplb_transfer_context_handler(original_func, communicator, old_indices, layer_idx, *args, **kwargs):
+    """Start a clean accumulator for the layer about to be transferred."""
+    result = original_func(communicator, old_indices, layer_idx, *args, **kwargs)
+    _reset(communicator, layer_idx)
+    return result
+
+
+def eplb_transfer_send_handler(original_func, communicator, tensors, dst_rank, expert_id, *args, **kwargs):
+    """Count outgoing experts, issued ops and transferred bytes."""
+    result = original_func(communicator, tensors, dst_rank, expert_id, *args, **kwargs)
+    slot = _slot(communicator)
+    slot["send"].add(expert_id)
+    slot["ops"] += len(tensors)
+    slot["bytes"] += sum(tensor.nbytes for tensor in tensors)
+    return result
+
+
+def eplb_transfer_recv_handler(original_func, communicator, tensors, src_rank, expert_id, *args, **kwargs):
+    """Count incoming experts, issued ops and transferred bytes."""
+    result = original_func(communicator, tensors, src_rank, expert_id, *args, **kwargs)
+    slot = _slot(communicator)
+    slot["recv"].add(expert_id)
+    slot["ops"] += len(tensors)
+    slot["bytes"] += sum(tensor.nbytes for tensor in tensors)
+    return result
+
+
+def eplb_transfer_execute_handler(original_func, communicator, *args, **kwargs):
+    """Record the finished layer and reset the accumulator."""
+    try:
+        result = original_func(communicator, *args, **kwargs)
+    finally:
+        # A failed execute must not leave a stale accumulator behind; the
+        # slot is dropped either way and only a successful execute records.
+        slot = _pending.pop(communicator, None)
+    if slot is None or slot["layer"] is None:
+        return result
+
+    with safe_recording("eplb_transfer"):
+        metrics = register_metrics(_TF_SPECS, _TF_RECORDERS, _TF_KEY)
+        if metrics is None:
+            return result
+
+        # Imported lazily so the handler module stays importable without vLLM.
+        from vllm.distributed.parallel_state import get_ep_group
+
+        labels = {
+            "rank": str(get_ep_group().device_group.rank()),
+            "layer": str(slot["layer"]),
+        }
+        for spec, value in (
+            (_SEND_EXPERTS_SPEC, len(slot["send"])),
+            (_RECV_EXPERTS_SPEC, len(slot["recv"])),
+            (_COMM_OPS_SPEC, slot["ops"]),
+            (_EST_BYTES_SPEC, slot["bytes"]),
+        ):
+            if metric_enabled(spec):
+                record_metric(metrics, spec, value, labels)
     return result

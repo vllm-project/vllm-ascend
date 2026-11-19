@@ -88,7 +88,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 14
+    assert len(config) == 18
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -670,6 +670,122 @@ def test_eplb_load_balance_handler_records_only_on_rank_zero(monkeypatch):
         handlers.eplb_load_balance_handler(_clearing_step, _load_balance_state(torch), False, False, True) == "stepped"
     )
     metrics.record_metric.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# EPLB V2 weight transfer (AscendHixlEplbCommunicator)
+# ---------------------------------------------------------------------------
+
+
+def test_eplb_transfer_handlers_record_per_layer_totals(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert (
+        handlers.eplb_transfer_context_handler(
+            lambda *args, **kwargs: "context",
+            communicator,
+            None,
+            3,
+        )
+        == "context"
+    )
+    send_tensors = [type("Tensor", (), {"nbytes": 8})(), type("Tensor", (), {"nbytes": 4})()]
+    recv_tensors = [type("Tensor", (), {"nbytes": 16})()]
+    for expert_id in (5, 6, 5):
+        assert (
+            handlers.eplb_transfer_send_handler(
+                lambda *args, **kwargs: "sent",
+                communicator,
+                send_tensors,
+                1,
+                expert_id,
+            )
+            == "sent"
+        )
+    assert (
+        handlers.eplb_transfer_recv_handler(
+            lambda *args, **kwargs: "received",
+            communicator,
+            recv_tensors,
+            0,
+            7,
+        )
+        == "received"
+    )
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    assert metrics.record_metric.call_count == 4
+    recorded = {call.args[0]: call.kwargs for call in metrics.record_metric.call_args_list}
+    assert recorded["eplb:transfer:send_experts"]["value"] == 2
+    assert recorded["eplb:transfer:recv_experts"]["value"] == 1
+    # Both directions accumulate per call: 3 send calls x 2 tensors + 1 recv
+    # tensor = 7 ops; 3 x (8 + 4) + 16 = 52 estimated bytes.
+    assert recorded["eplb:transfer:comm_ops"]["value"] == 7
+    assert recorded["eplb:transfer:est_bytes"]["value"] == 52
+    assert recorded["eplb:transfer:send_experts"]["labels"] == {"rank": "0", "layer": "3"}
+
+
+def test_eplb_transfer_execute_without_context_records_nothing(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer_no_ctx", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    assert handlers.eplb_transfer_execute_handler(lambda *args, **kwargs: "done", communicator) == "done"
+
+    metrics.record_metric.assert_not_called()
+
+
+def test_eplb_transfer_execute_failure_clears_pending_accumulator(monkeypatch):
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"}),
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_eplb_v2_transfer_fail", "eplb_v2")
+    ep_group = Mock()
+    ep_group.rank.return_value = 0
+    ep_group.size.return_value = 2
+    _install_ep_group(monkeypatch, ep_group)
+    communicator = type("Communicator", (), {})()
+
+    handlers.eplb_transfer_context_handler(
+        lambda *args, **kwargs: "context",
+        communicator,
+        None,
+        3,
+    )
+
+    def failing_execute(*args, **kwargs):
+        raise RuntimeError("execute failed")
+
+    with pytest.raises(RuntimeError):
+        handlers.eplb_transfer_execute_handler(failing_execute, communicator)
+
+    # The accumulator is dropped, so nothing is recorded and a later execute
+    # on the same communicator starts from a clean state.
+    metrics.record_metric.assert_not_called()
+    assert communicator not in handlers._pending
 
 
 def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
