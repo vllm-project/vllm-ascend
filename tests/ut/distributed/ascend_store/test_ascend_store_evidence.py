@@ -35,6 +35,7 @@ Each test names the state(s) it pins.
 
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # isort: off
@@ -381,11 +382,13 @@ class _WorkerHarnessMixin:
         cfg.parallel_config.prefill_context_parallel_size = 1
         cfg.parallel_config.decode_context_parallel_size = 1
         cfg.parallel_config.pipeline_parallel_size = 1
+        # The evidence path requires the TARGET model's attention-layer
+        # count (hf_config.num_hidden_layers); the shared harness's spec-[]
+        # mock genuinely lacks it, so provide a real one here (F-5).
+        cfg.model_config.hf_text_config = SimpleNamespace(num_hidden_layers=LAYERS)
+        cfg.model_config.hf_config = cfg.model_config.hf_text_config
         worker = KVPoolWorker(cfg, use_layerwise=False, kv_cache_config=make_resolved_cache_config(cfg))
         worker.kv_cache_config = None
-        # After construction the worker derives evidence facts from the
-        # config; fix the layer count to the battery's bound.
-        worker._evidence_num_layers = LAYERS
         worker.m_store = MagicMock()
         return worker
 
@@ -591,6 +594,35 @@ class TestSyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):
         worker._init_evidence_path(worker.vllm_config, False)
         self.assertIsNone(worker.evidence_buffer)
         self.assertEqual(worker._evidence_certification, "none")
+
+    def test_missing_num_hidden_layers_refuses_loudly(self):
+        # [F-5] the evidence layer count is the TARGET model's
+        # hf_config.num_hidden_layers -- the exact bound Core's report
+        # battery enforces. A model config that lacks the attribute cannot
+        # produce honest evidence: a fallback to the worker's own
+        # num_layers would count EAGLE/MTP draft layers and every report
+        # would be rejected as malformed (fail-closed but confusing).
+        # Refuse loudly instead.
+        from tests.ut.distributed.ascend_store.test_pool_worker import (
+            TestKVPoolWorkerRegisterAndTransfer,
+        )
+
+        harness = TestKVPoolWorkerRegisterAndTransfer("test_start_load_kv_sync")
+        harness.setUp()
+        self.addCleanup(harness.tearDown)
+        harness._patch_all()
+        cfg = harness._make_config(kv_role="kv_consumer")
+        cfg.kv_transfer_config.kv_load_failure_policy = "repair"
+        cfg.parallel_config.prefill_context_parallel_size = 1
+        cfg.parallel_config.decode_context_parallel_size = 1
+        cfg.parallel_config.pipeline_parallel_size = 1
+        # The shared harness's hf_text_config is MagicMock(spec=[]): the
+        # num_hidden_layers attribute is genuinely absent (no synthesized
+        # fallback), which is exactly the unsupported-config shape.
+        with self.assertRaises(ValueError) as ctx:
+            KVPoolWorker(cfg, use_layerwise=False, kv_cache_config=make_resolved_cache_config(cfg))
+        self.assertIn("num_hidden_layers", str(ctx.exception))
+        self.assertIn("repair", str(ctx.exception))
 
 
 class TestAsyncLoadEvidence(_WorkerHarnessMixin, unittest.TestCase):

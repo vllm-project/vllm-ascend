@@ -367,8 +367,18 @@ class BaseKVPoolWorker(ABC):
             # The TARGET model's attention-layer count -- the exact bound
             # the scheduler's report battery enforces. NOT self.num_layers,
             # which additionally counts EAGLE/MTP draft layers and would
-            # make every honest report read as malformed.
-            self._evidence_num_layers = int(getattr(self.hf_config, "num_hidden_layers", self.num_layers))
+            # make every honest report read as malformed. A model config
+            # without the attribute cannot produce honest evidence; refuse
+            # loudly at init rather than emitting malformed reports.
+            hf_num_layers = getattr(self.hf_config, "num_hidden_layers", None)
+            if hf_num_layers is None:
+                raise ValueError(
+                    "kv_load_failure_policy='repair' requires a model config "
+                    "with hf_config.num_hidden_layers (the evidence layer "
+                    "bound); this model does not expose it. Use a different "
+                    "kv_load_failure_policy or a supported model family."
+                )
+            self._evidence_num_layers = int(hf_num_layers)
         else:
             self._evidence_certification = "none"
             self._evidence_num_layers = 0
