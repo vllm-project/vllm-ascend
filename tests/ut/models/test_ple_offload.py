@@ -15,6 +15,9 @@ def embedding():
     torch.nn.Module.__init__(obj)
     obj.weight = torch.nn.Parameter(torch.zeros(4, 160, dtype=torch.bfloat16), requires_grad=False)
     obj._shared_group = None
+    obj._host_scale = None
+    obj._mxfp8 = False
+    obj._quantized = False
     obj.etp_data_parallel_size = 1
     obj.shard_indices = SimpleNamespace(org_vocab_start_index=10, org_vocab_end_index=14)
     return obj
@@ -45,16 +48,25 @@ def test_failed_close_preserves_owner_for_retry():
 
 
 @pytest.mark.parametrize("reduce_results", [True, False])
-def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results):
-    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
+@pytest.mark.parametrize("format_", ["bf16", "int8", "mxfp8"])
+def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results, format_):
+    from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
 
     obj = embedding()
     obj._host_table = SimpleNamespace(ptrs=None)
+    obj._mxfp8 = format_ == "mxfp8"
+    obj._quantized = format_ != "bf16"
+    if obj._quantized:
+        obj._host_scale = SimpleNamespace(ptrs=None)
+        obj.weight_scale = torch.nn.Parameter(torch.ones(4, 5), requires_grad=False)
     obj.embedding_dim = 160
     obj.tp_size = 4
     obj.reduce_results = reduce_results
     obj.parallel_group = SimpleNamespace(all_reduce=Mock(side_effect=lambda x: x + 1))
     monkeypatch.setattr(ple_lookup, "lookup", lambda ptrs, ids, out, *args: out.fill_(2))
+    monkeypatch.setattr(
+        ple_lookup_quantized, "lookup_quantized", lambda ptrs, scales, ids, out, *args, **kwargs: out.fill_(2)
+    )
     output = obj(torch.zeros((3, 16), dtype=torch.int64))
     assert torch.all(output == (3 if reduce_results else 2))
     assert obj.parallel_group.all_reduce.call_count == int(reduce_results)

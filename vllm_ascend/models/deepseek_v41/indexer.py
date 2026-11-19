@@ -120,11 +120,11 @@ class DeepseekV41Indexer(nn.Module):
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
         DeviceOperator.apply_partial_rotary_inplace(key, cos, sin, start=self.width - self.rope_width, end=self.width)
         key = key.squeeze(1)
-        k_cache, scale_cache = self.k_cache.kv_cache[0]
+        k_cache, scale_cache = self.k_cache.kv_cache
         if self.packed_cache_ops is not None:
             self.packed_cache_ops.write_index_cache((k_cache, scale_cache), slots, key)
             if self.k_cache_folded is not None:
-                fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache[0], slots)
+                fold_indexer_cache_rows((k_cache, scale_cache), self.k_cache_folded.kv_cache, slots)
             return
         quantized, scale = torch_npu.npu_dynamic_quant(key, dst_type=torch.int8)
         scatter_cache_sk(k_cache, slots, quantized)
