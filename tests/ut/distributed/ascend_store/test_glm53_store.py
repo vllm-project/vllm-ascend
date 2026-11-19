@@ -271,7 +271,7 @@ class TestGLM53Store(unittest.TestCase):
                 self.assertEqual(len(mla_keys), len(hashes))
                 self.assertTrue(all("@head_or_tp_rank:0@" in key for key in mla_keys))
                 for worker, caches in workers:
-                    self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))), 1024)
+                    self.assertEqual(worker.lookup_scheduler(1024, hashes, list(range(5))).hit_length, 1024)
                     metadata = self.make_metadata(target, hashes, load=True)
                     worker.start_load_kv(metadata)
                     if load_async:
@@ -286,7 +286,7 @@ class TestGLM53Store(unittest.TestCase):
                         if "@group:4@" in key and f"@head_or_tp_rank:{rank}@" in key and key.endswith(hashes[-1].hex())
                     )
                     payload = stored.pop(missing)
-                    self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))), 1024)
+                    self.assertLess(workers[0][0].lookup_scheduler(1024, hashes, list(range(5))).hit_length, 1024)
                     stored[missing] = payload
 
     def test_recoverssm_registration_exports_each_backend_copyable_state_prefix(self):

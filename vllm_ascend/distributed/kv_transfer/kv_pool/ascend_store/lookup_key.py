@@ -23,6 +23,12 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
 
+# Wire integers are unsigned 32-bit values. Each tail boundary contains
+# a cache-group ID and a token count; both RPC ends share these sizes.
+_LOOKUP_INT_BYTES_LEN = 4
+_TAIL_KEY_BOUNDARY_BYTES_LEN = 2 * _LOOKUP_INT_BYTES_LEN
+
+
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     # NOTE: This isolates lookup IPC paths only. MooncakeConnector (V1) worker
     # handshake ports and MooncakeConnectorV2 scheduler control ports may still
@@ -75,9 +81,9 @@ class LookupKeyClient:
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
         all_frames = [
             LOOKUP_MSG,
-            token_len.to_bytes(4, byteorder="big"),
+            token_len.to_bytes(_LOOKUP_INT_BYTES_LEN, byteorder="big"),
             *kv_group_frames,
-            hbm_hit_tokens.to_bytes(4, byteorder="big"),
+            hbm_hit_tokens.to_bytes(_LOOKUP_INT_BYTES_LEN, byteorder="big"),
             *hash_frames,
         ]
         try:
@@ -88,13 +94,16 @@ class LookupKeyClient:
             self.close()
             return StoreLookupResult(0)
 
-        if len(resp) < 4 or (len(resp) - 4) % 8:
+        if len(resp) < _LOOKUP_INT_BYTES_LEN or (len(resp) - _LOOKUP_INT_BYTES_LEN) % _TAIL_KEY_BOUNDARY_BYTES_LEN:
             raise ValueError("Invalid AscendStore lookup reply")
         return StoreLookupResult(
-            int.from_bytes(resp[:4], "big"),
+            int.from_bytes(resp[:_LOOKUP_INT_BYTES_LEN], "big"),
             tuple(
-                TailKeyBoundary(int.from_bytes(resp[i : i + 4], "big"), int.from_bytes(resp[i + 4 : i + 8], "big"))
-                for i in range(4, len(resp), 8)
+                TailKeyBoundary(
+                    int.from_bytes(resp[i : i + _LOOKUP_INT_BYTES_LEN], "big"),
+                    int.from_bytes(resp[i + _LOOKUP_INT_BYTES_LEN : i + _TAIL_KEY_BOUNDARY_BYTES_LEN], "big"),
+                )
+                for i in range(_LOOKUP_INT_BYTES_LEN, len(resp), _TAIL_KEY_BOUNDARY_BYTES_LEN)
             ),
         )
 
@@ -171,16 +180,15 @@ class LookupKeyServer:
                                 use_layerwise=False,
                                 hbm_hit_tokens=hbm_hit_tokens,
                             )
-                            if isinstance(result, int):
-                                result = StoreLookupResult(result)
                             logger.debug(
                                 "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
                                 token_len,
                                 kv_group_ids,
                                 result.hit_length,
                             )
-                            response = result.hit_length.to_bytes(4, "big") + b"".join(
-                                boundary.group_id.to_bytes(4, "big") + boundary.num_tokens.to_bytes(4, "big")
+                            response = result.hit_length.to_bytes(_LOOKUP_INT_BYTES_LEN, "big") + b"".join(
+                                boundary.group_id.to_bytes(_LOOKUP_INT_BYTES_LEN, "big")
+                                + boundary.num_tokens.to_bytes(_LOOKUP_INT_BYTES_LEN, "big")
                                 for boundary in result.tail_key_boundaries
                             )
                         elif msg_type == RESET_MSG:

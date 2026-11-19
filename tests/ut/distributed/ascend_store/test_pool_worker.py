@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
+    StoreLookupResult,
 )
 
 
@@ -768,9 +769,9 @@ class TestKVPPPoolWorker(unittest.TestCase):
                     exists = [1] * 16
                     exists[missing_shard * 2 + missing_block] = 0
                     worker.m_store.exists.return_value = exists
-                    self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), missing_block * 16)
+                    self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), StoreLookupResult(missing_block * 16))
         worker.m_store.exists.return_value = [1] * 16
-        self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), 32)
+        self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), StoreLookupResult(32))
         keys = worker.m_store.exists.call_args.args[0]
         self.assertEqual(len(set(keys)), 16)
         for shard in range(8):
@@ -829,7 +830,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
         for exists, expected in (([1, 1, 1, 1], 32), ([1, 1, 1, 0], 16), ([1, 1, 0, 0], 0)):
             with self.subTest(exists=exists):
                 worker.m_store.exists.return_value = exists
-                self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), expected)
+                self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), StoreLookupResult(expected))
                 keys = worker.m_store.exists.call_args.args[0]
                 self.assertEqual(len(keys), 4)
                 self.assertTrue(all("@head_or_tp_rank:0" in key for key in keys[:2]))
@@ -1071,7 +1072,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         # Only the reachable tail block is queried; its presence covers the
         # whole segment, so the hit still spans the full token length.
-        self.assertEqual(hit, 256)
+        self.assertEqual(hit, StoreLookupResult(256))
         worker.m_store.exists.assert_called_once_with(["key1"])
         store_mask.assert_not_called()
         worker.token_database.process_tokens.assert_not_called()
@@ -1095,7 +1096,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         # The locally computed block is recognized without a query; only the
         # tail block beyond the HBM hit goes to the pool.
-        self.assertEqual(hit, 256)
+        self.assertEqual(hit, StoreLookupResult(256))
         worker.m_store.exists.assert_called_once_with(["key1"])
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
@@ -1692,19 +1693,19 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
-        self.assertEqual(result, 32)
+        self.assertEqual(result, StoreLookupResult(32))
 
     def test_lookup_scheduler_partial(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 0]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
-        self.assertEqual(result, 16)
+        self.assertEqual(result, StoreLookupResult(16))
 
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()
         worker.m_store.exists.side_effect = Exception("fail")
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
-        self.assertEqual(result, 0)
+        self.assertEqual(result, StoreLookupResult(0))
 
     def test_lookup_all_cached(self):
         worker = self._make_worker()
@@ -1729,7 +1730,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         for method in (worker.lookup, worker.lookup_scheduler):
             with self.subTest(method=method.__name__):
-                self.assertEqual(method(32, ["h0", "h1"], use_layerwise=True), 32)
+                expected = 32 if method == worker.lookup else StoreLookupResult(32)
+                self.assertEqual(method(32, ["h0", "h1"], use_layerwise=True), expected)
 
     def test_lookup_scheduler_multi_tp(self):
         self._stop_all()
@@ -1770,7 +1772,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         # 2 blocks * 2 tp_ranks = 4 keys
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
-        self.assertEqual(result, 32)
+        self.assertEqual(result, StoreLookupResult(32))
 
 
 class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):

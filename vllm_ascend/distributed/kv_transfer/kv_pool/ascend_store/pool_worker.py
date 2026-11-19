@@ -1036,7 +1036,7 @@ class BaseKVPoolWorker(ABC):
                 )
             )
             if coordinator_hit is not None:
-                return coordinator_hit.hit_length if isinstance(coordinator_hit, StoreLookupResult) else coordinator_hit
+                return coordinator_hit.hit_length
             for group_id in kv_cache_group_ids:
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 
@@ -1138,7 +1138,7 @@ class BaseKVPoolWorker(ABC):
         kv_cache_group_ids: list[int],
         include_all_ranks: bool,
         hbm_hit_tokens: int = 0,
-    ) -> int | None:
+    ) -> StoreLookupResult | None:
         if self.cache_coordinator is None:
             return None
         if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
@@ -1239,13 +1239,14 @@ class BaseKVPoolWorker(ABC):
             )
             return present
 
-        return coordinator.find_reachable_hit_tokens(
+        hit = coordinator.find_reachable_hit_tokens(
             block_hashes,
             token_len,
             query_group_hits,
             log_context="KV pool coordinator lookup",
             hbm_hit_tokens=hbm_hit_tokens,
         )
+        return StoreLookupResult(hit)
 
     def lookup_scheduler(
         self,
@@ -1254,11 +1255,11 @@ class BaseKVPoolWorker(ABC):
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
         hbm_hit_tokens: int = 0,
-    ) -> int:
+    ) -> StoreLookupResult:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
         :param tokens: the input tokens, with shape [seq_len]
-        :return: An int indicating how many prefix tokens are cached.
+        :return: Recoverable prefix length and per-group tail-key boundaries.
         """
         try:
             hits: list[list[int]] = []
@@ -1281,7 +1282,7 @@ class BaseKVPoolWorker(ABC):
                 keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id)
 
                 if not keys:
-                    return 0
+                    return StoreLookupResult(0)
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
@@ -1318,7 +1319,7 @@ class BaseKVPoolWorker(ABC):
                         multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
                     )
                 if not group_hits:
-                    return 0
+                    return StoreLookupResult(0)
                 max_hit_position = min(max_hit_position, group_hits[-1])
                 hits.append(group_hits)
                 logger.debug(
@@ -1334,7 +1335,7 @@ class BaseKVPoolWorker(ABC):
                 type(e).__name__,
                 e,
             )
-            return 0
+            return StoreLookupResult(0)
         final_hits = self._max_intersection_hit_position(hits)
         logger.debug(
             "KV pool scheduler lookup final token_len=%d groups=%s hit=%d",
@@ -1342,7 +1343,7 @@ class BaseKVPoolWorker(ABC):
             kv_cache_group_ids,
             final_hits,
         )
-        return final_hits
+        return StoreLookupResult(final_hits)
 
     @staticmethod
     def _max_intersection_hit_position(hits: list[list[int]]) -> int:
