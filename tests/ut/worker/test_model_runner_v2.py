@@ -1172,7 +1172,7 @@ def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_asc
         ),
     )
     ascend_config = SimpleNamespace(
-        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
+        finegrained_tp_config=FinegrainedTPConfig(),
         dump_config_path=None,
     )
     copy_stream = object()
