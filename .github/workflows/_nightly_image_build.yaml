@@ -338,7 +338,7 @@ jobs:
 
   merge-image:
     name: Merge multi-arch nightly-${{ inputs.target }}
-    runs-on: linux-amd64-cpu-4
+    runs-on: linux-amd64-cpu-2-hk
     needs: [generate-matrix, build]
     # Run even if some matrix instances failed. Each OS variant is merged
     # independently, only when BOTH arch images exist. An isolated (/presmoke)

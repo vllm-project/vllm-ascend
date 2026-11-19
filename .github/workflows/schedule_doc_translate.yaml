@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   translate:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-4-hk
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     permissions:
       contents: read
