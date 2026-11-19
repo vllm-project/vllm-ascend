@@ -104,7 +104,6 @@ meta:
 strategy_hardware:
   single_node_tp:
     npu: unsupported
-    ascend_950dt: supported
   single_node_tep:
     npu: unsupported
   single_node_dep:
@@ -118,25 +117,6 @@ strategy_hardware:
   pd_cluster:
     ascend_910c: supported
     ascend_950dt: supported
-strategy_overrides:
-  single_node_tp:
-    hardware_overrides:
-      ascend_950dt:
-        extra_args:
-          - '--host'
-          - 0.0.0.0
-          - '--port'
-          - '8000'
-          - '--data-parallel-size'
-          - '8'
-          - '--enable-expert-parallel'
-          - '--max-num-batched-tokens'
-          - '4096'
-          - '--no-swa-bounded-replay'
-          - '--compilation-config'
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - '--additional-config'
-          - '{"multistream_overlap_shared_expert":true,"combine_quant_mode":4}'
 presets:
   ascend_pd:
     label: A3 W4A8 PD (v0.32.0rc)
@@ -232,22 +212,6 @@ presets:
       P uses four local DP ranks with four devices per rank; D uses sixteen
       local DP ranks with one device per rank. Start P and D on their dedicated
       nodes in parallel, then start the proxy after all engines are ready.
-  ascend_a5_mxfp:
-    label: 950DT MXFP colocated (DP8/TP1)
-    hardware: ascend_950dt
-    strategy: single_node_tp
-    variants: [ascend_mxfp_a5]
-    default: true
-    image:
-      model_revision: 08c8657f02291e11b6f6b63e0e16014f8e748518
-    select:
-      frontend: python
-      features: { spec_decoding: true }
-      kv_offload: 'off'
-    source:
-      label: v0.32.0rc 950DT colocated tutorial
-      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#51-single-node-colocated-deployment
-      revision: 49007fd8cbcf597d9a1a4e2ebc968c69257045ed
   ascend_a5_pd:
     label: 950DT MXFP 1P1D (DP8/TP1 per role)
     hardware: ascend_950dt
@@ -372,11 +336,10 @@ guide_sections:
     assignment are prerequisites; the migrated launcher has not been NPU-validated.
     The preset covers direct PD transfer without KV pooling.
 
-    ## Ascend 950DT deployment
+    ## Ascend 950DT PD deployment
 
     Use the [official MXFP checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
-    on one eight-NPU node for colocated serving or on two dedicated eight-NPU
-    nodes for 1P1D. Before serving, follow the
+    on two dedicated eight-NPU nodes for 1P1D. Before serving, follow the
     [release tutorial's 950DT container setup](https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#41-docker-image-installation)
     for the host driver, URMA devices and mount, and local checkpoint storage.
     Keep 512 GiB of container shared memory for Engram. Replace the model ID
