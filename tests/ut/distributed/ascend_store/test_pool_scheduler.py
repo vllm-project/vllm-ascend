@@ -300,7 +300,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
                 ),
             )
         )
-    kv_cache_config = MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=None)
+    kv_cache_config = MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=16)
     scheduler = create_kv_pool_scheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
     assert scheduler.num_mamba_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
@@ -471,7 +471,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler = KVPoolScheduler(
             self._make_config(extra_config={"backend": "memcache"}),
             use_layerwise=False,
-            kv_cache_config=MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=None),
+            kv_cache_config=MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=16),
         )
         self.assertEqual(scheduler.swa_group_ids, {0})
 
@@ -491,7 +491,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler = KVPoolScheduler(
             self._make_config(extra_config={"backend": "memcache"}),
             use_layerwise=False,
-            kv_cache_config=MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=None),
+            kv_cache_config=MagicMock(kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=16),
         )
         self.assertEqual(scheduler.swa_group_ids, set())
 

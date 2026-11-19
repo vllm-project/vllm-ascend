@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from itertools import compress
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -16,7 +16,6 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -337,52 +336,6 @@ def get_engine_transfer_config(vllm_config, kv_cache_config):
         return resolved
     current = get_current_vllm_config_or_none()
     return (current if current is not None else vllm_config).kv_transfer_config
-
-
-def resolve_pool_hit_alignment(kv_cache_config: KVCacheConfig, page_alignment: int) -> int:
-    """Read Core's resolved alignment; an absent value keeps whole-page hits."""
-    alignment = kv_cache_config.cache_hit_alignment_tokens
-    return page_alignment if alignment is None else alignment
-
-
-def _pool_is_producer_only(vllm_config, kv_cache_config: KVCacheConfig) -> bool:
-    transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
-    return bool(transfer and transfer.is_kv_producer and not transfer.is_kv_consumer)
-
-
-def pool_uses_eagle(vllm_config, kv_cache_config: KVCacheConfig) -> bool:
-    """Apply the engine's producer exemption to Core's EAGLE block-drop policy."""
-    speculative = getattr(vllm_config, "speculative_config", None)
-    eagle = getattr(speculative, "use_eagle_block_drop", None)
-    return bool(callable(eagle) and eagle() is True and not _pool_is_producer_only(vllm_config, kv_cache_config))
-
-
-def resolve_pool_cache_groups(vllm_config, kv_cache_config: KVCacheConfig) -> list[KVCacheGroupSpec]:
-    """Apply the engine producer exemption to coordinator group flags."""
-    producer_only = _pool_is_producer_only(vllm_config, kv_cache_config)
-    return [
-        replace(
-            group,
-            is_eagle_group=False if producer_only else group.is_eagle_group,
-        )
-        for group in kv_cache_config.kv_cache_groups
-    ]
-
-
-def validate_pool_cache_config(
-    vllm_config,
-    block_sizes: Sequence[int],
-    cacheable_group_ids: Sequence[int],
-    hash_block_size: int,
-    enable_partial_hash_hits: bool,
-) -> None:
-    """Validate hash/page compatibility and the partial-hit connector contract."""
-    for group_id in cacheable_group_ids:
-        group_block_size = block_sizes[group_id]
-        assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-    extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-    if enable_partial_hash_hits and extra.get("discard_partial_chunks", True) is not True:
-        raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
 
 
 class ChunkedTokenDatabase:
@@ -1256,12 +1209,12 @@ class ReqMeta:
         # 2. number of unsaved tokens is not reached the chunk boundary
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, cache_transfer_granularity) * cache_transfer_granularity
-            if discard_partial_chunks
+            if discard_partial_chunks or enable_partial_hash_hits
             else 0
         )
         num_tokens_to_save = (
             (target_token_len // cache_transfer_granularity * cache_transfer_granularity)
-            if discard_partial_chunks
+            if discard_partial_chunks or enable_partial_hash_hits
             else target_token_len
         )
         hash_block_size = hash_block_size or cache_transfer_granularity

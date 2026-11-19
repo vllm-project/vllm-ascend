@@ -47,19 +47,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
-    resolve_pool_hit_alignment,
     uses_hybrid_kv_cache,
 )
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
-    def test_hit_alignment_consumes_core_value_without_mutating_config(self):
-        for alignment, expected in ((32, 32), (640, 640), (None, 640)):
-            with self.subTest(alignment=alignment):
-                cache = SimpleNamespace(cache_hit_alignment_tokens=alignment)
-                self.assertEqual(resolve_pool_hit_alignment(cache, 640), expected)
-                self.assertEqual(cache.cache_hit_alignment_tokens, alignment)
-
     def test_engine_transfer_config_uses_planner_then_core_context_then_child(self):
         child, engine, planner = object(), object(), object()
         config = SimpleNamespace(kv_transfer_config=child)

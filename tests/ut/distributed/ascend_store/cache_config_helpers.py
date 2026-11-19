@@ -32,8 +32,8 @@ def make_resolved_cache_config(config, cache=None):
         )
     if not isinstance(getattr(cache, "hash_block_size", None), int):
         _, cache.hash_block_size = resolve_kv_cache_block_sizes(cache, config)
-    if "cache_hit_alignment_tokens" not in vars(cache):
-        cache.cache_hit_alignment_tokens = None
+    if not isinstance(getattr(cache, "cache_hit_alignment_tokens", None), int):
+        cache.cache_hit_alignment_tokens, _ = resolve_kv_cache_block_sizes(cache, config)
     if "prefix_cache_retention_interval" not in vars(cache):
         cache.prefix_cache_retention_interval = config.cache_config.prefix_cache_retention_interval
     return cache

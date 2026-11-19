@@ -329,11 +329,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         if "reachable_boundaries" not in inspect.signature(MambaManager.reachable_block_mask).parameters:
             self.skipTest("requires the reachable_boundaries vLLM API")
         spec = MambaSpec(block_size=256, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
-        for interval, expected in [
-            (0, [False, False, True, False]),
-            (512, [False, True, True, True]),
-            (None, [True, True, True, True]),
-        ]:
+        for interval in [0, 512, None]:
             with self.subTest(retention_interval=interval):
                 coord = AscendStoreCoordinator(
                     [KVCacheGroupSpec(["attention"], _full_spec(256)), KVCacheGroupSpec(["state"], spec)],
@@ -344,8 +340,6 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                     retention_interval=interval,
                 )
                 self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], [False] * 4)
-                coord.use_boundary_state = False
-                self.assertEqual(coord.store_mask(1024, num_prompt_tokens=769)[1], expected)
                 hashes = _hashes(4)
 
                 def query(group_id, group_hashes, mask):

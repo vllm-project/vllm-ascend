@@ -71,11 +71,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
-    pool_uses_eagle,
-    resolve_pool_cache_groups,
-    resolve_pool_hit_alignment,
     uses_hybrid_kv_cache,
-    validate_pool_cache_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -221,17 +217,20 @@ class BaseKVPoolWorker(ABC):
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         self.hash_block_size = kv_cache_config.hash_block_size
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
-        hit_alignment = resolve_pool_hit_alignment(kv_cache_config, self.lcm_block_size)
+        hit_alignment = kv_cache_config.cache_hit_alignment_tokens
         self.enable_partial_hash_hits = not use_layerwise and hit_alignment < self.lcm_block_size
-        validate_pool_cache_config(
-            vllm_config,
-            self.grouped_block_size,
-            self.cacheable_group_ids,
-            self.hash_block_size,
-            self.enable_partial_hash_hits,
-        )
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.grouped_block_size[group_id]
+            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        if self.enable_partial_hash_hits and extra_config.get("discard_partial_chunks", True) is not True:
+            raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
         if self.enable_partial_hash_hits:
-            self.use_eagle = pool_uses_eagle(vllm_config, kv_cache_config)
+            use_eagle_block_drop = getattr(speculative_config, "use_eagle_block_drop", None)
+            transfer = get_engine_transfer_config(vllm_config, kv_cache_config)
+            producer_only = bool(transfer and transfer.is_kv_producer and not transfer.is_kv_consumer)
+            self.use_eagle = bool(
+                callable(use_eagle_block_drop) and use_eagle_block_drop() is True and not producer_only
+            )
         logger.info(
             "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
             "pool_transfer_alignment=%d mode=%s group_pages=%s",
@@ -437,7 +436,7 @@ class BaseKVPoolWorker(ABC):
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
         retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
-            resolve_pool_cache_groups(vllm_config, self.kv_cache_config),
+            self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
@@ -445,7 +444,6 @@ class BaseKVPoolWorker(ABC):
             use_eagle=self.use_eagle if self.enable_partial_hash_hits else use_eagle,
             retention_interval=retention_interval,
             enable_partial_hash_hits=self.enable_partial_hash_hits,
-            use_boundary_state=not self.use_layerwise,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
