@@ -1128,7 +1128,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         for group_id, uses_align in enumerate(align_groups):
             if not uses_align and group_id not in swa_group_ids:
                 continue
-            block_ids = request.block_ids_by_group[group_id]
+            block_ids = (
+                request.swa_save_block_ids(group_id)
+                if group_id in swa_group_ids
+                else request.block_ids_by_group[group_id]
+            )
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
             # An aligned prefill chunk ends with a real recurrent checkpoint,
@@ -1143,7 +1147,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             result[group_id] = [
                 index < len(block_ids)
-                and block_ids[index] != 0
+                and bool(block_ids[index])
                 and (
                     original_mask is None
                     or (index < len(original_mask) and original_mask[index])

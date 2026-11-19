@@ -314,8 +314,10 @@ def get_swa_group_ids(kv_cache_config: KVCacheConfig | None, cacheable_group_ids
     if kv_cache_config is None:
         return set()
     result = set()
-    for group_id in cacheable_group_ids:
-        spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if group_id not in cacheable_group_ids:
+            continue
+        spec = group.kv_cache_spec
         specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
         if any(isinstance(item, (SlidingWindowSpec, RSWASpec)) for item in specs):
             result.add(group_id)
@@ -1101,6 +1103,16 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+
+    def swa_save_block_ids(self, group_id: int) -> list[int] | np.ndarray:
+        """A flat physical block table belongs to group zero only."""
+        if self.block_ids_by_group_np is not None and group_id < len(self.block_ids_by_group_np):
+            return self.block_ids_by_group_np[group_id]
+        if group_id == 0 and self.block_ids_np is not None:
+            return self.block_ids_np
+        if group_id < len(self.block_ids_by_group):
+            return self.block_ids_by_group[group_id]
+        return []
 
     @property
     def block_ids(self) -> list[int]:

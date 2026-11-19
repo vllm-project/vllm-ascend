@@ -123,11 +123,12 @@ class GvaDataPlane(LayerwiseDataPlane):
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * worker.num_kv_cache_groups
             for group_id in range(worker.num_kv_cache_groups):
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
+                if group_id in worker.swa_group_ids:
+                    block_ids_by_group = request.swa_save_block_ids(group_id)
+                elif request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np):
+                    block_ids_by_group = request.block_ids_by_group_np[group_id]
+                else:
+                    block_ids_by_group = request.block_ids_np
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
                 if group_id not in worker.cacheable_group_ids or not worker._is_layerwise_save_owner(group_id):

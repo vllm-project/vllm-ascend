@@ -3606,6 +3606,31 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         ranges = worker.layer_save_tasks[0][0].block_ranges
         self.assertEqual([(r.start_block, r.end_block) for r in ranges], [(0, 1), (2, 3)])
 
+    def test_missing_swa_group_cannot_use_flat_block_ids_for_a_partial_save(self):
+        worker = self._make_worker()
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 16]
+        worker.group_uses_align_state = [False, False]
+        worker.swa_group_ids = {1}
+        worker.cacheable_group_ids = [0, 1]
+        worker.group_block_len[1] = [64]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+        worker._global_group_alloc_size = MagicMock(return_value=64)
+        worker._make_layerwise_full_key = MagicMock(side_effect=lambda group, block_hash: f"{group}:{block_hash}")
+        worker._make_layerwise_partial_key = MagicMock(
+            side_effect=lambda request, group, index, end: f"partial:{group}"
+        )
+        worker.m_store.batch_alloc.side_effect = lambda keys, *args: [101] * len(keys)
+        request = self._make_request(target_token_len=63, save_end_token=48)
+
+        request.store_masks = worker._compute_reachable_store_masks(request)
+        worker._data_plane._alloc_gvas_for_save([request])
+        worker._process_save_for_layer_batch([request], 0, group_id=1)
+
+        self.assertEqual(request.partial_save_gva_per_group, [101, 0])
+        self.assertEqual(request.block_gvas_by_group_np[1].size, 0)
+        self.assertEqual(worker.layer_save_tasks[0], [])
+
     def test_aligned_prefill_chunk_preserves_real_recurrent_checkpoint(self):
         worker = self._make_worker()
         worker.block_key_hybrid = False
