@@ -157,21 +157,3 @@ def checkpoint_views(
 def install_direct_reload_patch():
     """Register Ascend checkpoint-view support without editing vLLM files."""
     vllm_direct._checkpoint_views = checkpoint_views
-
-
-def refill_derived_buffer(module, name, source, *, dtype=None):
-    """Give a derived buffer independent storage and refresh it from the checkpoint."""
-    if name not in module._buffers or name not in module._non_persistent_buffers_set:
-        raise ValueError(f"{name}: expected a registered non-persistent derived buffer")
-    old = getattr(module, name)
-    if source is not None:
-        source = source.detach()
-        dtype = source.dtype if dtype is None else dtype
-        if old is not None and (old.shape, old.dtype, old.device) == (source.shape, dtype, source.device):
-            return old.copy_(source)
-    if direct_reload_enabled() and old is not None:
-        raise ValueError(f"{name}: derived buffer layout changed; rebuild and recapture graphs")
-    if source is not None:
-        source = source.to(dtype=dtype, memory_format=torch.contiguous_format, copy=True)
-    setattr(module, name, source)
-    return source

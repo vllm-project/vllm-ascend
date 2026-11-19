@@ -95,13 +95,12 @@ def _build_bf16_layer(layout, version, vc, monkeypatch, device=None):
         layer.head_dim = 16
         layer.wk_weights_proj = torch.nn.Module()
         layer.k_norm = torch.nn.Module()
-        for name in ("_key_weight", "_gate_weight", "_head_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
-            layer.register_buffer(name, None, persistent=False)
+        layer._head_weight_f32 = None
         values = {
             "wk_weights_proj.weight": torch.empty(20, 64, dtype=torch.bfloat16),
             "index_kpool_compress_gate": torch.empty(16, 64, dtype=torch.bfloat16),
-            "k_norm.weight": torch.empty(16, dtype=torch.bfloat16),
-            "k_norm.bias": torch.empty(16, dtype=torch.bfloat16),
+            "k_norm.weight": torch.empty(16, dtype=torch.float32),
+            "k_norm.bias": torch.empty(16, dtype=torch.float32),
         }
     else:
         import vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method as upstream
@@ -132,6 +131,8 @@ def _build_bf16_layer(layout, version, vc, monkeypatch, device=None):
 def _runtime(layer):
     tensors = {name: value for name, value in layer.named_parameters() if not getattr(value, "retired", False)}
     tensors.update({name: value for name, value in layer.named_buffers() if value is not None})
+    if hasattr(layer, "_head_weight_f32"):
+        tensors["_head_weight_f32"] = layer._head_weight_f32
     for name in ("w13_weight_list", "w2_weight_list"):
         tensors.update({f"{name}.{index}": value for index, value in enumerate(getattr(layer, name, ()))})
     return tensors
@@ -148,7 +149,7 @@ def test_bf16_reload_matches_cold_start(config, monkeypatch, layout, mode):
     parameters = dict(layer.named_parameters())
     if layout == "kpool-bf16":
         checkpoint_storage = {p.untyped_storage().data_ptr() for p in parameters.values()}
-        assert all(buf.untyped_storage().data_ptr() not in checkpoint_storage for buf in layer.buffers())
+        assert layer._head_weight_f32.untyped_storage().data_ptr() not in checkpoint_storage
     held = {name: tensor.detach() for name, tensor in _runtime(layer).items()}
     for version in (1, 3, 1):
         fresh, values = _build_bf16_layer(layout, version, config, monkeypatch)
