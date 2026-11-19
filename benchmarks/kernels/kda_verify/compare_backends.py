@@ -15,10 +15,10 @@ from fused import WEIGHT_REUSE_BATCHES, FusedMiddle
 from inputs import Config, make_inputs
 from native import Native
 
-# Reference peaks and logical traffic model for the fixed six-token GLM5Next fixture.
+# Reference peaks used for the GLM5Next verification benchmark.
 BF16_FLOPS_PER_SECOND = 432e12
 HBM_BYTES_PER_SECOND = 4e12
-PROJECTION_FLOPS_PER_REQUEST = 1_651_507_200
+PROJECTION_FLOPS_PER_TOKEN = 2 * (4096 * 24896 + 2 * 128 * 8192 + 8192 * 4096)
 TOLERANCES = {
     "output": (0.025, 0.002),
     "cache": (0, 0),
@@ -29,22 +29,37 @@ TOLERANCES = {
 }
 
 
-def model_utilization(batch, latency_us, *, fused, projection_rows=None, batch_gates=False):
-    """Pass the measured input projection height when comparing padded schedules."""
-    if fused:
-        logical_bytes = 275_481_088 + 6_020_612 * batch
-        if projection_rows is None:
-            projection_rows = 54 if batch in (6, 7, 8) else 6 * batch
-        if projection_rows > 6 * batch:
-            logical_bytes += 98_304 * batch
-    else:
-        logical_bytes = 275_481_096 + 7_790_100 * batch
+def model_utilization(
+    batch,
+    latency_us,
+    *,
+    fused,
+    tokens=6,
+    projection_rows=None,
+    output_rows=None,
+    batch_gates=False,
+    bandwidth=HBM_BYTES_PER_SECOND,
+):
+    """Estimate logical traffic. Actual HBM traffic requires device counters."""
+    rows = batch * tokens
+    weights = 275_481_088
+    state_and_history = 64 * 128 * 128 * 4 + (tokens + 5) * 3 * 8192 * 2
+    tensors = tokens * (4 * 24896 + 4 * 8192 + 4 * 4096 + 4 * 8192 + 4 * 8192)
+    logical_bytes = weights + batch * (state_and_history + tensors + 4)
+    if not fused:
+        logical_bytes += 8 + batch * (9 * tokens * 4 * 8192 + 16)
+    if fused and projection_rows is None:
+        projection_rows = 54 if tokens in (6, 8) and batch in (6, 7, 8) else rows
+    if fused and projection_rows > rows:
+        logical_bytes += 4 * rows * 4096
+    if fused and output_rows is not None and output_rows > rows:
+        logical_bytes += 4 * rows * 8192
     # Two materialized BF16 gates, each written and read once.
-    gate_bytes = 2 * 2 * 2 * 6 * 8192 * batch if fused and batch_gates else 0
+    gate_bytes = 2 * 2 * 2 * rows * 8192 if fused and batch_gates else 0
     seconds = latency_us * 1e-6
-    mfu = 100 * (PROJECTION_FLOPS_PER_REQUEST * batch) / (BF16_FLOPS_PER_SECOND * seconds)
-    mbu = 100 * logical_bytes / (HBM_BYTES_PER_SECOND * seconds)
-    path_mbu = 100 * (logical_bytes + gate_bytes) / (HBM_BYTES_PER_SECOND * seconds)
+    mfu = 100 * PROJECTION_FLOPS_PER_TOKEN * rows / (BF16_FLOPS_PER_SECOND * seconds)
+    mbu = 100 * logical_bytes / (bandwidth * seconds)
+    path_mbu = 100 * (logical_bytes + gate_bytes) / (bandwidth * seconds)
     return {
         "mfu_pct": mfu,
         "logical_mbu_pct": path_mbu,
@@ -70,28 +85,40 @@ def validate(n, output, expected, reference_state):
     for key, actual in observe(n, output).items():
         target = reference_state if key == "checkpoint" else expected[key]
         rtol, atol = TOLERANCES[key]
-        torch.testing.assert_close(actual, target, rtol=rtol, atol=atol, msg=lambda msg, key=key: key + " " + msg)
+        torch.testing.assert_close(
+            actual,
+            target,
+            rtol=rtol,
+            atol=atol,
+            msg=lambda msg, key=key: key + " " + msg,
+        )
         if key != "checkpoint":
             result[key] = (actual.float() - target.float()).abs().max().item()
     return result
 
 
 def run_batch(b, args):
-    c = Config(batch=b)
+    c = Config(batch=b, tokens=args.tokens)
     n = Native(c, make_inputs(c, device="npu", seed=args.seed + b))
     n.cs_base[1:, 3:] = torch.randn_like(n.cs_base[1:, 3:]) * 0.25
     paths = {"unfused": n, "tilelang": FusedMiddle(n, tuned=True, reuse_weights=True)}
     checks = []
     state = n.state.clone()
-    for accept in [1, 2, 6, "mixed"] if b > 1 else [1, 2, 6]:
+    lengths = list(dict.fromkeys((1, min(2, c.tokens), c.tokens)))
+    for accept in lengths + (["mixed"] if b > 1 else []):
         if accept == "mixed":
-            n.accepted.copy_(torch.arange(b, device="npu", dtype=torch.int32) % 6 + 1)
+            n.accepted.copy_(torch.arange(b, device="npu", dtype=torch.int32) % c.tokens + 1)
         else:
             n.accepted.fill_(accept)
         n.reset()
         ref = {k: v.clone() for k, v in observe(n, n()).items() if k != "checkpoint"}
         n.reset()
-        checks.append({"accepted": accept, "tilelang": validate(n, paths["tilelang"](), ref, state)})
+        checks.append(
+            {
+                "accepted": accept,
+                "tilelang": validate(n, paths["tilelang"](), ref, state),
+            }
+        )
     del ref
     n.accepted.fill_(1)
     graphs = {}
@@ -100,7 +127,7 @@ def run_batch(b, args):
         graphs[k] = capture(f, args.repeat)
     # Change history after capture and poison all public output buffers. This
     # checks that replay recomputes outputs and writes back the state.
-    n.accepted.fill_(2)
+    n.accepted.fill_(min(2, c.tokens))
     n.reset()
     # Capture-time allocations are shared within each graph. Compute the native
     # reference by replaying the same number of steps from identical history.
@@ -133,6 +160,9 @@ def run_batch(b, args):
                 b,
                 us,
                 fused=k == "tilelang",
+                tokens=c.tokens,
+                bandwidth=args.bandwidth,
+                output_rows=paths["tilelang"].output_rows,
                 projection_rows=paths["tilelang"].projection_rows,
                 batch_gates=paths["tilelang"].batch_gates,
             )
@@ -145,18 +175,22 @@ def run_batch(b, args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--batches", default="1:80")
+    p.add_argument("--tokens", type=int, choices=range(1, 17), default=6)
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=83700)
     p.add_argument("--repeat", type=int, default=5)
     p.add_argument("--samples", type=int, default=15)
     args = p.parse_args()
     torch.npu.set_device(0)
+    device_name = torch.npu.get_device_name(0)
+    args.bandwidth = 1.4e12 if device_name == "Ascend950PR_958b" else HBM_BYTES_PER_SECOND
     torch.set_num_threads(2)
     batches = list(range(1, 81)) if args.batches == "1:80" else [int(k) for k in args.batches.split(",")]
     if args.repeat < 1 or args.samples < 1 or any(not 1 <= b <= 80 for b in batches):
         p.error("repeat and samples must be positive and batches must be in [1, 80]")
     dest = Path(args.out)
     report = {
+        "tokens_per_request": args.tokens,
         "seed": args.seed,
         "repeat": args.repeat,
         "samples": args.samples,
@@ -164,9 +198,9 @@ def main():
         "torch": torch.__version__,
         "torch_npu": torch_npu.__version__,
         "reference_peaks": {
-            "device": "Ascend950DT_9581",
+            "device": device_name,
             "bf16_flops_per_second": BF16_FLOPS_PER_SECOND,
-            "hbm_bytes_per_second": HBM_BYTES_PER_SECOND,
+            "hbm_bytes_per_second": args.bandwidth,
         },
         "rows": [],
     }

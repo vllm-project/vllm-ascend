@@ -8,6 +8,7 @@ read-only; correction/KG records match the original Replay SSM contract.
 
 import tilelang
 import tilelang.ascend.language as T
+import torch
 import torch.nn.functional as F
 from small_batch import small_batch_program
 
@@ -15,6 +16,7 @@ from small_batch import small_batch_program
 def program(c, unroll_taps=False):
     taps = T.Unroll if unroll_taps else T.Serial
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
+    state_rows = 16 if L <= 8 else 32
     stages = 6 if c.batch == 1 else 4
     PITCH = 3 * H * D + H + 2 * D
 
@@ -65,11 +67,11 @@ def program(c, unroll_taps=False):
             decay = T.alloc_shared((L, D), "float32")
             val = T.alloc_shared((L, D), "float32")
             prefix = T.alloc_shared((L, D), "float32")
-            qk = T.alloc_shared((16, D), "float32")
-            qkl1 = T.alloc_l1((32, D), "float32")
+            qk = T.alloc_shared((state_rows, D), "float32")
+            qkl1 = T.alloc_l1((2 * state_rows, D), "float32")
             sl1 = T.alloc_l1((2 * D, D), "float32")
-            cp = T.alloc_l0c((32, 2 * D), "float32")
-            proj = T.alloc_shared((16, 2 * D), "float32")
+            cp = T.alloc_l0c((2 * state_rows, 2 * D), "float32")
+            proj = T.alloc_shared((state_rows, 2 * D), "float32")
             ck = T.alloc_shared((L, L), "float32")
             cq = T.alloc_shared((L, L), "float32")
             T.set_hf32_mode(None)
@@ -87,8 +89,8 @@ def program(c, unroll_taps=False):
                 hp = job % (H // 2)
                 h = hp * 2 + sid
                 T.copy(Accepted[b : b + 1], ac)
-                T.copy(P[b * L : b * L + 16, 3 * H * D + H : 3 * H * D + H + D], al1)
-                T.copy(P[b * L : b * L + 16, 3 * H * D + H + D : PITCH], bl1)
+                T.copy(P[b * L : (b + 1) * L, 3 * H * D + H : 3 * H * D + H + D], al1[:L, :])
+                T.copy(P[b * L : (b + 1) * L, 3 * H * D + H + D : PITCH], bl1[:L, :])
                 T.copy(WF[hp, :, :], wl1)
                 T.copy(WG[hp, :, :], vl1)
                 T.gemm(al1, wl1, ga, transpose_B=True, clear_accum=True)
@@ -175,7 +177,7 @@ def program(c, unroll_taps=False):
                                 prefix[t, j] = decay[t, j]
                             else:
                                 prefix[t, j] = prefix[t - 1, j] * decay[t, j]
-                    for t, j in T.Parallel(16, D):
+                    for t, j in T.Parallel(state_rows, D):
                         if t < L:
                             qk[t, j] = knq[1, t, j] * prefix[t, j]
                         elif t < 2 * L:
@@ -271,6 +273,8 @@ EXTRA_REQUEST_BATCHES = frozenset((14, 17, 19, 22))
 WEIGHT_REUSE_BATCHES = frozenset((1, 3, 5, 6, 7, 8, 9, 10))
 
 
+DT_PROJECTION_ROWS = {(5, 20): (105, 100), (13, 10): (143, 160)}
+
 GATE_TILE_ROWS = 32
 
 
@@ -321,19 +325,54 @@ class FusedMiddle:
         self.n = baseline
         c, i = baseline.c, baseline.i
         h, d = c.heads, c.dim
-        self.batch_gates = tuned and 5 <= c.batch <= 80 and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128)
-        self.projection_rows = c.batch * c.tokens
-        if c.batch in (6, 7, 8):
-            self.projection_rows = 54
-        elif tuned and (c.tokens, c.hidden, h, d) == (6, 4096, 64, 128) and c.batch in EXTRA_REQUEST_BATCHES:
+        # Keep the original general schedule as the six-token benchmark baseline.
+        if (
+            not tuned
+            and c.tokens != 6
+            and 1 <= c.tokens <= 16
+            and 1 <= c.batch <= 80
+            and (c.hidden, h, d) == (4096, 64, 128)
+        ):
+            tuned = True
+            reuse_weights = True
+        rows = c.batch * c.tokens
+        verify_shape = tuned and 1 <= c.batch <= 80 and (c.hidden, h, d) == (4096, 64, 128)
+        board = torch.npu.get_device_name(baseline.x.device) if verify_shape and 1 <= c.tokens <= 16 else ""
+        dt_board = board == "Ascend950DT_9581"
+        pr_board = board == "Ascend950PR_958b"
+        fast_math = False
+        self.batch_gates = False
+        if verify_shape and c.tokens == 6:
+            self.batch_gates = c.batch >= 5
+        elif c.tokens == 8 and c.batch >= 5:
+            self.batch_gates = dt_board or (pr_board and c.batch in (9, 10))
+            fast_math = self.batch_gates or (pr_board and c.batch >= 11)
+        elif c.tokens != 8 and (dt_board or pr_board):
+            fast_math = True
+            self.batch_gates = c.tokens > 8 or c.batch >= (5 if dt_board else 3) or (c.tokens == 5 and c.batch == 4)
+        self.projection_rows = rows
+        self.output_rows = rows
+        if c.tokens in (6, 8) and c.batch in (6, 7, 8):
+            self.projection_rows = max(rows, 54)
+        elif verify_shape and c.tokens == 6 and c.batch in EXTRA_REQUEST_BATCHES:
             self.projection_rows += c.tokens
+        elif dt_board:
+            # Paired end-to-end measurements include both padding and the GEMMs.
+            self.projection_rows, self.output_rows = DT_PROJECTION_ROWS.get((c.tokens, c.batch), (rows, rows))
         self.wf = i["w_f"].reshape(h // 2, 2 * d, d)
         self.wg = i["w_g"].reshape(h // 2, 2 * d, d)
         if tuned and c.batch <= 80:
             # The sliding window reads all channels of each tap contiguously.
             self.cw = i["conv_w"].permute(1, 0, 3, 2).contiguous()
             kernel = small_batch_program(
-                c, reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES, batch_gates=self.batch_gates
+                c,
+                reuse_weights=reuse_weights and c.batch in WEIGHT_REUSE_BATCHES,
+                batch_gates=self.batch_gates,
+                fast_math=fast_math,
+                # With a lower bound of -5 the reciprocal stays finite through 16 tokens.
+                precompute_keys=(dt_board or pr_board)
+                and -5 <= c.lower_bound <= 0
+                and ((c.tokens == 9 and c.batch >= 11) or (c.tokens == 16 and c.batch >= 32)),
             )
         else:
             self.cw = i["conv_w"].permute(1, 0, 2, 3).contiguous()
@@ -373,4 +412,8 @@ class FusedMiddle:
             n.correction,
             n.kg,
         )
-        return F.linear(n.normalized.reshape(c.batch * c.tokens, -1), i["w_o"])
+        normalized = n.normalized.reshape(rows, -1)
+        if self.output_rows > rows:
+            normalized = F.pad(normalized, (0, 0, 0, self.output_rows - rows))
+            return F.linear(normalized, i["w_o"])[:rows]
+        return F.linear(normalized, i["w_o"])

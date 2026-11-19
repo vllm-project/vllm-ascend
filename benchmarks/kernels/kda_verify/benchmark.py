@@ -50,16 +50,27 @@ def paired(graphs, repeat, *, samples=20, warmup=15):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--batches", default="1,28,80")
+    p.add_argument(
+        "--tokens",
+        type=int,
+        choices=range(1, 17),
+        default=6,
+        help="Speculative tokens per request",
+    )
     p.add_argument("--out", default="comparison.json")
     p.add_argument("--seed", type=int, default=100, help="Base RNG seed, incremented by batch size")
-    p.add_argument("--check-only", action="store_true", help="Validate outputs and state without timing graphs")
+    p.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Validate outputs and state without timing graphs",
+    )
     p.add_argument("--repeat", type=int, default=10)
     a = p.parse_args()
     torch.npu.set_device(0)
     torch.set_num_threads(2)
     report = {
-        "scope": "Complete QKV-to-O: unfused, original fusion, tuned fusion",
-        "tokens_per_request": 6,
+        "scope": "Complete QKV-to-O; native and tuned fusion, plus the original baseline for six tokens",
+        "tokens_per_request": a.tokens,
         "hidden": 4096,
         "heads": 64,
         "dim": 128,
@@ -76,18 +87,21 @@ def main():
     for b in batches:
         if not 1 <= b <= 80:
             p.error("batch must be in [1, 80]")
-        c = Config(batch=b)
+        c = Config(batch=b, tokens=a.tokens)
         i = make_inputs(c, device="npu", seed=a.seed + b)
         n = Native(c, i)
-        previous = None if a.check_only else FusedMiddle(n)
-        f = FusedMiddle(n, tuned=True)
+        previous = FusedMiddle(n) if not a.check_only and a.tokens == 6 else None
+        f = FusedMiddle(n, tuned=True, reuse_weights=True)
         # Exercise rollback offsets against nonzero speculative history.
         n.cs_base[1:, 3:] = torch.randn_like(n.cs_base[1:, 3:]) * 0.25
         checkpoint = n.state.clone()
         checks = []
-        for accept in [1, 2, 6] + (["mixed"] if b > 1 else []):
+        lengths = list(dict.fromkeys((1, min(2, a.tokens), a.tokens)))
+        if b > 1:
+            lengths.append("mixed")
+        for accept in lengths:
             if accept == "mixed":
-                n.accepted.copy_(torch.arange(b, device="npu", dtype=torch.int32) % 6 + 1)
+                n.accepted.copy_(torch.arange(b, device="npu", dtype=torch.int32) % a.tokens + 1)
             else:
                 n.accepted.fill_(accept)
             n.reset()
@@ -112,9 +126,21 @@ def main():
                 delta = (x.float() - y.float()).abs()
                 errors[name] = float(delta.max())
             for name, x, y, rtol, atol in pairs:
-                torch.testing.assert_close(x, y, rtol=rtol, atol=atol, msg=lambda msg, name=name: name + ": " + msg)
+                torch.testing.assert_close(
+                    x,
+                    y,
+                    rtol=rtol,
+                    atol=atol,
+                    msg=lambda msg, name=name: name + ": " + msg,
+                )
             checks.append({"accepted": accept, "max_abs": errors})
-        print("validated", b, "output max_abs", max(s["max_abs"]["output"] for s in checks), flush=True)
+        print(
+            "validated",
+            b,
+            "output max_abs",
+            max(s["max_abs"]["output"] for s in checks),
+            flush=True,
+        )
         if a.check_only:
             report["rows"].append({"batch": b, "checks": checks})
             Path(a.out).write_text(json.dumps(report, indent=2))
@@ -127,30 +153,47 @@ def main():
         n.reset()
         fg, _ = capture(f, a.repeat)
         n.reset()
-        pg, _ = capture(previous, a.repeat)
-        ns, ps, fs = paired([ng, pg, fg], a.repeat)
+        if previous is not None:
+            pg, _ = capture(previous, a.repeat)
+            ns, ps, fs = paired([ng, pg, fg], a.repeat)
+            del pg
+        else:
+            ns, fs = paired([ng, fg], a.repeat)
         row = {
             "batch": b,
-            "tokens": b * 6,
+            "tokens": b * a.tokens,
             "native_us": statistics.median(ns),
             "fused_us": statistics.median(fs),
-            "previous_us": statistics.median(ps),
-            "previous_samples_us": ps,
             "native_samples_us": ns,
             "fused_samples_us": fs,
             "checks": checks,
         }
         row["speedup"] = row["native_us"] / row["fused_us"]
-        row["speedup_vs_previous"] = row["previous_us"] / row["fused_us"]
+        if previous is not None:
+            row["previous_us"] = statistics.median(ps)
+            row["previous_samples_us"] = ps
+            row["speedup_vs_previous"] = row["previous_us"] / row["fused_us"]
         report["rows"].append(row)
         Path(a.out).write_text(json.dumps(report, indent=2))
         print(
             json.dumps(
-                {k: row[k] for k in ["batch", "native_us", "previous_us", "fused_us", "speedup", "speedup_vs_previous"]}
+                {
+                    k: v
+                    for k, v in row.items()
+                    if k
+                    in (
+                        "batch",
+                        "native_us",
+                        "previous_us",
+                        "fused_us",
+                        "speedup",
+                        "speedup_vs_previous",
+                    )
+                }
             ),
             flush=True,
         )
-        del ng, fg, pg, n, f, previous, i
+        del ng, fg, n, f, previous, i
         torch.npu.empty_cache()
 
 

@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contiguous-window KDA verify schedules for six-token BF16 requests on Ascend 950."""
+"""Contiguous-window KDA verify schedules for BF16 speculative requests on Ascend 950."""
 
 import tilelang.ascend.language as T
 
 
-def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
-    # Use the hardware FP32 SFU for the measured six-token verify shape.
-    sfu_precision = "ftz_true" if (c.tokens, c.hidden, c.heads, c.dim) == (6, 4096, 64, 128) else None
-    direct_history = sfu_precision is not None and c.batch == 1
+def small_batch_program(c, *, reuse_weights=False, batch_gates=False, fast_math=False, precompute_keys=False):
+    # Use the hardware FP32 SFU on the measured verify schedules.
+    six_token_shape = (c.tokens, c.hidden, c.heads, c.dim) == (6, 4096, 64, 128)
+    sfu_precision = "ftz_true" if six_token_shape or fast_math else None
+    direct_history = six_token_shape and c.batch == 1
     single_wave = c.batch == 1
     packed_output_gate = batch_gates
-    register_prefix = c.batch != 2
+    register_prefix = batch_gates or c.batch != 2
     B, L, H, D = T.dynamic("B"), c.tokens, c.heads, c.dim
+    # Both query and key rows are packed into the same Cube operand.
+    state_rows = 16 if L <= 8 else 32
     gate_shape = (B * L, H * D) if batch_gates else (H // 2, 2 * D, D)
     stages = 3 if batch_gates else (6 if single_wave else 4)
     taps = T.Unroll if batch_gates else T.Serial
@@ -72,11 +75,13 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
             decay = T.alloc_shared((L, D), "float32")
             val = T.alloc_shared((L, D), "float32")
             prefix = T.alloc_shared((L, D), "float32")
-            qk = T.alloc_shared((16, D), "float32")
-            qkl1 = T.alloc_l1((32, D), "float32")
+            qk = T.alloc_shared((state_rows, D), "float32")
+            qkl1 = T.alloc_l1((2 * state_rows, D), "float32")
             sl1 = T.alloc_l1((2 * D, D), "float32")
-            cp = T.alloc_l0c((32, 2 * D), "float32")
-            proj = T.alloc_shared((16, 2 * D), "float32")
+            cp = T.alloc_l0c((2 * state_rows, 2 * D), "float32")
+            proj = T.alloc_shared((state_rows, 2 * D), "float32")
+            if precompute_keys:
+                adjk = T.alloc_shared((L, D), "float32")
             ck = T.alloc_shared((L, L), "float32")
             cq = T.alloc_shared((L, L), "float32")
             T.set_hf32_mode(None)
@@ -182,7 +187,7 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                         running = T.simd.alloc_local((2,), "float32")
                         running[0] = one
                         running[1] = one
-                        for tail in T.Serial(16 - 2 * L):
+                        for tail in T.Serial(state_rows - 2 * L):
                             T.simd.vsts(qk[2 * L + tail, 0], zero)
                             T.simd.vsts(qk[2 * L + tail, 64], zero)
                     for t in T.Serial(L):
@@ -225,6 +230,15 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                             T.simd.vsts(knq[q, t, 0], T.simd.vmul(c0, scale))
                             T.simd.vsts(knq[q, t, 64], T.simd.vmul(c1, scale))
                             if register_prefix:
+                                if precompute_keys and q == 1:
+                                    T.simd.vsts(
+                                        adjk[t, 0],
+                                        T.simd.vdiv(T.simd.vmul(c0, scale), running[0], precision=sfu_precision),
+                                    )
+                                    T.simd.vsts(
+                                        adjk[t, 64],
+                                        T.simd.vdiv(T.simd.vmul(c1, scale), running[1], precision=sfu_precision),
+                                    )
                                 T.simd.vsts(qk[(1 - q) * L + t, 0], T.simd.vmul(T.simd.vmul(c0, scale), running[0]))
                                 T.simd.vsts(qk[(1 - q) * L + t, 64], T.simd.vmul(T.simd.vmul(c1, scale), running[1]))
                         if not register_prefix:
@@ -273,18 +287,33 @@ def small_batch_program(c, *, reuse_weights=False, batch_gates=False):
                         kt1 = T.simd.vld(knq[1, t, 64])
                         selfq = T.simd.vadd(T.simd.vcadd(T.simd.vmul(kt0, qt0)), T.simd.vcadd(T.simd.vmul(kt1, qt1)))
                         T.simd.vsts(cq[t, t], selfq, one, dist="ONEPT_B32", extent=1)
-                        ratio[0] = T.simd.vdup(T.float32(1), "float32")
-                        ratio[1] = T.simd.vdup(T.float32(1), "float32")
-                        for back in T.Serial(t):
-                            u = t - 1 - back
-                            ratio[0] = T.simd.vmul(ratio[0], T.simd.vld(decay[u + 1, 0]))
-                            ratio[1] = T.simd.vmul(ratio[1], T.simd.vld(decay[u + 1, 64]))
-                            k0 = T.simd.vmul(T.simd.vld(knq[1, u, 0]), ratio[0])
-                            k1 = T.simd.vmul(T.simd.vld(knq[1, u, 64]), ratio[1])
-                            kk = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, kt0)), T.simd.vcadd(T.simd.vmul(k1, kt1)))
-                            qq = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, qt0)), T.simd.vcadd(T.simd.vmul(k1, qt1)))
-                            T.simd.vsts(ck[t, u], kk, one, dist="ONEPT_B32", extent=1)
-                            T.simd.vsts(cq[t, u], qq, one, dist="ONEPT_B32", extent=1)
+                        # qk holds Q and K multiplied by cumulative decay. Dividing each
+                        # earlier K once replaces the backward decay scan for every query.
+                        if precompute_keys:
+                            kt0 = T.simd.vld(qk[t, 0])
+                            kt1 = T.simd.vld(qk[t, 64])
+                            qt0 = T.simd.vld(qk[t + L, 0])
+                            qt1 = T.simd.vld(qk[t + L, 64])
+                            for u in T.Serial(t):
+                                k0 = T.simd.vld(adjk[u, 0])
+                                k1 = T.simd.vld(adjk[u, 64])
+                                kk = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, kt0)), T.simd.vcadd(T.simd.vmul(k1, kt1)))
+                                qq = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, qt0)), T.simd.vcadd(T.simd.vmul(k1, qt1)))
+                                T.simd.vsts(ck[t, u], kk, one, dist="ONEPT_B32", extent=1)
+                                T.simd.vsts(cq[t, u], qq, one, dist="ONEPT_B32", extent=1)
+                        else:
+                            ratio[0] = T.simd.vdup(T.float32(1), "float32")
+                            ratio[1] = T.simd.vdup(T.float32(1), "float32")
+                            for back in T.Serial(t):
+                                u = t - 1 - back
+                                ratio[0] = T.simd.vmul(ratio[0], T.simd.vld(decay[u + 1, 0]))
+                                ratio[1] = T.simd.vmul(ratio[1], T.simd.vld(decay[u + 1, 64]))
+                                k0 = T.simd.vmul(T.simd.vld(knq[1, u, 0]), ratio[0])
+                                k1 = T.simd.vmul(T.simd.vld(knq[1, u, 64]), ratio[1])
+                                kk = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, kt0)), T.simd.vcadd(T.simd.vmul(k1, kt1)))
+                                qq = T.simd.vadd(T.simd.vcadd(T.simd.vmul(k0, qt0)), T.simd.vcadd(T.simd.vmul(k1, qt1)))
+                                T.simd.vsts(ck[t, u], kk, one, dist="ONEPT_B32", extent=1)
+                                T.simd.vsts(cq[t, u], qq, one, dist="ONEPT_B32", extent=1)
                 with T.SimdVF():
                     acc = T.simd.alloc_local((4,), "float32")
                     for t in T.Serial(L):

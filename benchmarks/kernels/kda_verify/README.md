@@ -1,6 +1,6 @@
 # GLM5Next KDA verify benchmark
 
-Compare the unfused, original fused and batch-tuned implementations on Ascend950DT_9581.
+Compare unfused and TileLang KDA verification on Ascend950DT_9581 (850E) and Ascend950PR_958b (850). The six-token fixture also reports the original fused schedule.
 Install torch-npu, fla-npu, vllm-ascend, CANN 9.2.1 and TileLang with the Ascend mixed Cube/Vector backend.
 Run from the repository root.
 
@@ -13,7 +13,7 @@ done
 python benchmarks/kernels/kda_verify/benchmark.py --batches 1:80 --out full-sweep.json
 ```
 
-Each request verifies six tokens with 64 heads, head dimension 128 and hidden size 4096.
+Each request verifies 1?16 tokens (six by default) with 64 heads, head dimension 128 and hidden size 4096.
 Weights and inputs are synthetic. Compilation and immutable weight packing happen before capture.
 Timing covers the input projection, padding when needed, the gate projections, the mixed kernel and the output projection.
 All paths share inputs and weights. Each median comes from 20 timed NPU graph replays after warmup,
@@ -29,7 +29,7 @@ with ten forwards per replay by default. Replay order rotates and reverses betwe
 
 Each row includes the underlying timing samples. For two seeds, take the geometric mean of the two median ratios at each batch size.
 
-## Batch-specific schedules
+## Six-token batch schedules
 
 | Batch | Tuned implementation |
 | --- | --- |
@@ -59,7 +59,7 @@ The paired runner records the actual projection height in `tilelang_projection_r
 
 ## Accuracy checks
 
-The harness compares output, convolution cache, normalized values, correction records, KG records and the FP32 checkpoint with the unfused path. It exercises accepted prefixes of one, two and six tokens, plus mixed prefixes across requests. To repeat the additional correctness runs:
+The harness compares output, convolution cache, normalized values, correction records, KG records and the FP32 checkpoint with the unfused path. It exercises accepted prefixes of one, up to two, and the full request length, plus mixed prefixes across requests. To repeat the additional correctness runs:
 
 ```sh
 for seed in 22100 32300 48100; do
@@ -80,16 +80,32 @@ python benchmarks/kernels/kda_verify/compare_backends.py --batches 1:80 --seed 6
 ```
 
 Each output row contains median latency in microseconds and raw samples keyed by `unfused` and `tilelang`.
-The runner validates accepted lengths 1, 2 and 6 and mixed lengths across requests.
+The runner validates one token, up to two tokens, the full request length and mixed lengths across requests.
 After graph capture it changes the accepted prefix and fills output buffers with NaNs.
 It then checks replay against the unfused reference, including convolution history, correction and KG records,
 normalized output and the FP32 checkpoint.
+
+### Token-length sweep
+
+Pass `--tokens` to either runner. For example:
+
+```sh
+for t in $(seq 1 16); do
+    python benchmarks/kernels/kda_verify/compare_backends.py --tokens "$t" --batches 1:80 --repeat 3 --samples 7 --out "latency-t$t.json"
+done
+```
+
+The state projection packs query and key rows into 16 rows for lengths 1?8 and 32 rows for lengths 9?16. On both boards the tuned schedule precomputes decay-adjusted keys at length 9 for batches 11?80 and length 16 for batches 32?80 with a gate lower bound between -5 and 0. The graph includes all projections, convolution, recurrence and gated normalization.
+
+![Fused and unfused KDA latency by batch and token length](latency-b1-50.png)
+
+Across batches 1?80 and token lengths 1?16, the geometric mean unfused-to-fused latency ratio was 2.00? on 850E and 1.72? on 850. The figure displays batches 1?50. Each measured shape passed eager and graph replay comparison with synthetic weights.
 
 ## Interpreting utilization
 
 For this fixed shape and six-token workload, `model_utilization` reports useful BF16 projection FLOPs
 (1,651,507,200 per request) divided by elapsed time and a 432 TFLOP/s reference peak.
-Logical MBU uses a 4 TB/s reference peak and the modeled tensor bytes for the path.
+Logical MBU uses a 4 TB/s (850E) or 1.4 TB/s (850) reference peak and the modeled tensor bytes for the path.
 For batch size B, modeled bytes are 275,481,096 + 7,790,100 脳 B for unfused and
 275,481,088 + 6,020,612 脳 B for TileLang, with another 98,304 脳 B when the input projection is padded. This allowance counts reads and writes of valid input rows. Dummy rows add no useful FLOPs.
 One Cube launch computes both gate projections directly from their input columns. Each core holds a
