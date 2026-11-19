@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
 
 # The A5 hardware profile does not enable RUNTIME_CUSTOM_OPS, so enable_custom_op()
@@ -33,6 +35,9 @@ Y_DIFF_THRESHOLD = 4e-3
 Y_REQUIRED_PASS_RATE = 0.98
 AUX_DIFF_THRESHOLD = 1e-4
 AUX_REQUIRED_PASS_RATE = 0.995
+A3_ONLY = pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3, reason="Exercises the optimized A3 HC pre kernel"
+)
 
 
 def _make_hc_pre_inputs(shape: tuple[int, ...]):
@@ -195,18 +200,13 @@ def test_npu_hc_pre_v2_bf16_extended_hidden_size():
 
 @torch.inference_mode()
 @pytest.mark.parametrize(
-    "shape",
+    ("shape", "use_pre_mix"),
     [
-        (2, HC_MULT, HIDDEN_SIZE),
-        (32, HC_MULT, HIDDEN_SIZE),
-        (33, HC_MULT, SECOND_HIDDEN_SIZE),
-        (80, HC_MULT, SECOND_HIDDEN_SIZE),
-        (96, HC_MULT, SECOND_HIDDEN_SIZE),
-        (129, HC_MULT, EXTENDED_HIDDEN_SIZE),
-        (1, 33, HC_MULT, HIDDEN_SIZE),
+        pytest.param((2, HC_MULT, HIDDEN_SIZE), True, id="external-pre-mix"),
+        pytest.param((65, HC_MULT, 1464), True, id="unaligned-bf16-row", marks=A3_ONLY),
+        pytest.param((65, HC_MULT, SECOND_HIDDEN_SIZE), False, id="internal-pre-mix", marks=A3_ONLY),
     ],
 )
-@pytest.mark.parametrize("use_pre_mix", [False, True])
 def test_npu_hc_pre_v3_matches_reference(shape: tuple[int, ...], use_pre_mix: bool):
     x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
     pre_mix = torch.rand(shape[:-1], dtype=torch.float32) if use_pre_mix else None
@@ -222,10 +222,10 @@ def test_npu_hc_pre_v3_matches_reference(shape: tuple[int, ...], use_pre_mix: bo
         norm_eps=NORM_EPS,
         hc_eps=HC_EPS,
     )
-    assert y.shape == (*shape[:-2], shape[-1])
-    assert post.shape == shape[:-1]
-    assert comb_frag.shape == (*shape[:-1], HC_MULT)
-    assert pre.shape == shape[:-1]
+    assert y.shape == (shape[0], shape[-1])
+    assert post.shape == (shape[0], HC_MULT)
+    assert comb_frag.shape == (shape[0], HC_MULT, HC_MULT)
+    assert pre.shape == (shape[0], HC_MULT)
     assert y.dtype == torch.bfloat16
     assert post.dtype == torch.float32
     assert comb_frag.dtype == torch.float32

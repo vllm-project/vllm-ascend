@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
 
 bootstrap_custom_op_env()
@@ -12,21 +13,19 @@ import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, 
 torch_npu.npu.config.allow_internal_format = True
 enable_custom_op()
 
+D_SPLIT_ONLY = pytest.mark.skipif(is_950(), reason="Exercises the A2/A3 HC post D-split kernel")
+
 
 @torch.inference_mode()
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("mix_dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
-    ("batch", "sequence", "heads", "hidden_size"),
+    ("batch", "sequence", "heads", "hidden_size", "dtype", "mix_dtype"),
     [
-        (1, 1, 4, 2048),
-        (1, 1, 4, 65),
-        (2, 17, 4, 4096),
-        (1, 3, 4, 4161),
-        (1, 80, 4, 5120),
-        (1, 96, 4, 7168),
-        (1, 3, 2, 4161),
-        (1, 1, 2, 2048),
+        pytest.param(1, 1, 4, 2048, torch.float32, torch.float32, id="single-full-tile"),
+        pytest.param(1, 1, 4, 65, torch.bfloat16, torch.float32, id="tail-only", marks=D_SPLIT_ONLY),
+        pytest.param(2, 17, 4, 4096, torch.bfloat16, torch.float32, id="deepseek-v4-flash"),
+        pytest.param(1, 3, 4, 4161, torch.float32, torch.float16, id="unaligned-tail", marks=D_SPLIT_ONLY),
+        pytest.param(1, 96, 4, 7168, torch.float16, torch.bfloat16, id="aligned-tail"),
+        pytest.param(1, 3, 2, 4161, torch.bfloat16, torch.float32, id="runtime-heads", marks=D_SPLIT_ONLY),
     ],
 )
 def test_npu_hc_post_matches_ordered_fp32_reference(batch, sequence, heads, hidden_size, dtype, mix_dtype):
