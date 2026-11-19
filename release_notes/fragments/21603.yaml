@@ -1,8 +1,5 @@
 pr: 21603
 entries:
   - category: performance
-    text: Speed up distributed Top-K owner selection by 1.21x-1.36x on Ascend A3 for repeated-prefix workloads with 64-2048 query rows and eight ranks.
-    hardware: [A3]
-  - category: performance
-    text: Speed up multi-rank distributed Top-K owner selection on Ascend A5 for the target shapes.
-    hardware: [A5]
+    text: Speed up distributed Top-K owner selection with eight ranks and 144 or 152 query rows by 1.26x-1.39x on Ascend A3 and 1.10x-1.14x on Ascend A5.
+    hardware: [A3, A5]
