@@ -48,6 +48,10 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
     # 310P gmm1+swiglu+quant is fused inside npu_quant_grouped_matmul_dequant
     # + npu_swiglu, so silu is handled by ``apply_gmm1_act_quant``.
     fused_activations = frozenset({"silu"})
+    # 310P W8A8_DYNAMIC injects MoE LoRA directly inside its gmm hooks around
+    # ``npu_quant_grouped_matmul_dequant`` instead of delegating to the shared
+    # quantized MoE LoRA path (which calls npu_dynamic_quant + npu_grouped_matmul).
+    handles_moe_lora_in_gmm_hooks: bool = True
 
     def __init__(self):
         self.ep_group = get_ep_group()
