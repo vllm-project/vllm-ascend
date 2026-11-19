@@ -249,7 +249,11 @@ def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
     raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
     group = SimpleNamespace(
-        kv_cache_group_id=0, kv_cache_spec=specs[INDEXER], layer_names=[INDEXER], backend=_AttentionBackend
+        kernel_block_size=None,
+        kv_cache_group_id=0,
+        kv_cache_spec=specs[INDEXER],
+        layer_names=[INDEXER],
+        backend=_AttentionBackend,
     )
     key, scale = attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [kernel_size], {}, plan)[INDEXER]
     page_bytes = next(
@@ -280,7 +284,9 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
     raw = raw_caches[STATE]
     expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
-    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
+    group = SimpleNamespace(
+        kernel_block_size=None, kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend
+    )
     actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
     assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
     assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()

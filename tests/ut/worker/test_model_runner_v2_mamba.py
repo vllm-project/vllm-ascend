@@ -901,12 +901,14 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
     attention_group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=attention_spec,
         layer_names=["full_attn", "mtp_attn"],
         backend=backend,
     )
     mamba_group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=1,
         kv_cache_spec=mamba_spec,
         layer_names=["linear_attn"],
@@ -982,6 +984,7 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
         )
     )
     group = SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=spec,
         layer_names=["mla_attn"],
@@ -1202,7 +1205,9 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     )
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d, _dtype: (2, n, b, h, d))
     groups = [
-        SimpleNamespace(kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend)
+        SimpleNamespace(
+            kernel_block_size=None, kv_cache_group_id=i, kv_cache_spec=spec, layer_names=[name], backend=backend
+        )
         for i, (name, spec) in enumerate(specs.items())
     ]
     raw_caches = _allocate_kv_cache(kv_cache_config, {}, torch.device("cpu"))

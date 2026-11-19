@@ -178,6 +178,7 @@ def test_v2_shares_storage_and_keeps_distinct_blocks_isolated(monkeypatch, dtype
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,

@@ -132,6 +132,7 @@ def _reshape(config, raw, monkeypatch):
     )
     groups = [
         SimpleNamespace(
+            kernel_block_size=None,
             kv_cache_group_id=index,
             kv_cache_spec=group.kv_cache_spec,
             layer_names=group.layer_names,
