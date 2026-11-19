@@ -122,8 +122,6 @@
     | [Qwen3.8-Flash-Next](../../tutorials/models/Qwen3.8-Flash-Next.md) | ✅ | 950DT Products | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | / | ❌ | ✅ | ✅ | 🟡 | 3 | ❌ | ❌ | ❌ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
     | [Step-5-Preview](../../tutorials/models/Step-5-Preview.md) | 🔵 | 950DT Products | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 |
 
-    Hy4-Flash supports a 131,072-token context and uses the embedded DFly draft via `--speculative-config '{"method":"dfly","num_speculative_tokens":5}'`. DFly is distinct from the speculative methods listed in the table. The single-node example enables DFly, prefix caching, and asynchronous scheduling together. PD Decode keeps prefix caching disabled.
-
 === "A2/A3"
 
     !!! note
