@@ -9,7 +9,7 @@ import pytest
 import torch
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
-from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode import init_speculator, rejection_sampler_utils
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -31,6 +31,95 @@ def test_rejection_sample_rejects_block_with_synthetic_rates():
             synthetic_conditional_rates=torch.ones(1),
             use_block_verification=True,
         )
+
+
+@pytest.mark.parametrize(
+    "lengths,has_draft_logits,use_block_verification",
+    [
+        ([1], True, True),
+        ([2], True, True),
+        ([3], True, True),
+        ([4], True, True),
+        ([4, 1, 3], True, True),
+        ([4, 1, 4], True, True),
+        ([4], False, True),
+        ([4], True, False),
+    ],
+)
+@pytest.mark.parametrize("vocab_size", [3, 8193])
+def test_block_verification_residual_rows_are_initialized(
+    monkeypatch, lengths, has_draft_logits, use_block_verification, vocab_size
+):
+    """Exercise the host launch against the v0.32 grid-dependent kernel guard.
+
+    The CPU kernel stub models row eligibility only; numerical correctness is
+    covered by the NPU tests. Poison the actual output buffer so missing the
+    last request's final draft row fails independently of allocator contents.
+    """
+    # CPU CI uses Triton placeholders whose constexpr is not a type. Keep
+    # integer grid helpers local to this test instead of the patched runtime.
+    monkeypatch.setattr(
+        rejection_sampler_utils,
+        "triton",
+        SimpleNamespace(cdiv=lambda x, y: (x + y - 1) // y, next_power_of_2=lambda n: 1 << (n - 1).bit_length()),
+    )
+    num_speculative_steps = 3
+    num_reqs = len(lengths)
+    num_logits = sum(lengths)
+    expanded_local_pos = torch.cat([torch.arange(length, dtype=torch.int32) for length in lengths])
+    cu_num_logits = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    residual_buffers = []
+
+    def launch_residual(grid):
+        def compute_residual(buffer, *_args, **_kwargs):
+            buffer.fill_(float("nan"))
+            residual_buffers.append(buffer)
+            for logit_idx in range(grid[0]):
+                # vLLM v0.32 determines the final bonus row from the grid.
+                if logit_idx + 1 >= grid[0]:
+                    continue
+                draft_step = int(expanded_local_pos[logit_idx])
+                if 0 < draft_step < num_speculative_steps:
+                    buffer[logit_idx].zero_()
+
+        return compute_residual
+
+    residual_kernel = MagicMock()
+    residual_kernel.__getitem__.side_effect = launch_residual
+    monkeypatch.setattr(rejection_sampler_utils, "_compute_local_residual_mass_kernel", residual_kernel)
+    monkeypatch.setattr(rejection_sampler_utils, "vllm_version_is", lambda version: version == "0.32.0")
+    for name in ("_compute_block_stats_kernel", "_compute_cumulative_log_p_kernel", "_probabilistic_rejection_kernel"):
+        monkeypatch.setattr(rejection_sampler_utils, name, MagicMock())
+    monkeypatch.setattr(rejection_sampler_utils, "resample", MagicMock())
+
+    rejection_sample(
+        target_logits=torch.zeros(num_logits, vocab_size),
+        draft_logits=torch.zeros(num_reqs, num_speculative_steps, vocab_size) if has_draft_logits else None,
+        draft_sampled=torch.zeros(num_logits, dtype=torch.int64),
+        cu_num_logits=cu_num_logits,
+        pos=torch.arange(num_logits, dtype=torch.int32),
+        idx_mapping=torch.arange(num_reqs, dtype=torch.int32),
+        expanded_idx_mapping=torch.repeat_interleave(torch.arange(num_reqs, dtype=torch.int32), torch.tensor(lengths)),
+        expanded_local_pos=expanded_local_pos,
+        temperature=torch.ones(num_reqs),
+        seed=torch.zeros(num_reqs, dtype=torch.int64),
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+    )
+
+    if not (use_block_verification and has_draft_logits and num_logits > 1):
+        residual_kernel.__getitem__.assert_not_called()
+        return
+
+    assert len(residual_buffers) == 1
+    residual_mass = residual_buffers[0]
+    for start, end in zip(cu_num_logits[:-1].tolist(), cu_num_logits[1:].tolist()):
+        # Verification reads one row ahead for each draft except the last.
+        # First rows and bonus rows are never residual-mass consumers.
+        assert torch.isfinite(residual_mass[start + 1 : end - 1]).all(), (
+            f"Uninitialized residual mass for request [{start}, {end})"
+        )
+    assert torch.isnan(residual_mass[-1]).all(), "The final bonus row must remain unused."
 
 
 def _make_config(

@@ -10,6 +10,7 @@ from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.worker.v2.spec_decode import rejection_sampler_utils
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
@@ -418,6 +419,82 @@ def test_block_verification_ragged_requests_and_mapping(has_draft_logits):
     assert num_sampled.cpu().tolist() == lengths
     for row, length in enumerate(lengths):
         assert (sampled[row, :length] == expected_ids[row]).all()
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("lengths", [(3,), (4, 1, 3)])
+@pytest.mark.parametrize("vocab_size", [3, 8193])
+@torch.inference_mode()
+def test_block_verification_computes_last_residual_row(monkeypatch, lengths, vocab_size):
+    """The full sampler must initialize every residual row its verifier reads.
+
+    vLLM v0.32 excludes the final row using tl.num_programs(0). Trimming the
+    launch grid as well skips the preceding draft row. Poisoning the output
+    makes this deterministic even if the allocator happens to return zeros.
+    """
+    kernel = rejection_sampler_utils._compute_local_residual_mass_kernel
+    captured = []
+
+    class CaptureResidualKernel:
+        def __getitem__(self, grid):
+            launch = kernel[grid]
+
+            def run(residual_mass, *args, **kwargs):
+                residual_mass.fill_(float("nan"))
+                captured.append((residual_mass, kwargs["BLOCK_SIZE"]))
+                return launch(residual_mass, *args, **kwargs)
+
+            return run
+
+    monkeypatch.setattr(rejection_sampler_utils, "_compute_local_residual_mass_kernel", CaptureResidualKernel())
+    num_speculative_steps = 3
+    num_reqs = len(lengths)
+    num_logits = sum(lengths)
+    temperature = 0.7
+    # Token 1 has p/q = 0.75, giving a nonzero, independently computable
+    # residual at every needed row. The last token exercises a second block.
+    target = torch.zeros(vocab_size)
+    draft = torch.zeros(vocab_size)
+    support = [0, 1, vocab_size - 1]
+    target[support] = torch.tensor([0.2, 0.3, 0.5])
+    draft[support] = torch.tensor([0.4, 0.4, 0.2])
+    mapping = torch.arange(num_reqs - 1, -1, -1, dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, *lengths], dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    sampled, num_sampled = rejection_sample(
+        target_logits=target.log().to("npu").expand(num_logits, -1).contiguous(),
+        draft_logits=(draft.log() * temperature).to("npu").expand(num_reqs, num_speculative_steps, -1).contiguous(),
+        draft_sampled=torch.ones(num_logits, dtype=torch.int64, device="npu"),
+        cu_num_logits=cu_num_logits.to("npu"),
+        pos=torch.arange(num_logits, dtype=torch.int32, device="npu"),
+        idx_mapping=mapping.to("npu"),
+        expanded_idx_mapping=torch.repeat_interleave(mapping, torch.tensor(lengths)).to("npu"),
+        expanded_local_pos=torch.cat([torch.arange(n, dtype=torch.int32) for n in lengths]).to("npu"),
+        temperature=torch.full((num_reqs,), temperature, device="npu"),
+        seed=torch.arange(num_reqs, dtype=torch.int64, device="npu"),
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=True,
+    )
+
+    ((residual_mass, block_size),) = captured
+    residual_mass = residual_mass.cpu()
+    required_rows = []
+    for start, length in zip(cu_num_logits.tolist(), lengths):
+        for step in range(1, length - 1):
+            row = start + step
+            required_rows.append(row)
+            prefix_ratio = (target[1] / draft[1]) ** step
+            residual = (prefix_ratio * target - draft).clamp_min(0)
+            expected = torch.stack([block.sum() for block in residual.split(block_size)])
+            torch.testing.assert_close(residual_mass[row], expected, rtol=1e-4, atol=1e-6)
+    assert required_rows[-1] == num_logits - 2
+    counts = num_sampled.cpu()
+    assert ((counts >= 1) & (counts <= torch.tensor(lengths))).all()
+    valid = torch.arange(num_speculative_steps + 1)[None, :] < counts[:, None]
+    tokens = sampled.cpu()[valid]
+    assert ((tokens >= 0) & (tokens < vocab_size)).all()
 
 
 @pytest.mark.skipif(
