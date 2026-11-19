@@ -2302,18 +2302,27 @@ class TestNPUWorker(TestBase):
             worker.model_runner.update_config.assert_called_once_with(overrides)
 
     def test_reload_weights(self):
-        """Test reload_weights delegates to model_runner.reload_weights"""
+        from vllm.config import get_current_vllm_config, set_current_vllm_config
+
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = self.vllm_config_mock
+        worker.model_runner = MagicMock()
+        worker.model_runner.reload_weights.side_effect = lambda **kwargs: self.assertIs(
+            get_current_vllm_config(), worker.vllm_config
+        )
+        outer_config = MagicMock(spec=VllmConfig)
+        with (
+            set_current_vllm_config(outer_config),
+            patch.dict("os.environ", VLLM_RELOAD_MODE="direct"),
+            patch("vllm_ascend.worker.worker.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=0)),
+        ):
             worker.reload_weights(weights_path="/tmp/weights", is_checkpoint_format=True)
-
-            worker.model_runner.reload_weights.assert_called_once_with(
-                weights_path="/tmp/weights", is_checkpoint_format=True
-            )
+            self.assertIs(get_current_vllm_config(), outer_config)
+        worker.model_runner.reload_weights.assert_called_once_with(
+            weights_path="/tmp/weights", is_checkpoint_format=True
+        )
 
 
 class TestNPUWorkerWeightUpdate(TestBase):
@@ -2322,6 +2331,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+        worker.vllm_config = MagicMock(spec=VllmConfig)
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
         worker.device = torch.device("cpu")
@@ -2354,11 +2364,17 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_start_weight_update_dispatches_to_engine(self, mock_get_ascend_config):
+        from vllm.config import get_current_vllm_config, set_current_vllm_config
+
         mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        worker.start_weight_update()
+        engine.start_weight_update.side_effect = lambda: self.assertIs(get_current_vllm_config(), worker.vllm_config)
+        outer_config = MagicMock(spec=VllmConfig)
+        with set_current_vllm_config(outer_config):
+            worker.start_weight_update()
+            self.assertIs(get_current_vllm_config(), outer_config)
 
         engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
@@ -2389,12 +2405,18 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
     def test_update_weights_dispatches_to_engine(self):
+        from vllm.config import get_current_vllm_config, set_current_vllm_config
+
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
         worker._weight_update_active = True
 
-        worker.update_weights({"foo": "bar"})
+        engine.update_weights.side_effect = lambda info: self.assertIs(get_current_vllm_config(), worker.vllm_config)
+        outer_config = MagicMock(spec=VllmConfig)
+        with set_current_vllm_config(outer_config):
+            worker.update_weights({"foo": "bar"})
+            self.assertIs(get_current_vllm_config(), outer_config)
 
         engine.update_weights.assert_called_once_with({"foo": "bar"})
 
@@ -2420,6 +2442,20 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine.finish_weight_update.assert_called_once_with()
         worker.model_runner.reset_lora_state.assert_called_once_with()
         self.assertFalse(worker._weight_update_active)
+
+    def test_failed_finish_releases_only_direct_session(self):
+        for mode in ("direct", "layerwise"):
+            with self.subTest(mode=mode), patch.dict("os.environ", VLLM_RELOAD_MODE=mode):
+                engine = MagicMock()
+                worker = self._make_worker(engine)
+                worker._weight_update_active = True
+                engine.finish_weight_update.side_effect = ValueError("failed BF16 finish")
+                with self.assertRaisesRegex(ValueError, "failed BF16 finish"):
+                    worker.finish_weight_update()
+                self.assertIs(worker._weight_update_active, mode == "layerwise")
+                self.assertEqual(engine.reset_weight_update_target.call_count, int(mode == "direct"))
+                worker.model_runner.reset_lora_state.assert_not_called()
+                worker.model_runner.on_target_weights_replaced.assert_not_called()
 
     def test_finish_without_start_raises(self):
         engine = MagicMock()

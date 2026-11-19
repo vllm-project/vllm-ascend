@@ -538,10 +538,10 @@ class NPUWorker(GPUWorker):
                 "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
 
-        self._check_nz_disabled()
-
-        assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.start_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            self._check_nz_disabled()
+            assert self.weight_transfer_engine is not None
+            self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -553,11 +553,12 @@ class NPUWorker(GPUWorker):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.update_weights(update_info)
+            except BaseException:
+                self._end_weight_update()
+                raise
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
@@ -567,12 +568,25 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
-        self.weight_transfer_engine.finish_weight_update()
+        with set_current_vllm_config(self.vllm_config):
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                if getattr(envs, "VLLM_RELOAD_MODE", None) == "direct":
+                    # Direct finish consumes its begin even when PWAL fails.
+                    # Release the session for a new complete repair update.
+                    self._end_weight_update()
+                raise
+            self._end_weight_update()
         if vllm_version_is("0.33.0"):
             self.model_runner.reset_lora_state()
         else:
             self.model_runner.on_target_weights_replaced()
+
+    def _end_weight_update(self) -> None:
         self._weight_update_active = False
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.reset_weight_update_target()
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
@@ -1592,7 +1606,10 @@ class NPUWorker(GPUWorker):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
-        self.model_runner.reload_weights(*args, **kwargs)
+        with set_current_vllm_config(self.vllm_config):
+            if getattr(envs, "VLLM_RELOAD_MODE", None) == "direct":
+                self._check_nz_disabled()
+            self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
         import subprocess

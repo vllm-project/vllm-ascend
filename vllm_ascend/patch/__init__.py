@@ -1807,3 +1807,11 @@
 #       Remove the verifier override once native Kimi defaults dispatch through
 #       the platform's attention/cache configuration interface.
 #
+
+# ** Registration: worker/__init__.py calls model_loader.weight_reload.install_direct_reload_patch **
+# Target: vllm.model_executor.model_loader.reload.direct._checkpoint_views.
+# Why: NPU NZ storage cannot serve as an ND checkpoint-loader allocation.
+# How: Select Ascend-owned staging views and retain upstream ND behavior.
+# Related PR: #64336/#65281 provide direct reload, but no backend view hook.
+# Future Plan: Remove this patch when upstream exposes such a provider hook.
+# Scope: Every Ascend worker with VLLM_RELOAD_MODE=direct, before model load.
