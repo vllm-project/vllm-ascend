@@ -413,10 +413,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
 
         with npu_stream_switch(bfg_stream):
-            # Stage 2: after both first-stage branches complete, overlap the
-            # QKV Cube matmul with raw-gate packing and, on the native path,
-            # beta's FP32 conversion and sigmoid. Pack the F/output gates so all
-            # BFG output handling occurs after the QKV matmul is enqueued.
+            # Stage 2: overlap native-path beta processing and F packing
+            # with the QKV Cube matmul.
             bfg_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
             bfg_ready = bfg_stream.record_event()
@@ -445,9 +443,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if not self.use_recoverssm:
             beta = beta.float().sigmoid()
         beta = beta.unsqueeze(0)
-        # Pack the raw gate on the auxiliary stream. This also
-        # copies graph padding and precedes any mixed-token index_select.
-        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim).contiguous()
+        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        # RecoverSSM verify reads the projection's token stride directly.
+        # Native KDA entry points pack F if their input is still strided.
+        if not self.use_recoverssm:
+            raw_gate = raw_gate.contiguous()
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
 
