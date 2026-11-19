@@ -162,92 +162,76 @@ def execute(negative=False):
         obj.k_layernorm = GemmaRMSNorm(128, eps=1e-6).to(device="npu", dtype=torch.bfloat16)
         obj.k_layernorm.weight.data.copy_(torch.linspace(-0.2, 0.4, 128, device="npu", dtype=torch.bfloat16))
         table = torch.tensor([[2], [1]], device="npu", dtype=torch.int32)
-        compression = qsa._compress_qsa_groups
-        recorded = []
-
-        def observe(*a, **kw):
-            pooled, first = compression(*a, **kw)
-            recorded.append((pooled, first))
-            return pooled, first
-
-        qsa._compress_qsa_groups = observe
-        try:
-            rounds = []
-            for positions in [torch.arange(0, 3), torch.arange(3, 10), torch.arange(10, 12)]:
-                count = len(positions)
-                logical = positions.repeat(2)
-                values = torch.cat([row_values(req, positions) for req in range(2)])
-                raw_slots = torch.cat([physical * 8 + positions.remainder(8) for physical in [2, 1]])
-                destination = torch.cat(
-                    [torch.where((positions + 1) % 4 == 0, physical * 64 + positions // 4, -1) for physical in [2, 1]]
-                )
-                metadata = NS(
-                    num_actual_tokens=2 * count,
-                    logical_positions=logical.to("npu"),
-                    token_to_req=torch.arange(2, dtype=torch.int32).repeat_interleave(count).to("npu"),
-                    query_start_loc=torch.tensor([0, count, 2 * count], device="npu", dtype=torch.int32),
-                    block_table=table,
-                    slot_mapping=raw_slots.to("npu"),
-                )
-                compressed_metadata = NS(slot_mapping=destination.to("npu"))
-                before = backing.cpu().clone()
-                obj._update_and_compress(values.to("npu"), logical.to("npu"), metadata, compressed_metadata)
-                torch.npu.synchronize()
-                pooled, first = recorded[-1]
-                pooled = pooled.cpu()
-                first = first.cpu()
-                max_error = 0.0
-                for request, physical in enumerate([2, 1]):
-                    for local, position in enumerate(positions.tolist()):
-                        index = request * count + local
-                        offset = start + physical * 2240 + (position % 8) * 256
-                        before[offset : offset + 256] = values[index].contiguous().view(torch.int8).reshape(-1)
-                        if (position + 1) % 4:
-                            continue
-                        independent = (
-                            row_values(request, torch.arange(position - 3, position + 1))
-                            .float()
-                            .mean(0, keepdim=True)
-                            .bfloat16()
-                        )
-                        torch.testing.assert_close(pooled[index : index + 1], independent, atol=0.04, rtol=0.02)
-                        assert torch.equal(first[index].reshape(-1), torch.full((3,), position - 3, dtype=first.dtype))
-                        reference = norm_rope_reference(
-                            independent, obj.k_layernorm, obj.rotary_emb, torch.tensor([position - 3])
-                        )
-                        actual = compressed[physical * 2, (position // 4)]
-                        torch.testing.assert_close(actual.cpu(), reference[0], atol=0.04, rtol=0.02)
-                        max_error = max(max_error, (actual.float().cpu() - reference[0].float()).abs().max().item())
-                # The compressed owner has legitimate writes. Compare only all
-                # raw physical pages in every owner slot, preserving padding.
-                for owner_name in [n for n in caches if n.endswith("raw_key_cache")]:
-                    owner = layout.owner(owner_name)
-                    base = owner.slot * layout.slot_backing_size + layout.region("r4").offset
-                    size = 3 * 2240
-                    torch.testing.assert_close(
-                        raw[owner_name].cpu()[base : base + size], before[base : base + size], rtol=0, atol=0
+        rounds = []
+        for positions in [torch.arange(0, 3), torch.arange(3, 10), torch.arange(10, 12)]:
+            count = len(positions)
+            logical = positions.repeat(2)
+            values = torch.cat([row_values(req, positions) for req in range(2)])
+            raw_slots = torch.cat([physical * 8 + positions.remainder(8) for physical in [2, 1]])
+            destination = torch.cat(
+                [torch.where((positions + 1) % 4 == 0, physical * 64 + positions // 4, -1) for physical in [2, 1]]
+            )
+            metadata = NS(
+                num_actual_tokens=2 * count,
+                logical_positions=logical.to("npu"),
+                token_to_req=torch.arange(2, dtype=torch.int32).repeat_interleave(count).to("npu"),
+                query_start_loc=torch.tensor([0, count, 2 * count], device="npu", dtype=torch.int32),
+                block_table=table,
+                slot_mapping=raw_slots.to("npu"),
+            )
+            compressed_metadata = NS(slot_mapping=destination.to("npu"))
+            before = backing.cpu().clone()
+            obj._update_and_compress(values.to("npu"), logical.to("npu"), metadata, compressed_metadata)
+            torch.npu.synchronize()
+            max_error = 0.0
+            for request, physical in enumerate([2, 1]):
+                for local, position in enumerate(positions.tolist()):
+                    index = request * count + local
+                    offset = start + physical * 2240 + (position % 8) * 256
+                    before[offset : offset + 256] = values[index].contiguous().view(torch.int8).reshape(-1)
+                    if (position + 1) % 4:
+                        continue
+                    independent = (
+                        row_values(request, torch.arange(position - 3, position + 1))
+                        .float()
+                        .mean(0, keepdim=True)
+                        .bfloat16()
                     )
-                rounds.append(
-                    {
-                        "positions": positions.tolist(),
-                        "historical_rows_read": int(positions[0] > 0),
-                        "physical_blocks": [2, 1],
-                        "compressed_rows": int((destination >= 0).sum()),
-                        "max_abs": max_error,
-                    }
+                    reference = norm_rope_reference(
+                        independent, obj.k_layernorm, obj.rotary_emb, torch.tensor([position - 3])
+                    )
+                    # Validate final cache values for both fused and unfused compression.
+                    actual = compressed[physical * 2, (position // 4)]
+                    torch.testing.assert_close(actual.cpu(), reference[0], atol=0.04, rtol=0.02)
+                    max_error = max(max_error, (actual.float().cpu() - reference[0].float()).abs().max().item())
+            # The compressed owner has legitimate writes. Compare only all
+            # raw physical pages in every owner slot, preserving padding.
+            for owner_name in [n for n in caches if n.endswith("raw_key_cache")]:
+                owner = layout.owner(owner_name)
+                base = owner.slot * layout.slot_backing_size + layout.region("r4").offset
+                size = 3 * 2240
+                torch.testing.assert_close(
+                    raw[owner_name].cpu()[base : base + size], before[base : base + size], rtol=0, atol=0
                 )
-            return {
-                "shape": list(good.shape),
-                "stride": list(good.stride()),
-                "physical_page_bytes": 2240,
-                "logical_page_bytes": 2048,
-                "direct_boundary_slots": [7, 8, 9],
-                "rounds": rounds,
-                "padding_and_adjacent_raw_owners": "byte-exact",
-                "reference": "independent logical history, FP32 norm/RoPE",
-            }
-        finally:
-            qsa._compress_qsa_groups = compression
+            rounds.append(
+                {
+                    "positions": positions.tolist(),
+                    "historical_rows_read": int(positions[0] > 0),
+                    "physical_blocks": [2, 1],
+                    "compressed_rows": int((destination >= 0).sum()),
+                    "max_abs": max_error,
+                }
+            )
+        return {
+            "shape": list(good.shape),
+            "stride": list(good.stride()),
+            "physical_page_bytes": 2240,
+            "logical_page_bytes": 2048,
+            "direct_boundary_slots": [7, 8, 9],
+            "rounds": rounds,
+            "padding_and_adjacent_raw_owners": "byte-exact",
+            "reference": "independent logical history, FP32 norm/RoPE",
+        }
     finally:
         monkey.undo()
 
