@@ -15,12 +15,15 @@ def is_draft_moe_config(moe_config: Any, vllm_config: Any) -> bool:
     target/draft model descriptors still distinguish their logical expert
     counts; redundant target slots must not turn a target into a draft.
     """
-    is_draft_runner = getattr(vllm_config.model_config, "runner_type", None) == "draft"
+    model_config = vllm_config.model_config
+    if model_config is None:
+        raise RuntimeError("MegaMoe role detection requires a model config")
+    is_draft_runner = getattr(model_config, "runner_type", None) == "draft"
     speculative = getattr(vllm_config, "speculative_config", None)
     draft_config = getattr(speculative, "draft_model_config", None)
     if draft_config is None:
         return is_draft_runner
-    target_experts = int(vllm_config.model_config.get_num_experts())
+    target_experts = int(model_config.get_num_experts())
     draft_experts = int(draft_config.get_num_experts())
     # Equal expert layouts already share a cached MoECommMethod, including
     # its lazy initialization when it was last constructed by the draft.
@@ -60,6 +63,7 @@ def get_main_owned_buffer(
 
     if group is not owner.group:
         raise RuntimeError("Main and draft MegaMoe process groups differ")
+    missing = object()
     for name in (
         "hidden",
         "dispatch_quant_mode",
@@ -69,7 +73,7 @@ def get_main_owned_buffer(
         "combine_comm_mode",
         "topk_weights_type",
     ):
-        if name in params and params[name] != getattr(owner, name):
+        if name in params and params[name] != getattr(owner, name, missing):
             raise RuntimeError(f"Incompatible shared MegaMoe setting: {name}")
     if num_max_tokens_per_rank > owner.num_max_tokens_per_rank:
         raise RuntimeError("Draft token capacity exceeds the main allocation")
@@ -77,12 +81,17 @@ def get_main_owned_buffer(
     # CANN added intermediate_hidden and combine_comm_mode to the size API.
     # Bind by name so older and newer signatures cannot shift positional args.
     size_query = module._get_mega_moe_ccl_buffer_size
-    size_params = dict(params, ep_world_size=owner.ep_world_size, moe_expert_num=num_experts)
-    if getattr(owner, "topo_type", 0) != 0:
-        size_params["server_num"] = owner.ep_world_size // owner.rank_num_per_server
-    required = size_query(
-        **{name: size_params[name] for name in signature(size_query).parameters if name in size_params}
-    )
+    query_parameters = signature(size_query).parameters
+    ep_world_size = getattr(owner, "ep_world_size", None)
+    if ep_world_size is None or ep_world_size <= 0:
+        raise RuntimeError("Shared MegaMoe requires a positive ep_world_size")
+    size_params = dict(params, ep_world_size=ep_world_size, moe_expert_num=num_experts)
+    if "server_num" in query_parameters and getattr(owner, "topo_type", 0) != 0:
+        ranks_per_server = getattr(owner, "rank_num_per_server", None)
+        if ranks_per_server is None or ranks_per_server <= 0 or ep_world_size % ranks_per_server:
+            raise RuntimeError("Shared MegaMoe requires a positive rank_num_per_server that divides ep_world_size")
+        size_params["server_num"] = ep_world_size // ranks_per_server
+    required = size_query(**{name: size_params[name] for name in query_parameters if name in size_params})
     if required > owner.ccl_buffer_size:
         raise RuntimeError(f"Requested MegaMoe capacity {required} exceeds main's {owner.ccl_buffer_size} bytes")
     view = SimpleNamespace(**vars(owner))

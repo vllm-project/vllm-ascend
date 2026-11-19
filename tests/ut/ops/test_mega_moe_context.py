@@ -140,6 +140,30 @@ class TestMainOwnedMegaMoeBuffer(unittest.TestCase):
         self._get_buffer(is_draft=True)
         self.assertEqual(self.size_query.call_args.kwargs["server_num"], 2)
 
+    def test_invalid_owner_topology_fails_before_size_query(self):
+        self.size_query.__signature__ = signature(_current_size_query)
+        main = self._get_buffer()
+        main.topo_type = 1
+        main.rank_num_per_server = 4
+        for name, value in (
+            ("ep_world_size", None),
+            ("ep_world_size", 0),
+            ("rank_num_per_server", None),
+            ("rank_num_per_server", 0),
+            ("rank_num_per_server", 3),
+        ):
+            original = getattr(main, name)
+            if value is None:
+                delattr(main, name)
+            else:
+                setattr(main, name, value)
+            with self.subTest(name=name, value=value), self.assertRaisesRegex(RuntimeError, name):
+                self._get_buffer(is_draft=True)
+            setattr(main, name, original)
+
+        self.factory.assert_called_once()
+        self.size_query.assert_not_called()
+
     def test_draft_first_fails_without_allocating_a_context(self):
         with self.assertRaisesRegex(RuntimeError, "Main must initialize"):
             self._get_buffer(is_draft=True)
@@ -177,6 +201,14 @@ class TestMainOwnedMegaMoeBuffer(unittest.TestCase):
             self._get_buffer(is_draft=True, num_max_tokens_per_rank=129)
         self.factory.assert_called_once()
 
+    def test_missing_owner_setting_does_not_match_none(self):
+        main = self._get_buffer(dispatch_quant_out_dtype=None)
+        del main.dispatch_quant_out_dtype
+        with self.assertRaisesRegex(RuntimeError, "dispatch_quant_out_dtype"):
+            self._get_buffer(is_draft=True, dispatch_quant_out_dtype=None)
+        self.factory.assert_called_once()
+        self.size_query.assert_not_called()
+
     def test_draft_ccl_capacity_cannot_exceed_main(self):
         self._get_buffer()
         self.size_query.return_value = 4097
@@ -206,6 +238,10 @@ class TestDraftMoEConfig(unittest.TestCase):
 
     def test_explicit_draft_runner(self):
         self.assertTrue(is_draft_moe_config(SimpleNamespace(num_experts=128), self._config(runner_type="draft")))
+
+    def test_missing_model_config_does_not_default_to_target_role(self):
+        with self.assertRaisesRegex(RuntimeError, "model config"):
+            is_draft_moe_config(SimpleNamespace(num_experts=128), SimpleNamespace(model_config=None))
 
     def test_no_speculation_or_same_expert_count(self):
         moe = SimpleNamespace(num_experts=384)
