@@ -15,14 +15,12 @@ from functools import wraps
 from typing import TYPE_CHECKING
 
 import vllm.v1.structured_output as structured_output
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 if TYPE_CHECKING:
     from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 
-logger = init_logger(__name__)
-
-_PATCH_MARKER = "_ascend_kimi_first_boundary"
+_PATCH_MARKER = "_vllm_ascend_kimi_first_boundary"
 
 
 class _TokenView(Sequence[int]):
