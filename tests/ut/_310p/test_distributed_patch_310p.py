@@ -22,7 +22,12 @@ def native_broadcast(monkeypatch):
 
 @pytest.mark.parametrize(
     ("kwargs", "global_src", "local_src"),
-    [({"group_src": 0}, None, 0), ({"src": 2}, 2, None), ({}, 0, None)],
+    [
+        ({"group_src": 0}, None, 0),
+        ({"src": 2}, 2, None),
+        ({}, 0, None),
+        ({"src": None, "group_src": None}, 0, None),
+    ],
 )
 def test_310p_broadcast_preserves_cpu_source_rank(native_broadcast, kwargs, global_src, local_src):
     tensor = torch.zeros(1)
