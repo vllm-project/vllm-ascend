@@ -6,7 +6,7 @@ module own the review rules for it.
 
 ## Layout
 
-```
+```text
 instructions.md        # output protocol; maintained by all maintainers
 allowlist.txt          # POC gray-release authors; maintainers (empty = off)
 L1/checklist.md        # cross-domain global rules; all maintainers

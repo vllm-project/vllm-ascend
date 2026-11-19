@@ -22,11 +22,11 @@ import argparse
 import fnmatch
 import json
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 
+import regex as re
 import yaml
 
 AI_REVIEW_LABEL = "ai-review"
