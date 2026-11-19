@@ -368,8 +368,8 @@ def _select_capacity_and_expert_density_moe_comm_method(
     # predates enable_fused_mc2; without this, enable_fused_mc2=1 is silently
     # ignored on A2 and the run falls back to ALLGATHER/MC2.
     # Draft (MTP) MoE layers take the fused path only when their quant type has
-    # an A2 dispatch_ffn_combine kernel; on A2 both the W4A8 and the BF16
-    # (unquantized) variants are built, so a BF16 MTP layer can stay fused.
+    # an A2 dispatch_ffn_combine kernel; on A2 the W4A8, W8A8 and BF16
+    # (unquantized) variants are built, so a matching MTP layer can stay fused.
     # This mirrors the A5 gate in _select_capacity_and_world_size_moe_comm_method.
     if get_ascend_config().enable_fused_mc2 == 1 and (
         not is_draft_model or draft_moe_quant_type in A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES
@@ -394,9 +394,9 @@ def resolve_moe_comm_type_for_layer(
     The forward-level selection cannot see individual layers, so a model that
     mixes quantized target layers with unquantized ones (e.g. the BF16 dspark
     MTP draft layer) would hand every MoE layer to FUSED_MC2. On A2 only the
-    variants listed in A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES exist (W4A8
-    and BF16/unquantized); such a layer must fall back to the device's default
-    (non-fused) policy instead of failing at the aclnn lookup.
+    variants listed in A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES exist (W4A8,
+    W8A8 and BF16/unquantized); such a layer must fall back to the device's
+    default (non-fused) policy instead of failing at the aclnn lookup.
 
     Everything is derived from layer/model-local state: real request forwards
     do not run under ``set_current_vllm_config()``, so this must not call

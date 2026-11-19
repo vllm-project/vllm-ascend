@@ -87,6 +87,15 @@ public:
         __gm__ HcclOpResParamCustom *WinContext_{nullptr};
         Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
         AscendC::LocalTensor<int32_t> ub;
+        // A2 (Ascend910B) has no HCCL symmetric window registered through
+        // GetHcclContext. Instead, CANN's KFC CommContext (
+        // cann_ops_transformer get_symm_buffer_for_mega_moe) exposes one
+        // registered CCL buffer per rank in epHcclBuffer_[rank], with a
+        // symmetric address mapping across ranks. layout:
+        //   uint32 epRankId; uint32 rankSizePerServer; uint64 kfcContextAddr;
+        //   uint64 epHcclBuffer_[rank]; ...
+        __gm__ uint64_t *kfcCtx_{nullptr};
+        bool useKfc_{false};
         FORCE_INLINE_AICORE
         HcclShmem(){
             auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
@@ -95,6 +104,14 @@ public:
             m_rank = WinContext_->localUsrRankId;
             m_rankSize = WinContext_->rankSize;
             m_segmentSize = WinContext_->winSize;
+        }
+        FORCE_INLINE_AICORE
+        void initKfc(GM_ADDR context, int32_t rankSize, uint64_t segmentSize) {
+            kfcCtx_ = reinterpret_cast<__gm__ uint64_t *>(context);
+            m_rank = static_cast<int32_t>(kfcCtx_[0]);
+            m_rankSize = rankSize;
+            m_segmentSize = static_cast<size_t>(segmentSize);
+            useKfc_ = true;
         }
     #else
         FORCE_INLINE_AICORE
@@ -112,6 +129,9 @@ public:
     FORCE_INLINE_AICORE
     GM_ADDR operator() () const {   // No parameters: return pointer to local peermem
         #ifdef HCCL_COMM
+            if (useKfc_) {
+                return reinterpret_cast<GM_ADDR>(kfcCtx_[2 + m_rank]);
+            }
             return (GM_ADDR)(WinContext_->localWindowsIn);
         #else
             return reinterpret_cast<GM_ADDR>(shmem_ptr(symmetricPtr, m_rank));
@@ -121,6 +141,9 @@ public:
     FORCE_INLINE_AICORE
     GM_ADDR operator() (int32_t index) const {  // With index parameter: return pointer to the base address of remote peermem
         #ifdef HCCL_COMM
+            if (useKfc_) {
+                return reinterpret_cast<GM_ADDR>(kfcCtx_[2 + index]);
+            }
             return (GM_ADDR)((index == m_rank) ? WinContext_->localWindowsIn :
                                     ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
         #else
@@ -136,6 +159,9 @@ public:
             }
             if (rankId < 0 || rankId >= m_rankSize) {
                 return nullptr;
+            }
+            if (useKfc_) {
+                return reinterpret_cast<GM_ADDR>(kfcCtx_[2 + rankId]) + offset;
             }
             return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
                                     ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
