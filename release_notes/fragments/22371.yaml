@@ -1,0 +1,4 @@
+pr: 22371
+entries:
+  - category: performance
+    text: Reduced prefill latency for long-context BF16 HiSparse workloads by reusing paged sparse flash attention.
