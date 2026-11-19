@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -74,6 +75,7 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -95,6 +97,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
@@ -106,6 +109,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -173,6 +177,12 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+            offload_config = vllm_config.offload_config
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group
@@ -320,6 +330,7 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        expert_offload.validate_loading(self, load_dummy_weights)
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -351,6 +362,8 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        expert_offload.initialize(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -601,6 +614,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+
+        expert_offload.shutdown(self)
+
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
         shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
@@ -626,6 +643,8 @@ class NPUModelRunner(GPUModelRunner):
             self._shared_engram_parent_stopped = True
         first_error = None
         for embedding in shared_embeddings:
+            if getattr(embedding, "local_vmm", False) is True:
+                continue
             try:
                 embedding.close_host_offload()
             except Exception as exc:
@@ -633,7 +652,21 @@ class NPUModelRunner(GPUModelRunner):
                     first_error = exc
         if first_error is not None:
             raise first_error
-        self._shared_engram_shutdown_pending = []
+        pending = [owner for owner in shared_embeddings if getattr(owner, "local_vmm", False) is True]
+        self._shared_engram_shutdown_pending = pending
+        if pending:
+            from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+            errors = []
+            for index in range(len(pending) - 1, -1, -1):
+                try:
+                    pending[index].close_host_offload()
+                except EngramSharedReleaseError as exc:
+                    errors.append(str(exc))
+                else:
+                    del pending[index]
+            if errors:
+                raise EngramSharedReleaseError("; ".join(errors))
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
@@ -813,7 +846,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens
-        profile_tokens = self._get_pcp_profile_num_tokens()
+        profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
         with override_mrv2_in_profile_run(True):
             if (
                 mc2_tokens_capacity is not None
@@ -841,6 +874,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        expert_offload.prepare_batch(self, batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1268,27 +1302,6 @@ class NPUModelRunner(GPUModelRunner):
             yield
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
-
-    def _get_pcp_profile_num_tokens(self) -> int:
-        """Keep replicated draft requests when profiling PCP-local prefill.
-
-        Initial memory profiling precedes KV/PCP-manager initialization.
-        Block drafters retain the global budget: their context-KV precompute
-        processes all target hidden states, independently of short queries.
-        """
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size <= 1:
-            return self.max_num_tokens
-        query_per_req = 1
-        spec = self.speculative_config
-        if spec is not None:
-            # Use shared config, not the last PP rank's speculator instance:
-            # every pipeline stage must profile the same target token shape.
-            if spec.method not in ("mtp", "eagle", "eagle3"):
-                return self.max_num_tokens
-            query_per_req = 1 + spec.num_speculative_tokens
-        local_tokens = (self.max_num_tokens + pcp_size - 1) // pcp_size
-        return min(self.max_num_tokens, max(local_tokens, self.max_num_reqs * query_per_req))
 
     @step_eplb_after(is_dummy=True)
     def _dummy_run(

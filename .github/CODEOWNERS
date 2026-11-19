@@ -89,6 +89,7 @@
 /vllm_ascend/distributed @LCAIZJ @zzzzwwjj @weijinqian0
 /vllm_ascend/distributed/ec_transfer @weijinqian0
 /vllm_ascend/distributed/eplb @freyfwt
+/vllm_ascend/distributed/expert_transfer/ @LookAround0301 @florian0125 @gjc0824 @xuanbozzz
 /vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
 /vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
 /vllm_ascend/distributed/kv_transfer @weijinqian0
@@ -144,15 +145,15 @@
 /vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
 /vllm_ascend/batch_invariant.py @Ronald1995
-/vllm_ascend/config_utils.py @wxsIcey
+/vllm_ascend/config_utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/cpu_binding.py @zouyida2052
 /vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
 /vllm_ascend/logger.py @wangxiyuan
 /vllm_ascend/meta_registration.py @ZT-AIA
 /vllm_ascend/mrv2_utils.py @yzeyu71
-/vllm_ascend/platform.py @wxsIcey @Tflowers-0129
+/vllm_ascend/platform.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 # /vllm_ascend/profiling_config.py
-/vllm_ascend/utils.py @wxsIcey
+/vllm_ascend/utils.py @wxsIcey @Ronald1995 @Tflowers-0129 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 
 # Patch
 /vllm_ascend/patch @wxsIcey
@@ -165,13 +166,13 @@
 
 # Worker base
 /vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
-/vllm_ascend/worker/worker.py @wxsIcey @Ronald1995
+/vllm_ascend/worker/worker.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 /vllm_ascend/worker/device_metadata.py @linfeng-yuan
-/vllm_ascend/worker/dspark_utils.py @wxsIcey
+/vllm_ascend/worker/dspark_utils.py @wxsIcey @slippersss @lilinsiman @zhenwenqi2024 @jiajinzhu2
 /vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
 /vllm_ascend/worker/kvpp_cache.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
-/vllm_ascend/worker/spec_decode_utils.py @wxsIcey
-/vllm_ascend/worker/utils.py @wxsIcey
+/vllm_ascend/worker/spec_decode_utils.py @wxsIcey @slippersss @lilinsiman @zhenwenqi2024 @jiajinzhu2
+/vllm_ascend/worker/utils.py @wxsIcey @Tflowers-0129 @Ronald1995 @zhenwenqi2024 @pisceskkk @zzzzwwjj @linfeng-yuan
 
 # Worker V2
 /vllm_ascend/worker/v2/model_states @zzzzwwjj
@@ -205,6 +206,7 @@
 /vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
+/vllm_ascend/models/step5/ @realliujiaxu
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
@@ -231,7 +233,7 @@
 /tests/e2e/common/rlhf/ @Ronald1995
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
-/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py @drslark @chenxi-hh
+/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @AuroraEmiya
 /tests/ut/models/test_glm5next_recoverssm_config.py @drslark @chenxi-hh
 /tests/ut/models/test_glm5next_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/models/test_kimi_recoverssm_config.py @drslark @chenxi-hh

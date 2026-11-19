@@ -183,6 +183,11 @@ class TokenRepeatDetector(ConfigBackedDetector):
         self._consumed_len.pop(req_id, None)
         self._alerted.discard(req_id)
 
+    def on_disabled(self) -> None:
+        self._states.clear()
+        self._consumed_len.clear()
+        self._alerted.clear()
+
     def check_all(
         self,
         sampled_token_ids: list[list[int]] | None,
