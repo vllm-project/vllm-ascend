@@ -1,0 +1,4 @@
+pr: 22324
+entries:
+  - category: feature
+    text: Added support for LiquidAI d1-3B and LFM2-VL models on Ascend.
