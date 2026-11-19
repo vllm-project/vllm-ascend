@@ -1,0 +1,117 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Refresh CI Gate
+
+# Review-event trigger for the ci-gate retrigger (PR #22106 design): a
+# state-changing review from a CODEOWNERS owner of the changed files
+# re-runs the gate jobs (codeowner-approval and its dependent ci-gate) of
+# the original E2E pull_request run, so the required
+# `E2E / ci-gate (pull_request)` check itself flips green in place once a
+# (then missing) owner approval arrives, and re-arms red on a veto. See
+# refresh_ci_gate.py for the exact conditions; COMMENTED reviews, bot
+# reviews and reviews from non-owners are no-ops.
+#
+# Why this job only packages a payload instead of running the retrigger
+# itself: GITHUB_TOKEN is read-only for every workflow run tied to a fork
+# PR (#22134), regardless of the triggering event, and fork runs see no
+# repository secrets either - so the rerun API call would always 403 and
+# there is no token upgrade path inside this context. `workflow_run`
+# workflows, by contrast, always execute in the base repository context
+# with a writable token. This job therefore ships the review payload as an
+# artifact and bot_ci_gate_refresh.yaml (workflow_run, trusted base
+# context) performs the actual re-run. The payload is data only: it is
+# re-validated by refresh_ci_gate.py against live API state at execution
+# time, so a stale or forged review cannot change the verdict.
+#
+# Why a separate workflow at all instead of a pull_request_review trigger
+# on pr_test.yaml: a review-triggered E2E run would skip every job whose
+# `if` requires `pull_request` - including `ci-gate` itself - and GitHub
+# still creates a check-run for each skipped job. Two check-runs share the
+# required `ci-gate` context name on the head SHA, and GitHub judges the
+# required check by the latest one; a skipped check counts as satisfied,
+# so the PR became mergeable in the window before the real gate rewrote
+# its verdict (#22202 merged exactly through that window). A separate
+# workflow has no job named `ci-gate`, so the required check has exactly
+# one producer and the shadow verdict cannot exist.
+
+on:
+  # No `branches` filter here: pull_request_review does not support one. The
+  # no-op paths in refresh_ci_gate.py (reviewer outside the CODEOWNERS pool,
+  # bot/comment reviews, already-green runs) make the extra triggers harmless
+  # for PRs targeting other branches, and re-evaluating the gate there is
+  # desirable anyway.
+  pull_request_review:
+    types:
+      - submitted
+      - dismissed
+
+concurrency:
+  # One refresh run per PR: a new review cancels the in-flight one and
+  # replaces it. The cancelled run loses nothing - its payload (if already
+  # uploaded) may still reach the bot, whose script re-judges with live
+  # review state anyway, and the incoming run ships a fresh payload. The
+  # latest review therefore always wins, even when several land in quick
+  # succession. This group is separate from the E2E workflow's, so a review
+  # never cancels the pull_request CI run the retrigger is waiting on.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh-ci-gate:
+    # Bot reviews cannot change the gate verdict (the owner gate ignores
+    # them); every other filter (owner pool, comment-only reviews) needs
+    # API access and stays in refresh_ci_gate.py, executed by the bot with
+    # live review data.
+    if: ${{ github.event.review.user.type != 'Bot' }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Package review payload for the refresh bot
+        run: |
+          mkdir -p ./refresh-payload
+          python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "head_sha": os.environ["HEAD_SHA"],
+              "review_state": os.environ["REVIEW_STATE"],
+              "review_action": os.environ["REVIEW_ACTION"],
+              "reviewer": os.environ["REVIEWER"],
+              "pr_number": os.environ["PR_NUMBER"],
+              "pr_author": os.environ["PR_AUTHOR"],
+              "base_ref": os.environ["BASE_REF"],
+          }
+          with open("./refresh-payload/payload.json", "w") as f:
+              json.dump(payload, f)
+          PY
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEW_ACTION: ${{ github.event.action }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Upload review payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-gate-refresh-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: error
+          path: ./refresh-payload/payload.json

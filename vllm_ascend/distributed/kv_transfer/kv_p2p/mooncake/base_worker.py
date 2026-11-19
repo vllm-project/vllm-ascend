@@ -485,6 +485,19 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             return shape
 
         heads = spec.num_kv_heads
+        if len(shape) > 3:
+            # Packed/blocked HND caches (for example C8-MXFP PA_NZ K/V and
+            # E8M0 scale caches) keep the KV-head axis first while splitting
+            # the token or head-dimension axes into additional fragments.
+            # Mooncake transfers raw bytes, so preserve that physical shape;
+            # the pull worker can still shard it by the leading head axis.
+            if shape[0] != heads:
+                raise ValueError(
+                    f"MooncakeConnector packed GQA block shape {shape} does not match the spec's {heads} KV heads."
+                )
+            if not cache[0].is_contiguous():
+                raise ValueError("MooncakeConnector packed HND requires contiguous bytes within each KV block.")
+            return shape
         if len(shape) != 3:
             raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
         if shape[0] == shape[1] == heads and heads > 1:
@@ -508,7 +521,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        owners = (
+        self.kvpp_layer_owners = (
             map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             if self.ascend_config.kvpp_config.size > 1
             else {}
@@ -539,7 +552,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 configured_layer_names.add(layer_name)
                 # Foreign target layers alias scratch. Publish persistent owners
                 # only; MTP caches are absent from owners and remain replicated.
-                owner = owners.get(layer_name)
+                owner = self.kvpp_layer_owners.get(layer_name)
                 if owner is not None and owner != kvpp_rank:
                     continue
 

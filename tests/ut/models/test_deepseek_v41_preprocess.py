@@ -40,7 +40,7 @@ def test_fused_swa_cache_uses_shared_wrapper_and_falls_back_when_rejected(monkey
         kv_norm=norm,
         nope_head_dim=448,
         head_dim=512,
-        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[cache])),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=cache)),
     )
     metadata = SimpleNamespace(slot_mapping=slots, global_metadata=None)
     store = Mock(return_value=True)
@@ -54,7 +54,7 @@ def test_fused_swa_cache_uses_shared_wrapper_and_falls_back_when_rejected(monkey
     store.assert_called_once_with(projected, weight, cos, sin, cache, slots, 1e-6, 448)
 
     new_cache = torch.empty_like(cache)
-    attn.dsa_attn.swa_cache_layer.kv_cache = [new_cache]
+    attn.dsa_attn.swa_cache_layer.kv_cache = new_cache
     impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
     assert store.call_args.args[4] is new_cache
 
@@ -232,7 +232,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
         packed_cache_ops=A5Backend() if a5_batch else None,
         rotary_emb=SimpleNamespace(layername="layer"),
         dsa_attn=SimpleNamespace(
-            swa_cache_layer=SimpleNamespace(kv_cache=[cache]),
+            swa_cache_layer=SimpleNamespace(kv_cache=cache),
             dsa_attn=SimpleNamespace(
                 impl=SimpleNamespace(
                     cv_wq_a=CVLinearWrapper(qa), cv_wq_b=CVLinearWrapper(qb), cv_wkv=CVLinearWrapper(kv)

@@ -1,0 +1,9 @@
+pr: 21137
+entries:
+  - category: feature
+    text: >-
+      Added DSpark adaptive verification support for DeepSeek-V4.1-Flash on Ascend.
+      To enable it on Model Runner V2, set `"enable_adaptive_verification": true`
+      and `"method": "dspark"` in `--speculative-config`.
+      Startup rejects this configuration if PCP or DCP is greater than 1.
+    model: deepseek-v4.1-flash
