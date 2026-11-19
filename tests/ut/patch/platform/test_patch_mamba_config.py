@@ -25,6 +25,7 @@ from vllm.model_executor.models.config import (
 from vllm.platforms.interface import Platform
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiK3ForConditionalGeneration
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
     _using_kv_store,
@@ -244,20 +245,35 @@ def test_kimi_k31_platform_alignment_preserves_native_pages(tp_size, mamba_cache
     config.cache_config.cache_dtype = cache_dtype
     config.cache_config.mamba_block_size = 131072
     config.cache_config.mamba_page_size_padded = 66502656
+    config.attention_config = SimpleNamespace(resolve_indexer_kv_dtype=lambda _default: "fp8")
     config.model_config = SimpleNamespace(
         architecture="KimiK3ForConditionalGeneration",
         use_mla=True,
         dtype=torch.bfloat16,
         hf_config=SimpleNamespace(model_type="kimi_k31"),
-        hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64),
+        hf_text_config=SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            dsa_config=SimpleNamespace(index_head_dim=128),
+            linear_attn_config={"full_attn_layers": [4, 5], "kda_layers": [1, 2, 3]},
+        ),
         get_num_kv_heads=lambda _parallel: 1,
         get_head_size=lambda: 576,
     )
     local_heads = 96 // tp_size
-    model_cls = SimpleNamespace(
-        get_mamba_state_shape_from_config=lambda _config: ((3, local_heads * 384), (local_heads, 128, 128)),
-        get_mamba_state_dtype_from_config=lambda _config: (torch.bfloat16, torch.float32),
-    )
+
+    class KimiGeometry(AscendKimiK3ForConditionalGeneration):
+        # Keep the real model's inherited cache-layout hook. A namespace with
+        # only state getters hides #66037's new whole-row packed selection.
+        @classmethod
+        def get_mamba_state_shape_from_config(cls, _config):
+            return ((3, local_heads * 384), (local_heads, 128, 128))
+
+        @classmethod
+        def get_mamba_state_dtype_from_config(cls, _config):
+            return (torch.bfloat16, torch.float32)
+
+    model_cls = KimiGeometry
     backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128])
     if cache_dtype in ("int8", "fp8"):
         expected_block_size, token_bytes = 12288 // tp_size, 656

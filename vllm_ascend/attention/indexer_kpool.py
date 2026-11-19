@@ -779,6 +779,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     Keep execution independent of the standard SFA indexer and its operators.
     """
 
+    _head_weight_f32: torch.Tensor | None
+
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
         if qk_rope_head_dim != 0:
@@ -829,14 +831,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         ):
             raise NotImplementedError("GLM KPool FP8 LI requires CANN PoolKeyIndexer FP8 support on Ascend 950.")
         self._init_cann_ops()
-        for name in (
-            "_key_weight",
-            "_gate_weight",
-            "_head_weight_f32",
-            "_norm_weight_f32",
-            "_norm_bias_f32",
-        ):
-            self.register_buffer(name, None, persistent=False)
+        self._head_weight_f32 = None
 
     @property
     def topk_output_width(self) -> int:
@@ -856,11 +851,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 2 if self.enable_sparse_li_c8 else 1
 
     def process_weights_after_loading(self) -> None:
-        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
-        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
-        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
-        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
-        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+        """Refill the sole derived weight without moving its captured address."""
+        head_weight = (
+            self.wk_weights_proj.weight[self.head_dim :].detach().to(dtype=torch.float32, copy=True).contiguous()
+        )
+        # TODO: Use upstream refill_derived once all vLLM versions supported
+        # by vllm-ascend main provide it.
+        if self._head_weight_f32 is None:
+            self._head_weight_f32 = head_weight
+        else:
+            self._head_weight_f32.copy_(head_weight)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:
@@ -929,9 +929,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             k_hidden_states = self.prepare_pcp_hidden(k_hidden_states, indexer_metadata)
         num_tokens = hidden_states.shape[0]
         hidden = hidden_states[:num_tokens]
-        if self._key_weight is None:
+        if self._head_weight_f32 is None:
             self.process_weights_after_loading()
-        assert self._key_weight is not None
+        assert self._head_weight_f32 is not None
         q_values = None
         weights = None
         if compute_topk:
@@ -1057,18 +1057,23 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         # Keep history separate: CANN can save the tail before other cores
         # finish reading history. Whole-pool shifts preserve the pooling result.
+        # Read parameters at execution time so refits/offloading cannot leave
+        # persistent views pointing at replaced parameter storage.
+        key_weight = self.wk_weights_proj.weight[: self.head_dim]
+        gate_weight = self.index_kpool_compress_gate
+        norm_weight, norm_bias = self.k_norm.weight, self.k_norm.bias
         norm_eps = getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6))
         state = self._prepare_keypool_state(tail_cache, cache_metadata.start_pos, tail_metadata, self.index_kpool)
         pooled_key = self._key_pool(
             hidden_states,
-            self._key_weight,
-            self._gate_weight,
+            key_weight,
+            gate_weight,
             self.index_kpool_compress_ape,
             state,
             cache_metadata.keypool_state_table,
             cache_metadata.keypool_start_offsets,
-            norm_weight=self._norm_weight_f32,
-            norm_bias=self._norm_bias_f32,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             cu_seqlens=cache_metadata.query_start_loc,
             cmp_ratio=self.index_kpool,
             norm_eps=norm_eps,
@@ -1077,12 +1082,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if tail_metadata.cann_inputs.retained_indices is not None:
             # Re-project the live MTP rollback window missing from CANN state.
             tail_hidden = self._gather_retained_hidden(hidden_states, tail_metadata.cann_inputs.retained_indices)
-            tail_key = F.linear(tail_hidden, self._key_weight).float()
-            if self._norm_weight_f32 is not None:
-                tail_key = F.layer_norm(
-                    tail_key, (self.head_dim,), self._norm_weight_f32, self._norm_bias_f32, norm_eps
-                )
-            tail_gate = F.linear(tail_hidden, self._gate_weight).float()
+            tail_key = F.linear(tail_hidden, key_weight).float()
+            if norm_weight is not None:
+                tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
+            tail_gate = F.linear(tail_hidden, gate_weight).float()
         self._write_keypool_caches(
             tail_cache,
             indexer_cache,
