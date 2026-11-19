@@ -181,6 +181,11 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
   lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
+  On A5, when an ordinary non-boundary launch has at least one task per vector
+  core, it launches one program per reported vector core. Each program owns a
+  contiguous range of layer, request, head and value tiles. A single buffer stage
+  keeps the task loop within the UB budget. Fully accepted windows use an
+  unrolled update without a length check at each step.
   The estimate covers two matrix buffers without boundary reconstruction and
   six per head for the ordinary or grouped boundary recovery path.
   Non-crossing aligned requests do not reserve boundary matrices.
