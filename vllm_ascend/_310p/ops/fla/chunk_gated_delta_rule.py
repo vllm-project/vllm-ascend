@@ -195,18 +195,7 @@ def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor)
     has_fwd_h = ascend_ops is not None and hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h_vllm")
     has_fwd_o = ascend_ops is not None and hasattr(ascend_ops, "chunk_fwd_o_vllm")
     if not custom_ops_enabled or not has_fwd_h or not has_fwd_o:
-        missing = []
-        if not custom_ops_enabled:
-            missing.append("vllm_ascend_C (enable_custom_op returned False)")
-        if not has_fwd_h:
-            missing.append("chunk_gated_delta_rule_fwd_h_vllm")
-        if not has_fwd_o:
-            missing.append("chunk_fwd_o_vllm")
-        raise RuntimeError(
-            "Missing AscendC chunk-gdr ops on 310P: "
-            f"{', '.join(missing)}. "
-            "Rebuild with COMPILE_CUSTOM_KERNELS=1 and SOC_VERSION=ascend310p*."
-        )
+        raise RuntimeError("310P chunk-gdr requires enabled AscendC FwdH and FwdO custom ops.")
     if q.device.type != "npu":
         raise RuntimeError("310P chunk_gated_delta_rule requires NPU AscendC kernels.")
     if q.dtype != torch.float16 or k.dtype != q.dtype or v.dtype != q.dtype:
