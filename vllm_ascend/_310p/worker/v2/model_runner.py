@@ -884,6 +884,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.kv_block_zeroer.enabled = self._needs_kv_cache_zeroing_310p(kv_cache_config)
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
         self._install_pc_eager_cudagraph_dispatch()
+        # 310P allocates its caches in this fork (no upstream call), so the
+        # repair layout gate must run here too; see the NPUModelRunner method
+        # it delegates to.
+        self._check_repair_kv_layout_capability()
 
     def _needs_kv_cache_zeroing_310p(self, kv_cache_config: KVCacheConfig) -> bool:
         """Use the narrow 310P Mamba speculative-decoding zeroing gate."""

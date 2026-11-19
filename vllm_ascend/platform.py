@@ -1247,7 +1247,7 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
             )
 
-    _validate_kv_load_failure_policy(vllm_config)
+    _validate_kv_load_failure_policy(vllm_config, ascend_config)
 
     # short_request_first_config requires FCFS and excludes batch-job and
     # kv-consumer paths. When profiling-chunk is also enabled, the profiling
@@ -1349,13 +1349,32 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
 
-def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
+def _validate_kv_load_failure_policy(vllm_config: VllmConfig, ascend_config=None) -> None:
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
         return
-    if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
+    policy = getattr(kv_transfer_config, "kv_load_failure_policy", "fail")
+    if policy == "recompute":
         if getattr(vllm_config.model_config, "is_hybrid", False):
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
+    elif policy == "repair":
+        # The repair policy needs the upstream scheduler to admit repair-only
+        # steps and to consume their verdicts. The Ascend scheduler forks
+        # replace Scheduler.schedule() with a pinned copy of an older body
+        # and (for the recompute family) update_from_output() as well, so a
+        # repair plan can never be dispatched or settled there: accepting the
+        # policy would strand the request above its rollback floor with the
+        # span's blocks held. Refuse at init instead; 'fail' and 'recompute'
+        # keep working on those paths.
+        mode = None if ascend_config is None else _swa_bounded_replay_unsupported_mode(ascend_config)
+        if mode is not None:
+            raise ValueError(
+                f"kv_load_failure_policy='repair' is not supported with {mode}: "
+                "that scheduling mode replaces Scheduler.schedule() with a "
+                "fork that never admits repair-only steps or consumes their "
+                "verdicts. Disable the scheduling mode or switch the policy "
+                "to 'fail' or 'recompute'."
+            )
 
 
 def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:

@@ -2098,6 +2098,50 @@ class TestNPUPlatform(TestBase):
 
             platform._validate_kv_load_failure_policy(vllm_config)
 
+    def _repair_fork_ascend_config(self, mode):
+        """An AscendConfig stand-in with exactly one schedule()-fork mode on."""
+        return SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                recompute_scheduler_enable=mode == "recompute_scheduler_enable",
+                dyntra_lb_config=SimpleNamespace(enabled=mode == "dyntra_lb_config"),
+                enable_balance_scheduling=mode == "enable_balance_scheduling",
+            )
+        )
+
+    def test_validate_kv_load_failure_policy_refuses_repair_on_scheduler_forks(self):
+        from vllm_ascend import platform
+
+        for mode in ("recompute_scheduler_enable", "dyntra_lb_config", "enable_balance_scheduling"):
+            with self.subTest(mode=mode):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="repair")
+                ascend_config = self._repair_fork_ascend_config(mode)
+
+                with pytest.raises(ValueError, match=f"kv_load_failure_policy='repair' is not supported with {mode}"):
+                    platform._validate_kv_load_failure_policy(vllm_config, ascend_config)
+
+    def test_validate_kv_load_failure_policy_allows_repair_without_forks(self):
+        from vllm_ascend import platform
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy="repair")
+
+        platform._validate_kv_load_failure_policy(vllm_config, self._repair_fork_ascend_config(None))
+
+    def test_validate_kv_load_failure_policy_keeps_fail_and_recompute_on_forks(self):
+        from vllm_ascend import platform
+
+        for policy in ("fail", "recompute"):
+            with self.subTest(policy=policy):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.model_config.is_hybrid = False
+                vllm_config.kv_transfer_config = MagicMock(kv_load_failure_policy=policy)
+
+                for mode in ("recompute_scheduler_enable", "dyntra_lb_config", "enable_balance_scheduling"):
+                    with self.subTest(mode=mode):
+                        # Neither policy interacts with the scheduling modes.
+                        platform._validate_kv_load_failure_policy(vllm_config, self._repair_fork_ascend_config(mode))
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",

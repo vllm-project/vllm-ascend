@@ -476,6 +476,55 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
+    def _check_repair_kv_layout_capability(self) -> None:
+        """Refuse kv_load_failure_policy='repair' on fence-incompatible layouts.
+
+        The repair executor derives the manager block size of a layer's KV
+        cache from the cache GEOMETRY (vllm's _repair_block_size: 4-D views
+        read it from dim 2, 2/3-D views from dim 1), and every repair refuses
+        unless that derivation reproduces the scheduler's block size. On the
+        default Ascend BNSD layout the per-K/V view is
+        [num_blocks, block_size, heads, dim]: dim 2 is the head count, so the
+        derivation reads num_kv_heads and every repair fails the fence at
+        repair time. Fail at init instead, naming the layout switch that makes
+        the cache fence-compatible ([B, H, N, C] layouts: LBHNC/HND). The
+        check reuses the repair executor's own derivation so it can only be
+        stricter than the runtime fence, never more permissive.
+
+        The repair executor only exists in vLLM builds carrying the repair
+        stack; on builds without it the policy never reaches repair execution
+        either, so the import guard below skips the check there.
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        policy = (
+            getattr(kv_transfer_config, "kv_load_failure_policy", "fail") if kv_transfer_config is not None else "fail"
+        )
+        if policy != "repair":
+            return
+        try:
+            from vllm.v1.worker.gpu.repair_executor import _repair_block_size
+        except ImportError:
+            return
+        block_size = self.vllm_config.cache_config.block_size
+        try:
+            derived = _repair_block_size(self.model.model.layers[0])
+        except Exception as exc:
+            raise RuntimeError(
+                "kv_load_failure_policy='repair': layer 0's KV cache geometry "
+                f"is not repair-fence compatible ({exc}). Set the KV cache "
+                "layout to a [B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) "
+                "or switch the policy to 'fail' or 'recompute'."
+            ) from exc
+        if derived != block_size:
+            raise RuntimeError(
+                "kv_load_failure_policy='repair': the repair fence derives a "
+                f"block size of {derived} from layer 0's KV cache geometry, but "
+                f"the cache is managed in blocks of {block_size}; every repair "
+                "would be refused at repair time. Set the KV cache layout to a "
+                "[B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) or switch "
+                "the policy to 'fail' or 'recompute'."
+            )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -519,6 +568,7 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(self.speculator, DraftModelSpeculator):
                     self.pcp_manager.set_speculator(self.speculator)
                 self.model_state.pcp_manager = self.pcp_manager
+        self._check_repair_kv_layout_capability()
         bind_dspark_context_receiver(
             self.vllm_config,
             sparse_offload_enabled=sparse_cfg.enabled,
