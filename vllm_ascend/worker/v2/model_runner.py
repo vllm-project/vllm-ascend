@@ -97,6 +97,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.kvtc.calibration import KVCacheDumper
+from vllm_ascend.kvtc.kvtc_config import KVTC_CONNECTOR_NAME, KVTCConfig
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
@@ -163,6 +165,12 @@ class NPUModelRunner(GPUModelRunner):
         self.ascend_config = get_ascend_config()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
+        self.kvtc_cache_dumper: KVCacheDumper | None = None
+        transfer_config = vllm_config.kv_transfer_config
+        if transfer_config is not None and transfer_config.kv_connector == KVTC_CONNECTOR_NAME:
+            kvtc_config = KVTCConfig.from_extra(transfer_config.kv_connector_extra_config or {})
+            if kvtc_config.kvtc_dump:
+                self.kvtc_cache_dumper = KVCacheDumper(kvtc_config.kvtc_dump_dir)
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
@@ -618,6 +626,8 @@ class NPUModelRunner(GPUModelRunner):
         from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 
         expert_offload.shutdown(self)
+        if getattr(self, "kvtc_cache_dumper", None) is not None:
+            self.kvtc_cache_dumper.close()
 
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
@@ -717,6 +727,18 @@ class NPUModelRunner(GPUModelRunner):
                     raise NotImplementedError("Graph memory profiling is unavailable in this vLLM version.")
                 return super().capture_model()
             return super().capture_model(profile_only=profile_only)
+
+    def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
+        dumper = self.kvtc_cache_dumper
+        if dumper is not None and scheduler_output.finished_req_ids:
+            dumper.dump_finished(
+                scheduler_output.finished_req_ids - (scheduler_output.preempted_req_ids or set()),
+                self.req_states,
+                self.block_tables,
+                self.kv_cache_config,
+                self.compilation_config.static_forward_context,
+            )
+        super().finish_requests(scheduler_output)
 
     # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
     # wave sync keeps running inside the inference-mode context.

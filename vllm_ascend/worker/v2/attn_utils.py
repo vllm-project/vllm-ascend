@@ -92,6 +92,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
 )
+from vllm_ascend.kvtc.kvtc_config import KVTC_CONNECTOR_NAME
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -956,6 +957,8 @@ def _allocate_kv_cache(
         Raw cache tensors or K/V tensor pairs, indexed by layer name.
     """
     vllm_config = get_current_vllm_config()
+    transfer_config = vllm_config.kv_transfer_config
+    use_kvtc = transfer_config is not None and transfer_config.kv_connector == KVTC_CONNECTOR_NAME
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
         specs = _get_layer_kv_cache_specs(kv_cache_config)
@@ -1339,14 +1342,15 @@ def _allocate_kv_cache(
                 if (
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
+                    # KVTC operators gather/restore directly in contiguous K/V.
+                    and not use_kvtc
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
                 if layer_spec.page_size_bytes != layer_spec.real_page_size_bytes:
                     raise ValueError(
-                        f"Sparse Attention backend for {layer_name} requires "
-                        "unpadded FullAttention pages for contiguous K/V cache."
+                        f"Contiguous K/V allocation for {layer_name} requires unpadded FullAttention pages."
                     )
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, layer_spec)
                 if enable_fa_quant(vllm_config):
