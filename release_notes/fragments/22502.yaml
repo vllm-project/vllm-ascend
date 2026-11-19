@@ -1,0 +1,15 @@
+pr: 22502
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in owner-sharded KV cache for DeepSeek V4.1 Flash prefill context parallelism on
+      A3. Each PCP rank keeps only its share of the KV cache while attention addresses the full
+      logical range, cutting per-rank KV HBM by about 70% in the validated configuration with
+      prefill TTFT within roughly 3% of the replicated baseline.
+    model: deepseek-v4.1
+    hardware: [A3]
+  - category: config
+    text: >-
+      Added VLLM_ASCEND_PCP_KV_SHARING (default "replicated") and the VLLM_ASCEND_PCP_OWNER_* /
+      VLLM_ASCEND_PCP_LOCAL_* switches (default off) for owner-sharded PCP KV placement, local
+      index placement, prefill staging, and capacity planning. Decode is unchanged.
