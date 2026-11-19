@@ -370,6 +370,15 @@ guide_sections:
     | 950DT, 1 P + 1 D node, TP4 / DP2 per role | MXFP8 | [950DT MXFP8 PD](?hardware=ascend_950dt_8x&variant=ascend_mxfp8&strategy=pd_cluster&preset=ascend_mxfp8_pd) |
     | A3, 1 P + 2 D nodes, P TP8 / PP2 and D TP8 / DP4 | W8A8 | [A3 W8A8 1M PD](?hardware=ascend_910c&variant=ascend_w8a8_1m&strategy=pd_cluster&preset=ascend_w8a8_1m_pd) |
 
+    In the A3 W8A8 dual-node layout, TP4 uses four NPUs per DP rank, so
+    each 16-NPU node runs four local ranks and the two nodes run eight in total.
+    Prefill and Decode are sized separately in the PD layouts. For example,
+    A3 W8A8 Prefill uses TP4 / PP4 to split the model across all 16 NPUs on
+    one node, while Decode uses TP4 with four local DP ranks on each of two nodes.
+    When changing the device count, check that weights and KV cache fit with
+    the chosen TP and PP, then recalculate local and global DP, start ranks,
+    and proxy endpoints for the new layout.
+
     For [dual-node serving](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html#52-multi-node-deployment),
     set `HEAD_IP` to the first node's communication IP, `LOCAL_IP` to the
     current host's IP and `IFACE_NAME` to its communication NIC. Add
@@ -625,6 +634,7 @@ presets:
           HCCL_BUFFSIZE: '2048'
         json_args:
           --additional-config:
+            # Remove the inherited false so Decode uses the runtime default.
             ascend_compilation_config: {fuse_qknorm_rope: null}
           --kv-transfer-config:
             kv_connector: MooncakeConnectorV1
@@ -657,6 +667,7 @@ presets:
     json_args:
       --compilation-config: {cudagraph_mode: NONE}
       --additional-config:
+        # Remove the inherited single-node setting from both PD roles.
         enable_reduce_sample: null
         enable_shared_expert_dp: false
         enable_flashcomm1: true
@@ -681,10 +692,11 @@ presets:
         nodes: 2
         parallelism: dep
         tp: 8
-        # Override the single-node variant's PP4 for this DEP role.
-        args:
+        pp: 1
+        remove_args:
+          # Drop the inherited PP4 flag so vLLM uses its default PP1.
           - --pipeline-parallel-size
-          - '1'
+        args:
           - --port
           - '31260'
           - --data-parallel-rpc-port
@@ -722,6 +734,7 @@ strategy_overrides:
           PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
           HCCL_SOCKET_IFNAME: $IFACE_NAME
           GLOO_SOCKET_IFNAME: $IFACE_NAME
+# Exact hardware profiles override the npu fallback for distributed strategies.
 strategy_hardware:
   single_node_tep:
     npu: unsupported
