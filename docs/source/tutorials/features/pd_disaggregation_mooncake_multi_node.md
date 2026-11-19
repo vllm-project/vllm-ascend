@@ -431,6 +431,61 @@ completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
 
+### MooncakeConnectorV2 Pull Configuration
+
+For `MooncakeConnectorV2`, set `pull_transfer_mode` in the decoder's
+`kv_connector_extra_config` to choose how pull requests are submitted:
+
+| Value | Behavior |
+| --- | --- |
+| `"request"` (default) | Submit READs separately for each request and publish its completion once all its buckets finish. Other requests can still be transferring. |
+| `"batch"` | Aggregate requests from the same producer engine within one received batch into PP/PCP/TP transfer buckets. Publish completion after all buckets in that batch finish. |
+
+To explicitly select request-level completion, add the following setting to the existing
+decoder configuration, preserving the other deployment-specific fields:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "pull_transfer_mode": "request"
+  }
+}
+```
+
+Omit this option to use request-level completion. Set it to `"batch"` when
+aggregated transfers are needed. Other
+values are rejected during decoder worker initialization. This option controls
+V2 pull transfers only; the producer does not need a matching setting.
+
+Request mode first plans block mappings for the received engine batch, then
+prepares and submits each request's addresses without waiting for earlier READs.
+If batch planning fails, no READs are submitted and the batch is reported as failed.
+Address-preparation and submission failures are handled per request, after all
+already-submitted READs for that request have stopped.
+
+Request mode removes the batch completion barrier that can delay a completed
+request behind other long requests. It can also increase READ call overhead
+and memory occupied by queued address lists. Compare both modes under the same
+workload before choosing a deployment setting. Both modes wait for submitted
+READs to stop before reporting a failed receive.
+
+Set `pull_max_workers` in the same decoder `kv_connector_extra_config` to
+configure the pull thread pool size. It applies to both `batch` and `request`
+mode, defaults to **32**, and must be a positive integer (booleans and strings
+are rejected). The limit is per decoder worker, not per request or per session.
+For example:
+
+```json
+{
+  "kv_connector_extra_config": {
+    "pull_transfer_mode": "request",
+    "pull_max_workers": 64
+  }
+}
+```
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
