@@ -21,8 +21,6 @@ def _fused_add_rms_norm_cast_kernel(
     ZERO_CENTERED: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    # Use one row per tile to minimize latency for small decode batches.
-    BLOCK_M: tl.constexpr = 1
     core_id = tl.program_id(0)
     core_num = tl.num_programs(0)
     rows_per_core = tl.cdiv(total_rows, core_num)
@@ -35,19 +33,19 @@ def _fused_add_rms_norm_cast_kernel(
     if ZERO_CENTERED:
         weight = weight + 1.0
 
-    for row_start in tl.range(start_row, end_row, BLOCK_M):
-        offset_row = row_start + tl.arange(0, BLOCK_M)
-        mask_r = offset_row < end_row
-        mask = mask_r[:, None] & mask_d[None, :]
-
-        offset = offset_row[:, None] * hidden_size + offset_d[None, :]
+    # Retain the singleton row dimension so the RMS reduction returns a [1] tensor.
+    # A 1D reduction lowered to scalar extraction and rebroadcast on Ascend 950DT,
+    # increasing device latency, especially when a core processed multiple rows.
+    mask = mask_d[None, :]
+    for row in tl.range(start_row, end_row):
+        offset = row * hidden_size + offset_d[None, :]
         values = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
         if HAS_RESIDUAL:
             residual = tl.load(residual_ptr + offset, mask=mask, other=0.0)
             values = values + residual
             tl.store(residual_out_ptr + offset, values, mask=mask)
 
-        variance = tl.sum(values * values, axis=-1) / hidden_size
+        variance = tl.sum(values * values, axis=1) / hidden_size
         rstd = tl.rsqrt(variance + eps)
         out = values * rstd[:, None] * weight[None, :]
         tl.store(out_ptr + offset, out, mask=mask)
