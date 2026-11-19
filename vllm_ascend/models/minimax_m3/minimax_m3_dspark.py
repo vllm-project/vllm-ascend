@@ -32,6 +32,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkModel
 
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3MLP
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
+from vllm_ascend.utils import vllm_version_is
 
 PREFIX = "language_model.model.dspark."
 ADAPTER_ARCHITECTURE = "DSparkMiniMaxDraftModel"
@@ -256,7 +257,10 @@ def draft_hf_override(hf_config):
     # loading the real checkpoint. Preserve its source config class selection.
     if hf_config.model_type.startswith("dummy_"):
         return hf_config
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
+    if vllm_version_is("0.33.0"):
+        from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig  # type: ignore[attr-defined]
+    else:
+        from transformers import MiniMaxM3VLTextConfig as MiniMaxM3TextConfig
 
     model_root = Path(hf_config._name_or_path).parent
     config = draft_config_from_file(hf_config.to_dict(), read_draft_header(model_root))

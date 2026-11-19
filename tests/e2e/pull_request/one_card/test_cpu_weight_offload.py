@@ -109,10 +109,10 @@ def test_prefetch_offload_nd_accuracy():
 
 @wait_until_npu_memory_free()
 def test_prefetch_offload_nz_graph_accuracy():
-    """NZ+graph prefetch matches the eager baseline on Model Runner V2.
+    """MRv2 graph prefetch with NZ weight mode matches the eager baseline.
 
-    Qwen3 defaults to MRv2, whose prefetch path accepts NZ graph capture.
-    Model Runner V1 still fail-fasts in AscendPrefetchOffloader for this combo.
+    MRv2 uses upstream prefetch buffers in graph mode. Prefetch into Ascend
+    NZ static buffers requires an ND-to-NZ conversion that ACL graphs cannot capture.
     """
     baseline_outputs = _generate_eager_baseline(nz_mode=2)
     _assert_offload_matches_baseline(
