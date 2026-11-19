@@ -211,3 +211,123 @@ def test_dsv41_owner_allocator_is_disabled_by_default(monkeypatch) -> None:
         kv_transfer_config=None,
     )
     assert attn_utils._deepseek_v41_owner_allocator(config, {}, torch.device("cpu")) is None
+
+
+class _FakeGroup:
+    def __init__(self, world_size: int, rank: int) -> None:
+        self.world_size = world_size
+        self.rank_in_group = rank
+        self.cpu_group = object()
+
+
+class _FakeDist:
+    """Collective double: every rank reports the local outcome of the caller."""
+
+    def __init__(self, world_size: int) -> None:
+        self.world_size = world_size
+
+    def all_gather_object(self, out, value, group=None) -> None:
+        for rank in range(self.world_size):
+            entry = dict(value)
+            if rank != entry.get("rank", 0):
+                entry["rank"] = rank
+                entry["device"] = rank
+                entry["tgid"] = rank + 1
+                if entry.get("handle") is not None:
+                    entry["handle"] = bytes(owner_vmm.ACL_V2_SHAREABLE_HANDLE_BYTES)
+            out[rank] = entry
+
+    def barrier(self, group=None) -> None:
+        return None
+
+
+class _FakeBackend:
+    def __init__(self, *, fail_after_maps: int = 1) -> None:
+        self.calls: list[tuple] = []
+        self.fail_after_maps = fail_after_maps
+        self.maps = 0
+
+    def set_device(self, device_index: int) -> None:
+        return None
+
+    def bare_tgid(self, device_index: int) -> int:
+        return 1
+
+    def allocate_granularity(self, device_index: int) -> int:
+        return owner_vmm.CANN_VMM_GRANULARITY_BYTES
+
+    def enable_peer_access(self, device_index: int, peers) -> None:
+        self.calls.append(("enable_peer_access", tuple(peers)))
+
+    def reserve_address(self, *, size_bytes: int, device_index: int) -> int:
+        self.calls.append(("reserve", size_bytes))
+        return 0x10000000
+
+    def malloc_physical(self, *, size_bytes: int, device_index: int):
+        self.calls.append(("malloc", size_bytes))
+        return owner_vmm.AclPhysicalHandle(0x2000, size_bytes, device_index)
+
+    def export(self, *, handle, device_index: int):
+        self.calls.append(("export", handle.value))
+        return owner_vmm.AclShareableHandle(bytes(owner_vmm.ACL_V2_SHAREABLE_HANDLE_BYTES))
+
+    def authorize(self, *, shareable_handle, bare_tgids, device_index: int) -> None:
+        self.calls.append(("authorize", tuple(bare_tgids)))
+
+    def import_handle(self, *, shareable_handle, device_index: int):
+        self.calls.append(("import", device_index))
+        return owner_vmm.AclPhysicalHandle(0x3000, 0, device_index)
+
+    def map(self, *, base_address: int, size_bytes: int, offset_bytes: int, handle, device_index: int) -> None:
+        self.calls.append(("map", base_address, size_bytes))
+        self.maps += 1
+        if self.maps > self.fail_after_maps:
+            raise owner_vmm.PcpOwnerVmmError("aclrtMapMem", -1)
+
+    def unmap(self, *, base_address: int, device_index: int) -> None:
+        self.calls.append(("unmap", base_address))
+
+    def free_physical(self, *, handle, device_index: int) -> None:
+        self.calls.append(("free_physical", handle.value))
+
+    def release_address(self, *, base_address: int, device_index: int) -> None:
+        self.calls.append(("release", base_address))
+
+
+def _fake_runtime(backend: _FakeBackend) -> owner_vmm.PcpOwnerSlabRuntime:
+    # ``torch.device("npu:0")`` cannot be built without torch_npu; the
+    # constructor only reads ``type`` and ``index``.
+    return owner_vmm.PcpOwnerSlabRuntime(
+        device=SimpleNamespace(type="npu", index=0),
+        pcp_group=_FakeGroup(2, 0),
+        backend=backend,
+        dist_module=_FakeDist(2),
+    )
+
+
+def test_partial_map_failure_rolls_back_before_physical_release() -> None:
+    granularity = owner_vmm.CANN_VMM_GRANULARITY_BYTES
+    # Two chunks, one per owner: the second aclrtMapMem call fails.
+    backend = _FakeBackend(fail_after_maps=1)
+    runtime = _fake_runtime(backend)
+
+    assert runtime.allocate_slab(["layers.0.long_kv_cache"], 2 * granularity) is None
+    assert runtime.active is False
+
+    calls = backend.calls
+    unmaps = [index for index, call in enumerate(calls) if call[0] == "unmap"]
+    frees = [index for index, call in enumerate(calls) if call[0] == "free_physical"]
+    assert unmaps, "the successfully mapped owner range must be unmapped during rollback"
+    assert calls[unmaps[0]] == ("unmap", 0x10000000)
+    assert frees and unmaps[0] < frees[0], "peer mappings must be dropped before the owner frees HBM"
+    assert any(call[0] == "release" for call in calls)
+
+
+def test_close_unregisters_its_slabs() -> None:
+    runtime = _fake_runtime(_FakeBackend())
+    owner_vmm._register_slab(0xABC000, 0x1000, runtime)
+    try:
+        runtime.close()
+        assert all(entry[2] is not runtime for entry in owner_vmm._slab_registry)
+    finally:
+        owner_vmm._slab_registry[:] = [entry for entry in owner_vmm._slab_registry if entry[2] is not runtime]

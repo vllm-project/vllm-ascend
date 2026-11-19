@@ -785,43 +785,55 @@ class PcpOwnerSlabRuntime:
         started = time.perf_counter()
         calls = 0
         mapped: list[int] = []
-        for owner in range(self.pcp_size):
-            owner_plan = SlabChunkPlan(
-                size_bytes=plan.size_bytes,
-                pcp_size=self.pcp_size,
-                rank=owner,
-                placement=plan.placement,
-            )
-            chunks = owner_plan.own_chunks
-            if not chunks:
-                continue
-            handle = physical if owner == self.rank else imported.get(owner)
-            if handle is None:
-                raise PcpOwnerVmmError(f"owner {owner} has no physical handle", -1)
-            if plan.placement == SLAB_PLACEMENT_CONTIGUOUS:
-                address = base_address + chunks[0] * CANN_VMM_GRANULARITY_BYTES
-                size_bytes = len(chunks) * CANN_VMM_GRANULARITY_BYTES
-                self._backend.map(
-                    base_address=address,
-                    size_bytes=size_bytes,
-                    offset_bytes=0,
-                    handle=handle,
-                    device_index=self.device_index,
+        try:
+            for owner in range(self.pcp_size):
+                owner_plan = SlabChunkPlan(
+                    size_bytes=plan.size_bytes,
+                    pcp_size=self.pcp_size,
+                    rank=owner,
+                    placement=plan.placement,
                 )
-                mapped.append(address)
-                calls += 1
-                continue
-            for chunk in chunks:
-                address = base_address + chunk * CANN_VMM_GRANULARITY_BYTES
-                self._backend.map(
-                    base_address=address,
-                    size_bytes=CANN_VMM_GRANULARITY_BYTES,
-                    offset_bytes=owner_plan.offset_in_owner(chunk),
-                    handle=handle,
-                    device_index=self.device_index,
-                )
-                mapped.append(address)
-                calls += 1
+                chunks = owner_plan.own_chunks
+                if not chunks:
+                    continue
+                handle = physical if owner == self.rank else imported.get(owner)
+                if handle is None:
+                    raise PcpOwnerVmmError(f"owner {owner} has no physical handle", -1)
+                if plan.placement == SLAB_PLACEMENT_CONTIGUOUS:
+                    address = base_address + chunks[0] * CANN_VMM_GRANULARITY_BYTES
+                    size_bytes = len(chunks) * CANN_VMM_GRANULARITY_BYTES
+                    self._backend.map(
+                        base_address=address,
+                        size_bytes=size_bytes,
+                        offset_bytes=0,
+                        handle=handle,
+                        device_index=self.device_index,
+                    )
+                    mapped.append(address)
+                    calls += 1
+                    continue
+                for chunk in chunks:
+                    address = base_address + chunk * CANN_VMM_GRANULARITY_BYTES
+                    self._backend.map(
+                        base_address=address,
+                        size_bytes=CANN_VMM_GRANULARITY_BYTES,
+                        offset_bytes=owner_plan.offset_in_owner(chunk),
+                        handle=handle,
+                        device_index=self.device_index,
+                    )
+                    mapped.append(address)
+                    calls += 1
+        except BaseException:
+            # The caller only sees the exception, not the addresses that were
+            # already mapped before it. Unmap them here, otherwise the rollback
+            # leaks VA mappings and a later ``aclrtReleaseMemAddress`` fails
+            # while they are still live.
+            for address in reversed(mapped):
+                try:
+                    self._backend.unmap(base_address=address, device_index=self.device_index)
+                except BaseException as error:  # noqa: BLE001 - keep the original failure
+                    logger.error("PCP owner-slab map rollback could not unmap %#x: %s", address, error)
+            raise
         self.map_calls += calls
         self.map_seconds += time.perf_counter() - started
         return mapped
@@ -1227,6 +1239,7 @@ class PcpOwnerSlabRuntime:
         """
         count = len(self._slabs)
         self._slabs.clear()
+        _unregister_slabs(self)
         self._active = False
         if count:
             logger.info("PCP owner-slab runtime closed: slabs=%d (physical released at process exit)", count)
@@ -1242,6 +1255,11 @@ _slab_registry: list[tuple[int, int, PcpOwnerSlabRuntime]] = []
 
 def _register_slab(base_address: int, size_bytes: int, runtime: PcpOwnerSlabRuntime) -> None:
     _slab_registry.append((int(base_address), int(size_bytes), runtime))
+
+
+def _unregister_slabs(runtime: PcpOwnerSlabRuntime) -> None:
+    """Forget a runtime's slabs so a closed runtime is not kept alive or matched."""
+    _slab_registry[:] = [entry for entry in _slab_registry if entry[2] is not runtime]
 
 
 def owner_slab_for_tensor(tensor: torch.Tensor | None) -> PcpOwnerSlabRuntime | None:
