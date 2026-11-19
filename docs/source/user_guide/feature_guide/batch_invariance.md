@@ -195,6 +195,10 @@ Request preemption is triggered when the KV cache runs out: the preempted reques
 
 Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... tokens per request`) to size your workload against the KV cache capacity, and watch the engine stats: `GPU KV cache usage` approaching 100% signals imminent preemption. See the [preemption FAQ](../../faqs.md#22-why-does-tpot-increase-drastically-as-concurrency-grows) for details.
 
+## Graph Mode
+
+Batch invariance does not require eager execution: ACLGraph capture works with `VLLM_BATCH_INVARIANT=1` enabled, so `FULL_DECODE_ONLY` can be used together with batch invariance. Verified with batch invariance enabled: `Qwen/Qwen3-30B-A3B` with `FULL_DECODE_ONLY` on Atlas A3 and 950DT Products, and `Qwen/Qwen3.5-35B-A3B` with the default `FULL_AND_PIECEWISE` graph on Atlas A3. Other models have not been validated with graph mode and batch invariance enabled together.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
