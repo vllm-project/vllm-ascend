@@ -61,7 +61,7 @@ With CANN PyPTO 0.3.0 installed, run the three backends in one process on the sa
 python benchmarks/kernels/kda_verify/compare_backends.py --batches 1:80 --seed 83700 --out three-backends.json
 ```
 
-The PyPTO kernel implements the gate projections, four-tap convolution, checkpoint projection, causal corrections and gated RMS normalization. Its wrapper gathers the rollback history by accepted prefix. Timing includes that gather, the two outer projections, all cache and record writes and the small-batch padding where used. The TileLang backend reuses invariant weights across requests at batches 1, 3 and 5�C10. The default `benchmark.py` comparison still exposes the earlier TileLang schedules for reproducing their incremental changes.
+The PyPTO kernel statically unrolls four independent heads per work item. It implements the gate projections, four-tap convolution, checkpoint projection, causal corrections and gated RMS normalization. Its wrapper gathers the rollback history by accepted prefix. Timing includes that gather, the two outer projections, all cache and record writes and the small-batch padding where used. The TileLang backend reuses invariant weights across requests at batches 1, 3 and 5�C10. The default `benchmark.py` comparison still exposes the earlier TileLang schedules for reproducing their incremental changes.
 
 PyPTO compiles its dynamic-batch program on first use. Compilation can take several minutes on this configuration and is excluded from replay latency.
 
