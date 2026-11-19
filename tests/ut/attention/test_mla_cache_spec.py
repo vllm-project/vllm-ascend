@@ -64,6 +64,8 @@ def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, hea
     actual = layer.get_kv_cache_spec(config)
     assert isinstance(actual, AscendMLAAttentionSpec)
     assert actual.num_heads == heads
+    assert (actual.kv_lora_rank, actual.qk_rope_head_dim) == (512, 64)
+    assert actual.mla_cache_layout == "component_major"
     assert layer.num_heads == 12
     for field in (
         "kv_quant_mode",

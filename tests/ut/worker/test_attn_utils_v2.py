@@ -1357,9 +1357,8 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
 
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == expected_num_heads
-    if model_type == "kimi_linear":
-        assert (spec.kv_lora_rank, spec.qk_rope_head_dim) == (512, 64)
-        assert spec.mla_cache_layout == "token_interleaved"
+    assert (spec.kv_lora_rank, spec.qk_rope_head_dim) == (512, 64)
+    assert spec.mla_cache_layout == "token_interleaved"
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)

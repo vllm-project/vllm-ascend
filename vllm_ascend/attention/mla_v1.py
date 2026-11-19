@@ -229,16 +229,11 @@ class AscendMLAAttention(MLAAttention):
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
-        if model_type == "kimi_linear":
-            values.update(
-                kv_lora_rank=self.kv_lora_rank,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                mla_cache_layout="token_interleaved"
-                if getattr(self.impl, "use_flashmla", False)
-                else "component_major",
-            )
         values.update(
             num_heads=storage_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
