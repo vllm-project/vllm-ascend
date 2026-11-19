@@ -26,7 +26,6 @@ request-time allocation.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -888,8 +887,9 @@ def _owner_kv_transfer_allowed() -> bool:
     this rank but which peers also map; an external connector (KV pool) can
     only work if the driver accepts registering that range.
     """
-    raw = os.environ.get("VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    from vllm_ascend import envs
+
+    return str(envs.VLLM_ASCEND_PCP_OWNER_ALLOW_KV_TRANSFER).strip().lower() in ("1", "true", "yes", "on")
 
 
 # The runner installs the owner-slab allocator and peer transport before the

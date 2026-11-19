@@ -11,8 +11,6 @@ and "attention (kernel)" costs between the replicated and owner builds.
 
 from __future__ import annotations
 
-import os
-
 import torch
 from vllm.logger import logger
 
@@ -24,8 +22,9 @@ _logged = 0
 
 
 def timing_enabled() -> bool:
-    raw = os.environ.get("VLLM_ASCEND_PCP_TIMING", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    from vllm_ascend import envs
+
+    return str(envs.VLLM_ASCEND_PCP_TIMING).strip().lower() in ("1", "true", "yes", "on")
 
 
 def enter(name: str):

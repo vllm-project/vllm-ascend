@@ -23,7 +23,6 @@ direct peer reads.  Results are identical either way.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -41,8 +40,7 @@ def _env_flag(value: object) -> bool:
 
 
 def owner_stage_enabled() -> bool:
-    raw = os.environ.get("VLLM_ASCEND_PCP_OWNER_STAGE", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE)
 
 
 def owner_cpu_plan_enabled() -> bool:
@@ -52,8 +50,7 @@ def owner_cpu_plan_enabled() -> bool:
     tail (``shm_broadcast`` 60 s stall), so it needs root-causing before it is
     trusted.  The mask path has completed multiple 1000/1000 runs.
     """
-    raw = os.environ.get("VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN)
 
 
 def owner_stage_swa_enabled() -> bool:
@@ -63,8 +60,7 @@ def owner_stage_swa_enabled() -> bool:
     fixes the kernel's peer reads but the per-call plan build costs more than
     it saves until the plan build is sync-free.
     """
-    raw = os.environ.get("VLLM_ASCEND_PCP_OWNER_STAGE_SWA", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA)
 
 
 def owner_stage_swa_chunk_enabled() -> bool:
@@ -205,7 +201,7 @@ def plan_swa_chunk_segments(
 
 
 def _stage_budget_bytes() -> int:
-    raw = os.environ.get("VLLM_ASCEND_PCP_OWNER_STAGE_BYTES", "").strip()
+    raw = envs.VLLM_ASCEND_PCP_OWNER_STAGE_BYTES
     if not raw:
         return DEFAULT_STAGE_BUDGET_BYTES
     try:
