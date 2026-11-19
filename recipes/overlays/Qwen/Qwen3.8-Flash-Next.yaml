@@ -582,16 +582,18 @@ presets:
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
       image_10k:
         label: Image and text (10K)
-        description: The command shows Decode rank 0. To start all four ranks, run the Decode loop once in the A3 image-and-text 10K launch scripts above the command.
+        description: This command runs one Decode rank. Run the four-rank loop in the A3 image-and-text 10K launch scripts above the command to set the device pair, API port and Mooncake configuration for each rank.
         remove_args:
           - '--enable-prefix-caching'
           - '--mamba-cache-mode'
           - '--mamba-ssm-cache-dtype'
         args:
+          - '--port'
+          - $DECODE_HTTP_PORT
           - '--data-parallel-size-local'
           - '1'
           - '--data-parallel-rank'
-          - '0'
+          - $DECODE_RANK
           - '--data-parallel-address'
           - $LOCAL_SERVICE_IP
           - '--data-parallel-rpc-port'
@@ -602,7 +604,7 @@ presets:
           - '4096'
           - '--no-enable-prefix-caching'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32700","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+          - $DECODE_KV_CONFIG
         json_args:
           '--speculative-config':
             enforce_eager: null
@@ -610,7 +612,7 @@ presets:
           VLLM_SERVER_DEV_MODE: '1'
           VLLM_ENGINE_READY_TIMEOUT_S: '2400'
           VLLM_ASCEND_PLE_BACKEND: torch
-          ASCEND_RT_VISIBLE_DEVICES: 8,9
+          ASCEND_RT_VISIBLE_DEVICES: $DECODE_DEVICES
   a5_pd_prefill:
     label: PD / Prefill worker (950DT)
     source:
@@ -1068,22 +1070,25 @@ notes:
       export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
       export HCCL_BUFFSIZE=512
 
-      for rank in 0 1 2 3; do
-          first_device=$((8 + rank * 2))
-          api_port=$((25569 + rank * 10))
-          kv_port=$((32700 + rank * 20))
+      for DECODE_RANK in 0 1 2 3; do
+          first_device=$((8 + DECODE_RANK * 2))
+          DECODE_HTTP_PORT=$((25569 + DECODE_RANK * 10))
+          kv_port=$((32700 + DECODE_RANK * 20))
 
-          ASCEND_RT_VISIBLE_DEVICES="${first_device},$((first_device + 1))" \
+          DECODE_DEVICES="${first_device},$((first_device + 1))"
+          DECODE_KV_CONFIG='{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$kv_port"'","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
+
+          ASCEND_RT_VISIBLE_DEVICES="${DECODE_DEVICES}" \
           vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
               --host 0.0.0.0 \
-              --port "${api_port}" \
+              --port "${DECODE_HTTP_PORT}" \
               --served-model-name qwen38-flash-next-a3-pd \
               --trust-remote-code \
               --quantization ascend \
               --tensor-parallel-size 2 \
               --data-parallel-size 4 \
               --data-parallel-size-local 1 \
-              --data-parallel-rank "${rank}" \
+              --data-parallel-rank "${DECODE_RANK}" \
               --data-parallel-address "${local_ip}" \
               --data-parallel-rpc-port 29569 \
               --max-model-len 262144 \
@@ -1097,7 +1102,7 @@ notes:
               --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
               --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
               --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-              --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"'"$kv_port"'","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}' &
+              --kv-transfer-config "${DECODE_KV_CONFIG}" &
       done
       wait
       ```
