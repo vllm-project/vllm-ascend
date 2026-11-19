@@ -239,6 +239,42 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
+# ** File: platform/patch_idle_kv_drain.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCoreProc._process_engine_step`
+#    Why:
+#       In P/D disaggregation the producer releases a finished transfer's KV
+#       blocks only from `Scheduler._update_from_kv_xfer_finished`, which core
+#       calls in `update_from_output` under `if kv_connector_output:`. For
+#       MooncakeConnectorV2 the producer-side worker never produces a
+#       non-empty output (it reports receive results only, records no
+#       transfer stats, and leaves the remaining fields at their defaults),
+#       so the gate never opens. Once the KV cache is full, no new request
+#       can be scheduled to produce a step that reaches the hook, and every
+#       request deadlocks behind `capacity` until restart.
+#    How:
+#       Wrap `_process_engine_step`: when the step executed no model but the
+#       scheduler still has requests and a connector is installed, drain it
+#       with `_update_from_kv_xfer_finished(KVConnectorOutput())`. The
+#       connector fills `finished_sending` in place and the upstream release
+#       path frees the blocks immediately. Only requests upstream would free
+#       anyway are affected (finished, blocks held by the connector, not by
+#       an in-flight batch). The drain is gated on `has_requests()`, so a
+#       fully idle engine performs none, and a failure is logged and retried
+#       on the next step. Only `EngineCoreProc` is wrapped, so
+#       `DPEngineCoreProc` and the Ascend DP subclasses inherit it; the
+#       wrapper is marked and the patch is idempotent.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/20755 (open; its
+#       worker-output ACK routing declares that it covers V2 idle steps)
+#       https://github.com/vllm-project/vllm/pull/66295 (withdrawn unmerged;
+#       it synthesized an empty output inside `update_from_output`, which a
+#       step that schedules no tokens never reaches)
+#    Future Plan:
+#       Transitional fix. Remove this patch and its platform import once
+#       #20755 lands in a pinned release and covers idle steps; re-run the
+#       P/D deadlock workload end to end before removing it.
+#
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
