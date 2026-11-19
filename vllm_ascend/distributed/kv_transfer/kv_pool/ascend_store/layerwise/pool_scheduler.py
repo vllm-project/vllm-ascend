@@ -121,16 +121,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
-        if self.layerwise_offload and (
-            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
-        ):
-            # Probe the endpoint we can actually resume from. Trimming a full
-            # hit afterwards could select an earlier recurrent checkpoint that was
-            # never produced by chunked prefill.
-            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
-            if token_len <= 0:
-                return 0
         if self.cache_coordinator is not None:
+            if self.use_eagle:
+                final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+                token_len = min(token_len, final_block_start)
+                if token_len <= 0:
+                    return 0
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
             )
