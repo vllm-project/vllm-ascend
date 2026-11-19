@@ -1,0 +1,4 @@
+pr: 22463
+entries:
+  - category: dependency
+    text: A5 images now ship cannbot_arena_net 0.3.0+ns1 and dsv41_cannbot_dsl 0.8.2+ns1 from the GDzhu01/cannbot-wheels mirror. x86_64 A5 images now include cannbot as well.
