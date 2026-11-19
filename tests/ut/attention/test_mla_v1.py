@@ -2191,6 +2191,8 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.fa_quant_layer = False
         self._setup_mlapo_weight_prep_mocks()
+        # The existing MLAPO path accepts different INT8 projection schemes.
+        self.impl.q_proj.quant_method = AscendLinearMethod(object.__new__(AscendW8A8DynamicLinearMethod))
 
         self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))

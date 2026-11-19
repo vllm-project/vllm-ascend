@@ -1134,6 +1134,14 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = self.vllm_config.speculative_config
         self.is_draft_model = self.vllm_config.model_config.runner_type == "draft" or backends.model_tag == "eagle_head"
+        draft_config = getattr(self.speculative_config, "draft_model_config", None)
+        # V2 can construct the draft under the target config. Preserve the
+        # loader's model tag for post-load processing and later weight reloads.
+        self._is_k3_dspark_draft = (
+            (self.is_draft_model or backends.model_tag == "dspark_head")
+            and getattr(self.speculative_config, "method", None) == "dspark"
+            and getattr(getattr(draft_config, "hf_config", None), "model_type", None) == "k3_dspark"
+        )
         # Replicated MLA layers use ordinary, non-interleaved KV.
         if not self.use_pcp and not self.use_dcp:
             self.supports_mtp_with_cp_non_trivial_interleave_size = True
@@ -1333,6 +1341,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # through AscendLinearMethod.quant_method. Let an unsupported
                 # wrapper fail here instead of silently disabling MLAPO.
                 quant_method = layer_quant_method.quant_method
+            self._mlapo_uses_native_weights = quant_method is None
             supports_quantized_weights = isinstance(
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
@@ -1454,37 +1463,37 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.q_proj is not None
         assert self.fused_qkv_a_proj is not None
 
-        # FA/cache quantization does not imply quantized projection weights.
-        # DSpark can disable MLAPO yet still use the FA-quant fused path, so
-        # classify both projections here rather than only in the MLAPO gate.
-        fused_method = self.fused_qkv_a_proj.quant_method
-        q_method = self.q_proj.quant_method
-        fused_native = isinstance(fused_method, UnquantizedLinearMethod)
-        q_native = isinstance(q_method, UnquantizedLinearMethod)
-        if fused_native != q_native:
-            raise RuntimeError(
-                "Fused MLA projections require compatible weight methods: "
-                f"fused_qkv_a_proj={type(fused_method).__name__}, "
-                f"q_proj={type(q_method).__name__}"
-            )
-        if fused_native:
-            if not self.fused_qkv_a_proj.weight.is_floating_point() or not self.q_proj.weight.is_floating_point():
-                raise RuntimeError("Native fused MLA projections require floating-point weights")
-        else:
-            fused_scheme = getattr(fused_method, "quant_method", None)
-            q_scheme = getattr(q_method, "quant_method", None)
-            supported = isinstance(
-                fused_scheme,
-                (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
-            ) or (not self.support_fp8_attention and type(fused_scheme) is AscendW8A8DynamicLinearMethod)
-            if not supported or type(fused_scheme) is not type(q_scheme):
+        is_native = self._mlapo_uses_native_weights
+        if self.fa_quant_layer and getattr(self, "_is_k3_dspark_draft", False):
+            # The K3 DSpark draft can combine quantized KV with BF16 weights
+            # while MLAPO is disabled. Classify its two projections together.
+            fused_method = self.fused_qkv_a_proj.quant_method
+            q_method = self.q_proj.quant_method
+            is_native = isinstance(fused_method, UnquantizedLinearMethod)
+            q_native = isinstance(q_method, UnquantizedLinearMethod)
+            if is_native != q_native:
                 raise RuntimeError(
-                    "Fused MLA projections require the same supported quantization scheme: "
-                    f"fused_qkv_a_proj={type(fused_scheme).__name__}, "
-                    f"q_proj={type(q_scheme).__name__}"
+                    "Fused MLA projections require compatible weight methods: "
+                    f"fused_qkv_a_proj={type(fused_method).__name__}, "
+                    f"q_proj={type(q_method).__name__}"
                 )
-        is_native = fused_native
-        self._mlapo_uses_native_weights = is_native
+            if is_native:
+                if not self.fused_qkv_a_proj.weight.is_floating_point() or not self.q_proj.weight.is_floating_point():
+                    raise RuntimeError("Native fused MLA projections require floating-point weights")
+            else:
+                fused_scheme = getattr(fused_method, "quant_method", None)
+                q_scheme = getattr(q_method, "quant_method", None)
+                supported = isinstance(
+                    fused_scheme,
+                    (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+                ) or (not self.support_fp8_attention and type(fused_scheme) is AscendW8A8DynamicLinearMethod)
+                if not supported or type(fused_scheme) is not type(q_scheme):
+                    raise RuntimeError(
+                        "Fused MLA projections require the same supported quantization scheme: "
+                        f"fused_qkv_a_proj={type(fused_scheme).__name__}, "
+                        f"q_proj={type(q_scheme).__name__}"
+                    )
+            self._mlapo_uses_native_weights = is_native
         fused_weight = self.fused_qkv_a_proj.weight.data
         weight_uq_qr = self.q_proj.weight.data
         if is_native:
