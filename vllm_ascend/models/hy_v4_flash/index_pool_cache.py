@@ -8,6 +8,29 @@ from vllm.triton_utils import tl, triton
 _GROUPS_PER_PROGRAM = 16
 
 
+@triton.jit
+def pool_key_addresses(
+    block_table,
+    group,
+    lane,
+    live,
+    ROW_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    RATIO: tl.constexpr,
+    LANES_PER_ROW: tl.constexpr,
+):
+    token = group * RATIO
+    block = tl.load(block_table + token // BLOCK_SIZE, mask=live, other=0).to(tl.int64)
+    slot = block * BLOCK_SIZE + token % BLOCK_SIZE
+    # Spread each key across the spare lanes of its group's token rows.
+    return (
+        (slot[:, None] + lane[None, :] // LANES_PER_ROW) * ROW_WIDTH
+        + ROW_WIDTH
+        - LANES_PER_ROW
+        + lane[None, :] % LANES_PER_ROW
+    )
+
+
 @triton.jit(do_not_specialize=["first_group", "num_groups"])
 def _copy_pool_keys(
     cache,
@@ -33,16 +56,7 @@ def _copy_pool_keys(
     live = row < num_groups
     if DEVICE_END:
         live = live & (group < tl.load(end_group))
-    token = group * RATIO
-    block = tl.load(block_table + token // BLOCK_SIZE, mask=live, other=0).to(tl.int64)
-    slot = block * BLOCK_SIZE + token % BLOCK_SIZE
-    # Spread each key across the spare lanes of its group's token rows.
-    address = (
-        (slot[:, None] + lane[None, :] // LANES_PER_ROW) * ROW_WIDTH
-        + ROW_WIDTH
-        - LANES_PER_ROW
-        + lane[None, :] % LANES_PER_ROW
-    )
+    address = pool_key_addresses(block_table, group, lane, live, ROW_WIDTH, BLOCK_SIZE, RATIO, LANES_PER_ROW)
     key_address = row[:, None] * WIDTH + lane[None, :]
     mask = live[:, None]
     if WRITE:

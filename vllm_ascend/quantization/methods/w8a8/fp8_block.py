@@ -170,8 +170,8 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
     Weights arrive as ``float8_e4m3fn`` plus a float32 ``weight_scale_inv`` with
     one entry per ``block_n x block_k`` tile. ``process_weights_after_loading``
     resolves those tiles and re-quantizes them to MXFP8. Building the scheme on a
-    device without an FP8 matmul fails, so the dense path is reserved for matrices
-    the attention backend absorbs or for shapes MXFP8 cannot regroup.
+    device without an FP8 matmul fails. The dense path handles absorbed
+    projections, shapes MXFP8 cannot regroup, and projections marked by the model.
     """
 
     supports_weight_switch = True
@@ -273,13 +273,14 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         )
         del layer.weight_scale_inv
 
-        if _is_absorbed_by_attention(layer):
-            # The attention backend splits this layer and disposes of it, so
-            # apply() is never reached. The matrix it absorbs is dense, so neither
-            # the matmul nor the weight switch may describe this layer as MXFP8;
-            # and since each layer owns its own scheme instance, this stays local.
+        keep_dense = getattr(layer, "keep_block_fp8_weight_dense", False)
+        if keep_dense or _is_absorbed_by_attention(layer):
             self.use_mxfp8 = False
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            if keep_dense:
+                logger.info_once(
+                    "Serving block-FP8 linear '%s' with dequantized %s weights", layer.prefix, resolved.dtype
+                )
             return
 
         self.use_mxfp8 = _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size)

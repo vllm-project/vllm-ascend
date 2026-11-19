@@ -15,7 +15,7 @@ export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:Tru
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 export VLLM_USE_V2_MODEL_RUNNER=1
 
-max_num_seqs="${HY4FLASH_MAX_NUM_SEQS:-8}"
+max_num_seqs="${HY4FLASH_MAX_NUM_SEQS:-128}"
 case "${HY4FLASH_GRAPH_MODE:-decode}" in
   eager) mode_args=(--enforce-eager) ;;
   decode)
@@ -47,7 +47,7 @@ case "${HY4FLASH_ENABLE_DFLY:-1}" in
   *) printf '%s\n' 'HY4FLASH_ENABLE_DFLY must be 0 or 1' >&2; exit 2 ;;
 esac
 
-case "${HY4FLASH_SHARED_EXPERT_MULTISTREAM:-0}" in
+case "${HY4FLASH_SHARED_EXPERT_MULTISTREAM:-1}" in
   0) shared_expert_multistream=false ;;
   1) shared_expert_multistream=true ;;
   *) printf '%s\n' 'HY4FLASH_SHARED_EXPERT_MULTISTREAM must be 0 or 1' >&2; exit 2 ;;
@@ -60,11 +60,10 @@ exec vllm serve "${HY4FLASH_CHECKPOINT:-/home/hy4nxt}" \
   --tensor-parallel-size "${HY4FLASH_TP:-8}" \
   --served-model-name hy4-flash \
   --max-num-seqs "$max_num_seqs" \
-  --max-model-len "${HY4FLASH_MAX_MODEL_LEN:-4096}" \
+  --max-model-len "${HY4FLASH_MAX_MODEL_LEN:-131072}" \
   --max-num-batched-tokens "${HY4FLASH_MAX_NUM_BATCHED_TOKENS:-4096}" \
   --enable-expert-parallel \
   --trust-remote-code \
-  --dtype bfloat16 \
   --kv-cache-dtype "${HY4FLASH_KV_CACHE_DTYPE:-fp8}" \
   --gpu-memory-utilization "${HY4FLASH_GPU_MEMORY_UTILIZATION:-0.85}" \
   --seed 1024 \

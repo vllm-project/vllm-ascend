@@ -1,0 +1,17 @@
+{
+  "enable_mlapo": false,
+  "enable_fused_mc2": 0,
+  "multistream_overlap_shared_expert": true,
+  "ascend_compilation_config": {
+    "enable_npugraph_ex": false
+  },
+  "hy4flash_fuse_c8_write": true,
+  "hy4flash_batch_verify_attention": true,
+  "hy4flash_share_swa_c8_reads": true,
+  "hy4flash_fuse_indexpool_fp8": true,
+  "hy4flash_fuse_indexpool_select": true,
+  "hy4flash_overlap_attn_output_gate": true,
+  "hy4flash_fuse_attn_output_gate": true,
+  "hy4flash_fuse_swa_q_norm": true,
+  "hy4flash_fuse_c8_qk": true
+}

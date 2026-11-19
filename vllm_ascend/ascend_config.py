@@ -1988,8 +1988,16 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Consumed by the HYV4 Flash model and its attention metadata builder.
         "hy4flash_batch_verify_attention",
         "hy4flash_cannbot_mla_prolog",
+        "hy4flash_fuse_attn_output_gate",
+        "hy4flash_fuse_c8_qk",
         "hy4flash_fuse_c8_write",
+        "hy4flash_fuse_indexpool_fp8",
+        "hy4flash_fuse_indexpool_select",
+        "hy4flash_fuse_swa_q_norm",
+        "hy4flash_gpu_c8_scale",
+        "hy4flash_overlap_attn_output_gate",
         "hy4flash_precise_decode",
+        "hy4flash_share_swa_c8_reads",
         "hy4flash_triton_mla_logits",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",

@@ -22,6 +22,23 @@ from vllm_ascend.models.hy_v4_flash.attention import AscendHYV4FlashAttention, F
 from vllm_ascend.models.hy_v4_flash.dfly_speculator import build_reuse_indices
 
 
+def test_gpu_c8_scale_packs_per_tile_fp8_and_preserves_rope():
+    attention = AscendHYV4FlashAttention.__new__(AscendHYV4FlashAttention)
+    attention.use_fp8_cache = True
+    attention.use_gpu_c8_scale = True
+    latent = torch.zeros((1, 512), dtype=torch.bfloat16)
+    latent[0, :2] = torch.tensor([3, 1])
+    latent[0, 128:131] = torch.tensor([-7, 2, -1])
+    latent[0, 384] = 2**-20
+    rope = torch.arange(64, dtype=torch.bfloat16).unsqueeze(0)
+
+    packed = attention._pack_kv(latent, rope)
+    _, _, scales = packed.split((512, 128, 16), dim=-1)
+    expected_scales = torch.tensor([[2**-7, 2**-6, 2**-13, 2**-13]])
+    torch.testing.assert_close(scales.view(torch.float32), expected_scales, rtol=0, atol=0)
+    torch.testing.assert_close(dequantize_c8_rows(packed), torch.cat((latent, rope), dim=-1).float(), rtol=0, atol=0)
+
+
 def test_flat_vl_config_resolves_architecture_and_per_layer_geometry():
     config = HYV4FlashConfig.from_dict(
         {
@@ -160,6 +177,49 @@ def test_window_boundary_and_zero_value_sink():
         scale=1.0,
     )
     assert probs.tolist() == [[[0.5, 0.0]]]
+
+
+def test_full_swa_shared_read_preserves_windows_and_ignores_padding_pages():
+    queries, heads, window, page_size = 6, 8, 512, 64
+    width = 576
+    seq_lens = torch.tensor([64, 514, 4096])
+    slot_mapping = torch.tensor([[0] * queries, [0] * 4 + [-1] * 2, [-1] * queries]).flatten()
+    # The last two scheduled positions of request 1 cross into an unallocated page.
+    # A fully padded request also has stale sequence metadata.
+    tables = torch.arange(8).flip(0).repeat(3, 1).int()
+    meta = SimpleNamespace(decode_seq_lens=seq_lens, slot_mapping=slot_mapping, block_table=tables)
+    rope = torch.zeros(8 * page_size, 64, dtype=torch.bfloat16)
+    latent = (torch.arange(8 * page_size * 512).reshape(-1, 512) % 17 - 8).to(torch.float8_e4m3fn)
+    cache = pack_c8_components(latent, rope, torch.full((8 * page_size, 4), 0.125))
+    query = torch.zeros((seq_lens.numel() * queries, heads, width), dtype=torch.bfloat16)
+    wv = torch.eye(512, 2, dtype=torch.bfloat16).expand(heads, -1, -1).contiguous()
+
+    attention = AscendHYV4FlashAttention.__new__(AscendHYV4FlashAttention)
+    torch.nn.Module.__init__(attention)
+    attention.window = window
+    attention.max_model_len = 4096
+    attention.local_heads = heads
+    attention.latent_dim = 512
+    attention.scale = width**-0.5
+    attention.indexer = None
+    attention.use_fp8_cache = True
+    attention.kv_storage_width = C8_ROW_BYTES
+    attention.use_triton_mla_logits = False
+    attention.batch_verify_attention = True
+    attention.learnable_sink_param = torch.zeros(heads)
+    attention.topk_snapshot = torch.empty(query.shape[0], window, dtype=torch.long)
+
+    def run(share):
+        attention.share_swa_c8_reads = share
+        out = query.new_empty(query.shape[0], heads * 2)
+        attention._forward_decode_graph(meta, cache, page_size, None, None, None, query, wv, out)
+        return out, attention.topk_snapshot.clone()
+
+    baseline, baseline_indices = run(False)
+    shared, shared_indices = run(True)
+    assert shared_indices.equal(baseline_indices)
+    torch.testing.assert_close(shared, baseline, atol=0, rtol=0)
+    assert shared[queries + 4 :].eq(0).all()
 
 
 def test_engram_hash_matches_across_prefill_chunk_boundary():
