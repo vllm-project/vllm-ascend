@@ -29,7 +29,13 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CacheConfig, CompilationMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    CompilationMode,
+    VllmConfig,
+    get_current_vllm_config as _real_get_current_vllm_config,
+    set_current_vllm_config,
+)
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.models.llama_eagle3_vwn import (
@@ -123,6 +129,19 @@ def _cp_config(pcp_size: int = 1, dcp_size: int = 1):
     )
 
 
+def _current_or_cp_config():
+    """Real current config inside a context, CP stub for config-less probes.
+
+    The VWN tests never exercise context parallelism, so the backend routing
+    probes only need the parallel sizes. The attention impl, however, reads the
+    full VllmConfig, so return the real one whenever a context is active.
+    """
+    try:
+        return _real_get_current_vllm_config()
+    except Exception:
+        return _cp_config()
+
+
 @pytest.fixture(autouse=True)
 def _mock_npu_env():
     """Patch TP group, Ascend config, and NPU ops so all tests run on CPU.
@@ -168,7 +187,7 @@ def _mock_npu_env():
         # backend routing checks so their mocked config stays scoped to VWN.
         patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config",
-            return_value=_cp_config(),
+            new=_current_or_cp_config,
         ),
         patch(
             "vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer",
@@ -177,7 +196,7 @@ def _mock_npu_env():
         patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),
         patch(
             "vllm_ascend.attention.mla_v1.get_current_vllm_config",
-            return_value=_cp_config(),
+            new=_current_or_cp_config,
         ),
     ):
         yield
