@@ -64,12 +64,15 @@ Outputs are returned in table order: weights, cu_query, compressed, residual.
 
 CPU tests cover decode/prefill row counts, padded requests, empty inputs,
 both integer dtypes, strided metadata and schedule reuse/regeneration.
-Repository NPU e2e cases are deferred. The manual A3 validation below is
-separate from these CPU tests and is not an automated CI test entry point.
+The NPU e2e entry point covers exact output comparison, input preservation,
+both integer dtypes, strided metadata and graph replay after metadata updates.
+The manual A3 validation below predates this test file; execution of the new
+repository test file remains pending and is not implied by those results.
 
 ```bash
 pytest -sv tests/ut/ops/test_qsa_lightning_v2_prepare_contract.py
 pytest -sv tests/ut/models/qwen4_exp/test_lightning_indexer_v2.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_v2_prepare.py
 ```
 
 CPU tests cover allocation, launch wiring, dtype/stride contracts, schedule
@@ -104,5 +107,5 @@ are median per-call NPU-event latency, excluding compilation and warmup.
 These results measure input preparation only, excluding CANN schedule metadata,
 scoring/TopK, index packing and model execution. They do not establish
 end-to-end model speedup or model accuracy non-regression. Other-device
-coverage, repository NPU e2e cases, model accuracy/performance comparisons and
+coverage, execution of the repository NPU e2e cases, model accuracy/performance comparisons and
 actual startup/serving compilation counts remain pending.
