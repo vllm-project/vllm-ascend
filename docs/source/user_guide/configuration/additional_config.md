@@ -122,7 +122,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
 | `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
 | `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
-| `shared_expert_tensor_parallel_size` | int | `1` | Independent shared-expert TP along DP. Requires V2 graph-dispatched PD decode with global TP=PCP=DCP=PP=1. See [shared-expert TP](../feature_guide/Fine_grained_TP.md#shared-expert-fine-grained-tp). |
+| `shared_expert_tensor_parallel_size` | int | `1` | Independent shared-expert TP along DP. Requires graph-dispatched PD decode with global TP=PCP=DCP=PP=1. See [shared-expert TP](../feature_guide/Fine_grained_TP.md#shared-expert-fine-grained-tp). |
 | `qkv_iproj_tensor_parallel_size`  | int  | `1` | The custom tensor parallel size of QKV input projections. See [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
 | `gproj_tensor_parallel_size` | int | `1` | Independent Kimi full-rank output-gate projection TP. Requires the Kimi graph-decode conditions in [QKV IProj preconditions](../feature_guide/Fine_grained_TP.md#preconditions-for-qkv-iproj-tp). |
 

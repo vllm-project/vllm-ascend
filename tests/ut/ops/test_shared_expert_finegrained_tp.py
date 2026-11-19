@@ -37,7 +37,6 @@ def valid_config():
         scheduler_config=SimpleNamespace(max_num_seqs=16, max_num_batched_tokens=768),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
         kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
-        use_v2_model_runner=True,
         additional_config={},
         lora_config=None,
         model_config=SimpleNamespace(is_moe=True),
@@ -64,7 +63,6 @@ def test_shared_size_is_independent_of_dense_mlp(size):
         ("compilation_config", "max_cudagraph_capture_size", 32, "capture capacity"),
         ("kv_transfer_config", "is_kv_consumer", False, "PD decode"),
         ("model_config", "is_moe", False, "MOE models"),
-        (None, "use_v2_model_runner", False, "V2 model runner"),
         (None, "lora_config", object(), "LoRA"),
         (None, "additional_config", {"enable_shared_expert_dp": True}, "replicate"),
     ],
@@ -232,22 +230,10 @@ def test_gproj_config_has_no_model_schema_dependency(model_type):
     FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
 
 
-@pytest.mark.parametrize("knob", ["qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"])
-def test_projection_config_requires_runtime_graph_guard(knob):
-    vc = valid_config()
-    vc.model_config.hf_config = SimpleNamespace(model_type="kimi_k31")
-    vc.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 4})
-    vc.use_v2_model_runner = False
-    with pytest.raises(ValueError, match="V2 model runner"):
-        FinegrainedTPConfig(**{knob: 2})._validate_preconditions(vc)
-
-
-@pytest.mark.parametrize("runner_v2", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
-def test_glm_qkv_keeps_eager_execution_contract(runner_v2, dcp):
+def test_glm_qkv_keeps_eager_execution_contract(dcp):
     vc = valid_config()
     vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", linear_num_heads=4)
-    vc.use_v2_model_runner = runner_v2
     vc.parallel_config.decode_context_parallel_size = dcp
     vc.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)

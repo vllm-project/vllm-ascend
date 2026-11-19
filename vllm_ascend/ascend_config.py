@@ -1547,8 +1547,6 @@ class FinegrainedTPConfig:
                 or parallel.pipeline_parallel_size != 1
             ):
                 raise ValueError("Projection/shared-expert fine-grained TP requires TP=PCP=DCP=PP=1.")
-            if not vc.use_v2_model_runner:
-                raise ValueError("Projection/shared-expert fine-grained TP requires the V2 model runner.")
         if shared_tp:
             if (vc.additional_config or {}).get("enable_shared_expert_dp", False):
                 raise ValueError(

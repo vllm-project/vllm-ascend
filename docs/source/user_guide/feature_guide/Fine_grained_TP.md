@@ -83,8 +83,8 @@ Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these c
 - `tensor_parallel_size == 1`, `prefill_context_parallel_size == 1` and `pipeline_parallel_size == 1`.
 - A QKV IProj TP size that evenly divides both `data_parallel_size` and the KDA head count.
 
-GLM QKV TP pads to a DP-agreed capacity and supports eager execution with either
-model runner. Kimi's mixed QKV/BF16-gate pipeline targets V2 full-graph decode,
+GLM QKV TP pads to a DP-agreed capacity and supports eager execution.
+Kimi's mixed QKV/BF16-gate pipeline targets full-graph decode,
 `decode_context_parallel_size == 1`, full-rank output gates, capture capacity
 covering every decode step including speculative slots, the recompute scheduler,
 and `PreemptOffloadConnector` in the connector chain. Kimi validates its checkpoint
@@ -328,7 +328,7 @@ Requirements:
 - A MoE model using Ascend's shared runner and standard `gate_up_proj` /
   `down_proj` linears, with the shared-expert prefix recognized by the linear
   dispatcher. Incompatible shared modules fail explicitly during construction.
-- A3 or A5, global `TP=PCP=DCP=PP=1`, V2 runner, and a size evenly dividing DP.
+- A3 or A5, global `TP=PCP=DCP=PP=1`, and a size evenly dividing DP.
   The shared intermediate dimension must also divide evenly by the size.
 - P/D decode deployment with graph mode and capture capacity covering every
   decode step, including speculative-token slots. Idle ranks still participate
