@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
@@ -118,10 +118,12 @@ def eplb_worker_config(tmp_path):
             "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
             return_value=(model_info, model_info.architecture),
         ),
-        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
-        patch("vllm.config.vllm.HAS_TRITON", True),
+        ExitStack() as legacy_runner,
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
+        if vllm_version_is("0.33.0"):
+            legacy_runner.enter_context(patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True))
+            legacy_runner.enter_context(patch("vllm.config.vllm.HAS_TRITON", True))
         # Keep the model dtype float-compatible with the bfloat16 KV cache the
         # draft loader override below sets: vLLM main rejects a mismatched
         # explicit float KV dtype.
@@ -267,10 +269,14 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
         raise RuntimeError("reached model construction")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        ExitStack() as pp_context,
         patch.object(eagle_utils, "get_model", side_effect=get_draft_model) as get_model,
         pytest.raises(RuntimeError, match="reached model construction"),
     ):
+        if vllm_version_is("0.33.0"):
+            pp_context.enter_context(
+                patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2))
+            )
         speculator.load_draft_model(torch.nn.Module(), set())
     loading_config = get_model.call_args.kwargs["vllm_config"]
     assert loading_config.parallel_config.enable_eplb
@@ -279,7 +285,8 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
     assert loading_config.kernel_config.moe_backend == "auto"
     assert loading_config.cache_config.cache_dtype == "bfloat16"
     assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
-    assert loading_config.load_config.load_format == "auto"
+    expected_format = "auto" if vllm_version_is("0.33.0") else "fastsafetensors"
+    assert loading_config.load_config.load_format == expected_format
     assert speculator.draft_vllm_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
@@ -541,10 +548,14 @@ def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_conf
         raise RuntimeError("observed actual inherited EAGLE loader")
 
     with (
-        patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
+        ExitStack() as pp_context,
         patch.object(eagle_utils, "get_model", side_effect=inspect_construction),
         pytest.raises(RuntimeError, match="observed actual inherited EAGLE loader"),
     ):
+        if vllm_version_is("0.33.0"):
+            pp_context.enter_context(
+                patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1))
+            )
         speculator.load_draft_model(torch.nn.Module(), set())
     assert seen == ["eagle_head"]
     assert backends.model_tag == original_tag
