@@ -171,6 +171,8 @@ def sp_padding_mask(
 # torch_npu builds; see the tp_size >= 16 TODO in ascend_forward_context.py).
 DENSE_SP_FUSED_TP_SIZES = (2, 4, 8)
 _DENSE_SP_FUSED_DTYPES = (torch.bfloat16, torch.float16)
+# Weight dtypes accepted by the quantized fused matmul-collective path.
+_DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES = (torch.int8, torch.float8_e4m3fn)
 # Minimum total token count for fusion: prefill and mixed batches have large
 # token counts; pure decode batches (concurrency ~8, 1 token/seq) stay below
 # this threshold and fall back to the unfused GEMM + collective path.
@@ -196,15 +198,22 @@ def _dense_sp_can_fuse(
     every TP size.
     """
     num_tokens = x.shape[0] * world_size if is_shard else x.shape[0]
-    return (
-        world_size in DENSE_SP_FUSED_TP_SIZES
-        and x.ndim == 2
-        and weight.ndim == 2
-        and x.dtype in _DENSE_SP_FUSED_DTYPES
-        and weight.dtype == x.dtype
-        and num_tokens >= _DENSE_SP_FUSED_MIN_TOKENS
-        and x.shape[1] == weight.shape[1]
-    )
+    if x.dtype not in _DENSE_SP_FUSED_DTYPES:
+        return False
+    if weight.dtype == x.dtype:
+        pass  # unquantized path
+    elif weight.dtype in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES:
+        pass  # quantized (W8A8 INT8 or MXFP8) path
+    else:
+        return False
+    if num_tokens < _DENSE_SP_FUSED_MIN_TOKENS:
+        return False
+    # Input feature dim must match the weight's contraction (K) dim.
+    # Unquantized weights are (N, K) so K = weight.shape[1].
+    # Quantized weights are (K, N) after process_weights_after_loading
+    # transpose, so K = weight.shape[0].
+    weight_k_dim = weight.shape[0] if weight.dtype in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES else weight.shape[1]
+    return x.ndim == 2 and weight.ndim == 2 and x.shape[1] == weight_k_dim
 
 
 # ---------------------------------------------------------------------------
@@ -326,12 +335,31 @@ class DenseSpAllGatherMmOp(CustomColumnParallelOp):
 
     def apply_impl(self, input_):
         bias = self.bias if not self.skip_bias_add else None
-        output = torch.ops.vllm.dense_sp_all_gather_mm(
-            input_,
-            self.layer.weight,
-            bias,
-            self.fused_tp_size,
-        )
+        weight_scale = getattr(self.layer, "weight_scale", None)
+        if weight_scale is not None and self.layer.weight.dtype in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES:
+            if self.layer.weight.dtype == torch.float8_e4m3fn:
+                output = torch.ops.vllm.dense_sp_all_gather_mm_quant_mxfp8(
+                    input_,
+                    self.layer.weight,
+                    weight_scale,
+                    bias,
+                    self.fused_tp_size,
+                )
+            else:
+                output = torch.ops.vllm.dense_sp_all_gather_mm_quant_int8(
+                    input_,
+                    self.layer.weight,
+                    weight_scale,
+                    bias,
+                    self.fused_tp_size,
+                )
+        else:
+            output = torch.ops.vllm.dense_sp_all_gather_mm(
+                input_,
+                self.layer.weight,
+                bias,
+                self.fused_tp_size,
+            )
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
@@ -356,13 +384,44 @@ class DenseSpMmReduceScatterOp(CustomRowParallelOp):
     def apply_impl(self, input_):
         input_parallel = self.get_input_parallel(input_)
         bias = self.bias
-        output = torch.ops.vllm.dense_sp_mm_reduce_scatter(
-            input_parallel,
-            self.layer.weight,
-            bias,
-            self.skip_bias_add,
-            self.fused_tp_size,
-        )
+        weight_scale = getattr(self.layer, "weight_scale", None)
+        if weight_scale is not None and self.layer.weight.dtype in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES:
+            if self.layer.weight.dtype == torch.float8_e4m3fn:
+                # MXFP8 row-parallel: quantize activation inside, then fuse
+                # MM + RS via npu_quant_mm_reduce_scatter.
+                import torch_npu
+                quantized_x, x_scale = _mx_quant_activations(input_parallel)
+                output = torch.ops.vllm.dense_sp_mm_reduce_scatter_quant_mxfp8_prequant(
+                    quantized_x,
+                    self.layer.weight,
+                    weight_scale,
+                    x_scale,
+                    input_parallel.dtype,
+                    self.fused_tp_size,
+                )
+            else:
+                # INT8 row-parallel: dynamic quant then fuse MM + RS.
+                import torch_npu
+                quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(input_parallel, dst_type=torch.int8)
+                if pertoken_scale.dim() == 2:
+                    quantized_x = quantized_x.squeeze(dim=1)
+                    pertoken_scale = pertoken_scale.squeeze(dim=1)
+                output = torch.ops.vllm.dense_sp_mm_reduce_scatter_quant_prequant(
+                    quantized_x,
+                    self.layer.weight,
+                    weight_scale,
+                    pertoken_scale,
+                    input_parallel.dtype,
+                    self.fused_tp_size,
+                )
+        else:
+            output = torch.ops.vllm.dense_sp_mm_reduce_scatter(
+                input_parallel,
+                self.layer.weight,
+                bias,
+                self.skip_bias_add,
+                self.fused_tp_size,
+            )
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 

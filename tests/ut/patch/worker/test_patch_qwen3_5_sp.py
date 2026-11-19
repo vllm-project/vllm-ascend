@@ -13,7 +13,8 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm_ascend.models.common.ops import sequence_parallel as sp_ops
 from vllm_ascend.ops import linear_op
 from vllm_ascend.patch.worker import patch_qwen3_5
-from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+from vllm_ascend.patch.worker.patch_qwen3_5 import _enable_moe_sp_fused_ops, enable_dense_sp
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.utils import enable_sp
 
 
@@ -106,6 +107,56 @@ class TestEnableDenseSp:
         assert not enable_sp(_make_vllm_config())
 
 
+class TestEnableMoeSpFusedOps:
+    def test_enabled_for_moe_model_family(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        config = _make_vllm_config(
+            model_type="qwen3_5_moe_text",
+            use_sequence_parallel_moe=True,
+        )
+        assert _enable_moe_sp_fused_ops(config)
+
+    def test_disabled_for_dense_model_family(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        # qwen3_5_text is a dense family — not in MOE_SP_FUSED_OP_MODEL_TYPES.
+        assert not _enable_moe_sp_fused_ops(_make_vllm_config(model_type="qwen3_5_text"))
+
+    def test_disabled_without_flashcomm_switch(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        config = _make_vllm_config(
+            model_type="qwen3_5_moe_text",
+            enable_flashcomm1=False,
+            use_sequence_parallel_moe=True,
+        )
+        assert not _enable_moe_sp_fused_ops(config)
+
+    def test_disabled_for_tp_size_one(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        config = _make_vllm_config(
+            model_type="qwen3_5_moe_text",
+            tensor_parallel_size=1,
+            use_sequence_parallel_moe=True,
+        )
+        assert not _enable_moe_sp_fused_ops(config)
+
+    def test_disabled_for_pipeline_parallel(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        config = _make_vllm_config(
+            model_type="qwen3_5_moe_text",
+            pipeline_parallel_size=2,
+            use_sequence_parallel_moe=True,
+        )
+        assert not _enable_moe_sp_fused_ops(config)
+
+    def test_disabled_where_standard_worker_patches_do_not_load(self, monkeypatch):
+        monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
+        profile = SimpleNamespace(supports=lambda capability: False)
+        monkeypatch.setattr(patch_qwen3_5, "get_current_hardware_profile", lambda: profile)
+        assert not _enable_moe_sp_fused_ops(
+            _make_vllm_config(model_type="qwen3_5_moe_text", use_sequence_parallel_moe=True)
+        )
+
+
 def _make_layer(layer_type: str = "full_attention", mlp=None, upstream_sp: bool = False):
     layer = object.__new__(patch_qwen3_5.AscendQwen3_5DecoderLayer)
     layer.layer_type = layer_type
@@ -128,13 +179,14 @@ def _make_layer(layer_type: str = "full_attention", mlp=None, upstream_sp: bool 
     return layer
 
 
-def _run_layer_init(layer, vllm_config, layer_type, dense_sp: bool):
+def _run_layer_init(layer, vllm_config, layer_type, dense_sp: bool, moe_sp: bool = False):
     def _fake_original_init(_layer, _vllm_config, _layer_type, prefix=""):
         del _layer, _vllm_config, _layer_type, prefix
 
     with (
         patch.object(patch_qwen3_5, "_QWEN3_5_LAYER_ORIGINAL_INIT", _fake_original_init),
         patch.object(patch_qwen3_5, "enable_dense_sp", return_value=dense_sp),
+        patch.object(patch_qwen3_5, "_enable_moe_sp_fused_ops", return_value=moe_sp),
     ):
         patch_qwen3_5._qwen3_5_decoder_layer_init_with_dense_sp(layer, vllm_config, layer_type)
 
@@ -169,6 +221,67 @@ class TestDenseSpLayerInit:
         assert layer.use_attn_reduce_scatter_for_moe is True
         assert layer.self_attn.o_proj.reduce_results is False
         assert layer.mlp.down_proj.reduce_results is True
+
+
+class TestMoeSpLayerInit:
+    """MoE SP: fused ops installed on attention projections only; the MoE
+    MLP block (Qwen3NextSparseMoeBlock) is left untouched since its experts
+    use All-to-All dispatch, not AllGather/ReduceScatter."""
+
+    def test_full_attention_installs_ops_without_flipping_flags(self):
+        # upstream_sp=True mirrors the real MoE SP path where the upstream
+        # has already set use_attn_reduce_scatter_for_moe=True and adjusted
+        # reduce_results.
+        layer = _make_layer("full_attention", upstream_sp=True)
+        layer.self_attn.o_proj.reduce_results = False
+        # Use a MoE block so the MLP install path is skipped.
+        from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+        layer.mlp = SimpleNamespace(
+            __class__=Qwen3NextSparseMoeBlock,
+            gate_up_proj=SimpleNamespace(custom_op=None),
+            down_proj=SimpleNamespace(reduce_results=True, custom_op=None),
+        )
+        real_isinstance = isinstance
+
+        def _patched_isinstance(obj, classinfo):
+            if obj is layer.mlp and classinfo is Qwen3NextSparseMoeBlock:
+                return True
+            return real_isinstance(obj, classinfo)
+
+        with patch("builtins.isinstance", _patched_isinstance):
+            _run_layer_init(layer, _make_vllm_config(), "full_attention", dense_sp=False, moe_sp=True)
+
+        # Flags stay as-is (upstream already set them) — patch does not touch them.
+        assert layer.use_attn_reduce_scatter_for_moe is True
+        assert layer.self_attn.o_proj.reduce_results is False
+        # MoE block MLP projections must NOT get fused ops.
+        assert layer.mlp.gate_up_proj.custom_op is None
+        assert layer.mlp.down_proj.custom_op is None
+
+    def test_linear_attention_installs_out_proj_only(self):
+        layer = _make_layer("linear_attention", upstream_sp=True)
+        layer.linear_attn.out_proj.reduce_results = False
+        from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+        layer.mlp = SimpleNamespace(
+            __class__=Qwen3NextSparseMoeBlock,
+            gate_up_proj=SimpleNamespace(custom_op=None),
+            down_proj=SimpleNamespace(reduce_results=True, custom_op=None),
+        )
+        real_isinstance = isinstance
+
+        def _patched_isinstance(obj, classinfo):
+            if obj is layer.mlp and classinfo is Qwen3NextSparseMoeBlock:
+                return True
+            return real_isinstance(obj, classinfo)
+
+        with patch("builtins.isinstance", _patched_isinstance):
+            _run_layer_init(layer, _make_vllm_config(), "linear_attention", dense_sp=False, moe_sp=True)
+
+        assert layer.use_attn_reduce_scatter_for_moe is True
+        assert layer.mlp.gate_up_proj.custom_op is None
+        assert layer.mlp.down_proj.custom_op is None
 
 
 class _ForwardLayer(SimpleNamespace):
@@ -620,6 +733,8 @@ class TestInstallDenseSpFusedOps:
         monkeypatch.setattr(sp_ops, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_base_mm", lambda *a, **k: None, raising=False)
         monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_mm_reduce_scatter_base", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_all_gather_quant_mm", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(patch_qwen3_5.torch_npu, "npu_quant_mm_reduce_scatter", lambda *a, **k: None, raising=False)
 
     def _eligible_proj(self, **overrides):
         weight = torch.randn(4, 6, dtype=torch.bfloat16)
@@ -640,8 +755,76 @@ class TestInstallDenseSpFusedOps:
         assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
         assert proj.custom_op is None
 
-    def test_skips_for_quantized_projection(self):
+    def test_skips_for_non_ascend_quantized_projection(self):
+        # _FakeQuantMethod is neither UnquantizedLinearMethod nor
+        # AscendLinearMethod, so the guard rejects it.
         proj = self._eligible_proj(quant_method=_FakeQuantMethod(torch.randn(4, 6, dtype=torch.bfloat16)))
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
+        assert proj.custom_op is None
+
+    def test_installs_fused_row_op_for_mxfp8_quantized_projection(self):
+        # MXFP8: weight dtype=float8_e4m3fn, quant_method=AscendLinearMethod.
+        # The quant weights are stored (K, N) after processing, so the K dim
+        # is weight.shape[0].
+        weight = torch.randn(6, 4, dtype=torch.float8_e4m3fn)
+        proj = _make_row_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        proj.weight_scale = torch.randn(6, 4, dtype=torch.float32)
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is True
+        assert isinstance(proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
+
+    def test_installs_fused_column_op_for_mxfp8_quantized_projection(self):
+        weight = torch.randn(6, 4, dtype=torch.float8_e4m3fn)
+        proj = _make_column_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        proj.weight_scale = torch.randn(6, 4, dtype=torch.float32)
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpAllGatherMmOp) is True
+        assert isinstance(proj.custom_op, sp_ops.DenseSpAllGatherMmOp)
+
+    def test_installs_fused_row_op_for_int8_quantized_projection(self):
+        # INT8: weight dtype=int8, quant_method=AscendLinearMethod.
+        weight = torch.randn(6, 4, dtype=torch.int8)
+        proj = _make_row_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        proj.weight_scale = torch.randn(6, 4, dtype=torch.float32)
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is True
+        assert isinstance(proj.custom_op, sp_ops.DenseSpMmReduceScatterOp)
+
+    def test_skips_ascend_quant_without_weight_scale(self):
+        weight = torch.randn(6, 4, dtype=torch.float8_e4m3fn)
+        proj = _make_row_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        # No weight_scale attribute → must be rejected.
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
+        assert proj.custom_op is None
+
+    def test_skips_ascend_quant_with_unsupported_weight_dtype(self):
+        # float32 weight is not in _DENSE_SP_FUSED_QUANT_WEIGHT_DTYPES.
+        weight = torch.randn(6, 4, dtype=torch.float32)
+        proj = _make_row_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        proj.weight_scale = torch.randn(6, 4, dtype=torch.float32)
+        assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
+        assert proj.custom_op is None
+
+    def test_skips_mxfp8_when_quant_kernel_unavailable(self, monkeypatch):
+        monkeypatch.delattr(patch_qwen3_5.torch_npu, "npu_quant_mm_reduce_scatter", raising=False)
+        weight = torch.randn(6, 4, dtype=torch.float8_e4m3fn)
+        proj = _make_row_proj(
+            weight,
+            quant_method=AscendLinearMethod.__new__(AscendLinearMethod),
+        )
+        proj.weight_scale = torch.randn(6, 4, dtype=torch.float32)
         assert patch_qwen3_5._install_dense_sp_fused_op(proj, sp_ops.DenseSpMmReduceScatterOp) is False
         assert proj.custom_op is None
 

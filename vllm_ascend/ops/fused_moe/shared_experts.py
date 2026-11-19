@@ -800,9 +800,10 @@ class AscendSharedExperts:
           and ``npu_mm_reduce_scatter_base`` with per-token float32 scales
           (``x1_scale``/``x2_scale``).
 
-        - **W4A8MXFP** (``A8_MXFP_FUSED``): uses the A5 dedicated fused quant
-          operators ``npu_all_gather_quant_mm`` and ``npu_quant_mm_reduce_scatter``
-          (scene 4: E8M0 per-group scale, blockSize=32).
+        - **W4A8MXFP / W8A8MXFP** (``A8_MXFP_FUSED``): uses the A5 dedicated
+          fused quant operators ``npu_all_gather_quant_mm`` and
+          ``npu_quant_mm_reduce_scatter`` (scene 4: E8M0 per-group scale,
+          blockSize=32).
 
         Both paths require SP-only mode (TP-sharded weights, not replicated),
         TP size in {2, 4, 8}, no active LoRA, and the corresponding torch_npu
@@ -1006,8 +1007,8 @@ class AscendSharedExperts:
                         output_dtype=torch.int32,
                     )
             elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
-                # W4A8MXFP only: MXFP8 activations with MXFP4 weights.
-                # W8A8MXFP remains on the registered linear-wrapper path.
+                # W4A8MXFP / W8A8MXFP: MXFP8 activations with MXFP4 or MXFP8
+                # weights.
                 if self._can_fuse_sp_mc2():
                     # Fused AG+MM: the A5 npu_all_gather_quant_mm kernel
                     # quantizes the SP shard and gathers inside.  The
@@ -1125,11 +1126,12 @@ class AscendSharedExperts:
         submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
     ) -> torch.Tensor:
-        """Finish the fused W4A8MXFP shared MLP.
+        """Finish the fused MXFP shared MLP (W4A8MXFP or W8A8MXFP).
 
-        This path means MXFP4 weights with MXFP8 activations. W8A8MXFP does
-        not enter here; it keeps the registered linear wrapper so its scheme-
-        owned padding, scale algorithm, and output dtype remain intact.
+        Both quantization modes produce MXFP8 (float8_e4m3fn) activations from
+        SwiGLU+MX quant with an E8M0 per-group scale.  W4A8MXFP uses MXFP4
+        weights while W8A8MXFP uses MXFP8 weights, but the activation pipeline
+        and the fused MM+RS down-projection are identical.
         Gate-Up has already been submitted before routed TopK/dispatch.
         """
         self._wait_for_routed_stage(
@@ -1261,8 +1263,8 @@ class AscendSharedExperts:
         """Select a path without changing the quantization scheme's math.
 
         Only schemes with a proven split activation-quant pipeline bypass the
-        registered linear wrappers. W8A8MXFP keeps both linears and selects
-        a path that checks activation-fusion compatibility after Gate-Up.
+        registered linear wrappers. W8A8/W4A8 INT and W4A8MXFP/W8A8MXFP MXFP
+        paths fuse their activation quantization and down-projection.
         W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
         Active LoRA always uses that generic path to preserve its adapters.
         """
@@ -1275,14 +1277,14 @@ class AscendSharedExperts:
         # the activation width and does not imply that weights are INT8.
         if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
             return SharedExpertMLPPath.A8_INT_FUSED
-        # This MXFP path currently represents W4A8MXFP only (MXFP4 weights
-        # with MXFP8 activations).
-        if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
+        # This MXFP path represents W4A8MXFP (MXFP4 weights with MXFP8
+        # activations) and W8A8MXFP (MXFP8 weights with MXFP8 activations).
+        # Both use the A5 dedicated fused quant operators.
+        if has_quantized_shared_without_lora and self.quant_type in (
+            QuantType.W4A8MXFP,
+            QuantType.W8A8MXFP,
+        ):
             return SharedExpertMLPPath.A8_MXFP_FUSED
-        # Selecting this path does not guarantee fusion: tensor metadata and
-        # the Down scheme are checked after the registered Gate-Up linear.
-        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
-            return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def wait_for_output(self) -> None:
