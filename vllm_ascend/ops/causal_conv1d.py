@@ -14,15 +14,18 @@ def _causal_conv1d_npu(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
     batch, dim = x.shape[:2]
     width = weight.shape[1]
     acc_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+    x_acc = x.to(acc_dtype)
+    weight_acc = weight.to(acc_dtype)
+    bias_acc = bias.to(acc_dtype) if bias is not None else None
     out = torch.zeros((batch, dim, seqlen), dtype=acc_dtype, device=x.device)
 
     for i in range(width):
-        x_slice = x[..., i : i + seqlen].to(acc_dtype)
-        weight_slice = weight[:, i].to(acc_dtype).view(1, dim, 1)
+        x_slice = x_acc[..., i : i + seqlen]
+        weight_slice = weight_acc[:, i].view(1, dim, 1)
         out.add_(x_slice * weight_slice)
 
-    if bias is not None:
-        out.add_(bias.to(acc_dtype).view(1, dim, 1))
+    if bias_acc is not None:
+        out.add_(bias_acc.view(1, dim, 1))
     return out.to(x.dtype)
 
 
