@@ -108,10 +108,9 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 | `think_end` | int | `-1` | `-1` chat mode, or explicit `</think>` token id for reasoning |
 
 `token_repeat` uses a fixed pattern-based rule set with 64 raw-token check
-boundaries and a final partial-block flush. There is no sliding-window
-algorithm and no `algorithm` selector. The native CPU extension lives in-tree
-at `vllm_ascend/.../native_pattern/` and is compiled when you build or install
-vllm-ascend; there is no separate pip package. (Helper notes under
+boundaries and a final partial-block flush. The native CPU extension lives
+in-tree at `vllm_ascend/.../native_pattern/` and is compiled when you build
+or install vllm-ascend; there is no separate pip package. (Helper notes under
 `tools/token_repeat_pattern/` point at the same sources.)
 
 Alert thresholds, short on-call titles, and long rule ids live in packaged
@@ -119,10 +118,6 @@ Alert thresholds, short on-call titles, and long rule ids live in packaged
 `runtime_config` hot-reload field). Feature share windows and the feature-rule
 list are also JSON-driven. Hot-reload still applies when
 `runtime_config_hot_reload` is on (enable/disable and `think_end`).
-
-**Breaking change:** former sliding-window keys (`window`,
-`repeat_sum_threshold`, `min_tokens`, `consecutive_hits`, `ignore_token_ids`,
-`algorithm`) are rejected as unknown. Migrate to:
 
 ```json
 "token_repeat": {
