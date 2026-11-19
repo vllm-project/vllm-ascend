@@ -133,11 +133,11 @@ def test_update_encoder_graph_params_cu_seqlens():
     assert compute_lengths.call_count == 1
 
 
-def _make_manager():
+def _make_manager(*, video_limit=0):
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = CompilationConfig()
     mm_config = MagicMock()
-    mm_config.get_limit_per_prompt.return_value = 0
+    mm_config.get_limit_per_prompt.return_value = video_limit
     mm_config.mm_encoder_tp_mode = "tensor"
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.multimodal_config = mm_config
@@ -146,7 +146,7 @@ def _make_manager():
 
     model = MagicMock()
     model.get_encoder_cudagraph_config.return_value = EncoderCudaGraphConfig(
-        modalities=["image"],
+        modalities=["image", "video"] if video_limit else ["image"],
         buffer_keys=["cu_seqlens"],
         out_hidden_size=64,
         padding_logics={},
@@ -154,6 +154,14 @@ def _make_manager():
     )
     model.get_encoder_cudagraph_budget_range.return_value = (64, 2048)
     return EncoderAclGraphManager(vllm_config, "npu", "bfloat16", model), model
+
+
+@pytest.mark.parametrize("video_limit, expected_max_frames", [(0, 0), (1, 32)])
+def test_unset_frame_limit_is_resolved_during_initialization(video_limit, expected_max_frames):
+    mgr, _ = _make_manager(video_limit=video_limit)
+
+    assert mgr.vllm_config.compilation_config.encoder_cudagraph_max_frames_per_batch is None
+    assert mgr.max_frames_per_batch == expected_max_frames
 
 
 def test_capture_graph_params():

@@ -1,0 +1,7 @@
+pr: 22456
+entries:
+  - category: bugfix
+    text: >-
+      Fixed excessive padded-frame processing in Qwen encoder ACL graphs when
+      video is enabled and the configured frame limit exceeds a graph's token
+      budget. Existing configuration remains valid.
