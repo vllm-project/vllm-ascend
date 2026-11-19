@@ -438,6 +438,8 @@ def rejection_sample(
         cu_num_logits,
         expanded_idx_mapping,
         expanded_local_pos,
+        vocab_size,
+        temperature,
     )
 
     # Compute the block-level logits stats, such as target argmax

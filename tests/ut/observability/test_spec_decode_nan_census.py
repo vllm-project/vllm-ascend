@@ -23,8 +23,11 @@
 #     issue returns None)
 #   * snapshot deferral: mutating the logits tensors AFTER issue must not
 #     change what consume reports (the regression for async buffer reuse)
-#   * draft census is restricted to the ACTIVE (slot, step) pairs the
-#     verify kernels read: draft_logits is a persistent
+#   * census input set == verifier read set, enforced by three masks:
+#     padded vocab columns beyond vocab_size are ignored (target and
+#     draft), draft rows of greedy (temperature == 0) requests are zeroed,
+#     and the draft census is restricted to the ACTIVE (slot, step) pairs
+#     the verify kernels read -- draft_logits is a persistent
 #     [max_num_reqs, K, V] buffer whose inactive slots / unscheduled steps
 #     hold stale data that must NOT be reported (and must not take the
 #     limited display slots); bonus rows read no draft and are zeroed
@@ -98,9 +101,9 @@ def _draft_records(cap):
     return [m for m in _messages(cap) if "draft_logits" in m]
 
 
-def _run_census(target, draft, steps, cu=None, slot=None, step=None):
+def _run_census(target, draft, steps, cu=None, slot=None, step=None, vocab_size=None, temperature=None):
     """Two-phase path: issue at the entry, consume at the exit."""
-    pending = dfx.issue_nan_census(target, draft, steps, cu, slot, step)
+    pending = dfx.issue_nan_census(target, draft, steps, cu, slot, step, vocab_size, temperature)
     dfx.consume_nan_census(pending)
 
 
@@ -225,6 +228,65 @@ def test_draft_full_scan_legacy_coords(capture):
     assert "rows_with_nan=1" in recs[0]
     assert "total_nan=7" in recs[0]
     assert "slot=1 step=3 nan=7" in recs[0]
+
+
+def test_padded_target_vocab_not_reported(capture):
+    """The verifier masks columns to the effective vocab (min of target
+    and draft widths); NaNs in padded target columns never reach it and
+    must not be reported. Target width 64, draft width 32 -> effective
+    vocab 32: a NaN at column 40 is invisible, one at column 5 is real."""
+    target = torch.zeros(NUM_LOGITS, 64)
+    target[6, 40] = float("nan")  # padded column -- invisible to the verifier
+    target[7, 5] = float("nan")  # effective column -- real
+    draft = torch.zeros(4, K, 32)
+    slot, step = _uniform_mappings()
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    _run_census(target, draft, K, cu, slot, step, vocab_size=32)
+    recs = _target_records(capture)
+    assert len(recs) == 1, recs
+    assert "rows_with_nan=1/12" in recs[0]
+    assert "total_nan=1" in recs[0]  # only the effective-column NaN
+    assert "req=1 step=1 nan=1" in recs[0]  # row 7, not the padded row 6
+
+
+def test_padded_draft_vocab_not_reported(capture):
+    """Reverse padding: draft wider than target (effective vocab 32, draft
+    width 64). The verifier reads only the effective vocab columns of the
+    gathered draft rows; a NaN in a padded draft column must not be
+    reported."""
+    draft = torch.zeros(4, K, 64)
+    draft[0, 1, 40] = float("nan")  # padded draft column -- invisible
+    draft[0, 1, 5] = float("nan")  # effective column -- real
+    slot, step = _uniform_mappings()
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    _run_census(torch.zeros(NUM_LOGITS, 32), draft, K, cu, slot, step, vocab_size=32)
+    recs = _draft_records(capture)
+    assert len(recs) == 1, recs
+    assert "total_nan=1" in recs[0]
+    assert "req=0 step=1 slot=0 nan=1" in recs[0]
+
+
+def test_greedy_draft_rows_not_reported(capture):
+    """Mixed greedy/stochastic batch: the verifier skips draft reads for
+    temperature == 0 requests entirely (argmax acceptance), so NaNs in
+    their draft rows are not verification inputs. NaNs in the greedy
+    TARGET rows are still reported (argmax reads them)."""
+    draft = torch.zeros(4, K, V)
+    draft[0, 1, :7] = float("nan")  # req 0 (greedy, slot 0) -- skipped
+    draft[1, 2, :5] = float("nan")  # req 1 (stochastic, slot 1) -- real
+    slot, step = _uniform_mappings()
+    cu = torch.tensor([0, 6, 12], dtype=torch.int64)
+    temperature = torch.tensor([0.0, 1.5, 1.0, 1.0], dtype=torch.float32)
+    target = _clean_target()
+    target[0, :3] = float("nan")  # greedy target NaN -- still a real input
+    _run_census(target, draft, K, cu, slot, step, vocab_size=None, temperature=temperature)
+    recs = _draft_records(capture)
+    assert len(recs) == 1, recs
+    assert "req=1 step=2 slot=1 nan=5" in recs[0]
+    assert "slot=0" not in recs[0]
+    trecs = _target_records(capture)
+    assert len(trecs) == 1, trecs
+    assert "req=0 step=0 nan=3" in trecs[0]
 
 
 def test_draft_logits_none_no_crash(capture):
@@ -353,5 +415,15 @@ def test_census_never_raises(capture):
         torch.zeros(0, dtype=torch.int32),
     )
     dfx.consume_nan_census(None)  # degenerate pending
+    # degenerate masks: zero effective vocab, all-greedy temperature
+    _run_census(_clean_target(), torch.zeros(4, K, V), K, vocab_size=0)
+    _run_census(
+        _with_nan(_clean_target(), 6, 2),
+        torch.zeros(4, K, V),
+        K,
+        slot=torch.zeros(NUM_LOGITS, dtype=torch.int32),
+        step=torch.zeros(NUM_LOGITS, dtype=torch.int32),
+        temperature=torch.zeros(4, dtype=torch.float32),
+    )
     dfx.log_accept0_census(torch.zeros(0, dtype=torch.int32), 0)
     # no exception escaped; failures would surface as census-failed DEBUGs

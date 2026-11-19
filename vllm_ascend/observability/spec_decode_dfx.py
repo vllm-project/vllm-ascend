@@ -121,6 +121,8 @@ def issue_nan_census(
     cu_num_logits: torch.Tensor | None = None,
     draft_slot_per_row: torch.Tensor | None = None,
     draft_step_per_row: torch.Tensor | None = None,
+    vocab_size: int | None = None,
+    temperature: torch.Tensor | None = None,
 ) -> _NanCensusPending | None:
     """[dfx/nan] Phase 1 -- enqueue the per-row NaN reductions.
 
@@ -131,17 +133,30 @@ def issue_nan_census(
     degenerate but legal token (id 0). A single census record therefore
     identifies exactly which request/step was poisoned.
 
-    ``draft_logits`` is a PERSISTENT ``[max_num_reqs, K, V]`` buffer: only
-    the slots selected by ``draft_slot_per_row`` (expanded_idx_mapping) at
-    the steps scheduled by ``draft_step_per_row`` (expanded_local_pos)
-    carry this step's drafts; every other cell holds stale data from
-    earlier steps or other requests. Scanning the whole buffer would
-    report those stale NaNs as current inputs, and they can crowd out the
-    limited display slots. The draft census therefore GATHERS exactly the
-    rows the verify kernels read and zeroes bonus rows (each request's
-    last row, which reads no draft -- mirroring the verifier's
-    ``_is_bonus_logit`` early-return). The gather also cuts the read
-    traffic from ``max_num_reqs * K * V`` to ``num_rows * V``.
+    The census input set MUST equal the verifier's read set; three
+    restrictions align it (a NaN the verifier never loads cannot be a
+    verification input and must not be reported):
+
+    * **Padded vocabulary** -- both logits tensors may be wider than the
+      effective vocab; the verifier masks columns to ``vocab_size``
+      (``block_offsets < vocab_size``). Pass ``vocab_size`` (= the
+      min(target, draft) width computed by the caller) to slice both
+      reductions to the effective columns; NaNs in padded columns are
+      ignored.
+    * **Greedy requests** -- for ``temperature == 0`` requests the
+      verifier computes target argmax only and skips draft reads
+      entirely. Pass ``temperature`` (``[max_num_reqs]``) to zero the
+      draft counts of greedy rows (the target census keeps them: greedy
+      still reads target logits for argmax).
+    * **Active (slot, step) pairs** -- ``draft_logits`` is a PERSISTENT
+      ``[max_num_reqs, K, V]`` buffer: only the slots selected by
+      ``draft_slot_per_row`` (expanded_idx_mapping) at the steps
+      scheduled by ``draft_step_per_row`` (expanded_local_pos) carry
+      this step's drafts. The draft census GATHERS exactly those rows
+      and zeroes bonus rows (each request's last row, which reads no
+      draft -- mirroring the verifier's ``_is_bonus_logit``
+      early-return). The gather also cuts the read traffic from
+      ``max_num_reqs * K * V`` to ``num_rows * V``.
 
     MUST be called before the first verify kernel is enqueued: the
     reductions then enter the stream ahead of every logits reader, so
@@ -155,7 +170,13 @@ def issue_nan_census(
     if not _logger.isEnabledFor(logging.DEBUG):
         return None
     try:
-        target_nan_per_row = torch.isnan(target_logits).sum(dim=-1)
+        # Padded-vocabulary slice: a view, so the reduce reads only the
+        # effective columns (zero-copy, stream-order safe).
+        if vocab_size is not None and vocab_size < target_logits.shape[1]:
+            target_input = target_logits[:, :vocab_size]
+        else:
+            target_input = target_logits
+        target_nan_per_row = torch.isnan(target_input).sum(dim=-1)
         draft_nan_per_row = None
         slot_per_row = None
         if draft_logits is not None and draft_logits.numel() > 1:
@@ -170,16 +191,27 @@ def issue_nan_census(
                 # discards the result.
                 step = draft_step_per_row.clamp(max=draft_logits.shape[1] - 1)
                 active = draft_logits[draft_slot_per_row, step]
+                if vocab_size is not None and vocab_size < active.shape[1]:
+                    active = active[:, :vocab_size]
                 draft_nan_per_row = torch.isnan(active).sum(dim=-1)
                 next_step = torch.cat((draft_step_per_row[1:], draft_step_per_row.new_zeros(1)))
                 draft_nan_per_row = draft_nan_per_row * (next_step != 0)
+                if temperature is not None:
+                    # Greedy requests (temperature == 0) never read draft
+                    # logits in the verifier; zero their draft counts.
+                    temp_per_row = temperature[draft_slot_per_row]
+                    draft_nan_per_row = draft_nan_per_row * (temp_per_row != 0)
                 slot_per_row = draft_slot_per_row
             else:
                 # Legacy path: no row mapping provided. The buffer layout
                 # is padded and fixed, so a full scan with uniform slot
-                # coordinates stays correct-shaped, but callers that know
-                # the packed layout should pass the mappings above.
-                draft_nan_per_row = torch.isnan(draft_logits).sum(dim=-1).view(-1)
+                # coordinates stays correct-shaped; the greedy mask cannot
+                # be applied without per-row slots (production callers
+                # always pass the mappings above).
+                draft_input = draft_logits.view(-1, draft_logits.shape[-1])
+                if vocab_size is not None and vocab_size < draft_input.shape[1]:
+                    draft_input = draft_input[:, :vocab_size]
+                draft_nan_per_row = torch.isnan(draft_input).sum(dim=-1).view(-1)
         return _NanCensusPending(
             target_nan_per_row=target_nan_per_row,
             draft_nan_per_row=draft_nan_per_row,
