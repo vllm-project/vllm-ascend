@@ -110,6 +110,48 @@ def test_sp_mask_tracks_padding_and_source_phase(tp_size):
     assert fallback.sum() == 4
 
 
+def test_tp_only_sp_routes_with_the_gathered_padding_mask(monkeypatch):
+    from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
+
+    local_padding = torch.tensor([False, True])
+    context = SimpleNamespace(is_padding=local_padding, additional_kwargs={})
+    monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
+    monkeypatch.setattr(routed_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(routed_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
+    monkeypatch.setattr(routed_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
+
+    def gather_validity(local_validity):
+        torch.testing.assert_close(local_validity, torch.tensor([1, 0], dtype=torch.int32))
+        return torch.cat((local_validity, local_validity.new_tensor([0, 1])))
+
+    gather = MagicMock(side_effect=gather_validity)
+    monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
+    config = SimpleNamespace(num_experts=4, is_sequence_parallel=True, dp_size=1, pcp_size=1)
+    prepare = PrepareAndFinalizeWithAllGather(config)
+    monkeypatch.setattr(
+        routed_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=SimpleNamespace(prepare_finalize=prepare))
+    )
+    logits = torch.zeros(4, 4)
+    weights = torch.ones(4, 2)
+    source_ids = torch.tensor([[0, 1]] * 4)
+    routed = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed.router = SimpleNamespace(_select_experts=lambda **kwargs: (weights, source_ids))
+    routed.moe_config = config
+    routed.n_shared_experts = 0
+    routed.global_redundant_expert_num = 0
+    routed.log2phy = None
+    routed.padding_token_expert_id = 2
+
+    for _ in range(2):
+        actual_weights, ids = routed._select_experts(logits, logits, enable_force_load_balance=False)
+        assert actual_weights is weights
+        torch.testing.assert_close(ids, torch.tensor([[0, 1], [2, 2], [2, 2], [0, 1]]))
+    gather.assert_called_once()
+    assert context.is_padding is local_padding
+
+
 def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 

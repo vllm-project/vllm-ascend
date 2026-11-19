@@ -2,17 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Exercise one AllGather EP rank after routing, without HCCL communication."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 import torch_npu
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.models.deepseek_v41 import model as model_module
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.worker.v2 import input_batch as input_batch_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -45,11 +41,11 @@ def allow_internal_format():
 @pytest.mark.parametrize("rank", [0, 7])
 @pytest.mark.parametrize("graph_tokens", [13, 16])
 @torch.inference_mode()
-def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch, rank, graph_tokens):
+def test_moe_padding_zero_counts_graph_replay(allow_internal_format, rank, graph_tokens):
     enable_custom_op()
     torch.manual_seed(21092 + rank)
     experts, local_experts, topk = 384, 48, 6
-    capacity, hidden, intermediate = 16, 128, 128
+    capacity, hidden, intermediate = graph_tokens, 128, 128
     start, end = rank * local_experts, (rank + 1) * local_experts
     foreign = local_experts if rank == 0 else 0
     expert_map = torch.full((experts,), -1, dtype=torch.int32, device="cpu")
@@ -70,9 +66,6 @@ def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch
     probs = torch.rand(capacity, topk, device="cpu")
     probs = (probs / probs.sum(dim=1, keepdim=True)).npu()
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    parallel = SimpleNamespace(use_sequence_parallel_moe=True, tensor_parallel_size=8)
-    config = SimpleNamespace(parallel_config=parallel)
-    monkeypatch.setattr(input_batch_module, "get_current_vllm_config_or_none", lambda: config)
     runner.input_buffers = AscendInputBuffers(1, graph_tokens, torch.device("npu"))
 
     def run_moe(hidden_states, topk_ids, topk_weights, padding_mask):
@@ -120,29 +113,15 @@ def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch
         )
         return output, counts
 
-    class Backbone:
-        use_sequence_parallel = True
-        use_global_moe_padding_mask = True
-
-        def __call__(self, *args, **kwargs):
-            return run_moe(x, ids, probs, context.is_padding)
-
-    context = SimpleNamespace(is_padding=runner.prepare_padding_mask(0, graph_tokens))
-    model = SimpleNamespace(model=Backbone())
-    monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
-    monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 8)
-
+    padding = runner.prepare_padding_mask(0, graph_tokens)
     # Capture with no local work, as in an all-padding graph warmup. The graph
     # must still execute GEMMs after real requests update the device mask.
     for _ in range(3):
-        context.is_padding = runner.input_buffers.is_padding[:graph_tokens]
-        model_module.AscendDeepseekV41LLMForCausalLM.forward(model, None, None)
+        run_moe(x, ids, probs, padding)
     torch.npu.synchronize()
     graph = torch_npu.npu.NPUGraph()
-    context.is_padding = runner.input_buffers.is_padding[:graph_tokens]
     with torch_npu.npu.graph(graph):
-        output, counts = model_module.AscendDeepseekV41LLMForCausalLM.forward(model, None, None)
-    assert context.is_padding.data_ptr() == runner.input_buffers.is_padding.data_ptr()
+        output, counts = run_moe(x, ids, probs, padding)
 
     for step, num_valid in enumerate((0, 1, 9, graph_tokens, 0, 5)):
         valid = torch.arange(capacity, device="cpu") < num_valid
@@ -150,9 +129,6 @@ def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch
         x.copy_(torch.randn(capacity, hidden, dtype=torch.bfloat16, device="cpu"))
         ids.copy_(updated_ids)
         runner.prepare_padding_mask(num_valid, graph_tokens)
-        if graph_tokens < capacity:
-            # A replay must re-mark the SP tail even when it contains stale values.
-            runner.input_buffers.is_padding[graph_tokens:].fill_(False)
         graph.replay()
         torch.npu.synchronize()
 

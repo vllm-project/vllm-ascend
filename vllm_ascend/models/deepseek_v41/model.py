@@ -1053,9 +1053,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.use_sequence_parallel = parallel.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
         skip_padding_tokens_in_moe = _can_skip_padding_tokens_in_moe(vllm_config)
-        self.use_global_moe_padding_mask = (
-            skip_padding_tokens_in_moe and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
-        )
         if skip_padding_tokens_in_moe:
             for layer in self.layers[self.start_layer : self.end_layer]:
                 moe = layer.mlp
@@ -1696,8 +1693,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         token_mask = token_mask[:full_num_tokens]
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
-            # Cross-DP or cross-PCP MoE gathers the same SP shard as the inputs.
-            if not self.use_global_moe_padding_mask and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
@@ -1917,17 +1913,6 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
-        if self.model.use_global_moe_padding_mask and self.model.use_sequence_parallel:
-            context = get_forward_context()
-            padding = context.is_padding
-            assert padding is not None
-            rows = padding.shape[0]
-            sp_pad = (-rows) % get_tensor_model_parallel_world_size()
-            if sp_pad:
-                # Mark the rows added by SP as padding in the existing mask buffer.
-                aligned_padding = padding.as_strided((rows + sp_pad,), (1,))
-                aligned_padding[rows:].fill_(True)
-                context.is_padding = aligned_padding
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count

@@ -2,15 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
-import torch
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.models.deepseek_v41 import model as model_module
-from vllm_ascend.worker.v2 import input_batch as input_batch_module
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
 
 @pytest.mark.parametrize(
@@ -65,38 +61,3 @@ def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option
     if enabled:
         config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
         assert model_module._can_skip_padding_tokens_in_moe(config)
-
-
-@pytest.mark.parametrize("rows", [13, 16])
-@pytest.mark.parametrize("sequence_parallel", [False, True])
-@pytest.mark.parametrize("has_graph_padding", [False, True])
-def test_forward_preserves_global_padding_layout(monkeypatch, rows, sequence_parallel, has_graph_padding):
-    parallel = SimpleNamespace(use_sequence_parallel_moe=sequence_parallel, tensor_parallel_size=8)
-    config = SimpleNamespace(parallel_config=parallel)
-    monkeypatch.setattr(input_batch_module, "get_current_vllm_config_or_none", lambda: config)
-    buffers = AscendInputBuffers(1, rows, torch.device("cpu"))
-    assert buffers.max_num_tokens == buffers.input_ids.numel() == buffers.positions.numel() == rows
-    for tensor in (buffers.input_ids, buffers.positions):
-        assert tensor.untyped_storage().nbytes() == rows * tensor.element_size()
-    assert buffers.is_padding.numel() == (16 if sequence_parallel else rows)
-    mask = buffers.is_padding[:rows]
-    valid_rows = 6 if has_graph_padding else rows
-    mask[valid_rows:].fill_(True)
-    context = SimpleNamespace(is_padding=mask)
-    monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
-    monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 8)
-    model = Mock(use_sequence_parallel=sequence_parallel, use_global_moe_padding_mask=True)
-    ids = torch.arange(rows, dtype=torch.int32)
-    model_module.AscendDeepseekV41LLMForCausalLM.forward(
-        SimpleNamespace(model=model),
-        ids,
-        torch.arange(rows),
-    )
-    if not sequence_parallel or rows == 16:
-        assert context.is_padding is mask
-        assert not buffers.is_padding[rows:].any()
-    else:
-        assert context.is_padding.data_ptr() == mask.data_ptr()
-        torch.testing.assert_close(context.is_padding, torch.arange(16) >= valid_rows)
-    torch.testing.assert_close(mask, torch.arange(rows) >= valid_rows)
-    assert model.call_args.args[0] is ids
