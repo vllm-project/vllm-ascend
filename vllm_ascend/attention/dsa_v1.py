@@ -55,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.lora.deepseek_v4 import AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.models.deepseek_v4.cache_reuse import get_swa_save_layer_name
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
@@ -2183,7 +2184,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.attn_sink = kwargs["attn_sink"]
 
         ascend_config = get_ascend_config()
-        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        # Main and indexer compressors share Punica's shrink buffer. Their
+        # adapter projections must finish sequentially instead of overlapping
+        # on the main and auxiliary DSA streams.
+        self.multistream_dsv4_dsa_overlap = (
+            ascend_config.multistream_dsv4_dsa_overlap and self.vllm_config.lora_config is None
+        )
 
     def _write_kv_cache(self, cache, kv, slot_mapping, *, quantize: bool):
         if self.turboquant is not None:
@@ -2261,6 +2267,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
     def _wo_a_bmm(self, o_proj_input: torch.Tensor) -> torch.Tensor:
         """Project grouped activations with FP8 or BF16, preserving the 3D layout."""
+        if isinstance(self.wo_a, AscendDeepseekV4GroupedWoAWithLoRA):
+            return self.wo_a(o_proj_input)
         if self.support_fp8_attention and _has_weight_scale(self.wo_a):
             o_proj_input, act_scale = torch_npu.npu_dynamic_mx_quant(o_proj_input, dst_type=torch.float8_e4m3fn)
             return torch_npu.npu_transpose_quant_batchmatmul(

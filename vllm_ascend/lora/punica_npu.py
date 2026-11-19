@@ -25,6 +25,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         refresh_all_lora_classes()
         self._max_num_batched_tokens = max_num_batched_tokens
         self._lora_shrink_buffers: dict[tuple[int, int], torch.Tensor] = {}
+        self._lora_delta_buffers: dict[tuple[int, torch.dtype, torch.device], torch.Tensor] = {}
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
@@ -420,6 +421,31 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         buffer = self._get_shrink_buffer(len(slices), x.size(0), r, x.device)
         self.add_shrink(buffer, x, lora_a, scale)
         self.add_expand(y, buffer, lora_b, slices, add_inputs=True)
+
+    def get_lora_delta_buffer(
+        self,
+        num_tokens: int,
+        output_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return zeroed scratch for serial projection calls on this wrapper.
+
+        The caller must consume the delta before the next request on the same
+        stream. DSA disables compressor stream overlap for LoRA. Sharing by
+        output width avoids retaining a full token buffer for every layer;
+        reserving the token capacity keeps storage stable across graph sizes.
+        """
+        key = (output_size, dtype, device)
+        buffer = self._lora_delta_buffers.get(key)
+        if buffer is None or buffer.shape[0] < num_tokens:
+            buffer = torch.empty(
+                (max(num_tokens, self._max_num_batched_tokens), output_size),
+                dtype=dtype,
+                device=device,
+            )
+            self._lora_delta_buffers[key] = buffer
+        return buffer[:num_tokens].zero_()
 
     def _get_shrink_buffer(
         self,
