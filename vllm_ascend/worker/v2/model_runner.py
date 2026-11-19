@@ -20,7 +20,6 @@
 import inspect
 import logging
 from collections.abc import Mapping
-import time
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -75,10 +74,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import (
-    offload_debug_enabled,
-    offload_event,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -712,7 +707,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
-        step_start = time.monotonic_ns() if not dummy_run and not is_profile and offload_debug_enabled() else None
         forward_failed = True
         with dp_coordination_context:
             try:
@@ -731,13 +725,6 @@ class NPUModelRunner(GPUModelRunner):
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
-        if step_start is not None:
-            offload_event(
-                "model_step_time",
-                execute_ns=time.monotonic_ns() - step_start,
-                scheduled_tokens=scheduler_output.total_num_scheduled_tokens,
-                requests=list(scheduler_output.num_scheduled_tokens),
-            )
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False

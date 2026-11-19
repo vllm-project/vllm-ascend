@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -13,7 +12,6 @@ import numpy as np
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
     require_aligned_batch_results,
@@ -31,65 +29,15 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     SharedBlockData,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_debug_enabled, offload_event
 
 from .layerwise_cache_layout import reuse_sources
 
-_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
 
-def _build_range_debug_payload(
-    direction: str,
-    layer_id: int,
-    sizes: list[list[int]],
-    object_offsets: list[list[int]],
-    results: list[int],
-) -> dict[str, Any]:
-    nested_sizes = [[int(size) for size in key_sizes] for key_sizes in sizes]
-    return {
-        "event": "range",
-        "pid": os.getpid(),
-        "t_ns": time.monotonic_ns(),
-        "direction": direction,
-        "layer_id": int(layer_id),
-        "key_count": len(results),
-        "requested_bytes": [sum(key_sizes) for key_sizes in nested_sizes],
-        "sizes": nested_sizes,
-        "object_offsets": [[int(offset) for offset in key_offsets] for key_offsets in object_offsets],
-        "results": [int(result) for result in results],
-    }
 
 
-def _emit_range_debug_event(
-    direction: str,
-    layer_id: int,
-    sizes: list[list[int]],
-    object_offsets: list[list[int]],
-    results: list[int],
-) -> None:
-    try:
-        if not get_ascend_config().kv_pool_range_debug:
-            return
-        payload = _build_range_debug_payload(direction, layer_id, sizes, object_offsets, results)
-        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
-    except Exception:
-        # Debug instrumentation must never affect the transfer path.
-        pass
 
 
-def _emit_commit_debug_event(layer_id: int, key_count: int, results: list[int]) -> None:
-    try:
-        if not get_ascend_config().kv_pool_range_debug:
-            return
-        payload = {
-            "event": "commit",
-            "layer_id": int(layer_id),
-            "key_count": int(key_count),
-            "results": [int(result) for result in results],
-        }
-        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
-    except Exception:
-        pass
 
 
 def _circular_shift(lst: list, offset: int) -> list:
@@ -932,7 +880,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
             results: list[int] = []
-            copy_start = time.monotonic_ns() if offload_debug_enabled() else None
             for keys, buffers, sizes, offsets in self._range_transfer_batches(
                 active_keys,
                 active_buffers,
@@ -948,16 +895,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                         self.m_store.batch_copy_put(keys, buffers, sizes, offsets),
                     )
                 )
-            if copy_start is not None:
-                copy_ns = time.monotonic_ns() - copy_start
-                offload_event(
-                    "range_copy_time", direction="save", layer=layer_id, copy_ns=copy_ns,
-                    keys=len(results),
-                    successful_bytes=sum(
-                        sum(sizes) for sizes, result in zip(active_sizes, results, strict=True) if result >= 0
-                    ),
-                )
-            _emit_range_debug_event("save", layer_id, active_sizes, active_offsets, results)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
@@ -973,7 +910,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 commit_results = require_aligned_batch_results(
                     "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
                 )
-                _emit_commit_debug_event(layer_id, len(active_keys), commit_results)
             except Exception:
                 self._revoke_range_keys(active_keys)
                 raise
@@ -1009,9 +945,7 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                     self.dec_stored_request(req_id)
                     if self.try_finish_and_delete_stored_request(req_id):
                         self.set_finished_request(req_id)
-            offload_event("source_done", layer=layer_id)
         except Exception as exc:
-            offload_event("save_failed", layer=layer_id, error=str(exc))
             self._fatal_error = exc
             # All started objects belong to the failed forward step, including
             # groups whose first physical layer has not been visited yet.
@@ -1242,13 +1176,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
-            offload_event("range_write_begin", layer=layer_id, keys=len(active_keys))
             self._stagger_h2d_submit(layer_id)
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
             results: list[int] = []
-            copy_start = time.monotonic_ns() if offload_debug_enabled() else None
             for keys, buffers, sizes, offsets in self._range_transfer_batches(
                 active_keys,
                 active_buffers,
@@ -1264,24 +1196,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                         self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
                     )
                 )
-            if copy_start is not None:
-                copy_ns = time.monotonic_ns() - copy_start
-                offload_event(
-                    "range_copy_time", direction="load", layer=layer_id, copy_ns=copy_ns,
-                    keys=len(results),
-                    successful_bytes=sum(
-                        sum(sizes) for sizes, result in zip(active_sizes, results, strict=True) if result >= 0
-                    ),
-                )
-            _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
-            offload_event(
-                "load_result",
-                layer=layer_id,
-                requests=shared.req_ids,
-                keys=len(results),
-                bytes=sum(map(sum, active_sizes)),
-                failed=sum(result < 0 for result in results),
-            )
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
                 self._mark_invalid_range_indices(req_meta, failed_indices)
@@ -1298,20 +1212,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         try:
             wait_for_save = data.wait_for_save_layer
             for source_layer in reuse_sources(wait_for_save):
-                slot_start = time.monotonic_ns() if offload_debug_enabled() else None
-                offload_event(
-                    "slot_wait", layer=layer_id, predecessor=source_layer,
-                    blocked=not self.layer_save_finished_events[source_layer].is_set(),
-                )
                 if not self._wait_for_event(self.layer_save_finished_events[source_layer], self.save_failure_checker):
                     return
                 if self.save_failure_checker is not None:
                     self.save_failure_checker()
                 self.sync_save_events[source_layer].synchronize()
-                offload_event(
-                    "slot_release", layer=layer_id, predecessor=source_layer,
-                    wait_ns=None if slot_start is None else time.monotonic_ns() - slot_start,
-                )
                 if isinstance(data.wait_for_save_layer, int):
                     self.layer_save_finished_events[source_layer].clear()
 
@@ -1386,11 +1291,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         attention_start_gate = data.attention_start_gate
 
         for source_layer in reuse_sources(wait_for_save):
-            slot_start = time.monotonic_ns() if offload_debug_enabled() else None
-            offload_event(
-                "slot_wait", layer=layer_id, predecessor=source_layer,
-                blocked=not self.layer_save_finished_events[source_layer].is_set(),
-            )
             if not self._wait_for_event(self.layer_save_finished_events[source_layer], self.save_failure_checker):
                 return False
             if self.save_failure_checker is not None:
@@ -1399,10 +1299,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
             self.sync_save_events[source_layer].synchronize()
-            offload_event(
-                "slot_release", layer=layer_id, predecessor=source_layer,
-                wait_ns=None if slot_start is None else time.monotonic_ns() - slot_start,
-            )
             logger.debug("Layer save event cleared: layer %d", source_layer)
             if isinstance(data.wait_for_save_layer, int):
                 self.layer_save_finished_events[source_layer].clear()

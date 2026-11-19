@@ -17,7 +17,7 @@ def production():
     tree = ast.parse(path.read_text())
     tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('_open_puts', '_load_entries', 'snapshot_key')]
     namespace = dict(_OBJECT_ALREADY_EXISTS=-705, require_aligned_batch_results=lambda op, keys, results: results,
-                     offload_event=Mock(), block_hash_to_str=lambda value: value)
+                     block_hash_to_str=lambda value: value)
     exec(compile(ast.fix_missing_locations(tree), str(path), 'exec', flags=0x1000000), namespace)
     return namespace
 

@@ -66,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_event
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -626,19 +625,6 @@ class BaseKVPoolWorker(ABC):
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
                         shared_entries.append(shared_names is None or layer_name in shared_names)
                         group_cache_entry_segments.append((segment_index, len(segments)))
-                        if shared_names is not None:
-                            offload_event(
-                                "component",
-                                component=layer_name,
-                                group=group_id,
-                                layer=phys,
-                                segment=segment_index,
-                                address=base_addr,
-                                page_bytes=block_len,
-                                stride=block_stride,
-                                shared=layer_name in shared_names,
-                                blocks=self.num_blocks,
-                            )
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)

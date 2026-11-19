@@ -367,7 +367,6 @@ def test_mrv2_allocates_the_exact_plan_and_validates_before_allocation(ns):
         enable_sfa=lambda c: True,
         is_deepseek_v41_cache=lambda s: False,
         _allocate_int8_cache_tensor=allocate,
-        offload_event=lambda *args, **kwargs: None,
         get_kv_cache_tensor_layers=lambda t: t.layers,
     )
     definitions("vllm_ascend/worker/v2/attn_utils.py", ns, {"_allocate_kv_cache"})
@@ -383,31 +382,6 @@ def test_mrv2_allocates_the_exact_plan_and_validates_before_allocation(ns):
     assert not allocations
 
 
-@pytest.mark.parametrize("operation", ["get", "put", "commit"])
-def test_backend_faults_are_one_shot_and_delay_is_observed(ns, operation):
-    import threading
-
-    recorded = []
-    ns.update(time=NS(sleep=lambda seconds: recorded.append(seconds)), offload_event=lambda *args, **kwargs: None)
-    tree = ast.parse((ROOT / STORE / "backend/mooncake_backend.py").read_text())
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakeBackend")
-    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_inject_offload_debug_fault")
-    cls.body = [method]
-    cls.bases = []
-    cls.decorator_list = []
-    exec(
-        compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "backend", "exec", flags=0x1000000),
-        ns,
-    )
-    backend = ns["MooncakeBackend"]()
-    backend._offload_debug_delay_ms = 250
-    backend._offload_debug_fault = operation
-    backend._offload_debug_used = set()
-    backend._offload_debug_lock = threading.Lock()
-    assert not backend._inject_offload_debug_fault(operation, [])
-    assert backend._inject_offload_debug_fault(operation, ["key"])
-    assert not backend._inject_offload_debug_fault(operation, ["key"])
-    assert recorded == ([0.25] if operation == "put" else [])
 
 
 def test_missing_required_compressed_page_fails_closed(ns):
@@ -526,7 +500,6 @@ def test_indexer_transport_drops_only_overlapping_view(ns):
 
 
 def isolated_method(path, cls_name, method_name, ns):
-    ns.setdefault("offload_debug_enabled", lambda: False)
     tree = ast.parse((ROOT / path).read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls_name)
     cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == method_name]
@@ -587,8 +560,6 @@ def test_layerwise_prefill_keeps_checkpoint_for_partial_tail(ns, offload, target
 def test_publication_requires_all_layer_copies_and_failures_revoke(ns, fault):
     ns.update(
         require_aligned_batch_results=lambda operation, keys, results: results,
-        _emit_range_debug_event=lambda *args: None,
-        _emit_commit_debug_event=lambda *args: None,
     )
     cls = isolated_method(
         STORE + "layerwise/kv_transfer.py", "KVCacheStoreLayerSendingThread", "_handle_range_request", ns
@@ -635,7 +606,6 @@ def test_actual_receive_handler_waits_for_source_before_overwrite(ns, save_faile
 
     events = []
     definitions(STORE + "layerwise/layerwise_cache_layout.py", ns, {"reuse_sources"})
-    ns["offload_event"] = lambda event, **fields: events.append(event)
     cls = isolated_method(
         STORE + "layerwise/kv_transfer.py", "KVCacheStoreLayerRecvingThread", "_handle_range_layer_task", ns
     )
@@ -650,15 +620,14 @@ def test_actual_receive_handler_waits_for_source_before_overwrite(ns, save_faile
     receiver.request_queue = MagicMock()
     receiver.get_event = threading.Event()
     receiver.external_slot_release_waiter = None
-    receiver._wait_for_event = lambda event, *args: event.wait(timeout=2)
     started_wait = threading.Event()
 
-    def record(event, **fields):
-        events.append(event)
-        if event == "slot_wait":
-            started_wait.set()
+    def wait_for_event(event, *args):
+        started_wait.set()
+        return event.wait(timeout=2)
 
-    ns["offload_event"] = record
+    receiver._wait_for_event = wait_for_event
+    receiver.sync_save_events[0].synchronize.side_effect = lambda: events.append("slot_release")
 
     def check_failure():
         if save_failed:
@@ -700,21 +669,6 @@ def test_actual_receive_handler_waits_for_source_before_overwrite(ns, save_faile
         thread.join(timeout=2)
 
 
-def test_summary_preserves_failures_and_never_reports_empty_run_as_pass(tmp_path):
-    import importlib.util
-
-    path = ROOT / "tests/e2e/cases/features/kv_pool/tools/summarize_dsv4_offload.py"
-    spec = importlib.util.spec_from_file_location("dsv4_summary_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    log = tmp_path / "server.log"
-    log.write_text("ERROR failure\n" * 1000)
-    result = module.summarize([log])
-    assert len(result) <= 280
-    assert result[1].startswith("ERROR ")
-    assert result[-1] == "RESULT FAIL"
-    log.write_text("")
-    assert "INSUFFICIENT" in module.summarize([log])[-1]
 
 
 @pytest.mark.parametrize("cacheable", [True, False])
@@ -774,7 +728,6 @@ def test_cold_slot_wait_has_evidence_without_get(ns):
     import threading
 
     definitions(STORE + "layerwise/layerwise_cache_layout.py", ns, {"reuse_sources"})
-    ns["offload_event"] = MagicMock()
     cls = isolated_method(STORE + "layerwise/kv_transfer.py", "KVCacheStoreLayerRecvingThread", "_copy_gva_layers", ns)
     receiver = cls()
     receiver.layer_save_finished_events = [threading.Event()]
@@ -787,7 +740,7 @@ def test_cold_slot_wait_has_evidence_without_get(ns):
     receiver.external_slot_release_waiter = MagicMock()
     task = NS(wait_for_save_layer=0, transfer_tasks=[], layer_id=1, attention_start_gate=None)
     assert receiver._copy_gva_layers(task)
-    assert [call.args[0] for call in ns["offload_event"].call_args_list] == ["slot_wait", "slot_release"]
+    receiver.sync_save_events[0].synchronize.assert_called_once_with()
     receiver.external_slot_release_waiter.assert_called_once_with(1)
 
 

@@ -1794,32 +1794,8 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         return wrapper
 
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    @patch.dict(os.environ, {"VLLM_ASCEND_KVPOOL_RANGE_DEBUG": "1"})
-    def test_kv_pool_range_debug_defaults_off_without_env_fallback(self, mock_fix):
-        vc = VllmConfig()
-        vc.additional_config = {}
-        self.assertIs(init_ascend_config(vc).kv_pool_range_debug, False)
 
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_kv_pool_range_debug_additional_config_is_typed(self, mock_fix):
-        for value, expected in ((True, True), (False, False), ("false", False), ("0", False), (1, True)):
-            with self.subTest(value=value):
-                vc = VllmConfig()
-                vc.additional_config = {"kv_pool_range_debug": value}
-                self.assertIs(init_ascend_config(vc).kv_pool_range_debug, expected)
 
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_kv_pool_range_debug_rejects_invalid_values(self, mock_fix):
-        for value in (2, "invalid", None):
-            with self.subTest(value=value):
-                vc = VllmConfig()
-                vc.additional_config = {"kv_pool_range_debug": value}
-                with self.assertRaises(ValueError):
-                    init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

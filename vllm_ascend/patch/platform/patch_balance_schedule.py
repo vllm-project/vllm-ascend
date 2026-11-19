@@ -610,13 +610,6 @@ class BalanceScheduler(Scheduler):
                         num_external_computed_tokens,
                     )
                     if num_new_tokens == 0:
-                        params = request.kv_transfer_params or {}
-                        if params.get("do_remote_decode") and not getattr(request, "_push_alignment_logged", False):
-                            request._push_alignment_logged = True
-                            logger.warning(
-                                "Push P admission blocked request=%s phase=alignment prompt_tokens=%d",
-                                request.request_id, request.num_prompt_tokens,
-                            )
                         break
 
                 # Handles an edge case when P/D Disaggregation

@@ -80,7 +80,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_dcp_mismatch_info,
     is_kv_save_role,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_debug_enabled, offload_event
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
@@ -382,18 +381,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     raise ValueError("layerwise_prefetch_layers must be a positive integer") from exc
                 if self.num_prefetch_layers <= 0:
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
-        if getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None:
-            offload_event(
-                "config",
-                predecessors=self.prefetch_layer_map,
-                independent=self.independent_layers,
-                prefetch=self.num_prefetch_layers,
-                blocks=self.kv_cache_config.num_blocks,
-                buffers=self._extra_config.get("layerwise_num_shared_buffers"),
-                expected_components=sum(len(g.layer_names) for g in self.kv_cache_config.kv_cache_groups),
-                identity=self.kv_cache_config.dsv4_component_identity,
-                planned_bytes=sum(t.size for t in self.kv_cache_config.kv_cache_tensors),
-            )
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
@@ -763,18 +750,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._save_disabled.clear()
         if self.kv_recv_thread is not None:
             self.kv_recv_thread.load_disabled.clear()
-        if metadata.requests:
-            offload_event(
-                "step_begin",
-                requests=[
-                    {
-                        "request": req.req_id,
-                        "endpoint": req.target_token_len,
-                        "restore_endpoint": req.load_spec.kvpool_cached_tokens if req.load_spec else 0,
-                    }
-                    for req in metadata.requests
-                ],
-            )
         self.process_layer_data(metadata.requests)
 
     def _is_layerwise_save_leader(self) -> bool:
@@ -1016,8 +991,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             checkpoints = getattr(self, name, {})
             for identity in [identity for identity in checkpoints if identity[0] in req_ids]:
                 del checkpoints[identity]
-        if req_ids:
-            offload_event("terminal_cleanup", requests=sorted(req_ids))
 
     def _release_failed_layerwise_get_attempts(self, request_ids_by_key: dict[str, set[str]]) -> None:
         with self._load_session_lock:
@@ -1033,7 +1006,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         else:
             req_ids = self._current_layerwise_last_chunk_req_ids.copy()
             self._release_layerwise_requests_terminal(req_ids)
-        offload_event("load_sessions_released", requests=sorted(req_ids), aborted=self._layer_load_aborted.is_set())
         self._current_layerwise_request_ids.difference_update(req_ids)
         self._current_layerwise_last_chunk_req_ids.difference_update(req_ids)
 
@@ -1189,7 +1161,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 ][:8],
             )
             logger.error("Layerwise GET session rejected: %s", details)
-            offload_event("get_session_failed", **details)
         for key, result in results_by_key.items():
             self._layerwise_session_tracker.record_get_result(key, request_ids_by_key[key], succeeded=result == 0)
         request_load_keys: dict[int, list[str]] = {}
@@ -2209,7 +2180,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 requests=sorted(getattr(self, "_current_layerwise_request_ids", ()))[:8],
                 **state,
             )
-            offload_event("transfer_guard_failed", **details)
             logger.error("Layerwise transfer guard failed: %s", details)
             raise RuntimeError(f"Layerwise transfer failed; refusing incomplete KV/state: {details}")
 
@@ -2596,7 +2566,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
-        wait_start = time.monotonic_ns() if offload_debug_enabled() else None
         gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
@@ -2636,13 +2605,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        offload_event(
-            "compute_release",
-            wait_ns=None if wait_start is None else time.monotonic_ns() - wait_start,
-            layer=self.current_layer,
-            predecessor=self.prefetch_layer_map.get(self.current_layer),
-            requests=sorted(self._current_layerwise_request_ids),
-        )
         # KVPP can observe completion after attention; reset at the next bind.
         if not self.use_kvpp:
             self.layer_load_finished_events[self.current_layer].clear()
@@ -2675,16 +2637,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         send_thread.raise_if_failed()
         if self.current_layer not in self._attention_saved_layers:
             self.sync_save_events[self.current_layer].record()
-            offload_event(
-                "post_attention", layer=self.current_layer, requests=sorted(self._current_layerwise_request_ids)
-            )
             if self.layer_save_tasks[self.current_layer]:
                 for task in self.layer_save_tasks[self.current_layer]:
                     for block_range in task.block_ranges:
                         send_thread.add_stored_request(block_range.request.req_id)
                 send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
             else:
-                offload_event("source_done", layer=self.current_layer, no_transfer=True)
                 self.layer_save_finished_events[self.current_layer].set()
         if self.block_key_hybrid:
             # Recurrent and record-only paths do not exit an attention window.
@@ -2719,7 +2677,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
-        wait_start = time.monotonic_ns() if offload_debug_enabled() else None
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
         # The final layer may have no save task while earlier layers still copy.
@@ -2751,12 +2708,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()
-        if wait_start is not None:
-            offload_event(
-                "save_drain_time",
-                wait_ns=time.monotonic_ns() - wait_start,
-                requests=sorted(self._current_layerwise_request_ids),
-            )
         pending = getattr(self, "_offload_pending_pages", None)
         if pending:
             if not hasattr(self, "_offload_active_pages"):

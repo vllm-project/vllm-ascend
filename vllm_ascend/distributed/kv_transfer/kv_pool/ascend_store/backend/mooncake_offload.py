@@ -10,7 +10,6 @@ read. There is no per-layer key or session preparation on the forward path.
 from __future__ import annotations
 
 from copy import copy
-from time import monotonic_ns
 from typing import TYPE_CHECKING
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import require_aligned_batch_results
@@ -20,7 +19,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.offload_diagnostics import offload_debug_enabled, offload_event
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
@@ -245,7 +243,6 @@ def _open_puts(worker, slots):
                     dict(result=codes_by_key[key], bytes=sizes[key], private_snapshot="offload_v1:" in key)
                     for key in fatal[:8]
                 ]
-                offload_event("put_session_failed", failed_keys=len(fatal), samples=details)
                 raise RuntimeError(
                     f"Mooncake offload could not open a required PUT session: "
                     f"failed_keys={len(fatal)} samples={details}"
@@ -272,10 +269,6 @@ def _open_puts(worker, slots):
             if not hasattr(worker, "_offload_private_aliases"):
                 worker._offload_private_aliases = {}
             worker._offload_private_aliases.update(aliases)
-            offload_event(
-                "put_collision_fallback", keys=len(set(aliases.values())),
-                requests=len({view.req_id for view, _, _, _ in fallback_slots}),
-            )
     except Exception:
         worker._queue_layerwise_revoke_keys(list(started))
         raise
@@ -297,8 +290,6 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
     put_slots: list[tuple[ReqMeta, str, int | None, int]] = []
     pending = {}
     dsv4 = getattr(getattr(worker, "kv_cache_config", None), "dsv4_component_identity", None) is not None
-    debug = offload_debug_enabled()
-    prepare_start = monotonic_ns() if debug else 0
     for request in requests:
         cached = request.load_spec.kvpool_cached_tokens if request.load_spec is not None else 0
         masks = worker._compute_reachable_load_masks(request, cached)
@@ -311,34 +302,6 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
             hashes = get_block_hashes(request.block_hashes, worker.grouped_block_size[group], worker.hash_block_size)
             entries = _load_entries(worker, request, group, hashes, masks[group] if masks is not None else None)
             object_bytes = sum(worker.group_block_len[group])
-            if debug:
-                endpoint = cached
-                spec = request.load_spec
-                if spec is not None and not worker.use_eagle and spec.kvpool_store_skip_tokens is not None:
-                    endpoint = spec.kvpool_store_skip_tokens
-                page_tokens = worker.grouped_block_size[group]
-                window = getattr(worker.kv_cache_config, "dsv4_nominal_windows", {}).get(group)
-                first = max(0, endpoint - window + 1) // page_tokens if window is not None else None
-                outside_pages = sum(index < first for _, index in entries) if first is not None else None
-                offload_event(
-                    "restore",
-                    request=request.req_id,
-                    incarnation=request.layerwise_request_id,
-                    group=group,
-                    endpoint=endpoint,
-                    target=request.target_token_len,
-                    source="previous_step"
-                    if request.load_spec and request.load_spec.layerwise_previous_step
-                    else "external",
-                    keys=len(entries),
-                    planned_bytes=len(entries) * object_bytes,
-                    outside_window_pages=outside_pages,
-                    outside_window_bytes=None if outside_pages is None else outside_pages * object_bytes,
-                    nominal_window_tokens=window,
-                    nominal_first_page=first,
-                    page_tokens=page_tokens,
-                    shared=worker._group_reuses_buffer(group),
-                )
             view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
             for key, index in entries:
                 view.load_block_keys[index] = key
@@ -365,23 +328,9 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
                 pending[(request.req_id, request.layerwise_request_id, group)] = request.target_token_len, pages
             groups[group].append(view)
     try:
-        if debug:
-            get_start = monotonic_ns()
         worker._open_layerwise_get_sessions(get_slots)
         worker._check_layerwise_transfer_errors()
-        if debug:
-            put_start = monotonic_ns()
         _open_puts(worker, put_slots)
-        if debug:
-            offload_event(
-                "session_prepare_time",
-                build_ns=get_start - prepare_start,
-                get_open_ns=put_start - get_start,
-                put_open_ns=monotonic_ns() - put_start,
-                get_entries=len(get_slots),
-                put_entries=len(put_slots),
-                requests=sorted(worker._current_layerwise_request_ids),
-            )
         aliases = getattr(worker, "_offload_private_aliases", {})
         worker._offload_pending_pages = {
             identity: (endpoint, {

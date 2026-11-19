@@ -9,7 +9,6 @@ import json
 from collections import defaultdict
 from dataclasses import asdict, replace
 
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
@@ -132,15 +131,6 @@ def build_deepseek_v4_reuse_config(config, groups, num_blocks):
     plan.dsv4_component_identity = component_layout_identity(groups)
     plan.kv_cache_allocation_alignment = 2 * 1024 * 1024
     plan.kv_transfer_config = config.kv_transfer_config
-    logger.info(
-        "DSV4_OFFLOAD plan blocks=%d bytes=%d descriptors=%d predecessors=%s resident_layers=%s identity=%s",
-        num_blocks,
-        sum(t.size for t in plan.kv_cache_tensors),
-        len(plan.kv_cache_tensors),
-        layout.prefetch_layer_map,
-        layout.independent_layers,
-        plan.dsv4_component_identity,
-    )
     return plan
 
 

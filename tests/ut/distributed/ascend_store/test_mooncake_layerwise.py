@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -28,11 +27,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tr
     LayerwiseSessionTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
-    _build_range_debug_payload,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -62,47 +59,9 @@ def make_token_database() -> ChunkedTokenDatabase:
     return database
 
 
-class TestKVPoolRangeDebug(unittest.TestCase):
-    def test_audit_events_follow_ascend_config(self):
-        cases = (
-            (kv_transfer, kv_transfer._emit_range_debug_event, ("save", 3, [[10]], [[0]], [10]), "range"),
-            (kv_transfer, kv_transfer._emit_commit_debug_event, (3, 1, [0]), "commit"),
-            (mooncake_backend, mooncake_backend._emit_whole_key_debug_event, ("get", 1), "whole_key"),
-        )
-        for module, emit, args, event in cases:
-            for enabled in (False, True):
-                with (
-                    self.subTest(event=event, enabled=enabled),
-                    patch.object(
-                        module, "get_ascend_config", return_value=SimpleNamespace(kv_pool_range_debug=enabled)
-                    ),
-                    patch.object(module.logger, "info") as log,
-                ):
-                    emit(*args)
-                    if enabled:
-                        log.assert_called_once()
-                        self.assertEqual(json.loads(log.call_args.args[2])["event"], event)
-                        log.side_effect = RuntimeError("logging failed")
-                        emit(*args)  # Audit failures must not abort transfers.
-                    else:
-                        log.assert_not_called()
 
 
 class TestMooncakeLayerBatchBuilder(unittest.TestCase):
-    def test_range_debug_payload_reports_per_key_bytes_and_offsets(self):
-        payload = _build_range_debug_payload(
-            "save",
-            3,
-            [[10, 20], [7]],
-            [[30, 40], [50]],
-            [30, -1],
-        )
-
-        self.assertEqual(payload["event"], "range")
-        self.assertEqual(payload["layer_id"], 3)
-        self.assertEqual(payload["requested_bytes"], [30, 7])
-        self.assertEqual(payload["object_offsets"], [[30, 40], [50]])
-        self.assertEqual(payload["results"], [30, -1])
 
     def test_key_major_ranges_use_full_object_offsets(self):
         request = ReqMeta("r1", block_ids=[2], block_hashes=[])
