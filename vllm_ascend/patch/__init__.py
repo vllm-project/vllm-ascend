@@ -202,6 +202,10 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
+# Main2main November 12: vLLM #66859 replaces routed-scale booleans with
+# RoutedScaleMode. Translate Ascend model callers before router construction
+# and forward native modes to both runners. Remove the boolean bridge when
+# the matched release also uses the enum.
 # ** 8. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
@@ -840,6 +844,21 @@
 #    Future Plan:
 #       Remove the forward patch when upstream extension points cover Ascend
 #       capture, gathering, and TopK transport without copying the forward.
+#
+#   4. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model`
+#    Why:
+#       vLLM main #66177 identifies aux decoders by EagleModelMixin and moves
+#       remote-state aggregation into PPHandler. Copying release-only fields
+#       fails at import and does not provide the required decoder identity.
+#    How:
+#       Keep the existing member copy on v0.33.0. On main, replace the module's
+#       decoder class with an EagleModelMixin subclass of the decorated,
+#       Ascend-patched native decoder. Native slot bookkeeping and PPHandler
+#       own local/remote relay; Ascend retains capture and TP gathering.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66177
+#    Future Plan:
+#       Remove the replacement when native DeepseekV2Model inherits the mixin.
 #
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1756,4 +1775,35 @@
 #      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
 #    Future Plan:
 #      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
+
+# ** File: platform/patch_kimi_k31_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY["kimi_k31"]`
+#    Why:
+#       Expose the K3.1 config identity and Ascend DSA constraints. Native main
+#       #66030 consumes a KimiLinearDSAConfig, whereas v0.33.0 uses our dict.
+#    How:
+#       Register the existing platform config subclass once. Keep the explicit
+#       release dict branch; delegate main's dataclass construction, layer
+#       lookup and serialization to native KimiLinearConfig.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66030
+#    Future Plan:
+#       Remove this registration/subclass when native kimi_k31 registration
+#       provides the required config identity and Ascend DSA validation.
+#   2. `vllm.model_executor.models.config.MODELS_CONFIG_MAP` Kimi entries
+#    Why:
+#       #66037 defaults Kimi DSA and MLA drafts to GPU cache/backend formats.
+#       In DSpark reconstruction its fp8 draft default fails A2/A3 validation.
+#    How:
+#       On main register an Ascend verifier that retains native model-level
+#       quantization resolution and delegates generic config verification to
+#       the base hook; NPUPlatform and Ascend layers own attention selection.
+#       Release registration and explicit cache/backend settings are unchanged.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/66037
+#    Future Plan:
+#       Remove the verifier override once native Kimi defaults dispatch through
+#       the platform's attention/cache configuration interface.
 #

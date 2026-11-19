@@ -220,6 +220,9 @@ class PCPGlm5NextMergedColumnParallelLinear(_Glm5NextMergedColumnParallelLinear,
         **kwargs,
     ) -> None:
         self.replicated_shard_ids = set(replicated_shard_ids)
+        # #66784's inherited merged loaders read this even for unpadded PCP
+        # projections, whose constructor bypasses the merged initializer.
+        self.padding_size = 0
         self.output_sizes = output_sizes.copy()
         for sid in self.replicated_shard_ids:
             self.output_sizes[sid] *= tp_size
