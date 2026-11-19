@@ -1,8 +1,14 @@
-# HY4 Flash (Experimental)
+# Hy4-Flash(Experimental)
 
 ## 1 Introduction
 
-HY4 Flash is a Mixture-of-Experts model with sliding-window attention, IndexPool sparse attention, iHC, and Engram conditional memory. The checkpoint has 42 language-model layers and an embedded five-layer DFly draft for speculative decoding.
+!!! note
+
+    The "PD Separation Deployment" mentioned in this document is provided only as an example/reference design to demonstrate the basic process of deploying Prefill and Decode in separated mode. It is not recommended for use in the production environment.
+
+    **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
+
+Hy4-Flash is a Mixture-of-Experts model with sliding-window attention, IndexPool sparse attention, iHC, and Engram conditional memory. The checkpoint has 42 language-model layers and an embedded five-layer DFly draft for speculative decoding.
 
 This document covers environment and model preparation, single-node deployment, PD disaggregation, functional verification, accuracy and performance evaluation, and performance tuning on 950DT products.
 
@@ -16,13 +22,13 @@ The deployment scripts use native FP8 weights, BF16 computation, FP8 KV cache, e
 
 ### 3.1 Model Weight
 
-Prepare the HY4 Flash FP8 checkpoint, including its tokenizer, model configuration, Engram tables, and embedded DFly weights.
+Prepare the Hy4-Flash FP8 checkpoint, including its tokenizer, model configuration, Engram tables, and embedded DFly weights.
 
 | Weight Version | Deployment | Download Links |
 | --- | --- | --- |
-| HY4 Flash FP8 | 950DT products | [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/Hy4-flash-FP8) |
+| Hy4-Flash FP8 | 950DT products | [ModelScope](https://modelscope.cn/models/Tencent-Hunyuan/Hy4-flash-FP8) |
 
-Download the complete checkpoint to a local directory. In the examples below, replace `<HY4_FLASH_FP8_PATH>` with that directory and use the same path on every deployment node.
+Download the complete checkpoint to a local directory on each deployment host. In Section 4.1, replace `<HY4_FLASH_FP8_PATH>` with that host directory. The container mounts it at `/models/Hy4-Flash-FP8`, which is the model path used by the serving and benchmark commands below.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -34,13 +40,38 @@ Prepare the UB endpoint configuration directory used by `ascend_local_comm_res_p
 
 ### 4.1 Docker Image Installation
 
-Prepare the Ascend 950DT container environment by following [Installation](../../getting_started/installation.md). Install the HY4 Flash adaptation sources as described below.
+Run the following on each 950DT products host. Set the model path to the FP8 checkpoint and use the Hy4-Flash adaptation image below.
 
-### 4.2 Source Code Installation
+```bash
+export IMAGE="quay.io/atlas-ci/vllm-atlas-temp:hy4-flash-a5-openeuler-44498364094-1-arm64-temp"
+export CONTAINER_NAME=hy4_flash
+export MODEL_DIR="<HY4_FLASH_FP8_PATH>"
+export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
+mkdir -p "$WORK_DIR"
 
-If you do not use the Docker images above, you can build from source. Follow the [installation guide](https://docs.vllm.ai/projects/ascend/en/latest/getting_started/installation.html) to install vLLM-Ascend and prepare the same runtime environment on every deployment node.
+docker run -it --name "$CONTAINER_NAME" \
+    --network host --ipc host --privileged --shm-size=100g \
+    --device /dev/davinci_manager --device /dev/hisi_hdc \
+    --device /dev/ummu --device /dev/uburma \
+    --device /dev/davinci0 --device /dev/davinci1 \
+    --device /dev/davinci2 --device /dev/davinci3 \
+    --device /dev/davinci4 --device /dev/davinci5 \
+    --device /dev/davinci6 --device /dev/davinci7 \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
+    -v /usr/local/sbin:/usr/local/sbin:ro \
+    -v /etc/hccn.conf:/etc/hccn.conf:ro \
+    -v /usr/local/dcmi:/usr/local/dcmi:ro \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+    -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+    -v /etc/hixlep:/etc/hixlep:ro \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \
+    -v "$MODEL_DIR":/models/Hy4-Flash-FP8:ro \
+    -v "$WORK_DIR":/workspace \
+    -w /workspace "$IMAGE" bash
+```
 
-HY4 Flash model implementations, multimodal processing, and DFly speculative decoding are registered by vLLM-Ascend. Use matching vLLM and vLLM-Ascend source revisions that include HY4 Flash support and are compatible with **vLLM-Ascend 0.33.0**, the version used in this guide.
+Run the serving commands in Section 5 inside the container. For the remaining environment requirements, refer to [Installation](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment
 
@@ -53,7 +84,7 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     Use eight NPUs for TP8 with expert parallelism:
 
     ```bash
-    export MODEL_PATH="<HY4_FLASH_FP8_PATH>"
+    export MODEL_PATH="/models/Hy4-Flash-FP8"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=1024
@@ -112,7 +143,7 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     set -euo pipefail
 
     # Set these paths for the serving environment.
-    MODEL_PATH="<HY4_FLASH_FP8_PATH>"
+    MODEL_PATH="/models/Hy4-Flash-FP8"
     VLLM_PATH="<VLLM_SOURCE_DIRECTORY>"
     VLLM_ASCEND_PATH="<VLLM_ASCEND_SOURCE_DIRECTORY>"
     UB_ENDPOINTS_PATH="<UB_ENDPOINT_CONFIG_DIRECTORY>"
@@ -182,7 +213,7 @@ For standard `vllm serve` arguments, refer to [Serving Arguments](https://docs.v
     set -euo pipefail
 
     # Set these paths for the serving environment.
-    MODEL_PATH="<HY4_FLASH_FP8_PATH>"
+    MODEL_PATH="/models/Hy4-Flash-FP8"
     VLLM_PATH="<VLLM_SOURCE_DIRECTORY>"
     VLLM_ASCEND_PATH="<VLLM_ASCEND_SOURCE_DIRECTORY>"
     UB_ENDPOINTS_PATH="<UB_ENDPOINT_CONFIG_DIRECTORY>"
@@ -409,7 +440,7 @@ The following results use the TP8 + EP service with FP8 weights, BF16 computatio
 Run the following benchmark against the service on port `8000`:
 
 ```bash
-export MODEL_PATH="<HY4_FLASH_FP8_PATH>"
+export MODEL_PATH="/models/Hy4-Flash-FP8"
 mkdir -p /workspace/hy4flash-benchmarks
 vllm bench serve \
     --backend openai \
