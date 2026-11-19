@@ -1008,6 +1008,7 @@ def _make_impl(
             window_size=16,
             compress_ratio=1,
             vllm_config=SimpleNamespace(
+                lora_config=None,
                 cache_config=SimpleNamespace(cache_dtype="auto"),
                 parallel_config=SimpleNamespace(
                     prefill_context_parallel_size=2,
@@ -1557,8 +1558,11 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     torch.testing.assert_close(output, projected.reshape(4, -1))
 
 
-def test_a5_bf16_keeps_multistream_overlap_enabled():
+@pytest.mark.parametrize("allow_overlap", [False, True])
+@pytest.mark.parametrize("enable_lora", [False, True])
+def test_a5_bf16_multistream_overlap_follows_lora_config(allow_overlap, enable_lora):
     linear = MagicMock()
+    ascend_config = SimpleNamespace(multistream_dsv4_dsa_overlap=allow_overlap)
     with (
         patch(
             "vllm_ascend.attention.dsa_v1.CVLinearWrapper",
@@ -1566,7 +1570,7 @@ def test_a5_bf16_keeps_multistream_overlap_enabled():
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
-            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=True),
+            return_value=ascend_config,
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
@@ -1585,8 +1589,11 @@ def test_a5_bf16_keeps_multistream_overlap_enabled():
             n_groups=1,
             n_local_groups=1,
             window_size=16,
-            compress_ratio=1,
-            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16")),
+            compress_ratio=4,
+            vllm_config=SimpleNamespace(
+                lora_config=object() if enable_lora else None,
+                cache_config=SimpleNamespace(cache_dtype="bfloat16"),
+            ),
             wq_a=linear,
             wq_b=linear,
             wkv=linear,
@@ -1601,7 +1608,8 @@ def test_a5_bf16_keeps_multistream_overlap_enabled():
             attn_sink=None,
             swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
         )
-    assert impl.multistream_dsv4_dsa_overlap is True
+    assert impl.multistream_dsv4_dsa_overlap is (allow_overlap and not enable_lora)
+    assert ascend_config.multistream_dsv4_dsa_overlap is allow_overlap
 
 
 def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():

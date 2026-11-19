@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 
+from vllm_ascend.lora.deepseek_v4 import AscendCompressorLinearWithLoRA, AscendDeepseekV4GroupedWoAWithLoRA
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
@@ -201,6 +202,8 @@ class AscendColumnParallelLinearWithLoRA(_SingleLinearLoRAWrapper, ColumnParalle
 
 def refresh_all_lora_classes():
     ascend_classes = (
+        AscendCompressorLinearWithLoRA,
+        AscendDeepseekV4GroupedWoAWithLoRA,
         AscendRowParallelLinearWithLoRA,
         AscendColumnParallelLinearWithLoRA,
         AscendMergedColumnParallelLinearWithLoRA,

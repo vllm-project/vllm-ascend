@@ -32,14 +32,16 @@ from torch import nn
 # DeepseekV4Config is provided by Transformers on both supported versions.
 from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm.config import CacheConfig, VllmConfig
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.linear import AscendReplicatedLinear
+from vllm_ascend.ops.triton.compressor.dsv4_compressor import compressor_from_projected
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
@@ -95,6 +97,15 @@ class AscendCompressorMetadata:
     state: typing.Any
 
 
+class AscendCompressorLinear(AscendReplicatedLinear):
+    """Preserve the fused compressor's FP32 projection accumulation for LoRA."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.device.type == "cpu":
+            return torch.nn.functional.linear(hidden_states.float(), self.weight.float())
+        return torch.mm(hidden_states, self.weight.t(), out_dtype=torch.float32)
+
+
 class Compressor(nn.Module):
     def __init__(
         self,
@@ -124,7 +135,7 @@ class Compressor(nn.Module):
         self.coff = 1 + self.overlap
 
         self.ape = nn.Parameter(torch.empty(compress_ratio, self.coff * self.head_dim, dtype=torch.float32))
-        self.wkv = ReplicatedLinear(
+        self.wkv = AscendCompressorLinear(
             self.dim,
             self.coff * self.head_dim,
             bias=False,
@@ -134,7 +145,7 @@ class Compressor(nn.Module):
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
-        self.wgate = ReplicatedLinear(
+        self.wgate = AscendCompressorLinear(
             self.dim,
             self.coff * self.head_dim,
             bias=False,
@@ -202,6 +213,23 @@ class Compressor(nn.Module):
         assert compressor_metadata is not None
         assert state_metadata is not None
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
+        if isinstance(self.wkv, BaseLinearLayerWithLoRA) or isinstance(self.wgate, BaseLinearLayerWithLoRA):
+            compressed_kv = compressor_from_projected(
+                self.wkv(hidden_states),
+                self.wgate(hidden_states),
+                state_cache.squeeze(-2),
+                self.ape,
+                self.norm.weight,
+                compress_sin.view(-1, compress_sin.shape[-1]),
+                compress_cos.view(-1, compress_cos.shape[-1]),
+                state_block_table=state_metadata.block_table,
+                cu_seqlens=compressor_metadata.query_start_loc,
+                start_pos=compressor_metadata.start_pos,
+                compress_ratio=self.compress_ratio,
+                norm_eps=self.norm_eps,
+                output_dtype=hidden_states.dtype,
+            )
+            return compressed_kv, slot_mapping
         compressed_kv = torch.ops._C_ascend.compressor(
             hidden_states,
             self.wkv.weight,

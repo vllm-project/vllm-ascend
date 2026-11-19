@@ -6,9 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 
 from vllm_ascend.attention import dsa_attn_kv_plan
 from vllm_ascend.models.deepseek_v4.compressor import (
+    AscendCompressorLinear,
     AscendCompressorMetadata,
     AscendCompressorStateCache,
     Compressor,
@@ -94,6 +96,49 @@ class TestCompressorMetadata:
 
 
 class TestCompressorForward:
+    @pytest.mark.parametrize("adapter_projection", ["wkv", "wgate"])
+    def test_adapter_projections_reach_pooling(self, adapter_projection):
+        hidden = torch.randn(3, 4, dtype=torch.bfloat16)
+        projected = torch.randn(3, 8, dtype=torch.float32)
+        base = MagicMock(return_value=projected)
+        adapter = MagicMock(spec=BaseLinearLayerWithLoRA, return_value=projected + 1)
+        cache_metadata = SimpleNamespace(query_start_loc=torch.tensor([0, 3]), start_pos=torch.tensor([1]))
+        state_metadata = SimpleNamespace(block_table=torch.tensor([[1]]))
+        metadata = AscendCompressorMetadata(
+            cache=SimpleNamespace(req_metadata=cache_metadata), state=SimpleNamespace(req_metadata=state_metadata)
+        )
+        sin, cos, slots = torch.zeros(1, 2), torch.ones(1, 2), torch.tensor([[1, 0]])
+        compressor = SimpleNamespace(
+            wkv=adapter if adapter_projection == "wkv" else base,
+            wgate=adapter if adapter_projection == "wgate" else base,
+            ape=torch.ones(4, 8),
+            norm=SimpleNamespace(weight=torch.ones(4)),
+            compress_ratio=4,
+            norm_eps=1e-6,
+            _compute_metadata=MagicMock(return_value=(cos, sin, slots)),
+        )
+        state = torch.zeros(2, 8, 1, 16)
+        pooled = torch.randn(1, 4, dtype=torch.bfloat16)
+        with patch("vllm_ascend.models.deepseek_v4.compressor.compressor_from_projected", return_value=pooled) as pool:
+            actual, actual_slots = Compressor.forward(compressor, hidden, state, metadata)
+        assert actual is pooled and actual_slots is slots
+        base.assert_called_once_with(hidden)
+        adapter.assert_called_once_with(hidden)
+        kv, gate = pool.call_args.args[:2]
+        torch.testing.assert_close(kv, projected + (adapter_projection == "wkv"))
+        torch.testing.assert_close(gate, projected + (adapter_projection == "wgate"))
+        assert pool.call_args.kwargs["output_dtype"] == torch.bfloat16
+        assert pool.call_args.kwargs["state_block_table"] is state_metadata.block_table
+
+    def test_projection_keeps_fp32_accumulation(self):
+        projection = AscendCompressorLinear.__new__(AscendCompressorLinear)
+        torch.nn.Module.__init__(projection)
+        projection.weight = torch.nn.Parameter(torch.randn(8, 16, dtype=torch.bfloat16))
+        hidden = torch.randn(3, 16, dtype=torch.bfloat16)
+        actual = projection(hidden)
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(actual, hidden.float() @ projection.weight.float().T)
+
     @pytest.mark.parametrize(
         ("compress_ratio", "overlap", "expected_coff"),
         [(4, True, 2), (128, False, 1)],
