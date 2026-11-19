@@ -1,5 +1,5 @@
 # Two-node Memcache pooling with DSpark
-test_name: DSv4-Flash-Memcache-PD-dspark
+test_name: DSv4-Flash-PD-dspark
 model: Eco-Tech/DeepSeek-V4-Flash-0731-w8a8
 num_nodes: 2
 npu_per_node: 16
@@ -106,7 +106,7 @@ templates:
       - "--additional-config"
       - '{"enable_cpu_binding": true, "enable_fused_mc2": 1}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_load_failure_policy": "fail", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1, "pcp_size": 8}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": false}}]}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1, "pcp_size": 8}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - "--enable-prefix-caching"
   - node_index: 1
     envs: *env_decode
@@ -161,7 +161,7 @@ templates:
       - "--additional-config"
       - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_load_failure_policy": "fail", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1, "pcp_size": 8}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "memcache", "use_layerwise": false}}]}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1, "pcp_size": 8}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - "--async-scheduling"
 
 # Accuracy coverage and baseline reused from the existing Memcache PD case.
