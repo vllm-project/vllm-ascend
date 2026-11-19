@@ -78,9 +78,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
-    def _async_load_enabled(self) -> bool:
-        return False
-
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
         if self.layerwise_offload:
