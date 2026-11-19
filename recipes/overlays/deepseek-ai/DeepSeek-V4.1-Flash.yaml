@@ -1,0 +1,106 @@
+meta:
+  hardware:
+    ascend_910c: verified
+hardware_overrides:
+  npu:
+    extra_args:
+      - '--data-parallel-size'
+      - '4'
+      - '--tensor-parallel-size'
+      - '4'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--served-model-name'
+      - 'DeepSeek-V4.1-Flash'
+      - '--max-model-len'
+      - '286720'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--max-num-seqs'
+      - '32'
+      - '--enable-prefix-caching'
+      - '--model-loader-extra-config'
+      - '{"enable_multithread_load":true,"num_threads":128}'
+      - '--safetensors-load-strategy'
+      - 'lazy'
+      - '--speculative-config'
+      - '{"num_speculative_tokens":5,"method":"dspark"}'
+      - '--trust-remote-code'
+      - '--block-size'
+      - '128'
+      - '--tokenizer-mode'
+      - 'deepseek_v41'
+      - '--tool-call-parser'
+      - 'deepseek_v41'
+      - '--enable-auto-tool-choice'
+      - '--reasoning-parser'
+      - 'deepseek_v41'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--quantization'
+      - 'ascend'
+      - '--enforce-eager'
+      - '--engram-config'
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_shared_expert_dp":true}'
+      - '--kv-transfer-config'
+      - '{"kv_connector":"MooncakeHybridConnector","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"prefill":{"dp_size":4,"tp_size":4},"decode":{"dp_size":8,"tp_size":2}}}'
+    extra_env:
+      HCCL_SOCKET_IFNAME: '$IFACE_NAME'
+      HCCL_CONNECT_TIMEOUT: '1200'
+      GLOO_SOCKET_IFNAME: '$IFACE_NAME'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_EXEC_TIMEOUT: '204'
+      HCCL_OP_EXPANSION_MODE: 'AIV'
+      TASK_QUEUE_ENABLE: '1'
+      TP_SOCKET_IFNAME: '$IFACE_NAME'
+      OMP_NUM_THREADS: '1'
+hardware_notes:
+  ascend_910c:
+    title: "vLLM Ascend image required"
+    body: |-
+      Pin quay.io/ascend/vllm-ascend:v0.30.0-a3 - the NVIDIA pip wheel cannot run on Ascend NPU.
+      PD declaration (D01/PD01): roles = prefill + decode; TP/DP per role: prefill dp=4/tp=4, decode dp=8/tp=2; total NPUs = 40.
+      PD readiness (PD10): every backend process healthy; requests via the router/proxy succeed; KV transfer completes before declaring PD ready.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+strategy_hardware:
+  multi_node_dep:
+    npu: supported
+  single_node_tp:
+    npu: unsupported
+features:
+  reasoning:
+    hardware_overrides:
+      npu:
+        args:
+          - '--reasoning-parser'
+          - 'deepseek_v41'
+variants:
+  default:
+    hardware_overrides:
+      ascend_910c:
+        docker_image: 'quay.io/ascend/vllm-ascend:v0.30.0-a3'
+        install:
+          pip: false
+  ascend_w8a8:
+    model_id: 'deepseek-ai/DeepSeek-V4.1-Flash'
+    label: 'W8A8 (A3)'
+    precision: int8
+    vram_minimum_gb: 916
+    description: 'W8A8 quantized serving on Ascend NPU. Requires --quantization ascend and the matching W8A8 checkpoint.'
+    supported_hardware: [ascend_910c]
+    tp:
+      ascend_910c: 4
+guide_sections:
+  ascend: |-
+    ### Running on Ascend NPU
+
+    Serve this checkpoint with the vLLM Ascend image; the NVIDIA pip wheel cannot run on NPU:
+
+    ```bash
+    docker pull quay.io/ascend/vllm-ascend:v0.30.0-a3
+    ```
+
+    Keep `--quantization ascend` and load the W8A8 checkpoint; an unquantized checkpoint will not serve with this flag.
