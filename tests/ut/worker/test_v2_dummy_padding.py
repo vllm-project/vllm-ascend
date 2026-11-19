@@ -28,7 +28,10 @@ def buffers():
 def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner._target_uses_flashmla = False
-    runner.vllm_config = SimpleNamespace(kv_transfer_config=None)
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(pcp_shard_decode_requests=False),
+    )
     runner.input_buffers = buffers
     runner.debugger = None
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)

@@ -1153,6 +1153,7 @@ class TestNPUPlatform(TestBase):
                             self.assertTrue(
                                 all(size % 4 == 0 for size in config.compilation_config.cudagraph_capture_sizes)
                             )
+                            expected_decode_sizes = config.compilation_config.cudagraph_capture_sizes
                         expected_mode = (
                             CUDAGraphMode.NONE
                             if mode == CUDAGraphMode.FULL_DECODE_ONLY and not expected_decode_sizes

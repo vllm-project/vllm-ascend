@@ -105,13 +105,15 @@ def test_eager_dispatch_tp_aligns_target_and_reused_draft_sync(monkeypatch):
         ),
     )
     manager = SimpleNamespace(vllm_config=vllm_config)
-    initial_sync = DPSyncState(
+    sync_kwargs: dict[str, Any] = dict(
         num_tokens_across_dp=torch.tensor([3, 5]),
         uniform_token_count=None,
-        max_query_len=None,
         eager=True,
         num_reqs=1,
     )
+    if not vllm_version_is("0.33.0"):
+        sync_kwargs["max_query_len"] = None
+    initial_sync = DPSyncState(**sync_kwargs)
     seen_tokens = []
 
     def dispatch(_manager, num_reqs, num_tokens, _uniform, *args, **kwargs):
