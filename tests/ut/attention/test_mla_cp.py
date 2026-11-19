@@ -659,6 +659,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.use_quant_flashmla = False
     impl.scale = 0.5
     impl.speculative_config = None
     impl.num_heads = 2
