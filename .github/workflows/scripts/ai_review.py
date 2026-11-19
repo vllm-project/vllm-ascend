@@ -81,10 +81,20 @@ REQUIRED_FINDING_FIELDS = ("path", "line", "severity", "rule", "body")
 
 
 def parse_findings(text: str) -> list[dict]:
-    """Parse ```finding blocks into dicts; malformed blocks are dropped."""
+    """Parse ```finding blocks into dicts; malformed blocks are dropped.
+
+    `body` is everything after its key line (multi-line allowed); the other
+    fields are single `key: value` lines before it.
+    """
     findings = []
     for m in FINDING_BLOCK_RE.finditer(text):
-        fields = dict(FIELD_LINE_RE.findall(m.group(1)))
+        block = m.group(1)
+        body_match = re.search(r"^body:\s*(.*)$", block, re.M)
+        if not body_match:
+            continue
+        fields = dict(FIELD_LINE_RE.findall(block[: body_match.start()]))
+        # body is everything after its key line, so it may span multiple lines
+        fields["body"] = block[body_match.end() :]
         if not all(f in fields and fields[f].strip() for f in REQUIRED_FINDING_FIELDS):
             continue
         try:
