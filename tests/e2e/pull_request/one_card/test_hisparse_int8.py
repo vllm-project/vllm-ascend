@@ -84,7 +84,16 @@ def test_int8_resolver_refill_attention(capture, clip_capacity):
     torch.manual_seed(71)
     rows, topk, block, hot_size, width, stride = 4, 2048, 128, 2048, 656, 256
     blocks = hot_size // block + 1
-    host = allocate_mapped_host((blocks * block, width), torch.int8)
+    try:
+        host = allocate_mapped_host((blocks * block, width), torch.int8)
+    except RuntimeError as exc:
+        # ACL_ERROR_RT_FEATURE_NOT_SUPPORT or a successful query with no AIV support.
+        if str(exc) in (
+            "HiSparse requires AIV host-memory mapping: status=207000, capability=0",
+            "HiSparse requires AIV host-memory mapping: status=0, capability=0",
+        ):
+            pytest.skip(str(exc))
+        raise
     mapping = host._hisparse_registration
     nope = torch.randint(-127, 128, (blocks * block, 512), dtype=torch.int8)
     rope = torch.randn(blocks * block, 64, dtype=torch.bfloat16)
