@@ -12,7 +12,6 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -340,17 +339,6 @@ def get_engine_transfer_config(vllm_config, kv_cache_config):
     return (current if current is not None else vllm_config).kv_transfer_config
 
 
-def resolve_pool_block_sizes(vllm_config, kv_cache_config: KVCacheConfig) -> list[int]:
-    """Resolve each physical group's token span using Core's DCP rules."""
-    dcp = vllm_config.parallel_config.decode_context_parallel_size
-    groups = kv_cache_config.kv_cache_groups
-    return (
-        [kv_cache_utils.resolve_dcp_kv_block_size(group.kv_cache_spec, dcp) for group in groups]
-        if groups
-        else [vllm_config.cache_config.block_size * dcp]
-    )
-
-
 def resolve_pool_hit_alignment(kv_cache_config: KVCacheConfig, page_alignment: int) -> int:
     """Read Core's resolved alignment; an absent value keeps whole-page hits."""
     alignment = kv_cache_config.cache_hit_alignment_tokens
@@ -370,13 +358,11 @@ def pool_uses_eagle(vllm_config, kv_cache_config: KVCacheConfig) -> bool:
 
 
 def resolve_pool_cache_groups(vllm_config, kv_cache_config: KVCacheConfig) -> list[KVCacheGroupSpec]:
-    """Build coordinator specs with DCP resolution and producer group flags."""
-    dcp = vllm_config.parallel_config.decode_context_parallel_size
+    """Apply the engine producer exemption to coordinator group flags."""
     producer_only = _pool_is_producer_only(vllm_config, kv_cache_config)
     return [
         replace(
             group,
-            kv_cache_spec=kv_cache_utils.resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp),
             is_eagle_group=False if producer_only else group.is_eagle_group,
         )
         for group in kv_cache_config.kv_cache_groups
@@ -391,11 +377,9 @@ def validate_pool_cache_config(
     enable_partial_hash_hits: bool,
 ) -> None:
     """Validate hash/page compatibility and the partial-hit connector contract."""
-    if any(block_sizes[i] % hash_block_size for i in cacheable_group_ids):
-        raise ValueError(
-            f"AscendStore cannot fold Core hash size {hash_block_size} into cacheable pages "
-            f"{tuple(block_sizes[i] for i in cacheable_group_ids)}"
-        )
+    for group_id in cacheable_group_ids:
+        group_block_size = block_sizes[group_id]
+        assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config
     if enable_partial_hash_hits and extra.get("discard_partial_chunks", True) is not True:
         raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")

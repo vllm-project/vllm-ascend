@@ -42,7 +42,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
     pool_uses_eagle,
-    resolve_pool_block_sizes,
     resolve_pool_cache_groups,
     resolve_pool_hit_alignment,
     uses_hybrid_kv_cache,
@@ -128,7 +127,7 @@ class BaseKVPoolScheduler(ABC):
                 )
             )
         }
-        self.grouped_block_size = resolve_pool_block_sizes(vllm_config, kv_cache_config)
+        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         self.hash_block_size = kv_cache_config.hash_block_size
         self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         hit_alignment = resolve_pool_hit_alignment(kv_cache_config, self.lcm_block_size)
