@@ -912,6 +912,50 @@ class AscendAttentionBackendImpl(AttentionImpl):
             _, _, block_size, _ = key.shape
         return key, value, block_size
 
+    def _materialize_bnsd_pa_read(self, block_table: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Gather the head-major KV cache into the form the FIA kernel reads.
+
+        aclnnFusedInferAttentionScore has no kv-cache layout parameter: in
+        page-attention mode it reads the cache as token-major 3D blocks
+        (block_num, block_size, num_kv_heads * head_dim), the shape the
+        default layout hands it as a zero-copy view. The BNSD/HND allocation
+        is head-major (num_blocks, num_kv_heads, block_size, head_dim); the
+        kernel's tiling rejects that 4D form (EZ0037 "key tensor must be
+        contiguous"), and head-major memory has no zero-copy token-major
+        view, so the read gathers the blocks this step's block table
+        references and permutes them into the accepted layout.
+
+        The gather is deduplicated on device (torch.unique with
+        return_inverse) so only referenced blocks are copied, and the block
+        table is remapped to the gathered block indices; no host
+        synchronization is introduced. Under ACL-graph capture the dedup
+        output shape is not static, so the full table width is gathered
+        instead (duplicate blocks are harmless: each row is read only up to
+        its seq len, and unfilled entries are clamped to block 0).
+
+        This is a read-side view builder only: the bound cache tensors keep
+        their identity and geometry for the scatter write path and the
+        repair fence. The per-layer per-step copy is the documented read
+        overhead of the HND layout.
+        """
+        num_rows, table_width = block_table.shape
+        # Unfilled table entries can hold negative ids; rows are read only up
+        # to each request's seq len, so mapping them to block 0 is safe.
+        flat_ids = block_table.reshape(-1).to(torch.int64).clamp(min=0)
+        if _EXTRA_CTX.capturing:
+            gathered_ids = flat_ids
+            remapped = torch.arange(flat_ids.numel(), device=flat_ids.device)
+        else:
+            gathered_ids, remapped = torch.unique(flat_ids, return_inverse=True)
+        block_size = self.key_cache.shape[2]
+
+        def to_token_major(cache: torch.Tensor) -> torch.Tensor:
+            # (U, H, block, D) -> (U, block, H * D); the reshape copies once.
+            return cache.index_select(0, gathered_ids).permute(0, 2, 1, 3).reshape(gathered_ids.numel(), block_size, -1)
+
+        remapped_table = remapped.reshape(num_rows, table_width).to(block_table.dtype)
+        return to_token_major(self.key_cache), to_token_major(self.value_cache), remapped_table
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -953,6 +997,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        if block_table is not None and self.use_bnsd_kv_cache:
+            # The head-major (BNSD/HND) cache has no zero-copy form the FIA
+            # kernel reads in page-attention mode; gather the referenced
+            # blocks into the token-major layout the kernel accepts.
+            key, value, block_table = self._materialize_bnsd_pa_read(block_table)
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(
