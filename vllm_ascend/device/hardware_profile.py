@@ -111,6 +111,11 @@ class HardwareCapability(Enum):
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
+    # CANN MsaIndexScore ``return_choice`` TopK fusion, which replaces the
+    # separate TopK and sort post-processing. Callers must also check that the
+    # installed CANN package provides the fused output and that the index score
+    # runs with ``pool_block_size=128``.
+    MINIMAX_M3_INDEX_SCORE_TOPK_FUSION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -485,6 +490,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+                    HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
