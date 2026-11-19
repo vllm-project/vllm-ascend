@@ -17,7 +17,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
-    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -3366,99 +3365,13 @@ def test_qwen_hybrid_main_allocator_preserves_padded_views_and_aliases(
     legacy.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "unsupported",
-    [
-        "other_model",
-        "ordinary_qwen3",
-        "ordinary_qwen3_moe",
-        "missing_model_type",
-        "kv_transfer",
-        "speculative",
-        "quantized_cache",
-        "dcp",
-        "pcp",
-        "kvpp",
-        "noncompact_layout",
-        "missing_layout",
-        "missing_kernel_size",
-        "zero_kernel_size",
-        "indivisible_block",
-        "interleaved_pages",
-        "separate_pools",
-        "non_gdn",
-        "multihead_gdn",
-        "sliding_attention",
-        "quantized_spec",
-        "different_value_size",
-        "draft",
-        "contiguous_pa",
-        "empty",
-    ],
-)
-def test_main_allocator_keeps_legacy_contract_for_unmigrated_configs(monkeypatch, qwen_hybrid_cache_case, unsupported):
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "qwen3", "qwen3_moe", None])
+def test_main_allocator_keeps_legacy_contract_for_unmigrated_models(monkeypatch, qwen_hybrid_cache_case, model_type):
     case = qwen_hybrid_cache_case
-    cfg = case.vllm_config
+    case.vllm_config.model_config.hf_text_config = (
+        SimpleNamespace(model_type=model_type) if model_type is not None else None
+    )
     layout = KVCacheLayout.LBNHC
-    group = case.config.kv_cache_groups[0]
-    if unsupported == "other_model":
-        cfg.model_config.hf_text_config.model_type = "deepseek_v4"
-    elif unsupported in ("ordinary_qwen3", "ordinary_qwen3_moe"):
-        cfg.model_config.hf_text_config.model_type = "qwen3" if unsupported == "ordinary_qwen3" else "qwen3_moe"
-    elif unsupported == "missing_model_type":
-        cfg.model_config.hf_text_config = None
-    elif unsupported == "kv_transfer":
-        cfg.kv_transfer_config = object()
-    elif unsupported == "speculative":
-        cfg.speculative_config = object()
-    elif unsupported == "quantized_cache":
-        cfg.cache_config.cache_dtype = "int8"
-    elif unsupported in ("dcp", "pcp"):
-        setattr(
-            cfg.parallel_config,
-            "decode_context_parallel_size" if unsupported == "dcp" else "prefill_context_parallel_size",
-            2,
-        )
-    elif unsupported == "kvpp":
-        monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=2))
-    elif unsupported == "noncompact_layout":
-        layout = KVCacheLayout.LHBNC
-    elif unsupported == "missing_layout":
-        layout = None
-    elif unsupported == "missing_kernel_size":
-        case.blocks = [2]
-    elif unsupported == "zero_kernel_size":
-        case.blocks[0] = 0
-    elif unsupported == "indivisible_block":
-        case.blocks[0] = 3
-    elif unsupported == "interleaved_pages":
-        case.config.kv_cache_tensors[0].block_stride = 256
-    elif unsupported == "separate_pools":
-        case.config.kv_cache_tensors[0].size = 1024
-    elif unsupported == "non_gdn":
-        case.config.kv_cache_groups[1].kv_cache_spec = replace(
-            case.config.kv_cache_groups[1].kv_cache_spec, mamba_type=MambaAttentionBackendEnum.MAMBA2
-        )
-    elif unsupported == "multihead_gdn":
-        case.config.kv_cache_groups[1].kv_cache_spec = replace(
-            case.config.kv_cache_groups[1].kv_cache_spec, num_heads=2
-        )
-    elif unsupported == "sliding_attention":
-        group.kv_cache_spec = SlidingWindowSpec(
-            block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float16, sliding_window=8
-        )
-    elif unsupported == "quantized_spec":
-        group.kv_cache_spec = replace(group.kv_cache_spec, kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD)
-    elif unsupported == "different_value_size":
-        group.kv_cache_spec = replace(group.kv_cache_spec, head_size_v=2)
-    elif unsupported == "draft":
-        group.kv_cache_spec = replace(group.kv_cache_spec, is_draft=True)
-    elif unsupported == "contiguous_pa":
-        monkeypatch.setattr(attn_utils, "requires_contiguous_pa_kv_cache", lambda *_: True)
-    elif unsupported == "empty":
-        case.config.kv_cache_tensors = []
-        case.config.kv_cache_groups = []
-
     raw = {"fa": object(), "gdn": object()}
     expected = {"fa": object(), "alias": object(), "gdn": object()}
     allocate = MagicMock(return_value=raw)
@@ -3474,7 +3387,7 @@ def test_main_allocator_keeps_legacy_contract_for_unmigrated_configs(monkeypatch
     assert reshape.call_args.kwargs["shared_kv_cache_layers"] == {"alias": "fa"}
     assert reshape.call_args.kwargs["kernel_block_sizes"] is case.blocks
     groups = reshape.call_args.kwargs["attn_groups"]
-    assert [name for group in groups for name in group.layer_names] == ([] if unsupported == "empty" else ["fa", "gdn"])
+    assert [name for group in groups for name in group.layer_names] == ["fa", "gdn"]
     migrated.assert_not_called()
 
 
@@ -3487,3 +3400,54 @@ def test_main_allocator_still_rejects_custom_callback(qwen_hybrid_cache_case):
             [2, 4],
             allocate=lambda size: torch.zeros(size, dtype=torch.int8),
         )
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_next", "qwen3_5_text", "qwen3_5_moe_text"])
+def test_qwen_hybrid_dispatch_depends_only_on_model_type(monkeypatch, qwen_hybrid_cache_case, model_type):
+    case = qwen_hybrid_cache_case
+    case.vllm_config.model_config.hf_text_config.model_type = model_type
+    case.vllm_config.kv_transfer_config = object()
+    case.vllm_config.speculative_config = object()
+    case.vllm_config.cache_config.cache_dtype = "int8"
+    migrated = MagicMock(return_value={})
+    monkeypatch.setattr(attn_utils, "_allocate_qwen_hybrid_kv_cache", migrated)
+    monkeypatch.setattr(
+        attn_utils, "_allocate_kv_cache", MagicMock(side_effect=AssertionError("must dispatch by model type"))
+    )
+    result = attn_utils.allocate_kv_cache_main(case.config, torch.device("cpu"), None, [])
+    assert result is migrated.return_value
+    migrated.assert_called_once_with(case.config, torch.device("cpu"), None, [])
+
+
+def test_cache_attention_groups_preserves_specs_backends_heads_and_order(qwen_hybrid_cache_case):
+    case = qwen_hybrid_cache_case
+    spec = case.config.kv_cache_groups[0].kv_cache_spec
+    other_spec = replace(spec, num_kv_heads=2)
+
+    class OtherBackend(AscendAttentionBackend):
+        pass
+
+    names = ["fa", "alias", "same", "other_heads", "other_spec", "other_backend"]
+    specs = {name: other_spec if name == "other_spec" else spec for name in names}
+    case.config.kv_cache_groups[0] = KVCacheGroupSpec(
+        layer_names=names, kv_cache_spec=UniformTypeKVCacheSpecs(block_size=spec.block_size, kv_cache_specs=specs)
+    )
+    for name in names[2:]:
+        case.layers[name] = SimpleNamespace(
+            get_attn_backend=lambda: AscendAttentionBackend, num_heads=2 if name == "other_heads" else 1
+        )
+    case.layers["other_backend"].get_attn_backend = lambda: OtherBackend
+    groups = attn_utils._get_cache_attention_groups(case.config, case.layers, {"alias": "fa"})
+    assert [group.layer_names for group in groups] == [
+        ["fa", "same"],
+        ["other_heads"],
+        ["other_spec"],
+        ["other_backend"],
+        ["gdn"],
+    ]
+    assert [group.kv_cache_group_id for group in groups] == [0, 0, 0, 0, 1]
+    assert groups[2].kv_cache_spec is other_spec
+    assert groups[3].backend is OtherBackend
+    assert groups[4].kv_cache_spec is case.config.kv_cache_groups[1].kv_cache_spec
+    case.config.kv_cache_groups = []
+    assert attn_utils._get_cache_attention_groups(case.config, case.layers, {}) == []
