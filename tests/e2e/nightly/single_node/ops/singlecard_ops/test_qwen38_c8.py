@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Synthetic QSA C8 tests; run only on a reserved Ascend 910B/A3 device."""
 
+import math
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -19,7 +21,11 @@ from vllm_ascend.models.qwen4_exp.quantization import (  # noqa: E402
     quantize_qsa_rows,
     quantize_qsa_values,
 )
-from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query, store_qsa_c8_rows  # noqa: E402
+from vllm_ascend.ops.triton.qwen4_exp.c8 import (  # noqa: E402
+    prepare_qli_query,
+    quantize_qsa_query,
+    store_qsa_c8_rows,
+)
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
 
 
@@ -252,3 +258,33 @@ def test_c8_query_fusion_graph_replay_matches_reference(heads, dim):
     graph.replay()
     torch.npu.synchronize()
     torch.testing.assert_close(captured, quantize_qsa_rows(query), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tokens,heads", [(0, 4), (1, 4), (4, 4), (96, 32), (4096, 4), (4, 64)])
+@torch.inference_mode()
+def test_c8_qli_query_padding_and_graph_replay(tokens, heads):
+    query = torch.randn(tokens, 128, heads, dtype=torch.bfloat16, device="npu").transpose(1, 2)
+
+    def check(outputs):
+        codes, scales, weights = outputs
+        ref_codes, ref_scales = quantize_qsa_rows(query)
+        assert codes.shape == (tokens, 64, 128) and codes.dtype == torch.int8
+        assert scales.shape == weights.shape == (tokens, 64) and scales.dtype == weights.dtype == torch.float16
+        torch.testing.assert_close(codes[:, :heads], ref_codes, rtol=0, atol=0)
+        torch.testing.assert_close(scales[:, :heads], ref_scales.half(), rtol=0, atol=0)
+        torch.testing.assert_close(weights[:, :heads], torch.full_like(ref_scales.half(), 1 / math.sqrt(128)))
+        assert not codes[:, heads:].any().item()
+        assert not weights[:, heads:].any().item()
+        assert (scales[:, heads:] == 1).all().item()
+
+    check(prepare_qli_query(query))
+    if tokens:
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            captured = prepare_qli_query(query)
+        query[0].zero_()
+        query[-1, :, :6] = torch.tensor([127, -127, 0.5, 1.5, -0.5, -1.5], device="npu", dtype=torch.bfloat16)
+        graph.replay()
+        torch.npu.synchronize()
+        check(captured)

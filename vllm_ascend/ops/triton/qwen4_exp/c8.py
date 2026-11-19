@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Strided C8 cache writes for QSA and its indexer."""
+"""C8 query preparation and strided cache writes for QSA and its indexer."""
+
+import math
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -11,6 +13,9 @@ from vllm_ascend.models.qwen4_exp.quantization import (
     quantize_qsa_rows,
 )
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+QLI_V2_QUERY_HEADS = 64
+_QLI_V2_FUSED_MIN_TOKENS = 4
 
 
 @triton.jit
@@ -69,6 +74,72 @@ def quantize_qsa_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
         SCALE_MIN=C8_SCALE_MIN,
     )
     return codes, scales
+
+
+@triton.jit
+def _pad_qli_query(
+    source_codes,
+    source_scales,
+    padded_codes,
+    padded_scales,
+    weights,
+    num_tokens,
+    rows_per_core,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    PADDED_HEADS: tl.constexpr,
+    HEAD_WEIGHT: tl.constexpr,
+):
+    heads = tl.arange(0, PADDED_HEADS)
+    channels = tl.arange(0, DIM)
+    for offset in range(rows_per_core):
+        token = tl.program_id(0) + offset * tl.num_programs(0)
+        if token < num_tokens:
+            active = heads < HEADS
+            source = token * HEADS + tl.minimum(heads, HEADS - 1)
+            codes = tl.load(source_codes + source[:, None] * DIM + channels[None, :], active[:, None], other=0)
+            scales = tl.load(source_scales + source, active, other=1.0)
+            dest = token * PADDED_HEADS + heads
+            tl.store(padded_codes + dest[:, None] * DIM + channels[None, :], codes)
+            tl.store(padded_scales + dest, scales)
+            tl.store(weights + dest, tl.where(active, HEAD_WEIGHT, 0.0))
+
+
+def prepare_qli_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Materialize the dense 64-head INT8 input and FP16 QLI v2 scales and weights."""
+    tokens, heads, dim = query.shape
+    codes, scales = quantize_qsa_query(query)
+    shape = (tokens, QLI_V2_QUERY_HEADS)
+    weight = 1.0 / math.sqrt(dim)
+    # A2/A3 QLI v2 requires 64 heads. Inactive heads have zero weight,
+    # so the padding cannot change the score. Keep the exact same FP32
+    # quantizer and convert scales only when writing the FP16 input.
+    if query.device.type == "npu" and tokens >= _QLI_V2_FUSED_MIN_TOKENS:
+        padded_codes = torch.empty((*shape, dim), dtype=torch.int8, device=query.device)
+        padded_scales = torch.empty(shape, dtype=torch.float16, device=query.device)
+        weights = torch.empty_like(padded_scales)
+        cores = min(tokens, get_vectorcore_num())
+        _pad_qli_query[(cores,)](
+            codes,
+            scales,
+            padded_codes,
+            padded_scales,
+            weights,
+            tokens,
+            triton.cdiv(tokens, cores),
+            HEADS=heads,
+            DIM=dim,
+            PADDED_HEADS=QLI_V2_QUERY_HEADS,
+            HEAD_WEIGHT=weight,
+        )
+        return padded_codes, padded_scales, weights
+    padded_codes = torch.zeros((*shape, dim), dtype=torch.int8, device=query.device)
+    padded_codes[:, :heads].copy_(codes)
+    padded_scales = torch.ones(shape, dtype=torch.float16, device=query.device)
+    padded_scales[:, :heads].copy_(scales)
+    weights = torch.zeros_like(padded_scales)
+    weights[:, :heads] = weight
+    return padded_codes, padded_scales, weights
 
 
 @triton.jit
