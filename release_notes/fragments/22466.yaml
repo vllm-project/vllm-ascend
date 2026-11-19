@@ -1,0 +1,4 @@
+pr: 22466
+entries:
+  - category: feature
+    text: Added opt-in expert parallelism for MoE serving on Ascend 310P with Model Runner V2. Start the server with `VLLM_USE_V2_MODEL_RUNNER=1` and `--enable-expert-parallel`.
