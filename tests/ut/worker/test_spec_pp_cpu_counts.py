@@ -262,22 +262,27 @@ def fa3_runner(runner_cls):
     runner.sync_spec_pp_cpu_counts = False
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=["OtherModel"]))
     runner.speculative_config = SimpleNamespace(method="mtp")
-    runner.speculator = SimpleNamespace(attn_backends={"draft.0": fa3, "draft.1": fa3})
+    # set_attn initializes nested draft groups, not an attn_backends mapping.
+    runner.speculator = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=fa3)], [SimpleNamespace(backend=fa3)]])
     return runner
 
 
-@pytest.mark.parametrize("case", ["fa3", "empty", "missing", "cann", "mixed", "no_speculator", "sync_pp"])
+@pytest.mark.parametrize(
+    "case", ["fa3", "empty", "empty_group", "missing", "cann", "mixed", "no_speculator", "sync_pp"]
+)
 def test_fa3_draft_cpu_sync_policy(fa3_runner, case):
     runner = fa3_runner
     cann = type("AscendFlashAttentionBackend", (), {"__module__": "vllm_ascend.attention.fa_v1"})
     if case == "empty":
-        runner.speculator.attn_backends = {}
+        runner.speculator.attn_groups = []
+    elif case == "empty_group":
+        runner.speculator.attn_groups = [[]]
     elif case == "missing":
-        del runner.speculator.attn_backends
+        del runner.speculator.attn_groups
     elif case == "cann":
-        runner.speculator.attn_backends = {"draft.0": cann}
+        runner.speculator.attn_groups = [[SimpleNamespace(backend=cann)]]
     elif case == "mixed":
-        runner.speculator.attn_backends["draft.1"] = cann
+        runner.speculator.attn_groups[1][0].backend = cann
     elif case == "no_speculator":
         runner.speculator = None
     elif case == "sync_pp":
