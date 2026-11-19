@@ -1,0 +1,7 @@
+pr: 22469
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incorrect context attention during Ricursive Ripple DFlash2
+      speculative decoding on Ascend when the draft mixes RoPE and NoPE
+      layers, including drafts with a NoPE first layer.

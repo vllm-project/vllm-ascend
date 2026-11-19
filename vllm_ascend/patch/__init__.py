@@ -1100,6 +1100,7 @@
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
 #   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
 #   3. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3ForCausalLM._read_mask_embedding`
+#   4. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model._apply_context_rope`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
@@ -1113,6 +1114,9 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #       Consume returned RoPE keys for both in-place and out-of-place NPU backends,
 #       using a key-only call to avoid cloning the entire context buffer.
+#       Dispatch through the upstream context RoPE hook so Ricursive drafts retain
+#       unrotated NoPE keys. Preserve its in-place contract and select a rotating
+#       layer for the fused call even when the first layer is NoPE.
 #       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
 #       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
 #       This binding is applied once per worker before model construction;
@@ -1121,6 +1125,7 @@
 #       override; preserve errors for malformed data and other missing files.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/57934
+#       https://github.com/vllm-project/vllm/pull/65745
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
 #       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
