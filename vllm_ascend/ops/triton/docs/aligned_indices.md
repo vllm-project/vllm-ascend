@@ -44,6 +44,9 @@
 
 - **Origin**: Developed from scratch for Ascend, following the Triton-Ascend gather tutorial. The state-selection semantics follow vLLM's GDN metadata contract (vLLM #58737 requires block-table rows to match `seq_lens` rows).
 - **Differences**: Ascend gather supports FP32 but not INT32, so physical IDs are bitcast through FP32 and back. Only a bounded aligned column window enters UB, and launch geometry (window vs flat) is chosen on the host. One launch serves every cache group.
+- **Why not reuse `get_aligned_state_indices_multi_group_kernel`**: Upstream's kernel forms a vector of group base pointers and uses it as a Triton pointer base for one 3-D load. Ascend's pointer/offset analysis rejects a vector int-to-pointer base (the same limitation documented in the flat kernel), so a thin NPU wrapper cannot compile without replacing that load path. Its state-slot load also assumes a native INT32 gather, while Ascend gather supports FP32 but not INT32. Upstream's Python entrypoint additionally asserts CUDA/XPU, so bypassing it would rely on an unsupported contract.
+- **Unaligned output groups**: When `max_reqs * state_slots % 8 != 0`, adjacent group bases are not 32-byte aligned. The flat kernel writes whole 32-byte spans so each program owns a disjoint store span; a single strided store from the upstream kernel does not provide that ownership.
+- **Single-row branch**: The `BLOCK_ROWS == 1` branch is a compile specialization, not a performance heuristic. When the launch geometry selects one row (for example, `state_slots` 8 or 16), it keeps `max/div` out of Ascend's single-element tensor pointer analysis, which does not support tensor `maxsi`; the vector form is used for all multi-row tiles. The window tests with 8- and 16-slot states exercise this layout.
 
 ## Test Cases
 

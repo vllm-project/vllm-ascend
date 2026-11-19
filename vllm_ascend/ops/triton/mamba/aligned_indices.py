@@ -51,9 +51,10 @@ def _aligned_indices_window_kernel(
         valid_rows = rows < num_reqs
         # Masked tl.load/store lanes do not access GM; tail offsets stay unclamped.
         if BLOCK_ROWS == 1:
-            # A true scalar keeps max/div out of Ascend's single-element
-            # tensor pointer analysis, which does not support tensor maxsi.
-            # other=1 makes inactive rows select window slot 0 without a read.
+            # Compile specialization, not a performance dispatch: a true scalar
+            # keeps max/div out of Ascend's single-element tensor pointer
+            # analysis, which does not support tensor maxsi. other=1 makes
+            # inactive rows select window slot 0 without a read.
             lengths = tl.load(seq_lens + tile * seq_stride, tile < num_reqs, other=1)
         else:
             lengths = tl.load(seq_lens + rows * seq_stride, valid_rows, other=1)
