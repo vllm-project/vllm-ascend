@@ -32,6 +32,7 @@ def make_attention(impl):
     inner.kv_b_proj.quant_method = UnquantizedLinearMethod()
     inner.is_amx_bmm_enabled = False
     inner.dcp_q_replicate = False
+    inner.dcp_manager = None
     inner.is_aiter_triton_fp4_bmm_enabled = False
     inner.is_aiter_triton_fp8_bmm_enabled = False
     inner.quant_config = None
