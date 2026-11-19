@@ -10,8 +10,8 @@ Set these variables in the existing launcher before it starts the relevant proce
 
 | Output | Environment variable | Set it to |
 | --- | --- | --- |
-| **Base** · vLLM disk cache | `XDG_CACHE_HOME` | `/root/ascend/log/cache` |
-| **Base** · vLLM configuration root | `XDG_CONFIG_HOME` | `/root/ascend/log/config` |
+| vLLM disk cache | `XDG_CACHE_HOME` | `/root/ascend/log/cache` |
+| vLLM configuration root | `XDG_CONFIG_HOME` | `/root/ascend/log/config` |
 | [Ascend component working directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0007.html), including logs | `ASCEND_WORK_PATH` | `/root/ascend/log/cann/work` |
 | [Ascend component cache directory](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/maintenref/envvar/envref_07_0006.html) | `ASCEND_CACHE_PATH` | `/root/ascend/log/cann/cache` |
 | `torch_npu` [Inductor compilation cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_configuration_tutorial.html) | `TORCHINDUCTOR_CACHE_DIR` | `/root/ascend/log/cann/torchinductor` |
@@ -42,8 +42,6 @@ Add the fields below to the JSON objects passed to the listed flags in your exis
 - **Runtime Guard** derives its report and KV dump directories from the configuration file location. With the base settings above, reports go under `/root/ascend/log/runtime/report` and KV dumps under its `kv_cache` subdirectory when capture is enabled. Omit both directory overrides unless you need a different layout.
 
 After starting with the recommended settings, look for `vllm_ascend_*.log` in the service log directory and for the Runtime Guard JSON file. Diagnostic files appear when the corresponding feature produces them, for example after a Watchdog timeout, a Runtime Guard report action, or the end of a profiling capture.
-
-For separate log collection with MindIE-PyMotor's `show_log.sh`, set `out_path = /root/ascend/log/motor-collected` in `[LogSetting]` in `examples/deployer/log_collect/log_config.ini`. The path is local to the collector. See the [MindIE-PyMotor deployment guide](https://github.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/user_guide/service_deployment/pd_disaggregation_deployment.md).
 
 ## MemCache and MemFabric logs
 
