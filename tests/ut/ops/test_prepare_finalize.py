@@ -58,6 +58,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_context = MagicMock()
         mock_context.mc2_mask = torch.tensor([1, 0, 1])
         mock_context.padded_num_tokens = 4
+        mock_context.use_mega_moe = False
         mock_get_forward_context.return_value = mock_context
 
         layer = PrepareAndFinalizeWithMC2(self.moe_config)
@@ -93,6 +94,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
             context = MagicMock()
             context.mc2_mask = torch.arange(padded_num_tokens) < num_tokens
             context.padded_num_tokens = padded_num_tokens
+            context.use_mega_moe = False
             mock_context.return_value = context
             for rank in range(4):
                 with self.subTest(num_tokens=num_tokens, rank=rank):
@@ -137,6 +139,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         mock_context = MagicMock()
         mock_context.mc2_mask = torch.tensor([1, 0, 1, 0])
         mock_context.padded_num_tokens = 4
+        mock_context.use_mega_moe = False
         mock_get_forward_context.return_value = mock_context
 
         layer = PrepareAndFinalizeWithMC2(self.moe_config)
@@ -173,6 +176,9 @@ class TestPrepareAndFinalize(unittest.TestCase):
         context.padded_num_tokens = padded_num_tokens
         context.in_profile_run = False
         context.is_padding = is_padding
+        # These fixtures exercise the ordinary MC2 runner-padding path, not the
+        # MegaMoe PCP mask branch.
+        context.use_mega_moe = False
         context.additional_kwargs = {}
         patches = (
             patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=context),
@@ -255,6 +261,31 @@ class TestPrepareAndFinalize(unittest.TestCase):
                 self.assertEqual(prepared.mc2_mask.tolist(), [True, True, True, False])
         prepared = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(3, 8), torch.randn(3, 2))
         self.assertEqual(prepared.mc2_mask.tolist(), [True, False, False, False])
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    def test_mc2_megamoe_pcp_mask_follows_internal_padding(self, mock_tp_rank, mock_tp_size):
+        # PCP8 MegaMoe forwards can carry padding inside the local row range;
+        # the mask follows is_padding and is padded to the PCP-wide length.
+        is_padding = torch.tensor([False, False, True, False])
+        context = MagicMock()
+        context.mc2_mask = torch.ones(6, dtype=torch.bool)
+        context.padded_num_tokens = 6
+        context.max_tokens_across_pcp = 4
+        context.is_padding = is_padding
+        with (
+            patch("vllm_ascend.ascend_forward_context.get_forward_context", return_value=context),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context", return_value=context),
+        ):
+            context.use_mega_moe = True
+            prepared = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(4, 8), torch.randn(4, 2))
+            self.assertEqual(prepared.mc2_mask.tolist(), [True, True, False, True, False, False])
+
+            # Without the MegaMoe PCP gate the ordinary mc2_mask is retained.
+            context.use_mega_moe = False
+            context.additional_kwargs.clear()
+            ordinary = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(4, 8), torch.randn(4, 2))
+            self.assertTrue(ordinary.mc2_mask.all())
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)

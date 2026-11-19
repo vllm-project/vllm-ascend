@@ -100,7 +100,42 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def is_draft_model(vllm_config: VllmConfig) -> bool:
+    """Whether ``vllm_config`` belongs to a nested speculative draft model.
+
+    The internal DSpark draft is rebuilt through ``VllmConfig.replace()``
+    (forcing PCP=1) before its architecture is rewritten to
+    DeepseekV41DSparkModel, so architecture/runner_type cannot always
+    identify it. A validated A2 MegaMoe target is PCP8, so a PCP1 config seen
+    while fused MC2 is active can only be that draft; standalone PCP1
+    deployments fail MegaMoe eligibility and keep ``enable_fused_mc2=0``, so
+    they never reach the heuristic.
+    """
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return False
+    architectures = getattr(model_config, "architectures", None)
+    if not isinstance(architectures, (list, tuple)):
+        architectures = [getattr(model_config, "architecture", None)]
+    if getattr(model_config, "runner_type", None) == "draft" or "DeepseekV41DSparkModel" in architectures:
+        return True
+    parallel = getattr(vllm_config, "parallel_config", None)
+    return (
+        parallel is not None
+        and getattr(parallel, "prefill_context_parallel_size", 1) == 1
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
+    )
+
+
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # A2 shares one worker between the PCP8 MegaMoe target and the nested
+    # PCP1 DSpark draft; the draft keeps its ordinary MC2/GMM route.
+    if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY and is_draft_model(
+        vllm_config
+    ):
+        return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
@@ -346,6 +381,8 @@ def _select_capacity_and_expert_density_moe_comm_method(
     is_draft_model: bool = False,
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
