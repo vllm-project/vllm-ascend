@@ -24,7 +24,7 @@
   },
   "reference_runner": "Model Runner V2 on main + the Qwen3.6 compatibility patch",
   "reference_release": "model runner V2, `main` + PR #21745 patch (recorded on a nightly-main image)",
-  "note": "Recorded with Model Runner V2 on a main-based image with the compatibility patch applied (fp32 dequant scale + fp32 mamba state). Model Runner V1 no longer exists on main, so a main-native recording is the only reference this suite can reproduce. The Model Runner V1 parity evidence is separate and lives on the v0.30.0 release: 13 cross-runner pairs (35B-A3B x4 + 27B x9), all token-identical, max same-token logprob delta 1.55e-06. On the eager/TP=1/24-token case the two stacks agree for 19 tokens and then flip a near-tie (delta 0.1297, inside the 0.1378 decode tolerance), which is why a v0.30.0-recorded golden cannot be asserted on main.",
+  "note": "Recorded with Model Runner V2 on a main-based image with the compatibility patch applied (fp32 dequant scale + fp32 mamba state). Model Runner V1 no longer exists on main, so a main-native recording is the only reference this suite can reproduce. The Model Runner V1 parity evidence is separate and lives on the v0.30.0 release: 13 cross-runner pairs (35B-A3B x4 + 27B x9), all token-identical, max same-token logprob delta 1.55e-06. On the eager/TP=1/24-token case the two stacks agree for 19 tokens and then flip a near-tie; the same-token delta at that step changed with the main build (0.1297 on the 2026-11-13 nightly, inside the 0.1378 decode tolerance, and 0.2296 on the 2026-11-19 nightly with vLLM 0.33, outside it), which is why a v0.30.0-recorded golden cannot be asserted on main.",
   "enable_prefix_caching": true,
   "max_model_len": 8192
  },
