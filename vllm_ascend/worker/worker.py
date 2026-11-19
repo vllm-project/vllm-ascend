@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import torch
@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -309,9 +310,6 @@ class NPUWorker(GPUWorker):
 
     def _init_workspace_and_model_runner(self) -> None:
         raise NotImplementedError("GPUWorker._init_workspace_and_model_runner is not validated on Ascend.")
-
-    def _make_model_runner(self) -> NoReturn:
-        raise NotImplementedError("GPUWorker._make_model_runner is not validated on Ascend.")
 
     def handle_ft_command(self, ft_request):
         raise NotImplementedError("GPUWorker.handle_ft_command is not validated on Ascend.")
@@ -735,22 +733,24 @@ class NPUWorker(GPUWorker):
         # Initialize workspace manager
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
-        # Init ModelRunner here, so that we have access to self.device.
+        self.model_runner = self._make_model_runner()
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    def _make_model_runner(self) -> "GPUModelRunner":
+        """Construct this platform's model runner; subclasses override to select their own."""
         if self.vllm_config.is_mm_encoder_only:
             from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
             from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
             with torch_cuda_wrapper():
-                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-        else:
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+                return MMEncoderModelRunner(self.vllm_config, self.device)
+        from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
-            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
+        return NPUModelRunner(self.vllm_config, self.device)
 
     def _apply_kv_offload_decode_memory_constraints(
         self,
