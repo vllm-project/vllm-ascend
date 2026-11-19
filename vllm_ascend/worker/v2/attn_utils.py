@@ -69,7 +69,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     requires_contiguous_pa_kv_cache,
@@ -1433,7 +1434,7 @@ def create_cache_component_views(
     base = raw_tensor.storage_offset() * raw_tensor.element_size()
     offset = base
     views = []
-    for shape, dtype in zip(cache_shapes, cache_dtypes):
+    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
         itemsize = get_dtype_size(dtype)
         if offset % itemsize or block_stride % itemsize:
             raise ValueError(f"Cache component placement is not aligned to {dtype}.")
@@ -1443,7 +1444,7 @@ def create_cache_component_views(
         dense_strides = tuple(math.prod(shape[dim + 1 :]) for dim in range(len(shape)))
         views.append(
             torch.as_strided(
-                raw_tensor.view(dtype),
+                raw_tensor[:itemsize].view(dtype),
                 shape,
                 (block_stride // itemsize, *dense_strides[1:]),
                 storage_offset=offset // itemsize,
@@ -1515,8 +1516,8 @@ def create_kv_cache_runtime_views(
             # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
             # views with the content dimension expressed in dtype elements.
             cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes, strict=True)
+                (blocks, tokens, heads, *content[:-1], content[-1] // get_dtype_size(dtype))
+                for (blocks, heads, tokens, *content), dtype in zip(shapes, dtypes, strict=True)
             ]
             components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
             format_views = getattr(group.backend, "format_runtime_views", None)
@@ -1610,6 +1611,28 @@ def _uses_k3_unified_cache(
     return True
 
 
+def _uses_glm_component_views(vllm_config, kv_cache_config, attn_layers, kernel_block_sizes) -> bool:
+    """Keep Flash, distributed/offloaded caches and block splitting on their existing path."""
+    if getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None) != "glm_moe_dsa":
+        return False
+    parallel = vllm_config.parallel_config
+    specs = _get_layer_kv_cache_specs(kv_cache_config)
+    return (
+        enable_sfa(vllm_config)
+        and parallel.prefill_context_parallel_size == parallel.decode_context_parallel_size == 1
+        and vllm_config.kv_transfer_config is None
+        and KVPPConfig.from_vllm_config(vllm_config).size == 1
+        and not get_ascend_config().sparse_kv_offload_config.enabled
+        and all(attn_layers[name].get_attn_backend() in (AscendSFABackend, AscendSFAIndexerBackend) for name in specs)
+        and all(
+            specs[name].block_size == kernel_block_sizes[group_id]
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            for name in group.layer_names
+        )
+        and all(not descriptor.host_resident for descriptor in kv_cache_config.kv_cache_tensors)
+    )
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1639,6 +1662,9 @@ def allocate_kv_cache_main(
         for layer_name, layer in attn_layers.items()
         if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
     }
+
+    if _uses_glm_component_views(vllm_config, kv_cache_config, attn_layers, kernel_block_sizes):
+        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
 
     raw_tensors = _allocate_kv_cache(
         kv_cache_config,

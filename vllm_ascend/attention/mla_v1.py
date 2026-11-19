@@ -235,6 +235,8 @@ class AscendMLAAttention(MLAAttention):
             )
         values.update(
             num_heads=storage_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
