@@ -1786,4 +1786,6 @@
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/68112
 #    Future Plan:
-#       Remove when all supported vLLM versions include the upstream fix.
+#       Remove only after every supported vLLM pin includes the upstream fix
+#       (or an equivalent backport), and boundary/JSON regressions pass without
+#       this wrapper. Verify the target-image NPU/PD path before removal.

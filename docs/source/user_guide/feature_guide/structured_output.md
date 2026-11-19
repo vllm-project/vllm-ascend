@@ -36,3 +36,14 @@ The reported 100 HTTP replays and ten multi-turn requests used a downstream
 adapter with direct decode; they do not validate the full prefill/decode KV
 transfer path or this branch's platform-patch startup. Branch-specific CPU
 compatibility results and remaining accelerator coverage are listed in the PR.
+
+The backport requires request-scoped reasoner and constraint-boundary APIs.
+On an unsupported vLLM API it leaves the manager unchanged and logs that the
+Kimi first-boundary fix is not installed; this does not provide the fix on
+older versions. Use a supported vLLM dependency for Kimi structured output.
+
+Remove the compatibility patch only after every supported vLLM dependency
+contains the upstream fix or an equivalent backport, and the boundary and JSON
+regressions pass with the wrapper removed. Validate platform startup and the
+target-image NPU prefill/decode path separately; CPU tests alone do not cover
+that path.
