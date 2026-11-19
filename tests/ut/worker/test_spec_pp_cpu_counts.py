@@ -7,6 +7,7 @@ import __future__
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -294,9 +295,17 @@ def test_fa3_draft_cpu_sync_policy(fa3_runner, case):
 def test_fa3_skips_cpu_snapshot_and_wait(fa3_runner):
     runner = fa3_runner
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/model_runner.py"
-    cls = next(node for node in ast.parse(source.read_text()).body if getattr(node, "name", None) == "NPUModelRunner")
-    copy = next(node for node in cls.body if getattr(node, "name", None) == "_copy_num_computed_tokens_to_cpu")
-    namespace = {}
+    cls = next(
+        node
+        for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner"
+    )
+    copy = next(
+        node
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_copy_num_computed_tokens_to_cpu"
+    )
+    namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=[copy], type_ignores=[]), str(source), "exec"), namespace)
     # No stream/buffer dependencies are supplied: taking the D2H path fails.
     namespace[copy.name](runner)
