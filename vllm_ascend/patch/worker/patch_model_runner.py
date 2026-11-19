@@ -159,7 +159,7 @@ def initialize_kv_cache(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
-        use_v2_model_runner=True,
+        **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
         kv_cache_config=self.kv_cache_config,
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,

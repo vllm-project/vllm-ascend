@@ -27,6 +27,7 @@ from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -65,7 +66,7 @@ def test_deepseek_mtp(
     speculative_config = {
         "method": "mtp",
         "num_speculative_tokens": num_speculative_tokens,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        **({"disable_padded_drafter_batch": disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}),
     }
     if dynamic_num_speculative_tokens is not None:
         speculative_config["num_speculative_tokens_per_batch_size"] = [

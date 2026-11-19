@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
+from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -96,6 +97,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
+from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.models.host_offload import track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
@@ -175,6 +177,12 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+            offload_config = vllm_config.offload_config
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group

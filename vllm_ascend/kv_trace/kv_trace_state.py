@@ -7,6 +7,8 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from vllm_ascend.utils import vllm_version_is
+
 BlockTable = tuple[tuple[int, ...], ...]
 
 
@@ -38,7 +40,8 @@ class KVCacheState:
                 self.emit("kv_trace.violation", operation="bind", reason="cached_request_array_length_mismatch")
             for request, added, start in zip(cached.req_ids, cached.new_block_ids, cached.num_computed_tokens):
                 computed[request] = start
-                if request in cached.resumed_req_ids:
+                # Main resends resumed requests through scheduled_new_reqs.
+                if vllm_version_is("0.33.0") and request in cached.resumed_req_ids:
                     self.requests[request] = tuple(tuple(group) for group in added) if added is not None else ()
                 elif added is not None:
                     old = self.requests.get(request)

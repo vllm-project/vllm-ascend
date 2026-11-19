@@ -47,7 +47,7 @@ from vllm_ascend.compilation.updatable_graph import (
     UpdatableGraph,
 )
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
-from vllm_ascend.utils import use_updatable_graph
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -217,6 +217,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
+        legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
         try:
             with communicator_switch():
                 return super().capture(
@@ -228,7 +229,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     attn_groups,
                     kv_cache_config,
                     pcp_manager=pcp_manager,
-                    has_lora=has_lora,
+                    **legacy_kwargs,
                     use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                     lora_capture_hook=lora_capture_hook,
                     progress_bar_desc=progress_bar_desc,
