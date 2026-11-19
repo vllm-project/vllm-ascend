@@ -593,6 +593,33 @@ def test_shared_exchange_uses_exact_payload_and_confirms():
     old.assert_not_called()
 
 
+@pytest.mark.parametrize("peer_error", [None, "peer cannot attach"])
+def test_rank_local_shared_control_has_no_kv_coordinator(peer_error):
+    manager = make_manager()
+    manager.tp_size, manager.tp_rank = 2, 0
+    manager.tp_group = SimpleNamespace(
+        cpu_group=object(), broadcast_object=MagicMock(side_effect=lambda name, src: name)
+    )
+    manager.sparse_kv_offload_config = SimpleNamespace(selective_offload=True)
+
+    def gather(output, value, group):
+        output[:] = [value, peer_error]
+
+    with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
+        manager._open_rank_local_shared_control()
+    storage = manager._selective_native_exchange_storage()
+    assert not manager._selective_native_tp_groups
+    if peer_error:
+        assert storage is None
+    else:
+        assert storage.device.type == "cpu"
+        assert storage[:56].count_nonzero().item() == 0
+        del storage
+        with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
+            manager.release_selective_native_graphs(close_tp=True)
+        assert manager._selective_native_exchange_storage() is None
+
+
 def test_shared_exchange_oversize_uses_existing_collective():
     manager = make_manager()
     manager.tp_size, manager.tp_rank = 2, 0
@@ -612,6 +639,48 @@ def test_shared_exchange_oversize_uses_existing_collective():
     ):
         assert manager.selective_native_all_gather([1, 2], "pages") == [[1, 2], [1, 2]]
     confirm.assert_called_once_with(storage, 0, 2, 1)
+
+
+@pytest.mark.parametrize("peer_value", [("peer", (1, 2)), ("x" * 2048, ())])
+def test_rank_local_exchange_uses_one_fixed_collective_and_falls_back_for_large_peer(peer_value):
+    local, peer = make_manager(), make_manager()
+    for rank, manager in enumerate((local, peer)):
+        manager.tp_size, manager.tp_rank = 2, rank
+        manager.tp_group = SimpleNamespace(cpu_group=object())
+        manager.sparse_kv_offload_config = SimpleNamespace(selective_offload=True)
+    phase = "page events"
+    local_value = (None, ())
+
+    def object_exchange(output, value, group):
+        output[:] = [(phase, local_value), (phase, peer_value)]
+
+    object_gather = MagicMock(side_effect=object_exchange)
+    peer_packets = []
+
+    def capture(output, tensor, group):
+        peer_packets.append(tensor.clone())
+        for target in output:
+            target.copy_(tensor)
+
+    with (
+        patch.object(torch.distributed, "all_gather", side_effect=capture),
+        patch.object(torch.distributed, "all_gather_object", object_gather),
+    ):
+        peer.selective_native_all_gather(peer_value, phase)
+    assert len(peer_packets) == 1
+    object_gather.reset_mock()
+
+    def gather(output, tensor, group):
+        output[0].copy_(tensor)
+        output[1].copy_(peer_packets[0])
+
+    with (
+        patch.object(torch.distributed, "all_gather", side_effect=gather) as fixed,
+        patch.object(torch.distributed, "all_gather_object", object_gather),
+    ):
+        assert local.selective_native_all_gather(local_value, phase) == [local_value, peer_value]
+    fixed.assert_called_once()
+    assert object_gather.call_count == int(len(peer_value[0]) > 512)
 
 
 def test_shared_failure_marks_exchange_and_every_group_control():

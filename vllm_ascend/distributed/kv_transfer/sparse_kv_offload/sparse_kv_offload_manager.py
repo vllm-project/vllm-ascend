@@ -53,6 +53,8 @@ OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 OFFLOAD_STORE_PORT_BASE = 8500
+SELECTIVE_TP_CONTROL_BYTES = 512
+SELECTIVE_TP_EXCHANGE_SLOT_BYTES = (1 << 20) + 8
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -174,7 +176,7 @@ class SelectiveNativeTPCoordinator:
             banks * rows * transfer_width * v_bytes,
         ]
         if shared_exchange:
-            sizes.append((1 + 3 * world) * 8 + world * ((1 << 20) + 8))
+            sizes.append((1 + 3 * world) * 8 + world * SELECTIVE_TP_EXCHANGE_SLOT_BYTES)
         offsets, total = [], 0
         for size in sizes:
             total = (total + 63) // 64 * 64
@@ -1760,6 +1762,8 @@ class SparseKVOffloadManager:
                 )
                 if any(value[0] is not None or value[1] != signature for value in gathered):
                     raise RuntimeError("Native selective TP group definitions differ across ranks")
+                if use_shared_exchange and self.local_host_pool:
+                    self._open_rank_local_shared_control()
                 for leader, names in [] if self.local_host_pool else groups:
                     layer_ids = tuple(self._get_offload_layer_id(name) for name in names)
                     if not layer_ids:
@@ -2000,7 +2004,51 @@ class SparseKVOffloadManager:
         )
         return tuple(str(getattr(desc, field, None)) for field in fields)
 
+    def _open_rank_local_shared_control(self) -> None:
+        header_bytes = (1 + 3 * self.tp_size) * 8
+        size = header_bytes + self.tp_size * SELECTIVE_TP_EXCHANGE_SLOT_BYTES
+        mapping = storage = None
+        try:
+            name = None
+            if self.tp_rank == 0:
+                try:
+                    mapping = shared_memory.SharedMemory(create=True, size=size)
+                    mapping.buf[:header_bytes] = bytes(header_bytes)
+                    name = mapping.name
+                except OSError as error:
+                    logger.warning("Cannot create selective TP control mapping: %s", error)
+            name = self.tp_group.broadcast_object(name, src=0)
+            if name is None:
+                return
+            local_error = None
+            try:
+                if self.tp_rank != 0:
+                    mapping = shared_memory.SharedMemory(name=name)
+                storage = torch.frombuffer(mapping.buf, dtype=torch.uint8, count=size)
+            except Exception as error:
+                local_error = str(error)
+            errors = [None] * self.tp_size
+            torch.distributed.all_gather_object(errors, local_error, group=self.tp_group.cpu_group)
+            if any(error is not None for error in errors):
+                logger.info("Selective TP shared control unavailable; using tensor collectives: %s", errors)
+                return
+            self._selective_native_shared_control = (mapping, storage)
+            logger.info("Selective TP using CPU-only shared control (%d bytes)", size)
+        finally:
+            if mapping is not None:
+                if self.tp_rank == 0:
+                    try:
+                        mapping.unlink()
+                    except OSError as error:
+                        logger.warning("Cannot unlink selective TP control mapping: %s", error)
+                if getattr(self, "_selective_native_shared_control", None) is None:
+                    storage = None
+                    mapping.close()
+
     def _selective_native_exchange_storage(self):
+        control = getattr(self, "_selective_native_shared_control", None)
+        if control is not None:
+            return control[1]
         groups = getattr(self, "_selective_native_tp_groups", {})
         if not getattr(self, "_selective_native_shared_exchange_requested", False) or not groups:
             return None
@@ -2023,9 +2071,41 @@ class SparseKVOffloadManager:
             except Exception:
                 logger.exception("Failed to publish selective TP failure; peer relies on timeout")
 
+    def _gather_rank_local_control(self, value, phase):
+        buffers = getattr(self, "_selective_tp_control_buffers", None)
+        if buffers is None:
+            buffers = torch.empty((self.tp_size + 1, SELECTIVE_TP_CONTROL_BYTES + 2), dtype=torch.uint8, device="cpu")
+            self._selective_tp_control_buffers = buffers
+        send, *received = buffers.unbind(0)
+        packet = memoryview(send.numpy())
+        packet[:] = bytes(len(packet))
+        payload = pickle.dumps((phase, value), protocol=5)
+        if len(payload) <= SELECTIVE_TP_CONTROL_BYTES:
+            packet[:2] = len(payload).to_bytes(2, "little")
+            packet[2 : 2 + len(payload)] = payload
+        torch.distributed.all_gather(received, send, group=self.tp_group.cpu_group)
+
+        packets = [memoryview(tensor.numpy()) for tensor in received]
+        sizes = [int.from_bytes(packet[:2], "little") for packet in packets]
+        if 0 in sizes:
+            # A zero header makes every rank take the same variable-size fallback.
+            gathered = [None] * self.tp_size
+            torch.distributed.all_gather_object(gathered, (phase, value), group=self.tp_group.cpu_group)
+        else:
+            gathered = [pickle.loads(packet[2 : 2 + size]) for packet, size in zip(packets, sizes)]
+        if any(item[0] != phase for item in gathered):
+            raise RuntimeError("Native selective TP exchange phases differ across ranks")
+        return [item[1] for item in gathered]
+
     def selective_native_all_gather(self, value, phase):
         storage = self._selective_native_exchange_storage()
         if storage is None:
+            if self.local_host_pool:
+                try:
+                    return self._gather_rank_local_control(value, phase)
+                except Exception:
+                    self.mark_selective_native_failure()
+                    raise
             gathered = [None] * self.tp_size
             torch.distributed.all_gather_object(gathered, value, group=self.tp_group.cpu_group)
             return gathered
@@ -2233,6 +2313,14 @@ class SparseKVOffloadManager:
         if close_tp and self.tp_size > 1:
             close_error = None
             try:
+                control = getattr(self, "_selective_native_shared_control", None)
+                if control is not None:
+                    mapping = control[0]
+                    self._selective_native_shared_control = control = None
+                    mapping.close()
+                    if self.tp_rank == 0:
+                        with contextlib.suppress(FileNotFoundError):
+                            mapping.unlink()
                 for coordinator in self._selective_native_tp_groups.values():
                     coordinator.close()
             except Exception as error:
