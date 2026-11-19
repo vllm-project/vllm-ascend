@@ -8,6 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -29,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm.logger import init_logger
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -37,10 +39,15 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.worker.device_metadata import (
@@ -87,6 +94,11 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
         return config.get(name, default)
     return getattr(config, name, default)
 
+
+logger = init_logger(__name__)
+
+_MLA_PROLOG_LOGGED = False
+_MLA_PROLOG_GATE_LOG_COUNTS: dict[str, int] = {}
 
 @dataclass
 class AscendDSAV41Metadata(AttentionMetadata):
@@ -347,6 +359,148 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
+    def _fused_mla_prolog_available(
+        self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata,
+        cos, sin, kv_cos, kv_sin,
+    ):
+        """Gate for the fused DeepSeek-V4.1 MLA prologue.
+
+        The fused operator performs wq_a/wq_b/wkv projections, both RMSNorms,
+        query dynamic quantization, partial RoPE and the SWA cache scatter in
+        one launch. It therefore only covers the replicated (enable_dsa_cp)
+        layout, the bf16 non-packed SWA cache and the case where query and
+        cache tokens are the same slice with one rope table.
+        """
+        global _MLA_PROLOG_GATE_LOG_COUNTS
+
+        def unavailable(reason):
+            key = reason.split("(")[0].strip()
+            counts = _MLA_PROLOG_GATE_LOG_COUNTS
+            n = counts.get(key, 0)
+            if n < 2:
+                logger.warning(
+                    "DeepSeek-V4.1 fused MLA prologue disabled: %s", reason
+                )
+                counts[key] = n + 1
+            return False
+
+        if os.getenv("VLLM_ASCEND_DSV41_MLA_PROLOG", "0") != "1":
+            return False
+        capturing = torch.npu.is_current_stream_capturing()
+        if capturing and os.getenv("VLLM_ASCEND_DSV41_MLA_PROLOG_GRAPH", "0") != "1":
+            return unavailable("cudagraph capture in progress")
+        if (
+            cache_hidden.dtype != query_hidden.dtype
+            or not cache_hidden.is_contiguous()
+            or not query_hidden.is_contiguous()
+            or cache_hidden.dim() != 2
+        ):
+            return unavailable("hidden states are not contiguous BF16 2D rows")
+        cache_tokens = cache_hidden.shape[0]
+        if cache_tokens <= 0 or cache_tokens > 4096:
+            return unavailable(
+                f"token count {cache_tokens} outside the fused kernel range [1, 4096]"
+            )
+        row_bytes = cache_hidden.stride(0) * cache_hidden.element_size()
+        if row_bytes <= 0:
+            return unavailable("invalid hidden row stride")
+        offset = query_hidden.data_ptr() - cache_hidden.data_ptr()
+        if offset < 0 or offset % row_bytes:
+            return unavailable(
+                "query tokens are not a row slice of the cache tokens "
+                f"(offset {offset} row_bytes {row_bytes})"
+            )
+        start = offset // row_bytes
+        if start + query_hidden.shape[0] > cache_hidden.shape[0]:
+            return unavailable(
+                "query token slice exceeds the cache token slice "
+                f"(start {start} query {query_hidden.shape[0]} cache {cache_hidden.shape[0]})"
+            )
+        if query_hidden.shape[1:] != cache_hidden.shape[1:]:
+            return unavailable("query/cache hidden width differs")
+        rope_elems = attn.rope_head_dim
+        if kv_cos.numel() != cache_hidden.shape[0] * rope_elems:
+            return unavailable("cache rope table length differs from token count")
+        if cos.numel() != query_hidden.shape[0] * rope_elems:
+            return unavailable("query rope table length differs from token count")
+        if (
+            cos.data_ptr()
+            != kv_cos.data_ptr() + start * rope_elems * kv_cos.element_size()
+            or sin.data_ptr()
+            != kv_sin.data_ptr() + start * rope_elems * kv_sin.element_size()
+        ):
+            return unavailable("query rope table is not the cache rope slice")
+        # Context-parallel decode/prefill: each rank projects its local query
+        # slice but publishes KV for the full replicated cache batch; the checks
+        # above already prove both slices are row-aligned.
+        # The fused prologue replaces the q/kv multistream overlap path, so an
+        # enabled overlap setting does not block it.
+        if not get_current_hardware_profile().supports(HardwareCapability.DSV41_MLA_PROLOG):
+            return unavailable("hardware capability missing")
+        if not enable_custom_op():
+            return unavailable("custom ops disabled")
+        if getattr(attn, "packed_cache_ops", None) is not None:
+            return unavailable("packed cache ops are enabled")
+        wq_b = getattr(attn, "wq_b", None)
+        weight = getattr(wq_b, "weight", None)
+        weight_scale = getattr(wq_b, "weight_scale", None)
+        if weight is None or weight_scale is None:
+            return unavailable("wq_b is not a quantized linear")
+        # weight_nz_mode=2 converts bf16 wq_a/wkv weights to FRACTAL_NZ; the
+        # fused kernel only understands ND bf16, so fall back instead of
+        # silently computing wrong q/kv.
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if get_ascend_config().weight_nz_mode == 2:
+                return unavailable("bf16 weights are NZ-packed (weight_nz_mode=2)")
+        except Exception:
+            pass
+        expected_wq_b = (attn.q_lora_rank, attn.n_heads * attn.head_dim)
+        if weight.dtype != torch.int8 or tuple(weight.shape) != expected_wq_b:
+            return unavailable(f"wq_b weight is {weight.dtype} {tuple(weight.shape)}")
+        if weight_scale.numel() != expected_wq_b[1]:
+            return unavailable("wq_b weight_scale size mismatch")
+        if attn.q_norm.variance_epsilon != attn.kv_norm.variance_epsilon:
+            return unavailable("q_norm/kv_norm epsilon differ")
+        swa = cache_metadata.swa
+        if getattr(swa, "flat_slot_mapping", None) is None:
+            return unavailable("flat slot mapping is missing")
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        if cache.dtype != torch.bfloat16 or cache.stride(-1) != 1:
+            return unavailable(
+                f"swa cache is {cache.dtype} inner_stride={cache.stride(-1)}"
+            )
+        if cache.dim() == 4:
+            ok = cache.size(1) > 0 and cache.size(2) == 1 and cache.size(3) == attn.head_dim
+        else:
+            ok = cache.dim() == 3 and cache.size(1) > 0 and cache.size(2) == attn.head_dim
+        if not ok:
+            return unavailable(f"swa cache shape {tuple(cache.shape)}")
+        return True
+
+    def _fused_mla_prolog(self, attn, hidden_states, swa_metadata, cos, sin):
+        global _MLA_PROLOG_LOGGED
+        if not _MLA_PROLOG_LOGGED:
+            logger.info("DeepSeek-V4.1 fused MLA prologue active (dsv41_mla_prolog).")
+            _MLA_PROLOG_LOGGED = True
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        slots = swa_metadata.flat_slot_mapping[: hidden_states.shape[0]]
+        return torch.ops._C_ascend.dsv41_mla_prolog(
+            hidden_states,
+            attn.wq_a.weight,
+            attn.q_norm.weight,
+            attn.wq_b.weight,
+            attn.wq_b.weight_scale,
+            attn.wkv.weight,
+            attn.kv_norm.weight,
+            cos,
+            sin,
+            slots,
+            cache,
+            attn.q_norm.variance_epsilon,
+        )
+
     def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
         query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
         cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
@@ -355,7 +509,26 @@ class AscendDSAV41Impl:
             return None, None, None
         cos, sin = query_metadata.rope(attn.rotary_emb.layername, query_hidden.shape[0])
         kv_cos, kv_sin = cache_metadata.rope(attn.rotary_emb.layername, cache_hidden.shape[0])
-        if self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
+        fused_mla_prolog = self._fused_mla_prolog_available(
+            attn, query_hidden, cache_hidden, query_metadata, cache_metadata,
+            cos, sin, kv_cos, kv_sin,
+        )
+        if fused_mla_prolog:
+            q_all, qr_all = self._fused_mla_prolog(
+                attn, cache_hidden, cache_metadata.swa, kv_cos, kv_sin
+            )
+            if query_hidden.shape[0] != cache_hidden.shape[0]:
+                row_bytes = (
+                    cache_hidden.stride(0) * cache_hidden.element_size()
+                )
+                start = (
+                    query_hidden.data_ptr() - cache_hidden.data_ptr()
+                ) // row_bytes
+                q = q_all[start : start + query_hidden.shape[0]]
+                qr = qr_all[start : start + query_hidden.shape[0]]
+            else:
+                q, qr = q_all, qr_all
+        elif self.multistream_dsv4_dsa_overlap and cache_hidden.shape[0]:
             q, qr = self.multistream_preprocess(
                 attn,
                 query_hidden,
@@ -371,7 +544,8 @@ class AscendDSAV41Impl:
             if cache_hidden.shape[0]:
                 kv = self._project_kv(attn, cache_hidden, kv_cos, kv_sin)
                 self._write_swa_cache(attn, cache_metadata.swa, kv)
-        self._apply_rotary(attn, q, cos, sin)
+        if not fused_mla_prolog:
+            self._apply_rotary(attn, q, cos, sin)
         # Consume local Query RoPE before compression can reuse source tables.
         prepared_indexer = self._prepare_indexer_inputs(attn, query_hidden, qr, cos, sin, query_metadata)
         if self.role.is_kv_source and cache_hidden.shape[0]:
