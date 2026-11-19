@@ -229,7 +229,10 @@ class KVPoolScheduler:
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        self.pp_rank = (
+            vllm_config.parallel_config.rank
+            // (self.tp_size * vllm_config.parallel_config.prefill_context_parallel_size)
+        ) % self.pp_size
         # Global layer offset for layerwise pool keys under PP (matches the
         # pool worker's pp_layer_offset).
         self.pp_layer_offset = 0
