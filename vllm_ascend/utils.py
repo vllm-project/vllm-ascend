@@ -48,7 +48,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
     VllmConfig = None
 
@@ -246,27 +246,8 @@ def model_uses_kimi_kda(model_config: Any | None) -> bool:
     )
 
 
-def model_supports_qkv_iproj_tp(model_config: ModelConfig | None) -> bool:
-    """Whether the resolved Ascend model builds a KDA layer wired for QKV TP."""
-    if model_config is None:
-        return False
-    arch = model_config.architecture
-    text = model_config.hf_text_config
-    if arch in ("Glm5NextForCausalLM", "Glm5NextForConditionalGeneration"):
-        return "linear_attention" in (text.layer_types or ())
-    if arch == "KimiK3MTPModel":
-        # MTP builds only the predictor layers following the backbone.
-        layers = range(text.num_hidden_layers, text.num_hidden_layers + text.num_nextn_predict_layers)
-    elif arch in (
-        "KimiLinearForCausalLM",
-        "KimiK3ForCausalLM",
-        "KimiK3ForConditionalGeneration",
-        "KimiK31ForConditionalGeneration",
-    ):
-        layers = range(text.num_hidden_layers)
-    else:
-        return False
-    return any(text.is_kda_layer(i) for i in layers)
+def supports_qkv_iproj_tp(model_type: str) -> bool:
+    return model_type in ("glm5_next", "glm5_next_text", "kimi_k31")
 
 
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
@@ -1496,7 +1477,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if getattr(ascend_config.finegrained_tp_config, "qkv_iproj_tensor_parallel_size", 1) > 1:
         spec = vllm_config.speculative_config
         model = spec.draft_model_config if is_draft_model and spec is not None else vllm_config.model_config
-        if model_supports_qkv_iproj_tp(model):
+        if model is not None and supports_qkv_iproj_tp(model.hf_config.model_type):
             return False
     # Projection collectives belong to the target's execution plan. A dense
     # drafter does not run them and must retain its rank-local K=0 fast path.

@@ -1,0 +1,11 @@
+pr: 21624
+entries:
+  - category: feature
+    text: >-
+      Kimi-K3.1 deployments with separate prefill and decode nodes can reduce weight memory
+      per NPU by sharding selected weights across data-parallel ranks on V2 full-graph decode nodes with TP=1.
+      For checkpoints with mixed QKV/BF16 gate projections and full-rank output gates, set
+      `qkv_iproj_tensor_parallel_size` or `gproj_tensor_parallel_size` under `finegrained_tp_config`
+      in `--additional-config` to a supported size greater than 1.
+      The `shared_expert_tensor_parallel_size` setting independently shards shared experts, and all three
+      settings default to 1 (disabled).

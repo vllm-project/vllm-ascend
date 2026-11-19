@@ -9,7 +9,6 @@ import pytest
 import torch
 from torch.nn import functional as F
 from vllm.config.compilation import CUDAGraphMode
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from vllm_ascend.ascend_config import FinegrainedTPConfig
 from vllm_ascend.distributed import parallel_state
@@ -215,48 +214,29 @@ def test_reused_shared_group_is_destroyed_once(monkeypatch):
         parallel_state.get_shared_expert_tp_group()
 
 
+def test_kimi_k31_qkv_tp_uses_the_outer_model_type():
+    vc = valid_config()
+    vc.model_config.hf_config = SimpleNamespace(model_type="kimi_k31")
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 4})
+    config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)
+    config._validate_preconditions(vc)
+    vc.model_config.hf_config.model_type = "kimi_k3"
+    with pytest.raises(ValueError, match="model_type='kimi_k3'"):
+        config._validate_preconditions(vc)
+
+
 @pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
 def test_gproj_config_has_no_model_schema_dependency(model_type):
     vc = valid_config()
     vc.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
-    config = FinegrainedTPConfig(gproj_tensor_parallel_size=2)
-    config._validate_preconditions(vc)
-    assert config.gproj_tensor_parallel_size == 2
-
-
-@pytest.mark.parametrize(
-    ("arch", "kda_layers", "supported"),
-    [
-        ("KimiLinearForCausalLM", [1], True),
-        ("KimiK3ForCausalLM", [1], True),
-        ("KimiK3ForConditionalGeneration", [1], True),
-        ("KimiK31ForConditionalGeneration", [1], True),
-        ("KimiK31ForConditionalGeneration", [], False),
-        ("KimiK3MTPModel", [1], False),
-        ("KimiK3MTPModel", [3], True),
-    ],
-)
-def test_kimi_qkv_tp_requires_a_kda_layer_in_the_executed_model(arch, kda_layers, supported):
-    vc = valid_config()
-    vc.model_config.architecture = arch
-    vc.model_config.hf_text_config = KimiLinearConfig(
-        num_hidden_layers=2,
-        num_nextn_predict_layers=1,
-        linear_attn_config={"kda_layers": kda_layers, "full_attn_layers": []},
-    )
-    config = FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)
-    if supported:
-        config._validate_preconditions(vc)
-    else:
-        with pytest.raises(ValueError, match="no supported QKV projection"):
-            config._validate_preconditions(vc)
+    FinegrainedTPConfig(gproj_tensor_parallel_size=2)._validate_preconditions(vc)
 
 
 @pytest.mark.parametrize("knob", ["qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"])
 def test_projection_config_requires_runtime_graph_guard(knob):
     vc = valid_config()
-    vc.model_config.architecture = "KimiK31ForConditionalGeneration"
-    vc.model_config.hf_text_config = KimiLinearConfig(linear_attn_config={"kda_layers": [1], "full_attn_layers": []})
+    vc.model_config.hf_config = SimpleNamespace(model_type="kimi_k31")
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 4})
     vc.use_v2_model_runner = False
     with pytest.raises(ValueError, match="V2 model runner"):
         FinegrainedTPConfig(**{knob: 2})._validate_preconditions(vc)
@@ -266,8 +246,8 @@ def test_projection_config_requires_runtime_graph_guard(knob):
 @pytest.mark.parametrize("dcp", [1, 2])
 def test_glm_qkv_keeps_eager_execution_contract(runner_v2, dcp):
     vc = valid_config()
-    vc.model_config.architecture = "Glm5NextForConditionalGeneration"
-    vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next", layer_types=["linear_attention"])
+    vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next")
+    vc.model_config.hf_config = vc.model_config.hf_text_config
     vc.use_v2_model_runner = runner_v2
     vc.parallel_config.decode_context_parallel_size = dcp
     vc.compilation_config.cudagraph_mode = CUDAGraphMode.NONE

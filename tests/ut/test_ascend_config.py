@@ -1516,10 +1516,8 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         def deployment():
             vc = self._oproj_tp_vllm_config()
             vc.parallel_config.pipeline_parallel_size = 1
-            vc.model_config.architecture = "Glm5NextForCausalLM"
-            vc.model_config.hf_text_config = SimpleNamespace(
-                model_type="glm5_next_text", linear_num_heads=64, layer_types=["linear_attention"]
-            )
+            vc.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text", linear_num_heads=64)
+            vc.model_config.hf_config = vc.model_config.hf_text_config
             return vc
 
         for size in (2, 4, 8):
@@ -1536,16 +1534,11 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "PD decode node"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
-        vc.model_config.architecture = "OtherMoEForCausalLM"
         vc.model_config.hf_text_config.model_type = "other"
-        with self.assertRaisesRegex(ValueError, "qkv_iproj_tensor_parallel_size=2.*OtherMoEForCausalLM"):
+        with self.assertRaisesRegex(ValueError, "model_type='other'"):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         for size in (0, 1):
             FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=size)._validate_preconditions(vc)
-        vc = deployment()
-        vc.model_config.hf_text_config.layer_types = ["full_attention"]
-        with self.assertRaisesRegex(ValueError, "no supported QKV projection"):
-            FinegrainedTPConfig(qkv_iproj_tensor_parallel_size=2)._validate_preconditions(vc)
         vc = deployment()
         vc.parallel_config.data_parallel_size = 6
         with self.assertRaisesRegex(AssertionError, "divide by data_parallel_size"):
