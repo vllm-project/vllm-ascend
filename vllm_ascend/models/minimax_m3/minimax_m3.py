@@ -1216,7 +1216,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # payload: re-packing the relayed slots would duplicate them and
             # shift the local slot keys.
             remote_aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
-            aux_hidden_states: list[torch.Tensor] = []
+            # Annotated in the first-rank branch above; mypy flags a redefinition.
+            aux_hidden_states = []
 
         hidden_states_are_sp = False
         sp_forward_context = None
