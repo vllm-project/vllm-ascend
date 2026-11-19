@@ -9,8 +9,6 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumn
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda import _KimiGDNMergedColumnParallelLinear
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def get_kda_parallel_size(parallel_config) -> int:
     return parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size
@@ -58,24 +56,24 @@ class KDAColumnParallelLinear(ColumnParallelLinear):
 
 class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParallelLinear):
     def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
-        # #66784 moves padding ownership from the Kimi wrapper to the merged
-        # layer. Consume it here rather than forwarding it to ColumnParallelLinear.
-        if not vllm_version_is("0.34.0"):
-            self.padding_size = padding_size
+        # #66784 moves padding ownership to the merged layer, but this class
+        # bypasses MergedColumnParallelLinear.__init__ (see below), so it must
+        # append and zero the padding rows on every supported vLLM revision.
+        self.padding_size = padding_size
         self.output_sizes = output_sizes.copy()
         self.shard_ids = tuple(range(len(output_sizes)))
-        if padding_size and not vllm_version_is("0.34.0"):
+        if padding_size:
             parallel_size = get_tp_group().world_size * get_pcp_group().world_size
             self.output_sizes.append(padding_size * parallel_size)
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        # #66784's pad-fill helpers only exist on the verified main revision.
-        if not vllm_version_is("0.34.0"):
-            for name in self.padding_fill_params():
+        if padding_size:
+            # Padding lives in the last ``padding_size`` rows of each rank.
+            for name in ["weight"] + (["bias"] if self.bias is not None else []):
                 param = getattr(self, name)
-                self._zero_output_padding(param)
+                param.data[-padding_size:].zero_()
                 set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
 
