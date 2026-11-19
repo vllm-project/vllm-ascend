@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
-"""Compare eager DFlash2 FlashAttn with explicit matmul/softmax."""
+"""Compare eager and captured draft FlashAttn with explicit matmul/softmax."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention import fa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.fa_v1 import (
     AscendFlashAttentionBackend,
     AscendFlashAttentionImpl,
     AscendFlashAttentionMetadataBuilder,
 )
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 
 def golden(query, key, value, block_table, lengths, window, query_len, causal):
@@ -45,7 +49,8 @@ def golden(query, key, value, block_table, lengths, window, query_len, causal):
 @pytest.mark.parametrize("layout", ["PA_BBND", "PA_BNBD"])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("head_dim", [128, 192])
-def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, head_dim):
+@pytest.mark.parametrize("execution_mode", ["eager", "graph"])
+def test_strided_paged_flash_attn_matches_golden(monkeypatch, dtype, window, layout, causal, head_dim, execution_mode):
     torch.npu.set_device(0)
     torch.manual_seed(42)
     device = "npu"
@@ -68,11 +73,6 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     optimistic = torch.tensor([4096, 3072, 0], dtype=torch.int32, device=device)
     rejected = torch.tensor([0, 2, 0], dtype=torch.int32, device=device)
     mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device=device), diagonal=1)
-    builder = AscendFlashAttentionMetadataBuilder.__new__(AscendFlashAttentionMetadataBuilder)
-    builder.model_config = SimpleNamespace(runner_type="draft")
-    builder.attn_mask_builder = SimpleNamespace(
-        get_splitfuse_attn_mask=lambda: mask,
-    )
     common = SimpleNamespace(
         num_reqs=3,
         num_actual_tokens=query.shape[0],
@@ -86,26 +86,87 @@ def test_strided_paged_flash_attn_matches_golden(dtype, window, layout, causal, 
     k_view, v_view = (key, value) if layout == "PA_BBND" else (key.transpose(1, 2), value.transpose(1, 2))
     impl = AscendFlashAttentionImpl.__new__(AscendFlashAttentionImpl)
     impl.key_cache, impl.value_cache = k_view, v_view
-    impl.num_heads, impl.num_kv_heads = 8, 1
+    impl.num_heads, impl.num_kv_heads, impl.head_size = 8, 1, head_dim
     impl.scale, impl.sliding_window = head_dim**-0.5, window
     impl.use_bnsd_kv_cache, impl.sinks = layout == "PA_BNBD", None
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft", max_model_len=4096),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, enable_chunked_prefill=True),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL if execution_mode == "graph" else CUDAGraphMode.NONE
+        ),
+        speculative_config=None,
+    )
+    kv_spec = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=physical_dim, dtype=dtype)
+    monkeypatch.setattr(fa_v1, "get_layers_from_vllm_config", lambda *_args: {"draft": SimpleNamespace(impl=impl)})
+    builder = AscendFlashAttentionMetadataBuilder(kv_spec, ["draft"], config, torch.device(device))
+    builder.attn_mask_builder = SimpleNamespace(get_splitfuse_attn_mask=lambda: mask)
     output = torch.empty_like(query)
+    # Capture must retain views of the persistent buffers, not a particular
+    # iteration's subtraction result or a host mirror of accepted lengths.
+    common.seq_lens = torch.empty_like(optimistic)
+    captured_metadata = builder.build_for_cudagraph_capture(common)
 
     def run():
-        common.seq_lens = optimistic - rejected
-        metadata = builder.build(0, common)
+        common.seq_lens.copy_(optimistic - rejected)
+        metadata = captured_metadata if execution_mode == "graph" else builder.build(0, common)
+        if execution_mode == "graph":
+            builder.update_draft_decode_metadata(metadata)
         for _ in range(6):
             result = impl.forward_impl(query, None, None, (k_view, v_view), metadata, output)
         return result
 
-    result = run()
+    if execution_mode == "graph":
+        stream = torch.npu.Stream()
+        stream.wait_stream(torch.npu.current_stream())
+        with torch.npu.stream(stream):
+            # Populate the same metadata's eager caches before capture to
+            # exercise the warmup-to-capture regression, not just cold capture.
+            for _ in range(3):
+                run()
+        torch.npu.current_stream().wait_stream(stream)
+        graph = UpdatableGraph()
+        with torch.npu.graph(graph, stream=stream):
+            run()
+        assert captured_metadata.flash_attn_plan[0].data_ptr() == builder.plan_buffer.data_ptr()
+
+        def execute():
+            graph.replay()
+            return output
+
+    else:
+        execute = run
+
+    result = execute()
     reference = golden(
         query, key[..., :head_dim], value[..., :head_dim], block_table, [4096, 3070], window, query_len, causal
     )
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
     rejected.copy_(torch.tensor([3, 5, 0], dtype=torch.int32, device=device))
-    result = run()
+    result = execute()
     reference = golden(
         query, key[..., :head_dim], value[..., :head_dim], block_table, [4093, 3067], window, query_len, causal
     )
     torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
+
+    # Reorder requests without rebuilding metadata or recapturing the graph.
+    block_table[:2].copy_(block_table[:2].flip(0))
+    optimistic.copy_(torch.tensor([3072, 4096, 0], dtype=torch.int32, device=device))
+    rejected.copy_(torch.tensor([5, 3, 0], dtype=torch.int32, device=device))
+    result = execute()
+    reference = golden(
+        query, key[..., :head_dim], value[..., :head_dim], block_table, [3067, 4093], window, query_len, causal
+    )
+    torch.testing.assert_close(result[:12], reference, rtol=1e-2, atol=1e-3)
+
+    # The captured request extent stays fixed while a real request becomes
+    # padding; repeated/negative boundaries must be read afresh on replay.
+    common.query_start_loc.copy_(torch.tensor([0, 6, 6, -1], dtype=torch.int32, device=device))
+    optimistic.copy_(torch.tensor([3072, 0, 0], dtype=torch.int32, device=device))
+    rejected.copy_(torch.tensor([5, 0, 0], dtype=torch.int32, device=device))
+    result = execute()
+    reference = golden(
+        query, key[..., :head_dim], value[..., :head_dim], block_table, [3067], window, query_len, causal
+    )
+    torch.testing.assert_close(result[:6], reference, rtol=1e-2, atol=1e-3)

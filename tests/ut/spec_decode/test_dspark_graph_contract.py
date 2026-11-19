@@ -36,11 +36,15 @@ def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monke
     )
     replay = MagicMock(return_value=object())
     monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
-    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+    manager._graph_replay = MagicMock(side_effect=AssertionError("unexpected FIA task update"))
+    manager._updatable_graph_replay = MagicMock(side_effect=AssertionError("unexpected host graph update"))
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=16, num_reqs=4)
 
     assert manager.run_fullgraph(desc) is replay.return_value
     replay.assert_called_once_with(desc)
     manager.speculator.build_draft_attn_metadatas.assert_not_called()
+    manager._graph_replay.assert_not_called()
+    manager._updatable_graph_replay.assert_not_called()
 
 
 def _speculator(**attributes):
