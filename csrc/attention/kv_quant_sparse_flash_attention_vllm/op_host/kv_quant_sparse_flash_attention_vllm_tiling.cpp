@@ -562,14 +562,16 @@ void QSFAMlaTiling::GetWorkspaceSize()
             workspaceSize_ += (S2_BASE_SIZE * dSize * GetTypeSize(qsfaInfo_->inputQType) \
                 * TRIPLE_BUFFER_NUM * (aicNum >> 1));
         }
-        if (qsfaInfo_->inputKvType == ge::DT_INT8 && qsfaInfo_->kvLayout == QSFALayout::PA_BSND &&
+        const bool noRope = qsfaInfo_->dSizeVInput == qsfa_a5::kNoRopePackedBytes;
+        if (qsfaInfo_->kvLayout == QSFALayout::PA_BSND &&
+            qsfa_a5::SupportsAddressPrecomputeKv(qsfaInfo_->inputKvType == ge::DT_INT8,
+                qsfaInfo_->inputKvType == ge::DT_FLOAT8_E4M3FN, noRope) &&
             qsfa_a5::CanPrecomputeAddresses(qsfaInfo_->blockSize, qsfaInfo_->maxBlockNumPerBatch,
                 qsfaInfo_->sparseBlockCount, qsfaInfo_->sparseMode,
-                qsfaInfo_->gSize > 64, qsfaInfo_->qHeadDim == 512)) {
+                qsfaInfo_->gSize > 64, noRope)) {
             const uint64_t queryRows = qsfaInfo_->qLayout == QSFALayout::TND ? qsfaInfo_->s1Size :
                 static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
-            workspaceSize_ += queryRows *
-                qsfaInfo_->sparseBlockCount * sizeof(int64_t);
+            workspaceSize_ += qsfa_a5::PhysicalAddressTableBytes(queryRows, qsfaInfo_->sparseBlockCount);
         }
     } else {
         uint32_t mmResElemSize = 4;         // 4:fp32
