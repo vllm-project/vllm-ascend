@@ -84,6 +84,75 @@ on the same instances that previously exported the environment variable.
 
 ## Scenario 1: Mooncake Backend
 
+### Deployment Cache Namespaces
+
+`AscendStoreConnector` supports `cache_prefix` in `kv_connector_extra_config`
+for the Mooncake backend, in both non-layerwise and layerwise modes. A nonempty
+prefix is prepended to every stored object key, including hybrid cache groups
+and objects used when DSpark is enabled. Existing layout/topology namespaces
+remain part of the key. This does not add support for new model/cache layouts.
+
+```json
+{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "cache_prefix": "production-release-v2"
+    }
+}
+```
+
+- Omitted or `""`: preserve the existing key format and cache hits.
+- A custom string: use it literally as the deployment namespace.
+- Values use the same `str(value)` conversion as upstream MooncakeStore:
+  JSON `null` becomes `"None"`, `false` becomes `"False"`, and `0` becomes `"0"`.
+  These are nonempty namespaces, not aliases for the empty default. Configure
+  a string explicitly to avoid accidental namespace changes.
+- `"auto"`: derive a prefix from `VLLM_IMAGE_TAG` (falling back to
+  `VLLM_BUILD_COMMIT`), the upstream model/cache configuration hashes, and the
+  resolved HF commit. The default development image tag
+  `local/vllm-openai:dev` and build commit `unknown` are not valid identities.
+  Startup fails if neither build identity is available. Other strings,
+  including `"AUTO"`, remain literal prefixes.
+
+Automatic prefixes use resolved cache-group block sizes so scheduler-side
+block-size normalization does not separate lookup from worker PUT/GET keys.
+Scheduler capacities are not added to the fingerprint. All Prefill, Decode,
+and replica instances intended to share compatible cache entries must resolve
+to the same prefix. Different model paths/configurations or image identities
+can produce different automatic prefixes; use a shared custom prefix when
+compatible peers need an explicitly coordinated namespace.
+
+Automatic mode does not hash live weight files or every environment flag, and
+does not independently identify changes to the vLLM-Ascend source. Update the
+image identity or use a new custom prefix when changing weights, adapters,
+Ascend code, KV layout, or other settings without an identity change. A prefix
+does not validate payload compatibility or make incompatible TP/layouts reusable.
+
+For rolling upgrades, keep the old instances on `production-release-v1`, start
+the new instances on `production-release-v2`, warm the new cache, and then shift
+traffic. Old objects remain until normal eviction or explicit cleanup; budget
+for both versions during the overlap. Namespaces share the same tenant quota
+and do not reserve physical memory, SSD capacity, or bandwidth. `tenant_id`
+is a separate Mooncake namespace/quota mechanism; `cache_salt` remains available
+for request-level isolation.
+
+**External reset remains a full reset.** `cache_prefix` does not filter
+`remove_all(force=True)`: a reset can remove all prefixes and models in the
+Mooncake client's effective tenant namespace. Coordinate every writer sharing
+that domain before cleanup. A local prefix-cache reset only reaches the
+external Store when connector reset is requested. Mooncake layerwise external
+reset remains unsupported. Changing a deployment prefix does not require a
+full reset.
+
+This option is Mooncake-only. Memcache and Yuanrong retain their existing key
+formats with an omitted/empty prefix and reject a nonempty `cache_prefix`,
+including `"auto"`, at startup.
+
+For source installation and A2 configuration, see the
+[Mooncake cache-prefix setup guide](../../developer_guide/contribution/mooncake_cache_prefix_setup.md).
+
 ### Configuration Examples
 
 #### Environment Preparation

@@ -6,7 +6,7 @@
 import threading
 import unittest
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +48,7 @@ class TestMooncakePipeline(unittest.TestCase):
         dcp_rank=0,
         tp_size=2,
         num_kv_heads=None,
+        cache_prefix="",
     ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
@@ -88,6 +89,12 @@ class TestMooncakePipeline(unittest.TestCase):
                 num_kv_heads=(1 if mla else 2) if num_kv_heads is None else num_kv_heads,
                 use_mla=mla,
                 cache_block_size=cache_block_size,
+                extra_config={"cache_prefix": cache_prefix},
+                speculative_config=SimpleNamespace(
+                    method="dspark", num_speculative_tokens=3, use_eagle=lambda: True, compute_hash=lambda: "dspark"
+                )
+                if draft
+                else None,
                 pcp_size=pcp_size,
                 pcp_rank=pcp_rank,
                 dcp_size=dcp_size,
@@ -178,11 +185,14 @@ class TestMooncakePipeline(unittest.TestCase):
         return scheduler
 
     def test_uneven_stages_roundtrip_all_heads_and_groups(self):
-        for hybrid, draft in ((False, False), (False, True), (True, False), (True, True)):
-            with self.subTest(hybrid=hybrid, draft=draft):
+        cases = [
+            (hybrid, draft, prefix) for hybrid in (False, True) for draft in (False, True) for prefix in ("", "v1")
+        ]
+        for hybrid, draft, prefix in cases:
+            with self.subTest(hybrid=hybrid, draft=draft, prefix=prefix):
                 store = MemoryRangeStore()
                 workers = [
-                    self.make_stage(stage, store, hybrid=hybrid, draft=draft, tp_rank=head)
+                    self.make_stage(stage, store, hybrid=hybrid, draft=draft, tp_rank=head, cache_prefix=prefix)
                     for stage in range(2)
                     for head in range(2)
                 ]
@@ -213,6 +223,11 @@ class TestMooncakePipeline(unittest.TestCase):
                     )
                     self.run_step(worker, request)
                     self.assertEqual(scheduler._query_layerwise_block_hits([expected_keys]), [index == 3])
+                self.assertTrue(store.complete)
+                if prefix:
+                    self.assertTrue(all(key.startswith(prefix + "@") for key in store.complete))
+                    other_release = replace(scheduler.layerwise_keys, cache_prefix="v2")
+                    self.assertFalse(any(store.batch_is_exist(other_release.make_hit_check_keys(0, b"h0".hex(), 2))))
                 # Destroy every destination and remap block IDs; stale local
                 # bytes and local-prefix-cache hits cannot hide a bad restore.
                 for (worker, arrays), saved in zip(workers, original):
