@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
@@ -30,7 +31,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
@@ -40,6 +41,9 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+
+if TYPE_CHECKING:
+    from vllm_ascend.attention.utils import KVCacheRuntimeComponents
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -1105,6 +1109,16 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
+    @staticmethod
+    def get_runtime_components(
+        spec: MambaSpec,
+        num_blocks: int,
+        _layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> "KVCacheRuntimeComponents":
+        # The leading state dimension indexes manager blocks.
+        return tuple(((num_blocks, *shape), dtype) for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True))
+
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Decode kernels consume device boundaries; CPU lengths only size

@@ -3,15 +3,12 @@
 """Graph-stable token permutations for head-sharded Kimi KDA."""
 
 from copy import copy
-from typing import Any
 
 import torch
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.kv_cache_interface import MambaSpec
 
-from vllm_ascend.attention.utils import KVCacheRuntimeComponents
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 
 
@@ -84,16 +81,6 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
 
 
 class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
-    @staticmethod
-    def get_runtime_components(
-        spec: MambaSpec,
-        num_blocks: int,
-        _layout: Any,
-        kernel_block_size: int | None = None,
-    ) -> KVCacheRuntimeComponents:
-        # The leading state dimension indexes manager blocks.
-        return tuple(((num_blocks, *shape), dtype) for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True))
-
     @staticmethod
     def get_builder_cls():
         return KimiKDAHostMetadataBuilder
