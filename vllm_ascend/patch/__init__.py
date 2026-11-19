@@ -265,14 +265,14 @@
 #       `DPEngineCoreProc` and the Ascend DP subclasses inherit it; the
 #       wrapper is marked and the patch is idempotent.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm-ascend/pull/20755 (open; its
-#       worker-output ACK routing declares that it covers V2 idle steps)
 #       https://github.com/vllm-project/vllm/pull/66295 (withdrawn unmerged;
-#       it synthesized the same empty output inside `update_from_output`)
+#       it synthesized the same empty output inside `update_from_output`).
+#       No vllm-ascend PR covers this gate today, so the fix ships here.
 #    Future Plan:
-#       Transitional fix. Remove this patch and its platform import once
-#       #20755 lands in a pinned release and covers idle steps; re-run the
-#       P/D deadlock workload end to end before removing it.
+#       Transitional fix. Remove this patch and its platform import once a
+#       pinned vLLM release carries an equivalent scheduler-side drain that
+#       covers idle steps; re-run the P/D deadlock workload end to end before
+#       removing it.
 #
 # ** 9. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

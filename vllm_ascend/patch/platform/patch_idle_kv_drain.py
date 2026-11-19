@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Drain connector finished-transfer bookkeeping on idle engine steps.
 
-**Sunset note**: this is a transitional fix for vllm-ascend #20755, whose
-worker-output ACK routing declares that it covers V2 idle steps. Upstream
-vLLM #66295 took the same approach (synthesize an empty
-``KVConnectorOutput`` so the scheduler update path runs) but was withdrawn
-unmerged, pointing at #20755 as the follow-up. Neither is in the pinned
-vLLM release, and the deadlock this patch fixes reproduces on the merged
-tree. Once #20755 lands and covers idle steps, this patch must be removed
-to avoid double-draining the same completions.
+**Sunset note**: this is a transitional fix. Upstream vLLM #66295 took the
+same approach (synthesize an empty ``KVConnectorOutput`` so the scheduler
+update path runs) but was withdrawn unmerged; neither it nor an equivalent
+scheduler-side drain is in the pinned vLLM release, and the deadlock this
+patch fixes reproduces on the merged tree. Once a pinned release carries an
+equivalent drain path that covers idle steps, this patch must be removed to
+avoid double-draining the same completions.
 
 In P/D disaggregation the producer releases the KV blocks of a
 already-completed transfer only via
