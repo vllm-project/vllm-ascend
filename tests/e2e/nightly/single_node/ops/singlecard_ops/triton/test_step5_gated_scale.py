@@ -175,3 +175,21 @@ def test_gated_scale_bounds_check():
     with pytest.raises(AssertionError):
         # offset + num_heads exceeds the base's row span.
         gated_scale(attn_output, packed, packed.shape[1] - 4, num_heads)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A5,
+    reason="Requires Ascend A5",
+)
+def test_gated_scale_empty_input():
+    """Zero tokens must return an empty output without launching a zero-sized grid."""
+    device = "npu"
+    num_heads, head_dim = 8, 192
+    attn_output = torch.empty((0, num_heads * head_dim), device=device, dtype=torch.bfloat16)
+    gate = torch.empty((0, num_heads), device=device, dtype=torch.bfloat16)
+
+    out = gated_scale(attn_output, gate, 0, num_heads)
+
+    assert out.shape == attn_output.shape
+    assert out.dtype == attn_output.dtype
+    assert out.numel() == 0

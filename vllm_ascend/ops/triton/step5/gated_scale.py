@@ -92,6 +92,8 @@ def _gated_scale_impl(
         f"offset={gate_col_offset}, num_heads={num_heads}, "
         f"row_stride={gate_row_stride}"
     )
+    if attn_output.shape[0] == 0:
+        return torch.empty_like(attn_output)
     head_dim = attn_output.shape[-1] // num_heads
     block_h = _pick_head_block(num_heads, head_dim)
     out = torch.empty_like(attn_output)

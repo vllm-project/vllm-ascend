@@ -48,10 +48,14 @@ import triton.language.extra.cann.extension as extension  # noqa: F401 (used in 
 
 
 def _npu_vec_core_num() -> int:
-    import triton.runtime.driver as driver
+    # The vector-core count is constant per device; cache it so the grid
+    # closure does not query the driver on every launch.
+    if not hasattr(_npu_vec_core_num, "_cache"):
+        import triton.runtime.driver as driver
 
-    properties = driver.active.utils.get_device_properties(torch.npu.current_device())
-    return properties["num_vectorcore"]
+        properties = driver.active.utils.get_device_properties(torch.npu.current_device())
+        _npu_vec_core_num._cache = properties["num_vectorcore"]
+    return _npu_vec_core_num._cache
 
 
 def _pick_head_chunk(num_heads: int, head_dim: int) -> int:
@@ -453,6 +457,12 @@ def _fused_indexer_qkz_norm_rope_impl(
         raise ValueError(
             f"index_k and index_z must have shape ({tokens}, {num_k_heads * head_dim}), "
             f"got {tuple(index_k.shape)} and {tuple(index_z.shape)}"
+        )
+    if tokens == 0:
+        return (
+            torch.empty((0, num_q_heads * head_dim), device=index_q.device, dtype=torch.float8_e4m3fn),
+            torch.empty((0, num_k_heads * head_dim), device=index_k.device, dtype=index_k.dtype),
+            torch.empty((0, num_k_heads * head_dim), device=index_z.device, dtype=index_z.dtype),
         )
     # index_q comes out pre-quantized to e4m3: its only consumer (the fused
     # indexer scoring) wants fp8, so the quantization rides along with the
