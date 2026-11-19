@@ -25,7 +25,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     | Method | Package type | Hardware handling | Recommended for |
     | --- | --- | --- | --- |
-    | **pip** | Prebuilt wheel | Installs the standard `vllm-ascend` wheel, which currently targets A2 | A2 users who want the simplest installation |
+    | **pip** | vLLM built from source; prebuilt vLLM Ascend wheel | Installs the standard `vllm-ascend` wheel, which currently targets A2 | A2 users who want the simplest installation |
     | **uv** | Prebuilt wheel | Uses WheelNext wheel variants to select a compatible build for the detected hardware | Users who want a prebuilt wheel selected for their hardware |
     | **Source** | Source code | Builds and installs vLLM Ascend for the current environment | Development, customization, or environments without a suitable prebuilt wheel |
 
@@ -35,9 +35,10 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-pip-install -->
     ```bash
-    pip install \
-        --extra-index-url https://download.pytorch.org/whl/cpu/ \
-        "vllm=={{ release_vllm_version }}"
+    VLLM_TARGET_DEVICE=empty \
+    VLLM_VERSION_OVERRIDE={{ release_vllm_version }} \
+    pip install -v --no-binary vllm "vllm=={{ release_vllm_version }}" \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
 
     pip install \
         --extra-index-url https://download.pytorch.org/whl/cpu/ \
