@@ -514,7 +514,7 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
     def test_load_only_restores_draft_without_saving(self):
         worker = self.make_worker(kv_role="kv_consumer")
         worker.current_layer = worker.next_layer_to_submit = 4
-        restored = []
+        restored: list[int] = []
         worker.external_slot_release_waiter = restored.append
         worker.load_dflash_draft_kv()
         worker.save_dflash_draft_kv(AscendConnectorMetadata(set()))
