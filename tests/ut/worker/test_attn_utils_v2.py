@@ -51,6 +51,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     get_storage_block_size,
 )
+from vllm_ascend.core.kv_cache_planning import _align_hybrid_attention_page_sizes
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
@@ -3178,7 +3179,7 @@ def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers(
     }
     summary_before = specs[STEP5_SUMMARY]
 
-    attn_utils._align_hybrid_attention_page_sizes(specs)
+    _align_hybrid_attention_page_sizes(specs)
 
     # Dense layers still align: the sliding-window page doubles its block
     # to reach the main page.
@@ -3201,7 +3202,7 @@ def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page(
         ),
     }
     with pytest.raises(ValueError, match="Cannot align"):
-        attn_utils._align_hybrid_attention_page_sizes(specs)
+        _align_hybrid_attention_page_sizes(specs)
 
 
 def _step5_tensors_and_groups():

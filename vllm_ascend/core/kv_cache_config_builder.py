@@ -48,6 +48,7 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
 from vllm_ascend.models.step5.cache_config import (
+    get_step5_kv_cache_groups,
     get_step5_pool_bytes_per_block,
     is_step5_groups,
 )
@@ -65,11 +66,14 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: Kimi-K3.1, GLM-Next and QSA, then DSV4.1 / mixed-page-size shared slots, then
+        Precedence: Kimi-K3.1, Step5, GLM-Next and QSA, then DSV4.1 / mixed-page-size shared slots, then
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+        step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
+        if step5_groups is not None:
+            return step5_groups
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.

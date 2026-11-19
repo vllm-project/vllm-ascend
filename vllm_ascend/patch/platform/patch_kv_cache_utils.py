@@ -48,7 +48,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
 )
 from vllm_ascend.models.step5.cache_config import (
     get_step5_kv_cache_config_from_groups,
-    get_step5_kv_cache_groups,
     get_step5_max_memory_usage,
     get_step5_pool_bytes_per_block,
     is_step5_groups,
