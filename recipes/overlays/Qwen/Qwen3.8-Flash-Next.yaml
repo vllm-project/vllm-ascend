@@ -1,13 +1,8 @@
 # Overlay for Qwen/Qwen3.8-Flash-Next on Huawei Ascend.
-# Verified on two Atlas A2 servers (800T A2 with 8 x Ascend 910B3, 800I A2 with
-# 8 x Ascend 910B4-1; 64 GB HBM per NPU), vLLM Ascend v0.32.0rc1.
-# 1P1D disaggregation, MooncakeConnectorV2 p2p KV transfer (no KV pool), MTP on both pools:
-#   prefill  TP4 x PP2 x DP1 x EP4         (node 1)
-#   decode   TP2 x DP4 x EP8               (node 2)
-# Topology: one prefill node and one decode node, 8 NPUs each.
+# Deployment commands follow the Qwen3.8-Flash-Next tutorial.
 meta:
   hardware:
-    ascend_910b: verified
+    ascend_910b: supported
     ascend_910c: supported
     ascend_950dt: supported
 
@@ -134,15 +129,15 @@ variants:
       - '--enable-prefix-caching'
       - '--mamba-cache-mode'
       - align
+      - '--mamba-ssm-cache-dtype'
+      - bfloat16
       - '--async-scheduling'
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
       VLLM_USE_V2_MODEL_RUNNER: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
       VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-      HCCL_CONNECT_TIMEOUT: '600'
       ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
-      PYTHONUNBUFFERED: '1'
     install:
       docker:
         note: Use the official Ascend image.
@@ -539,6 +534,7 @@ presets:
           TP_SOCKET_IFNAME: $SERVICE_NIC
           HCCL_SOCKET_IFNAME: $SERVICE_NIC
           VLLM_VERSION: 0.32.0
+          VLLM_USE_V1: '1'
           VLLM_RPC_TIMEOUT: '3600000'
           HCCL_EXEC_TIMEOUT: '204'
           HCCL_CONNECT_TIMEOUT: '120'
@@ -583,7 +579,7 @@ presets:
           - '--additional-config'
           - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}'
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}'
           - '--tool-call-parser'
           - qwen3_coder
           - '--data-parallel-address'
@@ -631,7 +627,7 @@ presets:
           - '--hf-overrides'
           - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
         json_args:
           '--speculative-config':
             enforce_eager: true
@@ -736,6 +732,7 @@ presets:
           TP_SOCKET_IFNAME: $SERVICE_NIC
           HCCL_SOCKET_IFNAME: $SERVICE_NIC
           VLLM_VERSION: 0.32.0
+          VLLM_USE_V1: '1'
           VLLM_RPC_TIMEOUT: '3600000'
           HCCL_EXEC_TIMEOUT: '204'
           HCCL_CONNECT_TIMEOUT: '120'
@@ -779,7 +776,7 @@ presets:
           - '--additional-config'
           - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}'
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}'
           - '--tool-call-parser'
           - qwen3_coder
           - '--data-parallel-address'
@@ -821,7 +818,7 @@ presets:
           - '--hf-overrides'
           - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
         env:
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
           VLLM_ASCEND_PLE_BACKEND: torch
@@ -863,23 +860,29 @@ presets:
     workload: Prefill/decode disaggregation, 141312 context, MTP
     default: true
     source:
-      label: Atlas A2 two-node PD recipe (PR 21856)
-      href: https://github.com/vllm-project/vllm-ascend/blob/18044dbc2b11f4e3e2f75aedb2cac879833b16f0/recipes/overlays/Qwen/Qwen3.8-Flash-Next.yaml
-      revision: 18044dbc2b11f4e3e2f75aedb2cac879833b16f0
-    runbook: >-
-      Start Decode on its dedicated host first so it can compile while Prefill
-      starts on the other host. Once Prefill on port 8001 and all four Decode
-      endpoints on ports 8002–8005 are ready, start the Ascend Router.
+      label: Qwen3.8-Flash-Next A2 basic PD tutorial
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
     description: >-
-      One node per pool. The prefill role overrides the pool's whole-node TP8 sizing with
-      tp 4 and pp 2, which renders the verified TP4 x PP2 prefill layout; the decode role
-      is DEP with TP2 x DP4 over the multi-port external load balancer, so one supervisor
-      process on the decode node runs four child API servers (one per DP rank) and the
-      Ascend Router fans decode requests across them, exactly as verified.
+      Prefill uses TP4 × PP2 on one eight-device A2 host. Decode uses TP2 × DP4
+      on the other host and exposes one HTTP endpoint through internal load balancing.
+    runbook: >-
+      Use the Section 4.1 container on each host. Set the router port to 25570.
+      Start the proxy on the Prefill host after both role endpoints respond at `/v1/models`.
     select:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
+      features:
+        tool_calling: false
+        reasoning: false
+        spec_decoding: true
+    env:
+      GLOO_SOCKET_IFNAME: $SERVICE_NIC
+      TP_SOCKET_IFNAME: $SERVICE_NIC
+      HCCL_SOCKET_IFNAME: $SERVICE_NIC
+      no_proxy: localhost,127.0.0.1,$PREFILL_NODE_1,$DECODE_NODE_1
+      NO_PROXY: localhost,127.0.0.1,$PREFILL_NODE_1,$DECODE_NODE_1
     roles:
       prefill:
         nodes: 1
@@ -887,10 +890,13 @@ presets:
         tp: 4
         pp: 2
         args:
+          - '--port'
+          - '25568'
           - '--engram-config'
           - '{"cpu_offload":true,"dp_shared_memory":false}'
-          - '--compilation-config'
-          - '{"cudagraph_mode":"NONE"}'
+          - '--data-parallel-size'
+          - '1'
+          - '--enforce-eager'
           - '--additional-config'
           - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
         json_args:
@@ -898,23 +904,32 @@ presets:
             kv_connector: MooncakeConnectorV2
             kv_role: kv_producer
             kv_load_failure_policy: null
-            kv_port: '55220'
+            kv_port: 32600
             kv_connector_extra_config:
               prefill:
                 dp_size: 1
                 tp_size: 4
                 pp_size: 2
               decode:
+                pp_size: null
                 dp_size: 4
                 tp_size: 2
         env:
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_IF_IP: $PREFILL_NODE_1
           HCCL_BUFFSIZE: '8192'
           HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
       decode:
         nodes: 1
         parallelism: dep
+        data_parallel_lb: internal
+        remove_args:
+          - --data-parallel-address
+          - --data-parallel-rpc-port
         tp: 2
         args:
+          - '--port'
+          - '25569'
           - '--engram-config'
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--compilation-config'
@@ -928,32 +943,31 @@ presets:
             kv_connector: MooncakeConnectorV2
             kv_role: kv_consumer
             kv_load_failure_policy: null
-            kv_port: '56010'
+            kv_port: 32700
             kv_connector_extra_config:
               prefill:
                 dp_size: 1
                 tp_size: 4
                 pp_size: 2
               decode:
+                pp_size: null
                 dp_size: 4
                 tp_size: 2
         env:
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_IF_IP: $DECODE_NODE_1
           HCCL_BUFFSIZE: '512'
           HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
 
 hardware_notes:
   ascend_910b:
-    title: Two-node A2 needs v0.32.0rc1 and 128g of shm
+    title: Two-node A2 basic PD
     body: >-
-      Verified on two Atlas A2 servers with 1P1D disaggregation. Pin
-      quay.io/ascend/vllm-ascend:v0.32.0rc1; the Docker command below already starts each
-      container with `--shm-size=128g`, because Engram keeps about 95 GiB in `/dev/shm`
-      on the decode node. The Ascend deployment guide below covers the remaining
-      prerequisites, environment variables and caveats. The generated commands carry
-      four placeholders; the guide lists them.
+      Use two eight-device hosts with 128g of shared memory per container.
+      Set the Prefill and Decode addresses and use the service interface on each host.
     link:
-      label: Ascend deployment
-      href: '#ascend-deployment'
+      label: A2 setup and proxy
+      href: '#two-node-a2-pd-preset'
 
   ascend_910c:
     title: Single-host deployment on A3
@@ -990,7 +1004,7 @@ guide_sections:
 
     For shared-host PD,
     choose the Prefill worker and Decode worker presets under Tensor Parallel.
-    Set the same workload point on both. Each preset starts one role. The Ascend Router preset targets two dedicated A2 hosts.
+    Set the same workload point on both. Each preset starts one role. The A2 preset runs each role on a dedicated host.
     The hardware tabs below include Docker setup, role commands, proxy and request checks. Run the three-tier storage setup before
     starting either role for pooling.
 
@@ -1044,161 +1058,40 @@ guide_sections:
 
     #### Two-node A2 PD preset
 
-    Two-node 1P1D, verified end-to-end on two Atlas A2 servers (Atlas 800T A2 with
-    8 x Ascend 910B3, Atlas 800I A2 with 8 x Ascend 910B4-1; 64 GB HBM per NPU) with
-    vLLM Ascend 0.32.0rc1 from `quay.io/ascend/vllm-ascend:v0.32.0rc1`.
-    Prefill runs TP4 x PP2 x DP1 x EP4 in one `vllm serve` process; decode runs
-    TP2 x DP4 x EP8 in vLLM's multi-port external load-balancer mode, where one
-    `vllm serve` supervisor process on the decode node spawns four child API servers,
-    one per DP rank, each owning 2 NPUs. KV moves over `MooncakeConnectorV2` in p2p
-    mode — no HBM/DRAM/SSD KV pool. MTP (3 speculative tokens) is on for both pools;
-    engram keeps the 51B N-gram embedding table in host memory, which is what lets the
-    checkpoint fit in 8 x 64 GB per node.
-
-    The weights are the ModelScope build `Eco-Tech/Qwen3.8-Flash-Next-w4a8`.
-    `VLLM_USE_MODELSCOPE=True` with the repo id works, and so does a local copy — mount
-    it into the container and pass the in-container path to `vllm serve`.
-
-    If you pull from ModelScope, mount its cache out of the container:
-    `-v ~/.cache/modelscope:/root/.cache/modelscope`, or set `MODELSCOPE_CACHE` to a
-    mounted path. The site's Docker command only mounts `~/.cache/huggingface`, which
-    ModelScope does not use — without this the ~181 GiB land in the container's
-    writable layer and are downloaded again whenever the container is recreated.
-
-    **`--shm-size 128g` is required** — the Docker command on this page already sets it,
-    and any hand-written `docker run` must pass it too. The decode pool's Engram table
-    (51B rows) lives in `/dev/shm` as two TP shards of 47.7 GiB each, 95.4 GiB in total,
-    so at 64g the second shard already fails to register (vLLM error 107017). The
-    prefill pool keeps its Engram copy in anonymous pinned host memory instead and does
-    not consume `/dev/shm`.
-    `/etc/hccn.conf` carries the per-NPU RoCE address/netmask the PD path uses, and the
-    image ships no copy of its own. The site's Docker tab does not mount it — if you
-    take that command, add `-v /etc/hccn.conf:/etc/hccn.conf:ro`.
-
-    **The router container is not `--privileged`.** Under a host seccomp profile
-    that predates `clone3` (Docker before 20.10.10, or a custom or older profile)
-    it exits immediately with `RuntimeError: can't start new thread`. Add
-    `--security-opt seccomp=unconfined` or `--privileged` to its `docker run`.
-
-    The generated commands carry the recipe's environment as `-e` flags. Only if you
-    start `vllm serve` from a shell instead, prepare it first:
+    Follow [Section 4.1](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#41-docker-image-installation) on both hosts, including
+    the `/etc/hccn.conf` mount and 128g of shared memory. On each host set
+    `PREFILL_NODE_1` and `DECODE_NODE_1` to the service IPs and `SERVICE_NIC` to
+    the interface for the local service IP. The published A2 image for this recipe
+    is `quay.io/ascend/vllm-ascend:v0.32.0rc1`. Inside each prepared container,
+    apply the role's generated environment and initialize the shell as in
+    [Section 5.2](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment):
 
     ```bash
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    [ -f /usr/local/Ascend/nnal/atb/set_env.sh ] && source /usr/local/Ascend/nnal/atb/set_env.sh
-    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
-    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
     unset VLLM_PP_LAYER_PARTITION
-    cd /workspace          # static-kernel cache root is <cwd>/static_kernel_compile_outputs
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
     ```
 
-    vLLM-Ascend reads `ASCEND_RT_VISIBLE_DEVICES` only — change it (the recipe sets all
-    eight devices) to run the engines on a subset; a generic `CUDA_VISIBLE_DEVICES` is
-    ignored.
-
-    The recipe leaves the six communication variables below unset; vLLM and CANN infer
-    them. If the pools start but the two sides never connect — requests hang and the
-    logs show a cross-node handshake / connect timeout — set them explicitly on each
-    node (as `-e` flags on the Docker command, or exports before `vllm serve`),
-    pointing at that node's business interface and address:
-
-    - `VLLM_HOST_IP` — the address this engine advertises to its peer over the KV
-      handshake channel; the peer connects back to exactly this address.
-    - `HCCL_IF_IP` — the address HCCL binds for inter-node collectives; it has to be an
-      address of the NIC named below.
-    - `HCCL_SOCKET_IFNAME` — the NIC HCCL opens its sockets on.
-    - `GLOO_SOCKET_IFNAME` — the NIC PyTorch Gloo uses for host-side collectives.
-    - `TP_SOCKET_IFNAME` — the NIC torch's own socket layer binds; the vLLM Ascend
-      multi-node PD tutorial exports it on every node.
-    - `no_proxy` / `NO_PROXY` — both node addresses, so the two engines' traffic to
-      each other never goes through an HTTP proxy the host may set.
-
-    Unset, vLLM probes the default-route address and CANN picks a NIC by itself. On a
-    multi-homed node the two choices are not unique and can disagree with the NIC the
-    peer actually reaches — the mismatch then shows up as the handshake timeout above,
-    not as a startup error. One node's values, to be replaced with that node's own:
+    Prefill serves port 25568 (TP4 × PP2 × DP1) and Decode serves port 25569
+    (TP2 × DP4). The builder explicitly renders all four Decode ranks as local.
+    Both roles use three-token MTP and bfloat16 Mamba SSM cache. Once both
+    endpoints respond at `/v1/models`, run the tutorial proxy on the Prefill host.
+    For the generated proxy command, change the builder's default `ROUTER_PORT`
+    from 30000 to 25570. The tutorial command below already uses 25570.
 
     ```bash
-    export VLLM_HOST_IP="<this-node-ip>" HCCL_IF_IP="<this-node-ip>"
-    export HCCL_SOCKET_IFNAME="<business-nic>"
-    export GLOO_SOCKET_IFNAME="<business-nic>" TP_SOCKET_IFNAME="<business-nic>"
-    export no_proxy="localhost,127.0.0.1,<prefill-ip>,<decode-ip>"
-    export NO_PROXY=$no_proxy
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${PREFILL_HOST}" --prefiller-ports 25568 \
+        --decoder-hosts "${DECODE_HOST}" --decoder-ports 25569
     ```
-
-    Both engines run `--max-model-len 141312`; the model supports up to 262144 tokens.
-
-    **Placeholders in the generated commands.** The rendered commands carry four
-    shell variables: the two node addresses, the DP RPC port and the router port.
-    The page fills in the router port; the other three must be substituted before
-    anything runs:
-
-    - `$PREFILL_NODE_1` — the prefill node. Set it to that node's address on the
-      interface the decode node and the router can reach; it becomes the router's
-      `--prefiller-hosts`.
-    - `$DECODE_NODE_1` — the decode node. Set it to that node's own IP. Three uses: the
-      decode pool's `--data-parallel-address`, the DP coordination endpoint its
-      supervisor binds, and the router's `--decoder-hosts`, repeated once per child API
-      server. `127.0.0.1` happens to work here only because the whole decode pool is one
-      node; it fails as soon as the pool spans two, and the node's IP is never wrong.
-    - `$DECODE_DP_RPC_PORT` — the port of that DP coordination endpoint. Set it to any
-      free TCP port on the decode node that no other pool or service binds (for
-      example 13345).
-    - `$ROUTER_PORT` — the port the frontend listens on. Set it to any free TCP port
-      on the node that runs the router; the page fills in 30000.
-
-    Every other port in the generated commands (8001, 8002-8005, 55220, 56010) is
-    already literal; the decode supervisor's aggregated `/health` stays on vLLM's
-    default port 9256.
-
-    **Prefill node.** The generated command runs TP4 x PP2 x DP1 x EP4 in one
-    `vllm serve` process, serves HTTP on :8001 and produces KV on :55220, with
-    `HCCL_BUFFSIZE=8192` and the NPU socket range 61400-61499.
-
-    **Decode node.** The generated command runs one `vllm serve` supervisor that
-    starts four child API servers, one per local DP rank and 2 NPUs each — child HTTP
-    :8002-:8005, DP coordination on `$DECODE_DP_RPC_PORT`, KV consumer :56010 — with
-    `HCCL_BUFFSIZE=512` and the NPU socket range 61500-61599. This is the only pool
-    that captures graphs, so it is also the only one that compiles static kernels.
-
-    In multi-port external LB mode the four children listen on the decode pool's
-    `--port` plus their local DP rank; the supervisor itself publishes aggregated
-    `/health` on vLLM's default supervisor port 9256 — setting
-    `--data-parallel-supervisor-port` moves only that port. Substitute
-    `$DECODE_NODE_1` and `$DECODE_DP_RPC_PORT` as described under Placeholders.
-    Do not add `--data-parallel-rank`,
-    `--data-parallel-external-lb` or `--data-parallel-hybrid-lb`: the supervisor
-    assigns the rank per child and rejects those flags.
-
-    The generated commands carry the same `kv_connector_extra_config`; it advertises
-    the pool shapes (prefill dp1/tp4/pp2, decode dp4/tp2), so keep it in sync with the
-    tp/pp/dp flags on both sides if you change them.
-
-    Start decode first: its static-kernel compile makes it the slow node — about
-    60-70 minutes from a fresh container, against about 10-15 for prefill. A restart
-    inside the same container can reuse part of the compile cache; a new container
-    starts cold.
-
-    Put the Ascend Router in front, on either node, and send requests to its port.
-
-    The router needs one decode endpoint per child API server — four here, on
-    8002-8005 — because each child serves one DP rank; a single
-    `--decoder-ports 8002` leaves the other three ranks idle. Both endpoint lists are
-    derived from the pools' `--port`, so if you change the decode `--port`, move the
-    four decoder endpoints with it (port + rank 0..3). The Ascend Router takes no
-    `--intra-node-data-parallel-size`; that flag exists only in the `vllm-router`
-    frontend. The generated command carries `$PREFILL_NODE_1` and `$DECODE_NODE_1`
-    (the last once per decode child); see Placeholders for the values.
-
-    ```bash
-    curl -s http://127.0.0.1:30000/v1/chat/completions \
-      -H 'Content-Type: application/json' \
-      -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
-    ```
-
-    `--reasoning-parser qwen3` matters: thinking mode is the default and the chat
-    template seeds the assistant turn with `<think>`, so without the parser the
-    reasoning block lands in `message.content`.
 
     #### Not covered by this page
 
