@@ -230,6 +230,14 @@ class Orchestrator:
 
         with open(out_file) as f:
             output = f.read()
+        # Defense in depth: the agent never sees repo tokens (filtered env
+        # above), but the model key could still be coaxed into its output by
+        # an injected instruction — redact known secret values before the
+        # text ever reaches a public PR comment.
+        for secret_name in ("AI_REVIEW_KEY", "AI_REVIEW_API", "GH_TOKEN"):
+            secret_value = os.environ.get(secret_name, "")
+            if secret_value:
+                output = output.replace(secret_value, "***REDACTED***")
         verdict_pass = PASS_MARKER in output
 
         new_state = State(state="reviewing", round=round_no, total=self.state.total + 1)
