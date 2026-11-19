@@ -2255,6 +2255,7 @@ def test_qwen_dflash2_keeps_length_sync_without_fa3(monkeypatch):
     "case",
     [
         "fia_gdn",
+        "fia_fa3_gdn",
         "fa3_gdn",
         "gdn_only",
         "fa3_only",
@@ -2272,6 +2273,8 @@ def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, 
     if case == "fa3_gdn":
         runner.speculator.attn_backends["draft.1"] = fa3
         runner.attn_groups[0][0].layer_names.insert(0, "draft.1")
+    elif case == "fia_fa3_gdn":
+        runner.attn_groups[0].append(SimpleNamespace(backend=AscendAttentionBackend, layer_names=["target.fia"]))
     elif case == "gdn_only":
         runner.attn_groups.pop(0)
     elif case == "fa3_only":
@@ -2287,7 +2290,7 @@ def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, 
         runner.parallel_config.pipeline_parallel_size = 2
     elif case == "kv_transfer":
         runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
-    eligible = case in ("fia_gdn", "fa3_gdn")
+    eligible = case == "fa3_gdn"
     assert runner._can_skip_spec_cpu_length_sync() is eligible
     runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
     runner.num_computed_tokens_cpu.fill_(-1)

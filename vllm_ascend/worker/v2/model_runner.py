@@ -1374,8 +1374,6 @@ class NPUModelRunner(GPUModelRunner):
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         ):
-            # Qwen GDN and the initialized FA3 draft use exact device counts.
-            # Skip the snapshot and Event together only for audited consumers.
             # If the selector used FA3, its optional backend is already loaded.
             fa3_backend = getattr(
                 sys.modules.get("vllm_ascend.attention.flash_attention_v3"), "AscendFlashAttentionBackend", None
@@ -1396,9 +1394,7 @@ class NPUModelRunner(GPUModelRunner):
                 and isinstance(getattr(self, "model_state", None), MambaHybridModelState)
                 and bool(draft_backends)
                 and all(backend is fa3_backend for backend in draft_backends.values())
-                and (AscendAttentionBackend in target_backends or fa3_backend in target_backends)
-                and AscendGDNFusedAttentionBackend in target_backends
-                and target_backends.issubset((AscendAttentionBackend, fa3_backend, AscendGDNFusedAttentionBackend))
+                and target_backends == {fa3_backend, AscendGDNFusedAttentionBackend}
                 and parallel.pipeline_parallel_size == 1
                 and parallel.prefill_context_parallel_size == 1
                 and parallel.decode_context_parallel_size == 1
