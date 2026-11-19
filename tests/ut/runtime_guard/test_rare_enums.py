@@ -34,10 +34,18 @@ def test_feat_input_loaded_from_c():
     assert inp["bad_utf8"] == 14
     assert len(feat) == 9
     assert len(inp) == 15
+    # Frozen fallback must stay identical to the .c parse (wheel safety net).
+    assert feat == rare_enums._FALLBACK_FEAT
+    assert inp == rare_enums._FALLBACK_INPUT
 
 
 def test_rare_native_tables_match_c():
     rare_enums.assert_enums_match_c(rare_native._FEAT, rare_native._INPUT)
+
+
+def test_package_data_ships_rare_feed_native_c():
+    setup = (Path(__file__).resolve().parents[3] / "setup.py").read_text(encoding="utf-8")
+    assert '"rare_feed_native.c"' in setup
 
 
 def test_parse_rejects_missing_enumerator(tmp_path: Path):
