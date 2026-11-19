@@ -70,6 +70,87 @@ def test_pcp_workspace_uses_supported_sfa_kernel_pages(monkeypatch):
     torch.testing.assert_close(slots, torch.arange(2 * block_size, dtype=torch.int64))
 
 
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_unquantized_preprocess_workspace_covers_gathered_rows(monkeypatch, world_size, dtype):
+    from vllm_ascend.attention import sfa_hisparse
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl._kv_staging_capacity = 128
+    impl.kv_lora_rank, impl.qk_rope_head_dim = 4, 64
+    impl.vllm_config = NS(parallel_config=NS(prefill_context_parallel_size=world_size))
+    impl.index_group = NS(logical_topk_indices=torch.empty(1))
+    monkeypatch.setattr(
+        sfa_hisparse, "current_workspace_manager", lambda: NS(get_persistent_resource=lambda key, allocate: allocate())
+    )
+    latent, rope, slots = impl._kv_workspace(dtype)
+    assert latent.shape == (world_size, 128, 1, 4)
+    assert rope.shape == (world_size, 128, 1, 64)
+    assert latent.dtype == rope.dtype == dtype
+    torch.testing.assert_close(slots, torch.arange(128 * world_size, dtype=torch.int64))
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("rope_dim", [0, 64])
+@pytest.mark.parametrize("decode", [False, True])
+def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
+    monkeypatch, world_size, dtype, rope_dim, decode
+):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.hisparse import cache_ops
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl.pcp_enabled, impl.is_pcp_decode_sharded, impl.enable_sparse_sfa_c8 = True, decode, False
+    impl.kv_lora_rank, impl.qk_rope_head_dim = 4, rope_dim
+    impl._kv_staging_capacity = 128
+    impl.kv_a_layernorm = torch.nn.Identity()
+    impl.hisparse_cache = handle()
+    cache = impl.hisparse_cache
+    width, rows = 4 + rope_dim, 3 * world_size
+    cache.view.cache = torch.zeros(rows, width, dtype=dtype)
+    cache.slot_mapping = torch.arange(rows, dtype=torch.int64)
+    cache.slot_mapping[2::3] = -1
+    meta = metadata(decode=decode)
+    meta.num_input_tokens = 3
+    meta.hisparse_num_write_tokens = rows
+    meta.hisparse_num_valid_write_rows = None
+    cache._prepare_for_batch(meta)
+    assert cache.num_actual_tokens == 3
+    # NoPE has two projected rows and one padded row in each rank stride.
+    local_rows = 3 if rope_dim else 2
+    local_kv = torch.arange(local_rows * width, dtype=dtype).reshape(local_rows, width)
+    cos = sin = torch.ones(3, rope_dim, dtype=dtype) if rope_dim else None
+    latent_cache = torch.empty((world_size, 128, 1, 4), dtype=dtype)
+    rope_cache = torch.empty((world_size, 128, 1, rope_dim), dtype=dtype)
+    impl._kv_workspace = lambda _: (latent_cache, rope_cache, torch.arange(world_size * 128, dtype=torch.int64))
+
+    def preprocess(self, kv, cos, sin, caches, slots, metadata):
+        assert slots.numel() == rows
+        caches[0].view(-1, 4)[:rows].copy_(kv[:, :4])
+        caches[1].view(-1, rope_dim)[:rows].copy_(kv[:, 4:])
+
+    def scatter(latent, rope, destination, mapping, valid_rows):
+        assert latent.shape[0] == mapping.numel() == rows
+        assert valid_rows is None
+        valid = mapping >= 0
+        destination[mapping[valid]] = torch.cat((latent, rope), dim=-1)[valid]
+
+    monkeypatch.setattr(AscendSFAImpl, "_exec_kv_local", preprocess)
+    monkeypatch.setattr(sfa_hisparse, "get_pcp_group", lambda: NS(world_size=world_size))
+    monkeypatch.setattr(sfa_hisparse, "needs_pcp_kv_gather", lambda *args: True)
+    monkeypatch.setattr(sfa_hisparse, "all_gather_async", lambda value, group: (torch.cat([value] * world_size), None))
+    monkeypatch.setattr(cache_ops, "scatter_packed_kv", scatter)
+    monkeypatch.setattr(sfa_hisparse, "finish_hisparse_kv_update", Mock())
+    finish = impl.exec_kv(local_kv, cos, sin, (), cache.slot_mapping, meta, defer_wait=True)
+    assert not cache.view.cache.any()
+    finish()
+    for rank in range(world_size):
+        torch.testing.assert_close(cache.view.cache[3 * rank : 3 * rank + 2], local_kv[:2])
+        assert not cache.view.cache[3 * rank + 2].any()
+
+
 def make_connector(padded_tokens=3):
     meta = metadata()
     local = NS(num_tokens=3, idx_mapping=torch.tensor([7, 7, 9], dtype=torch.int64))

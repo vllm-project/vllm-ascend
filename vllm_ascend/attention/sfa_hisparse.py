@@ -205,9 +205,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         parallel = self.vllm_config.parallel_config
         if parallel.decode_context_parallel_size > 1:
             raise ValueError("Ascend HiSparse does not support DCP")
-        if parallel.prefill_context_parallel_size > 1:
-            if not self.enable_sparse_sfa_c8:
-                raise ValueError("HiSparse PCP requires native C8")
         builder = kwargs.get("index_group_builder")
         if builder is None:
             if self.topk_indices_buffer is None:
@@ -276,9 +273,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _kv_workspace(self, dtype):
+        # Non-C8 preprocessing consumes all gathered rank rows.
+        capacity = self._kv_staging_capacity * self.vllm_config.parallel_config.prefill_context_parallel_size
         key = (
             "ascend_hisparse_kv_preprocess",
-            self._kv_staging_capacity,
+            capacity,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             dtype,
@@ -286,11 +285,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         def allocate():
             device = self.index_group.logical_topk_indices.device
-            shape = (self._kv_staging_capacity // 128, 128, 1)
+            shape = (capacity // 128, 128, 1)
             return (
                 torch.empty((*shape, self.kv_lora_rank), dtype=dtype, device=device),
                 torch.empty((*shape, self.qk_rope_head_dim), dtype=dtype, device=device),
-                torch.arange(self._kv_staging_capacity, dtype=torch.int64, device=device),
+                torch.arange(capacity, dtype=torch.int64, device=device),
             )
 
         return current_workspace_manager().get_persistent_resource(key, allocate)
@@ -416,10 +415,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not self.pcp_enabled or not needs_pcp_kv_gather(attn_metadata, self.is_pcp_decode_sharded):
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata, defer_wait=defer_wait)
 
-        # Native C8 PCP retains rank-major rows, including invalid duplicate
+        # HiSparse PCP retains rank-major rows, including invalid duplicate
         # decode slots, to match the Resident and Host-mirror write layout.
+        if not self.qk_rope_head_dim:
+            # The NoPE projection omits padding, while slots retain the rank stride.
+            pad = attn_metadata.num_input_tokens - kv_no_split.shape[0]
+            if pad < 0:
+                raise ValueError("SFA PCP KV exceeds the rank-local padded token count.")
+            if pad:
+                kv_no_split = torch.nn.functional.pad(kv_no_split, (0, 0, 0, pad))
+        inputs = (kv_no_split, cos, sin) if self.qk_rope_head_dim else (kv_no_split,)
         group = get_pcp_group()
-        sends = tuple(value.contiguous() for value in (kv_no_split, cos, sin))
+        sends = tuple(value.contiguous() for value in inputs)
         pending = tuple(all_gather_async(value, group) for value in sends)
         slots = slots[: group.world_size * kv_no_split.shape[0]]
 
@@ -429,6 +436,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             for _, work in pending:
                 if work is not None:
                     work.wait()
+            if not self.qk_rope_head_dim:
+                return self._exec_kv_local(pending[0][0], cos, sin, kv_cache, slots, attn_metadata)
             gathered_kv, gathered_cos, gathered_sin = (value for value, _ in pending)
             return self._exec_kv_local(gathered_kv, gathered_cos, gathered_sin, kv_cache, slots, attn_metadata)
 
@@ -448,9 +457,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
         num_tokens = values.shape[0]
         if self.qk_rope_head_dim:
-            if num_tokens > self._kv_staging_capacity:
-                raise ValueError("HiSparse KV preprocessing exceeds its profiled token capacity")
             latent_cache, rope_cache, local_slots = self._kv_workspace(values.dtype)
+            if num_tokens > local_slots.numel():
+                raise ValueError("HiSparse KV preprocessing exceeds its profiled token capacity")
             # Match ordinary SFA's fused RMSNorm/RoPE rounding. Separate RMSNorm
             # can differ by a BF16 ULP near a rounding midpoint. Local slots
             # isolate padding from the real resident/hot destination below.
@@ -464,8 +473,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             latent = self.kv_a_layernorm(values)
             rope = values[:, self.kv_lora_rank :]
         cache = self.hisparse_cache
-        destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
-        num_valid_rows = attn_metadata.query_start_loc[-1:]
+        destination, mapping, num_rows = hisparse_write_target(cache, attn_metadata, num_tokens, slots.numel())
+        num_valid_rows = getattr(attn_metadata, "hisparse_num_valid_write_rows", attn_metadata.query_start_loc[-1:])
         scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
