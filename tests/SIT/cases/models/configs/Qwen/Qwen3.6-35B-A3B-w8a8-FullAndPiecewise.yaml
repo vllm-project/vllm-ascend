@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "Qwen3.6-35B-A3B-w8a8-FullAndPiecewise"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
     envs:
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
@@ -22,7 +22,7 @@ test_cases:
       - "--port"
       - "$SERVER_PORT"
       - "--tokenizer"
-      - "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+      - "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
@@ -75,5 +75,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 14
         request_rate: 0
-        baseline: 596.8598
+        baseline: 532.9683
         threshold: 0.97
