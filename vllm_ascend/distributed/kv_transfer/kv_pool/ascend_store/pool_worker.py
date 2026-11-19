@@ -302,19 +302,21 @@ class BaseKVPoolWorker(ABC):
             # no GET path performs an independent digest check.
             requested = str(self._extra_config.get("evidence_certification", "content"))
             if self.backend_name in ("yuanrong", "memcache"):
-                # Neither backend can honestly claim the "content" level:
-                # the write-once property of the key->data binding rests on
-                # a CLIENT-SIDE exists-filter (kv_transfer.py
-                # _get_missing_indices: lookup, then put the missing only)
-                # -- a racy check-then-write, not a service-side
-                # add-if-absent. Yuanrong additionally re-PUTs every key on
-                # every save (requires_exists_before_put=False), so its
-                # binding is continuously mutable. Memcache's blockwise PUT
-                # (batch_put_from_layers) exposes no atomic-visibility
-                # contract in its API surface (the write-finish handshake
-                # exists only in the layerwise plane), so a torn or racy
-                # overwrite cannot be ruled out. Underclaim: force "none";
-                # the scheduler then fails publication closed exactly as
+                # Neither backend can honestly claim the "content" level.
+                # Memcache's installed service was MEASURED to behave
+                # add-if-absently and atomically (second put to an existing
+                # key is a silent no-op; no torn reads observed), but that
+                # behavior is undocumented and version-specific, so it is
+                # not a citable contract. The load-bearing reason stands
+                # regardless: the pool key addressing (model@block_hash@rank
+                # from tokens + model + parallel coordinates) does NOT bind
+                # content uniquely -- two legitimate serving configurations
+                # (different dtype/quantization) collide on one key and
+                # first-writer-wins permanently binds possibly-wrong bytes.
+                # Yuanrong additionally re-PUTs every key on every save
+                # (requires_exists_before_put=False), so its binding is
+                # continuously mutable. Underclaim: force "none"; the
+                # scheduler then fails publication closed exactly as
                 # designed. Only the mooncake store -- whose vLLM-side
                 # wrapper and claim match the upstream mooncake producer
                 # under the documented store-trust assumption -- may
@@ -322,8 +324,9 @@ class BaseKVPoolWorker(ABC):
                 if requested != "none":
                     logger.warning(
                         "AscendStore %s backend cannot claim content "
-                        "certification (no service-side write-once "
-                        "binding for its keys); forcing "
+                        "certification (its key addressing does not bind "
+                        "content uniquely and its binding is not a "
+                        "documented contract); forcing "
                         "evidence_certification=none.",
                         self.backend_name,
                     )
