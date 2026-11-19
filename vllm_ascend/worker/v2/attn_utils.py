@@ -1620,27 +1620,79 @@ def _reshape_gdn_cache(
     return states
 
 
-def allocate_kv_cache_main(
+def _can_use_qwen_hybrid_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    layout: Any,
+    kernel_block_sizes: list[int],
+    attn_layers: Mapping[str, AttentionLayerBase],
+) -> bool:
+    """Select supported Qwen FullAttention/GDN caches before allocating memory."""
+    text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    # Qwen3.6 checkpoints reuse the Qwen3.5 text config types.
+    if getattr(text_config, "model_type", None) not in ("qwen3_next", "qwen3_5_text", "qwen3_5_moe_text"):
+        return False
+    if vllm_config.kv_transfer_config is not None or vllm_config.speculative_config is not None:
+        return False
+    if vllm_config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+        return False
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size != 1 or parallel_config.prefill_context_parallel_size != 1:
+        return False
+    if KVPPConfig.from_vllm_config(vllm_config).size > 1:
+        return False
+    if layout is None or not layout.is_block_compact:
+        return False
+    if len(kernel_block_sizes) < len(kv_cache_config.kv_cache_groups):
+        return False
+    if len({tensor.size for tensor in kv_cache_config.kv_cache_tensors}) != 1:
+        return False
+
+    layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
+    if {type(spec) for spec in layer_specs.values()} != {FullAttentionSpec, MambaSpec}:
+        return False
+    placements = {name: tensor for tensor in kv_cache_config.kv_cache_tensors for name in tensor.layers}
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        for name in group.layer_names:
+            if getattr(attn_layers[name], "kv_sharing_target_layer_name", None):
+                continue
+            spec = layer_specs[name]
+            if type(spec) is MambaSpec:
+                if spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN or spec.num_heads != 1:
+                    return False
+                continue
+            if (
+                spec.dtype not in (torch.float16, torch.bfloat16)
+                or spec.kv_quant_mode != KVQuantMode.NONE
+                or spec.head_size != spec.head_size_v
+                or spec.tokens_per_state != 1
+                or spec.num_head_slots is not None
+                or spec.state_content_bytes is not None
+                or spec.is_draft
+                or requires_contiguous_pa_kv_cache(attn_layers[name], vllm_config, spec)
+            ):
+                return False
+            kernel_block_size = kernel_block_sizes[group_id]
+            if kernel_block_size <= 0:
+                return False
+            blocks_per_page, remainder = divmod(spec.block_size, kernel_block_size)
+            if remainder or (blocks_per_page > 1 and placements[name].block_stride != spec.page_size_bytes):
+                return False
+    return True
+
+
+def _allocate_qwen_hybrid_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
     layout: Any,
     kernel_block_sizes: list[int],
-    *,
-    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """Allocate upstream pages and expose Ascend views for FullAttention/GDN."""
-    if allocate is not None:
-        raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
-
     from vllm.v1.worker.utils import allocate_kv_cache as upstream_allocate_kv_cache
 
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    if vllm_config.kv_transfer_config is not None:
-        raise NotImplementedError("The vLLM v0.33.0 allocator does not support Ascend KV transfer alignment.")
-
-    # The release allocator lacks the callback and cannot split padded pages.
-    # It places whole manager pages; the Ascend view splits them below.
+    # Allocate whole manager pages; Ascend splits padded pages into kernel views.
     caches: dict[str, Any] = upstream_allocate_kv_cache(kv_cache_config, device, layout)
     layer_specs = _get_layer_kv_cache_specs(kv_cache_config)
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -1668,21 +1720,86 @@ def allocate_kv_cache_main(
             page_stride = cache.stride(0) * cache.element_size()
             if remainder or (blocks_per_page > 1 and page_stride != spec.page_size_bytes):
                 raise ValueError(f"Cannot split the manager page for {name} into kernel blocks.")
-            shape = attn_layers[name].get_attn_backend().get_kv_cache_shape(
-                cache.shape[0] * blocks_per_page,
-                kernel_block_size,
-                spec.num_kv_heads,
-                spec.head_size,
-                (spec.cache_dtype_str or "auto") if spec.is_draft else vllm_config.cache_config.cache_dtype,
+            shape = (
+                attn_layers[name]
+                .get_attn_backend()
+                .get_kv_cache_shape(
+                    cache.shape[0] * blocks_per_page,
+                    kernel_block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    (spec.cache_dtype_str or "auto") if spec.is_draft else vllm_config.cache_config.cache_dtype,
+                )
             )
-            caches[name] = _reshape_combined_attention_kv_cache(
-                cache, shape, spec.dtype, page_stride, blocks_per_page
-            )
+            caches[name] = _reshape_combined_attention_kv_cache(cache, shape, spec.dtype, page_stride, blocks_per_page)
 
     for name, layer in attn_layers.items():
         if target := getattr(layer, "kv_sharing_target_layer_name", None):
             caches[name] = caches[target]
     return caches
+
+
+def allocate_kv_cache_main(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: Any,
+    kernel_block_sizes: list[int],
+    *,
+    allocate: Callable[[int], torch.Tensor] | None = None,
+) -> dict[str, Any]:
+    """Use upstream pages for supported Qwen hybrid caches; preserve legacy layouts."""
+    if allocate is not None:
+        raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
+    vllm_config = get_current_vllm_config()
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    if _can_use_qwen_hybrid_kv_cache(vllm_config, kv_cache_config, layout, kernel_block_sizes, attn_layers):
+        return _allocate_qwen_hybrid_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
+
+    shared_layers = {
+        layer_name: target_layer
+        for layer_name, layer in attn_layers.items()
+        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+    }
+
+    raw_tensors = _allocate_kv_cache(
+        kv_cache_config,
+        shared_layers=shared_layers,
+        device=device,
+    )
+
+    attn_groups: list[AttentionGroup] = []
+    for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[str, KVCacheSpec, int]] = []
+        for layer_name in kv_cache_group.layer_names:
+            if layer_name in shared_layers:
+                continue
+            layer = attn_layers[layer_name]
+            layer_spec = kv_cache_group.kv_cache_spec
+            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                layer_spec = layer_spec.kv_cache_specs[layer_name]
+            backend = layer.get_attn_backend()
+            key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
+            if key not in group_map:
+                group_map[key] = AttentionGroup(
+                    backend=backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=layer_spec,
+                    kv_cache_group_id=group_id,
+                )
+                group_order.append(key)
+            else:
+                group_map[key].layer_names.append(layer_name)
+        attn_groups.extend(group_map[key] for key in group_order)
+
+    return _reshape_kv_cache_v2(
+        attn_groups=attn_groups,
+        kv_cache_raw_tensors=raw_tensors,
+        cache_dtype=vllm_config.cache_config.cache_dtype,
+        kernel_block_sizes=kernel_block_sizes,
+        shared_kv_cache_layers=shared_layers,
+        kv_cache_config=kv_cache_config,
+    )
 
 
 def _reshape_mamba_kv_cache(
