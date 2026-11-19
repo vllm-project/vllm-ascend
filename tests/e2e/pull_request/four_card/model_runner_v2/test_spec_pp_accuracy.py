@@ -76,6 +76,8 @@ POOL_PERF_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + POOL_LCM_BLOCK_SIZE // 9
 # 4,096 is chunked prefill and still yields exactly 16,384 hits.
 POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+# Design doc sec.2.4: shared per-position acceptance tolerance for the A/B delta.
+ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -122,24 +124,28 @@ def _extract_answer(text: str) -> str:
     return normalized
 
 
-def _assert_speculative_accuracy(outputs, metrics) -> None:
+def _assert_speculative_accuracy(outputs, metrics) -> list[float]:
     assert len(outputs) == 1
     output_ids, output_text = outputs[0]
     assert output_ids and output_text
     assert _extract_answer(output_text) == GSM8K_ANSWER, output_text
 
     num_drafts = 0
-    num_accepted = 0
+    accepted_per_pos: list[float] = []
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
-            num_accepted += sum(metric.values)
+            for position, accepted in enumerate(metric.values):
+                if position == len(accepted_per_pos):
+                    accepted_per_pos.append(0.0)
+                accepted_per_pos[position] += accepted
 
     assert num_drafts > 0, "Speculative decoding did not generate draft tokens"
-    assert num_accepted > 0, "Speculative decoding did not accept any draft tokens"
+    assert any(accepted_per_pos), "Speculative decoding did not accept any draft tokens"
+    return [accepted / num_drafts for accepted in accepted_per_pos]
 
 
 CASE_NAME = "dsv4_pp2_pool_watch"
@@ -209,10 +215,10 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
     tokenizer = AutoTokenizer.from_pretrained(DEEPSEEK_V4_MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
-    def _accuracy(runner) -> None:
+    def _accuracy(runner) -> list[float]:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
-        _assert_speculative_accuracy(outputs, metrics)
+        return _assert_speculative_accuracy(outputs, metrics)
 
     def _hit(runner) -> dict:
         # H3 stays asserted for this case: the fixed 4,096 chunked-prefill
@@ -235,7 +241,11 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         hit=_hit,
         prompt_ids=prompt_ids,
         perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
-        token_identity=False,
+        # Design doc sec.2.4: P5 is a fixed-answer case (cross-leg token
+        # identity gates) and an acceptance class case (per-position A/B
+        # delta stays inside the shared tolerance).
+        token_identity=True,
+        acceptance_tolerance=ACCEPTANCE_RATE_TOLERANCE,
         # Perf gate applies (helper defaults gate=True, perf_gate=True):
         # 10 timed samples, drop the highest 2 and the lowest 2, gate on the
         # middle 6 -- same policy as the four-card watch.

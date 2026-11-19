@@ -12,6 +12,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 from vllm import SamplingParams
+from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
@@ -22,9 +23,13 @@ from tests.e2e.pull_request.kv_pool_watch import (
     run_pool_ab,
     run_pool_hit_sequence,
 )
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
+MTP_NUM_SPECULATIVE_TOKENS = 3
+# Design doc sec.2.4: shared per-position acceptance tolerance for the A/B delta.
+ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 # Measured on A3: `kv cache group sizes [896, 896, 896, 896]` and
 # `kv lcm block sizes 896`; 16,388 = 18 x 896 + 260 -> 16,128 hit tokens.
@@ -146,7 +151,11 @@ def _leg(use_pool: bool, case_name: str):
             enable_chunked_prefill=True,
             async_scheduling=True,
             seed=1024,
-            speculative_config={"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True},
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": MTP_NUM_SPECULATIVE_TOKENS,
+                "enforce_eager": True,
+            },
             compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         )
         if use_pool:
@@ -173,7 +182,7 @@ def test_qwen38_pp_mtp_prefix_cache():
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
-    def _accuracy(runner) -> None:
+    def _accuracy(runner) -> list[float]:
         block_sizes = runner.model.collective_rpc("install_align_probe")
         block_size = next(size for size in block_sizes if size is not None)
         state["block_size"] = block_size
@@ -211,6 +220,13 @@ def test_qwen38_pp_mtp_prefix_cache():
         answer = runner.model.generate([prompt], SamplingParams(temperature=0, max_tokens=32), use_tqdm=False)
         assert answer[0].outputs[0].text.strip() == "5959", answer
 
+        metrics = runner.model.get_metrics()
+        num_drafts = sum(metric.value for metric in metrics if metric.name == "vllm:spec_decode_num_drafts")
+        assert num_drafts > 0, "Speculative decoding did not generate draft tokens"
+        rates = calculate_acceptance_per_pos(metrics, MTP_NUM_SPECULATIVE_TOKENS, Counter, Vector)
+        print(f"[{CASE_NAME}] acceptance rates per draft position: {rates}", flush=True)
+        return rates
+
     def _hit(runner) -> dict:
         return run_pool_hit_sequence(
             runner,
@@ -230,6 +246,9 @@ def test_qwen38_pp_mtp_prefix_cache():
         hit=_hit,
         prompt_ids=prompt_ids,
         perf_reset_local=True,  # A leg only: reset local before each sample.
+        # Design doc sec.2.4 (acceptance class): the per-position acceptance
+        # delta between the pool and local-cache legs stays inside tolerance.
+        acceptance_tolerance=ACCEPTANCE_RATE_TOLERANCE,
         # Design doc sec.2.5: 10 hit-state samples per leg, gates on TTFT
         # P50/P95 (x1.08) and input throughput (x0.92).
         perf_sample_count=10,
