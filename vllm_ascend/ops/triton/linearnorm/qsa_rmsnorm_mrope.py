@@ -44,26 +44,34 @@ def _qsa_rmsnorm_mrope_kernel(
 
     half_rope_dim: tl.constexpr = rope_dim // 2
     rotary_offsets = tl.arange(0, half_rope_dim)
-    if has_mrope:
-        h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
-        w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
-        axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
-    else:
-        axis = tl.full((half_rope_dim,), 0, tl.int32)
     if GATHER_CACHE:
         if has_mrope:
+            h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
+            w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
+            axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
             position = tl.load(positions_ptr + axis * position_stride_axis + token_id * position_stride_token)
         else:
-            # Keep the shared position scalar: an all-zero axis vector creates
-            # a repeated-address gather unsupported by Triton Ascend lowering.
             position = tl.load(positions_ptr + token_id * position_stride_token)
         position = tl.minimum(tl.maximum(position, 0), cache_rows - 1)
         cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
+        cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
+        sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
     else:
-        cache_row = cos_sin_ptr + axis * cos_sin_stride_axis + token_id * cos_sin_stride_token
-
-    cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
-    sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+        cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
+        if has_mrope:
+            h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
+            w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
+            cos_t = tl.load(cache_row + rotary_offsets).to(tl.float32)
+            cos_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets).to(tl.float32)
+            cos_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets).to(tl.float32)
+            sin_t = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+            sin_h = tl.load(cache_row + cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
+            sin_w = tl.load(cache_row + 2 * cos_sin_stride_axis + rotary_offsets + half_rope_dim).to(tl.float32)
+            cos = tl.where(h_mask, cos_h, tl.where(w_mask, cos_w, cos_t))
+            sin = tl.where(h_mask, sin_h, tl.where(w_mask, sin_w, sin_t))
+        else:
+            cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
+            sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
     first = tl.load(input_row + rotary_offsets).to(tl.float32)
     first_weight = tl.load(weight_ptr + rotary_offsets).to(tl.float32) + 1.0
     first = (first * reciprocal_std * first_weight).to(tl.bfloat16)
