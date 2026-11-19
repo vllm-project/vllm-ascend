@@ -41,6 +41,8 @@ Download the weights to a directory that is accessible from the deployment envir
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the model-weight mount with the path used in your environment.
 
 === "Atlas A2 inference products"
@@ -49,16 +51,10 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0 \
         --name vllm-ascend \
         --shm-size=1g \
         --net host \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \

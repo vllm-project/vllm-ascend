@@ -39,7 +39,7 @@ The validation environment of this document is as follows:
 | Item | Specification |
 |---|---|
 | Server | Single-node Atlas A3 inference series (Atlas 800I A3, board model `IT22HMDA_4_S`) |
-| NPU | Atlas A3 products (8 cards, each dual-die (2 chips)), 16 chips in total, corresponding to `/dev/davinci[0-15]` |
+| NPU | Atlas A3 products (8 cards, each dual-die (2 chips)), 16 chips in total, selected with `ASCEND_VISIBLE_DEVICES=0-15` |
 | Memory | 64 GB device memory per chip |
 | Chip software version | SOC_VERSION = `ascend910_9391` (A3 series) |
 | Host form | Single-node deployment (not multi-node) |
@@ -51,7 +51,7 @@ npu-smi info
 ls -l /dev/davinci{0..15} /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc
 ```
 
-Pass criteria: `npu-smi info` recognizes 8 cards with 16 chips in total, and all chips report normal device memory status; the device files required for container startup all exist. If the number of devices or device files differs from this document, adjust the device mapping in Section 4.2 and the subsequent parallel parameters accordingly; the TP16 configuration cannot be applied directly.
+Pass criteria: `npu-smi info` recognizes 8 cards with 16 chips in total, and all chips report normal device memory status; the device files required for container startup all exist. If the number of devices or device files differs from this document, adjust `ASCEND_VISIBLE_DEVICES` in Section 4.2 and the subsequent parallel parameters accordingly; the TP16 configuration cannot be applied directly.
 
 ### 3.2 Driver Version Requirements
 
@@ -103,6 +103,8 @@ This chapter provides a single installation method: use the official prebuilt im
 
 ### 4.2 Image Acquisition and Build
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 The runtime uses the official vLLM-Ascend all-in-one image, which already contains vLLM, vLLM-Ascend, torch-npu, CANN, and NNAL. Choose the image matching your hardware series and OS:
 
 | Image | Hardware | OS |
@@ -128,36 +130,15 @@ export HOST_MODEL_PATH=/path/to/dots3_note
 test -d "$HOST_MODEL_PATH"
 ```
 
-Atlas A3 requires mapping all 16 `davinci` devices and mounting the drivers. The command below has expanded all devices and can be copied directly; if the host directories differ, adjust the mount source paths first:
+Atlas A3 exposes 16 DIE devices. With [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) installed, `ASCEND_VISIBLE_DEVICES=0-15` selects all of them and the runtime mounts the driver libraries, so the command below can be copied directly; if the host directories differ, adjust the mount source paths first:
 
 ```bash
 docker run -it --rm \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     --name vllm-ascend \
     --shm-size=1g \
     --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci8 \
-    --device /dev/davinci9 \
-    --device /dev/davinci10 \
-    --device /dev/davinci11 \
-    --device /dev/davinci12 \
-    --device /dev/davinci13 \
-    --device /dev/davinci14 \
-    --device /dev/davinci15 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/.cache:/root/.cache \

@@ -29,7 +29,6 @@
     === "Ubuntu"
 
         ```bash
-        export DEVICE=/dev/davinci0
         export MODEL_CACHE="${HOME}/.cache"
 
         mkdir -p "$MODEL_CACHE"
@@ -37,13 +36,7 @@
         docker run --rm \
             --name vllm-ascend \
             --shm-size=1g \
-            --device "$DEVICE" \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \
@@ -54,7 +47,6 @@
     === "openEuler"
 
         ```bash
-        export DEVICE=/dev/davinci0
         export MODEL_CACHE="${HOME}/.cache"
 
         mkdir -p "$MODEL_CACHE"
@@ -62,13 +54,7 @@
         docker run --rm \
             --name vllm-ascend \
             --shm-size=1g \
-            --device "$DEVICE" \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -e ASCEND_VISIBLE_DEVICES=0 \
             -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v "$MODEL_CACHE:/root/.cache" \

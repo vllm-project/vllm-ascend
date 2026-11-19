@@ -51,6 +51,14 @@ Before multi-node deployment, follow the [multi-node communication verification 
 
 ### 4.1 Docker Image Installation {#41-docker-image-installation}
 
+The commands below need [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the **host**. It is the container engine's runtime: it reads `ASCEND_VISIBLE_DEVICES` and binds the selected NPUs into the container. Without it the container starts with no NPU inside, so `npu-smi` reports no device. Install it once on every node that runs containers, and skip the step if it is already installed.
+
+```bash
+chmod u+x Ascend-docker-runtime_<version>_linux-<arch>.run
+./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+systemctl daemon-reload && systemctl restart docker
+```
+
 Select an image for the deployment platform and host operating system, and start a container on every node. Refer to the [installation guide](../../getting_started/installation.md) for additional container options.
 
 === "A3 series"
@@ -64,33 +72,12 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a3"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
             --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
             -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
@@ -102,33 +89,12 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a3-openeuler"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-15 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
             --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci8 \
-            --device /dev/davinci9 \
-            --device /dev/davinci10 \
-            --device /dev/davinci11 \
-            --device /dev/davinci12 \
-            --device /dev/davinci13 \
-            --device /dev/davinci14 \
-            --device /dev/davinci15 \
-            --device /dev/davinci_manager \
-            --device /dev/devmm_svm \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
             -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
@@ -144,23 +110,12 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
             --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash
@@ -171,23 +126,12 @@ Select an image for the deployment platform and host operating system, and start
         ```bash
         export IMAGE="quay.io/ascend/vllm-ascend:kimi-k3.1-pro-a5-openeuler"
         docker run --rm \
+            -e ASCEND_VISIBLE_DEVICES=0-7 \
             --name kimi-k31 \
             --shm-size=1g \
             --net=host \
             --privileged=true \
-            --device /dev/davinci0 \
-            --device /dev/davinci1 \
-            --device /dev/davinci2 \
-            --device /dev/davinci3 \
-            --device /dev/davinci4 \
-            --device /dev/davinci5 \
-            --device /dev/davinci6 \
-            --device /dev/davinci7 \
-            --device /dev/davinci_manager \
-            --device /dev/hisi_hdc \
-            -v /usr/local/dcmi:/usr/local/dcmi \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
             -v /etc/ascend_install.info:/etc/ascend_install.info \
             -v /root/.cache:/root/.cache \
             -it "$IMAGE" bash

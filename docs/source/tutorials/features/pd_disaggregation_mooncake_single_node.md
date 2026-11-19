@@ -63,7 +63,7 @@ For disjoint P/D device assignments and the interaction between
 
 ## Run with Docker
 
-Start a Docker container.
+Start a Docker container. The command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
 
 ```bash
 # Update the vllm-ascend image
@@ -75,21 +75,8 @@ docker run --rm \
 --name $NAME \
 --net=host \
 --shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
+-e ASCEND_VISIBLE_DEVICES=0-7 \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /etc/hccn.conf:/etc/hccn.conf \

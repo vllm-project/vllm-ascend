@@ -48,6 +48,8 @@ On each host, use `ip addr` or `ifconfig` to identify the host communication IP 
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Choose the tab for your hardware and run the commands on each participating host.
 
 The image tags below are fixed to the release that matches this guide. If your vLLM-Ascend version differs, replace the tag with the one for your release; see [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
@@ -64,20 +66,12 @@ The image tags below are fixed to the release that matches this guide. If your v
     mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --network host --privileged --shm-size=100g \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        --device /dev/davinci0 --device /dev/davinci1 \
-        --device /dev/davinci2 --device /dev/davinci3 \
-        --device /dev/davinci4 --device /dev/davinci5 \
-        --device /dev/davinci6 --device /dev/davinci7 \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /usr/local/dcmi:/usr/local/dcmi:ro \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
         -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
         -v "$WORK_DIR":/workspace \
@@ -96,24 +90,12 @@ The image tags below are fixed to the release that matches this guide. If your v
     mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
+        -e ASCEND_VISIBLE_DEVICES=0-15 \
         --network host --privileged --shm-size=100g \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        --device /dev/davinci0 --device /dev/davinci1 \
-        --device /dev/davinci2 --device /dev/davinci3 \
-        --device /dev/davinci4 --device /dev/davinci5 \
-        --device /dev/davinci6 --device /dev/davinci7 \
-        --device /dev/davinci8 --device /dev/davinci9 \
-        --device /dev/davinci10 --device /dev/davinci11 \
-        --device /dev/davinci12 --device /dev/davinci13 \
-        --device /dev/davinci14 --device /dev/davinci15 \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /usr/local/dcmi:/usr/local/dcmi:ro \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
         -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v "$MODEL_DIR":/models/MiniMax-M3.1-Flash-W8A8:ro \
         -v "$WORK_DIR":/workspace \
@@ -131,19 +113,12 @@ The image tags below are fixed to the release that matches this guide. If your v
     export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
 
     docker run -it --name "$CONTAINER_NAME" \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --network host --ipc host --privileged --shm-size=100g \
-        --device /dev/davinci_manager --device /dev/hisi_hdc \
-        --device /dev/ummu --device /dev/uburma \
-        --device /dev/davinci0 --device /dev/davinci1 \
-        --device /dev/davinci2 --device /dev/davinci3 \
-        --device /dev/davinci4 --device /dev/davinci5 \
-        --device /dev/davinci6 --device /dev/davinci7 \
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
         -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
         -v /usr/local/sbin:/usr/local/sbin:ro \
         -v /etc/hccn.conf:/etc/hccn.conf:ro \
-        -v /usr/local/dcmi:/usr/local/dcmi:ro \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
         -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
         -v /etc/hixlep:/etc/hixlep:ro \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro \

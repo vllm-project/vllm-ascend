@@ -6,11 +6,35 @@
 
     Choose an official image for the fastest setup, or build an image manually when you need to customize it.
 
+    <span id="installation-ascend-docker-runtime"></span>
+
+    **Use Ascend Docker Runtime.** The runtime mounts the NPU devices and driver paths of the host, and a container then selects its NPUs with `-e ASCEND_VISIBLE_DEVICES=<ids>`. Install it as `root` on every node that runs containers, following the [MindCluster installation guide](https://www.hiascend.com/document/detail/en/mindcluster/latest/):
+
+    ```bash
+    chmod u+x Ascend-docker-runtime_<version>_linux-<arch>.run
+    ./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+    systemctl daemon-reload && systemctl restart docker
+    ```
+
+    Confirm that the runtime is the default:
+
+    {% raw %}
+
+    ```bash
+    docker info --format 'default={{.DefaultRuntime}}'
+    ```
+
+    {% endraw %}
+
+    The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`: when `ascend` is listed, add `--runtime ascend` to `docker run` or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker; when it is missing, rerun the installation and restart Docker.
+
+    The runtime mounts `/etc/ascend-docker-runtime.d/base.list` into every container, read-only. To mount an extra host path in every container, add it to `base.list`, one path per line. To mount a path only in selected containers, create another lowercase `.list` file in that directory and name it in `ASCEND_RUNTIME_MOUNTS`, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`, or the container loses the driver libraries and `npu-smi`.
+
     === "Select an official image"
 
         <span id="installation-prebuilt-image-selection"></span>
 
-        Select your hardware and operating system, then pull the official image, start the container, and verify the environment.
+        Select your hardware and operating system, then pull the official image, start the container, and verify the environment. The commands select NPUs with `ASCEND_VISIBLE_DEVICES` and need [Ascend Docker Runtime](#installation-ascend-docker-runtime) on the host. The examples use the device ids of a full node; on a machine with fewer devices, pass only the devices it has.
 
         ??? note "Official vLLM Ascend images"
 
