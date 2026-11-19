@@ -97,10 +97,7 @@ class BaseModel(nn.Module):
     def collect_remote_aux_hidden_states(self, intermediate_tensors):
         if self._aux_upstream_total_cached == 0:
             return []
-        return [
-            intermediate_tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"]
-            for i in range(self._aux_upstream_total_cached)
-        ]
+        return [intermediate_tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] for i in range(self._aux_upstream_total_cached)]
 
     def _maybe_add_hidden_state(self, states, layer_idx, hidden, residual):
         if layer_idx in self.aux_hidden_state_layers:
