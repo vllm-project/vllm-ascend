@@ -55,6 +55,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
@@ -163,7 +164,9 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
         return
     # MLA and compressed-cache subclasses manage their own storage layouts.
     attention_specs = {
-        name: spec for name, spec in kv_cache_specs.items() if type(spec) in (FullAttentionSpec, SlidingWindowSpec)
+        name: spec
+        for name, spec in kv_cache_specs.items()
+        if type(spec) in (FullAttentionSpec, SlidingWindowSpec) and not name.endswith((".sparse_summary_cache",))
     }
     if not attention_specs:
         return
@@ -1115,7 +1118,13 @@ def _allocate_kv_cache(
     # backing allocation. The group count is derived from kv_cache_config
     # below rather than being fixed here.
     text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
-    is_step_model = getattr(text_config, "model_type", None) in ("step3p5", "step3p7")
+    is_step_model = getattr(text_config, "model_type", None) in (
+        "step3p5",
+        "step3p7",
+        "step5",
+        "step5_vl",
+        "step5_mtp",
+    )
 
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next): use the model-owned planner and
     # build the layout from the cache groups themselves. Allocate
@@ -1191,7 +1200,7 @@ def _allocate_kv_cache(
 
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
-    step_backing: torch.Tensor | None = None
+    step_backings: dict[tuple[int, int], torch.Tensor] = {}
     # Match the paired planner's model scope. Generic DeepSeek/GLM SFA groups
     # also contain MLA and indexer specs, but retain independent allocations.
     # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
@@ -1283,15 +1292,15 @@ def _allocate_kv_cache(
 
         if is_step_model:
             # Step-3.5/3.7 describe interleaved full/sliding groups with
-            # descriptors that all start at offset zero. They therefore need
-            # one backing allocation, with each layer receiving its own
-            # contiguous view inside it. Allocating per layer multiplies the
-            # budget by the group count and causes KV cache initialization OOM.
+            # descriptors that all start at offset zero. Step5 additionally
+            # splits the pool by page size (main 96 KiB pages alias one
+            # backing exactly as before; the 32 KiB CSA tail ring and 4 KiB
+            # sparse summary get their own).
+            backing_key = kv_cache_tensor.size
+            step_backing = step_backings.get(backing_key)
             if step_backing is None:
-                tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-                if len(tensor_sizes) != 1:
-                    raise ValueError("Step KV cache tensors must share one backing allocation.")
-                step_backing = _allocate_int8_cache_tensor(tensor_sizes.pop(), alignment, device)
+                step_backing = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+                step_backings[backing_key] = step_backing
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
@@ -1998,6 +2007,25 @@ def _reshape_kv_cache_v2(
                 )
                 continue
 
+            # In Step5, the per-request CSA tail ring (CircularBufferSpec) and the
+            # per-block FP8 sparse summary page (FullAttentionSpec) carry
+            # their geometry in the upstream spec fields; the typed page
+            # view is the generic compute_layer_kv_cache_shape_bytes +
+            # as_strided reshape, and the layers unpack it themselves in
+            # bind_kv_cache.
+            if layer_name.endswith((".csa_tail_ring", ".sparse_summary_cache")):
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Step5 auxiliary cache for {layer_name} must use one raw tensor.")
+                page_bytes = kv_cache_spec.page_size_bytes
+                shape = compute_layer_kv_cache_shape_bytes(kv_cache_spec, kv_cache_config.num_blocks)
+                if math.prod(shape[1:]) > page_bytes:
+                    raise ValueError(
+                        f"Step5 auxiliary cache view for {layer_name} must "
+                        f"fit inside one {page_bytes}-byte physical page."
+                    )
+                strides = [page_bytes, *torch.empty(shape[1:]).stride()]
+                kv_caches[layer_name] = torch.as_strided(raw_cache, shape, tuple(strides)).view(kv_cache_spec.dtype)
+                continue
             if not isinstance(kv_cache_spec, AttentionSpec):
                 raise TypeError(f"Unsupported KV cache spec: {type(kv_cache_spec).__name__}.")
 

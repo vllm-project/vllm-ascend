@@ -61,7 +61,9 @@ class DeepseekV41Compressor(nn.Module):
             self.state_cache.kv_cache[0].squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
-            max_query_len=metadata.max_query_len,
+            # Metadata keeps the graph descriptor bound. A C2 launch cannot
+            # consume more rows than its physical projection carrier.
+            max_query_len=min(metadata.max_query_len, kv.shape[0]),
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,

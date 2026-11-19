@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, 
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    lmhead_tp_enable,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,8 +158,18 @@ def align_draft_weights(model, projection, vllm_config):
             # The target lm_head lives on the last PP stage and can still
             # be aliased; only the embedding needs its own copy.
             continue
+        prefix = ""
+        # Rebuilt draft heads opt into fine-grained TP only; without it,
+        # use standard TP even when the target enables PCP vocabulary sharding.
+        if name == "lm_head" and lmhead_tp_enable():
+            prefix = "lm_head"
         with torch.device(weight.device):
-            layer = layer_cls(target_config.vocab_size, target_config.hidden_size, params_dtype=weight.dtype)
+            layer = layer_cls(
+                target_config.vocab_size,
+                target_config.hidden_size,
+                params_dtype=weight.dtype,
+                prefix=prefix,
+            )
         load_quarot_target_layer(layer, vllm_config.model_config.model, weight_names, rotation, f"draft {name}.weight")
         layer.quant_method.process_weights_after_loading(layer)
         setattr(owner, name, layer)

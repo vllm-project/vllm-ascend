@@ -290,6 +290,9 @@ class NPUWorker(WorkerBase):
             if not matches:
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
+        meta_names = [name for name in names if parameters[name].device.type == "meta"]
+        if meta_names:
+            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
         self._sleep_saved_parameters = {
             name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
         }
@@ -842,7 +845,13 @@ class NPUWorker(WorkerBase):
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
-        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
+        is_step_model = self.model_config.hf_text_config.model_type in (
+            "step3p5",
+            "step3p7",
+            "step5",
+            "step5_vl",
+            "step5_mtp",
+        )
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)

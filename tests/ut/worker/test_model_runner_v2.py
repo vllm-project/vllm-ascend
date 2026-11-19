@@ -1021,6 +1021,38 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     prepare_ring.assert_called_once_with(runner, dummy.num_reqs)
 
 
+@pytest.mark.parametrize("promised,padded,expected", [(6, 16, 6), (6, 1, 6), (None, 16, 1)])
+def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, promised, padded, expected):
+    from vllm_ascend.worker.v2.model_states import default
+
+    state = default.AscendModelState.__new__(default.AscendModelState)
+    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    state.model_config = SimpleNamespace(max_model_len=2048)
+    state.kvpp_runtime = None
+    state.decoder_replay = None
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_reqs_after_padding=1,
+        num_tokens=1,
+        num_tokens_after_padding=padded,
+        query_start_loc_np=np.array([0, 1], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1]),
+        num_scheduled_tokens=torch.tensor([1]),
+        max_query_len=promised,
+        is_prefilling_np=np.array([False]),
+        seq_lens=torch.tensor([1]),
+        seq_lens_np=np.array([1]),
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(padded, dtype=torch.int64),
+        attn_state=None,
+    )
+    build = Mock(return_value={})
+    monkeypatch.setattr(default, "build_attn_metadata", build)
+    monkeypatch.setattr(default, "get_ascend_config", lambda: SimpleNamespace(xlite_graph_config=None))
+    state.prepare_attn(batch, CUDAGraphMode.FULL, (), torch.empty(0), [], None, for_capture=True)
+    assert build.call_args.kwargs["max_query_len"] == expected
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
@@ -1058,6 +1090,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
         num_scheduled_tokens=torch.tensor([1, 1]),
+        max_query_len=None,
         is_prefilling_np=np.array([True, False, False, False]),
         seq_lens=torch.tensor([1, 5]),
         seq_lens_np=np.array([1, 5]),
@@ -2033,6 +2066,52 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     parent.assert_called_once_with()
     assert entries == [] and wrapper_entries == []
     assert runner.kv_block_zeroer is delegate
+
+
+@pytest.mark.parametrize("failure", [None, "parent", "unsynchronized", "synchronized"])
+def test_vmm_shutdown_orders_and_retains_failures(failure):
+    from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    events = []
+    first = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("first")))
+    error = EngramSharedReleaseError("sync") if failure == "synchronized" else RuntimeError("peer")
+    last = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+
+    def close_last():
+        events.append("last")
+        if failure in ("unsynchronized", "synchronized"):
+            raise error
+
+    last.close_host_offload.side_effect = close_last
+    runner.model = SimpleNamespace(modules=lambda: [first, last])
+    runner._shared_engram_shutdown_pending = [first]
+
+    def parent(_runner):
+        events.append("parent")
+        if failure == "parent":
+            raise RuntimeError("parent")
+
+    with patch.object(GPUModelRunner, "shutdown", parent):
+        if failure:
+            with pytest.raises(RuntimeError):
+                runner.shutdown()
+        else:
+            runner.shutdown()
+    assert events[0] == "parent"
+    assert events[1:] == ([] if failure == "parent" else ["last"] if failure == "unsynchronized" else ["last", "first"])
+    if failure in ("unsynchronized", "synchronized"):
+        assert runner._shared_engram_shutdown_pending == ([first, last] if failure == "unsynchronized" else [last])
+        last.close_host_offload.side_effect = lambda: events.append("retry")
+        runner.model = None
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert runner._shared_engram_shutdown_pending == []
+        assert first.close_host_offload.call_count == 1
+    elif failure == "parent":
+        assert runner._shared_engram_shutdown_pending == [first, last]
+    else:
+        assert runner._shared_engram_shutdown_pending == []
 
 
 def test_shutdown_releases_shared_engram_after_parent_cleanup():

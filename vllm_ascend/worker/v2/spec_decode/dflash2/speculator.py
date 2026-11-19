@@ -122,6 +122,6 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     in an active outer draft capture.
     """
 
-    # _generate_draft -> get_top_k_tokens samples on the vocab-sharded head
-    # outside sample_draft; reject lmhead TP at construction (as DSpark).
-    _lmhead_tp_sample_draft_supported = False
+    # The model's compute_candidates aligns DP rows and exchanges TopK
+    # candidates directly, without going through sample_draft.
+    _lmhead_tp_sample_draft_supported = True

@@ -10,6 +10,7 @@ from vllm.config.attention import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -1648,6 +1650,7 @@ def test_v2_fused_offload_prepares_request_ownership_and_restores_tails(monkeypa
         num_computed_tokens_np=np.array([128], dtype=np.int32),
         is_prefilling_np=np.array([False]),
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
+        max_query_len=None,
         seq_lens=torch.tensor([129], dtype=torch.int32),
         seq_lens_np=np.array([129], dtype=np.int32),
         dcp_local_seq_lens=None,
@@ -1982,6 +1985,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             query_start_loc_np=np.array([0, 2, 5, 5, 5], dtype=np.int32),
             query_start_loc=torch.tensor([0, 2, 5, 5, 5], dtype=torch.int32),
             num_scheduled_tokens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
+            max_query_len=None,
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
             is_prefilling_np=np.array([True, True, False, False]),
@@ -3189,3 +3193,274 @@ def test_combined_mla_cache_nonzero_offset_preserves_guards_and_slot_padding(dty
     assert k_cache.storage_offset() * k_cache.element_size() == raw_offset_bytes
     assert v_cache.storage_offset() * v_cache.element_size() == raw_offset_bytes + k_block_bytes
     assert k_cache.untyped_storage().data_ptr() == v_cache.untyped_storage().data_ptr() == backing.data_ptr()
+
+
+STEP5_BLOCK = 128
+# 96 KiB main DSA page: 2 x 4 kv heads x 48 head_size x bf16 x 128 tokens.
+STEP5_MAIN_PAGE = 98304
+# 4 KiB FP8 sparse summary page: 2 x 1 head x 16 head_size x fp8 x 128.
+STEP5_SUMMARY_PAGE = 4096
+# The CSA tail-ring page mirrors the main class (96 KiB, capacity 96 rows):
+# 1 head x 384 head_size x bf16 x 128.
+STEP5_RING_PAGE = STEP5_MAIN_PAGE
+
+STEP5_NUM_BLOCKS = 3
+
+STEP5_L0 = "model.layers.0.self_attn"
+STEP5_L2 = "model.layers.2.self_attn"
+STEP5_RING = f"{STEP5_L0}.csa_tail_ring"
+STEP5_SUMMARY = f"{STEP5_L0}.sparse_summary_cache"
+
+
+def _step5_main_spec() -> FullAttentionSpec:
+    return FullAttentionSpec(block_size=STEP5_BLOCK, num_kv_heads=4, head_size=48, head_size_v=48, dtype=torch.bfloat16)
+
+
+def _step5_sw_spec() -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=STEP5_BLOCK,
+        num_kv_heads=2,
+        head_size=48,
+        head_size_v=48,
+        dtype=torch.bfloat16,
+        sliding_window=4096,
+    )
+
+
+def _step5_summary_spec() -> FullAttentionSpec:
+    return FullAttentionSpec(block_size=STEP5_BLOCK, num_kv_heads=1, head_size=16, dtype=torch.float8_e4m3fn)
+
+
+def _step5_ring_spec() -> CircularBufferSpec:
+    return CircularBufferSpec(
+        block_size=STEP5_BLOCK,
+        num_kv_heads=1,
+        head_size=384,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        block_stride_alignment=1024,
+    )
+
+
+def test_step5_align_hybrid_attention_page_sizes_excludes_sparse_summary_layers() -> None:
+    specs = {
+        STEP5_L0: _step5_main_spec(),
+        "model.layers.1.self_attn": _step5_sw_spec(),
+        # 3840-byte fp8 page: indivisible against the 96 KiB main page and a
+        # different K/V size ratio, so alignment would refuse this layer.
+        STEP5_SUMMARY: FullAttentionSpec(
+            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
+        ),
+    }
+    summary_before = specs[STEP5_SUMMARY]
+
+    attn_utils._align_hybrid_attention_page_sizes(specs)
+
+    # Dense layers still align: the sliding-window page doubles its block
+    # to reach the main page.
+    assert specs["model.layers.1.self_attn"].block_size == 2 * STEP5_BLOCK
+    assert specs["model.layers.1.self_attn"].real_page_size_bytes == STEP5_MAIN_PAGE
+    assert specs[STEP5_L0].block_size == STEP5_BLOCK
+    # The auxiliary summary page is left exactly as the planner wrote it.
+    assert specs[STEP5_SUMMARY] is summary_before
+    assert specs[STEP5_SUMMARY].block_size == STEP5_BLOCK
+    assert specs[STEP5_SUMMARY].real_page_size_bytes == 3840
+
+
+def test_step5_align_hybrid_attention_page_sizes_refuses_indivisible_dense_page() -> None:
+    """Without the aux-name exclusion the same geometry must fail, pinning
+    that the suffix filter (not the geometry) spares the summary layers."""
+    specs = {
+        STEP5_L0: _step5_main_spec(),
+        "model.layers.3.self_attn": FullAttentionSpec(
+            block_size=STEP5_BLOCK, num_kv_heads=1, head_size=15, dtype=torch.float8_e4m3fn
+        ),
+    }
+    with pytest.raises(ValueError, match="Cannot align"):
+        attn_utils._align_hybrid_attention_page_sizes(specs)
+
+
+def _step5_tensors_and_groups():
+    """One backing per page-size class: main pages alias one backing, the
+    summary and ring pages get their own (the ``step_backings`` contract).
+
+    Each tensor's ``size`` is its backing class; multi-layer tensors hold
+    contiguous per-layer slices at ``layer_stride`` spacing.
+    """
+    groups = [
+        KVCacheGroupSpec(
+            [STEP5_L0, STEP5_L2, STEP5_SUMMARY],
+            UniformTypeKVCacheSpecs.from_specs(
+                {
+                    STEP5_L0: _step5_main_spec(),
+                    STEP5_L2: _step5_main_spec(),
+                    STEP5_SUMMARY: _step5_summary_spec(),
+                }
+            ),
+        ),
+        KVCacheGroupSpec([STEP5_RING], _step5_ring_spec()),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+            layers=[STEP5_L0, STEP5_L2],
+            layer_stride=STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+            block_stride=STEP5_MAIN_PAGE,
+            offset=0,
+        ),
+        KVCacheTensor(
+            size=STEP5_SUMMARY_PAGE * STEP5_NUM_BLOCKS,
+            layers=[STEP5_SUMMARY],
+            layer_stride=STEP5_SUMMARY_PAGE * STEP5_NUM_BLOCKS,
+            block_stride=STEP5_SUMMARY_PAGE,
+            offset=0,
+        ),
+        KVCacheTensor(
+            size=STEP5_RING_PAGE * STEP5_NUM_BLOCKS,
+            layers=[STEP5_RING],
+            layer_stride=STEP5_RING_PAGE * STEP5_NUM_BLOCKS,
+            block_stride=STEP5_RING_PAGE,
+            offset=0,
+        ),
+    ]
+    return tensors, groups
+
+
+def _step5_vllm_config(model_type: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type=model_type),
+            hf_text_config=SimpleNamespace(model_type=model_type),
+        ),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        additional_config={},
+        kv_transfer_config=None,
+    )
+
+
+def _step5_allocate(config, vllm_config, monkeypatch):
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    backend = SimpleNamespace(full_cls_name=lambda: "step5-attn-test")
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend, num_heads=1)
+        for group in config.kv_cache_groups
+        for name in group.layer_names
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    return attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+
+
+def _step5_kv_cache_config(tensors, groups) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=STEP5_NUM_BLOCKS,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    ["step3p5", "step3p7", "step5", "step5_vl", "step5_mtp"],
+)
+def test_step5_allocate_kv_cache_shares_step_backing_by_tensor_size(monkeypatch, model_type) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    raw = _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config(model_type), monkeypatch)
+
+    # One backing per distinct tensor size: both main layers slice the same
+    # 2 x 96 KiB-class backing, the summary and ring pages get their own.
+    assert raw[STEP5_L0].untyped_storage().data_ptr() == raw[STEP5_L2].untyped_storage().data_ptr()
+    assert raw[STEP5_L0].numel() == raw[STEP5_L2].numel() == STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
+    storages = {tensor.untyped_storage().data_ptr(): tensor.untyped_storage().nbytes() for tensor in raw.values()}
+    assert sorted(storages.values()) == [
+        STEP5_SUMMARY_PAGE * STEP5_NUM_BLOCKS,
+        STEP5_RING_PAGE * STEP5_NUM_BLOCKS,
+        2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+    ]
+    # Views are contiguous slices at the planned offsets.
+    assert raw[STEP5_L2].data_ptr() == raw[STEP5_L0].data_ptr() + STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS
+
+
+def test_step5_allocate_kv_cache_rejects_non_contiguous_step_views(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    tensors[0] = KVCacheTensor(
+        size=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+        layers=[STEP5_L0, STEP5_L2],
+        layer_stride=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+        block_stride=STEP5_MAIN_PAGE,
+        offset=0,
+    )
+    with pytest.raises(ValueError, match="contiguous per-layer views"):
+        _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config("step5"), monkeypatch)
+
+
+def test_step5_allocate_kv_cache_rejects_step_view_beyond_backing(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    tensors[0] = KVCacheTensor(
+        size=2 * STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+        layers=[STEP5_L0, STEP5_L2],
+        layer_stride=STEP5_MAIN_PAGE * STEP5_NUM_BLOCKS,
+        block_stride=STEP5_MAIN_PAGE,
+        offset=STEP5_SUMMARY_PAGE,
+    )
+    with pytest.raises(ValueError, match="exceeds the backing allocation"):
+        _step5_allocate(_step5_kv_cache_config(tensors, groups), _step5_vllm_config("step5"), monkeypatch)
+
+
+def _step5_reshape(config, raw, monkeypatch):
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {})
+    backend = SimpleNamespace(
+        get_kv_cache_shape=lambda num_blocks, block_size, heads, head_size, *a, **k: (
+            2,
+            num_blocks,
+            block_size,
+            heads,
+            head_size,
+        )
+    )
+    groups = [
+        SimpleNamespace(
+            kv_cache_group_id=index,
+            kv_cache_spec=group.kv_cache_spec,
+            layer_names=group.layer_names,
+            backend=backend,
+        )
+        for index, group in enumerate(config.kv_cache_groups)
+    ]
+    return attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [STEP5_BLOCK] * len(groups), {}, config)
+
+
+def test_step5_reshape_aux_views_match_compute_layer_shape(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    config = _step5_kv_cache_config(tensors, groups)
+    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+    caches = _step5_reshape(config, raw, monkeypatch)
+
+    # Auxiliary layers get the typed page view straight from
+    # compute_layer_kv_cache_shape_bytes: one page per block id. The shape's
+    # trailing dim is in bytes, so the typed view halves it for bf16.
+    ring_shape = compute_layer_kv_cache_shape_bytes(_step5_ring_spec(), STEP5_NUM_BLOCKS)
+    assert tuple(caches[STEP5_RING].shape) == (*ring_shape[:3], ring_shape[3] // torch.bfloat16.itemsize)
+    assert caches[STEP5_RING].dtype is torch.bfloat16
+    assert caches[STEP5_RING].element_size() * caches[STEP5_RING].numel() == (STEP5_RING_PAGE * STEP5_NUM_BLOCKS)
+    summary_shape = compute_layer_kv_cache_shape_bytes(_step5_summary_spec(), STEP5_NUM_BLOCKS)
+    assert tuple(caches[STEP5_SUMMARY].shape) == (
+        *summary_shape[:3],
+        summary_shape[3] // torch.float8_e4m3fn.itemsize,
+    )
+    assert caches[STEP5_SUMMARY].dtype is torch.float8_e4m3fn
+    assert caches[STEP5_SUMMARY].element_size() * caches[STEP5_SUMMARY].numel() == (
+        STEP5_SUMMARY_PAGE * STEP5_NUM_BLOCKS
+    )
+    for aux, page_bytes in ((STEP5_RING, STEP5_RING_PAGE), (STEP5_SUMMARY, STEP5_SUMMARY_PAGE)):
+        assert caches[aux].stride(0) * caches[aux].element_size() == page_bytes
+
+
+def test_step5_reshape_rejects_non_tensor_step_aux_raw(monkeypatch) -> None:
+    tensors, groups = _step5_tensors_and_groups()
+    config = _step5_kv_cache_config(tensors, groups)
+    raw = _step5_allocate(config, _step5_vllm_config("step5"), monkeypatch)
+    raw[STEP5_RING] = (raw[STEP5_RING], raw[STEP5_RING])
+
+    with pytest.raises(ValueError, match="must use one raw tensor"):
+        _step5_reshape(config, raw, monkeypatch)
