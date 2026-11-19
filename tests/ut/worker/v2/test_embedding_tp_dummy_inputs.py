@@ -126,7 +126,6 @@ def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_i
 @pytest.mark.parametrize("supports_mm_inputs", [False, True], ids=["prompt-embeds", "multimodal"])
 @pytest.mark.parametrize("embedding_tp", [False, True], ids=["tp-disabled", "tp-enabled"])
 def test_dummy_inputs_embeds_accepts_explicit_none(monkeypatch, supports_mm_inputs, embedding_tp):
-    """The new runner passes a second argument even without randomized IDs."""
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: embedding_tp)
     events: list[tuple[int, str, tuple[int, ...]]] = []
     layer, _ = _make_embedding(1, events)
