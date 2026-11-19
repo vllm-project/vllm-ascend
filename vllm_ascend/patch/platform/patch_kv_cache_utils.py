@@ -51,6 +51,13 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_max_memory_usage,
     get_qwen4_exp_pool_bytes_per_block,
 )
+from vllm_ascend.models.step5.cache_config import (
+    get_step5_kv_cache_config_from_groups,
+    get_step5_kv_cache_groups,
+    get_step5_max_memory_usage,
+    get_step5_pool_bytes_per_block,
+    is_step5_groups,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 from vllm_ascend.utils import vllm_version_is
@@ -62,24 +69,6 @@ _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_group
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
-if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
-
-    def _uniform_type_max_num_blocks_per_req(
-        self: UniformTypeKVCacheSpecs,
-        vllm_config: VllmConfig,
-        max_len: int,
-    ) -> int:
-        """Preserve the inner spec's block-table width."""
-        widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
-        return next(iter(widths))
-
-    UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
-        _uniform_type_max_num_blocks_per_req
-    )
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
@@ -99,11 +88,6 @@ def _get_kv_cache_groups_uniform_page_size(
     if kimi_k3_groups is not None:
         return kimi_k3_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
-
-
-def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
-    """Recognize Mamba layers nested in UniformType cache groups."""
-    return any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in self.kv_cache_groups)
 
 
 def group_and_unify_kv_cache_specs(
@@ -506,6 +490,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
+    if is_step5_groups(kv_cache_groups):
+        return get_step5_pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -526,6 +512,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
+    if is_step5_groups(kv_cache_groups):
+        return get_step5_max_memory_usage(vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -560,6 +548,9 @@ def _get_ascend_kv_cache_groups(
 ) -> list[KVCacheGroupSpec]:
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+    step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+    if step5_groups is not None:
+        return step5_groups
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
@@ -591,6 +582,8 @@ def _ascend_get_kv_cache_config_from_groups(
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif is_step5_groups(kv_cache_groups):
+        kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     elif pools is not None:
         # Every physical pool shares the scheduler's block count, but owns a
         # disjoint byte range. Use the same aggregate divisor as admission and
@@ -658,9 +651,6 @@ if _orig_annotate_eagle_groups is not None:
 _kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 _kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 _kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
-KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
-    _kv_cache_config_has_mamba_layers
-)
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block

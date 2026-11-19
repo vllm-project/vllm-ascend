@@ -1061,11 +1061,7 @@ def test_balance_engine_core_hooks(monkeypatch):
     from vllm_ascend.patch.platform import patch_engine_core as pe
 
     orig = pe._engine_core_mod.DPEngineCoreProc
-    ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            profiling_chunk_config=SimpleNamespace(enabled=False),
-        )
-    )
+    ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace())
     try:
         with (
             patch.object(pe, "_OriginalRunEngineCore", return_value="ok") as mock_orig,

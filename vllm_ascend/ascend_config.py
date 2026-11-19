@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -34,11 +34,13 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_config import validate_expert_offload_config
+from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
+_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "MooncakePushConnector", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
 
 
@@ -99,7 +101,10 @@ class KVPPConfig:
                 name = connector.get("kv_connector")
                 if name not in _KVPP_SUPPORTED_CONNECTORS:
                     raise ValueError(f"KVPP does not support kv connector {name!r}.")
-                if name == "MooncakeConnectorV2" and connector.get("kv_role") == "kv_consumer":
+                if (
+                    name in ("MooncakeConnectorV2", "MooncakePushConnector")
+                    and connector.get("kv_role") == "kv_consumer"
+                ):
                     raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
@@ -409,19 +414,24 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
-    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
-    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+    Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
+    selects shared-scale int8 (default on A2) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (default on A5). An explicit
+    value overrides the hardware default. Both select calls by group size,
+    dtype, shape and payload rather than forward phase.
+    A collective takes the selected path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
+    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
+    measurements. Benchmark MXFP8 independently on the intended A5 workload.
 
-    The wrapper is built for every parallel group, but only groups with at most
-    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
-    TP degree itself is validated here, so an unsupported TP fails at config
-    parsing time instead of when some parallel group is constructed.
+    The wrapper is built for every parallel group; unsupported group sizes
+    keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
+    8 ranks. The TP degree itself is validated here before group construction.
     """
 
     enable: bool = False
     min_numel: int = 16777216
+    quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
@@ -440,26 +450,72 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        if tp_size > _MAX_VALID_WORLD_SIZE:
+        if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
                 f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
                 f"int8 bound leaves too few quantization levels beyond that), but "
                 f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
             )
+        if self.quant_dtype == "mxfp8":
+            from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import (
+                _SUPPORTED_WORLD_SIZES,
+            )
+
+            if not is_950():
+                raise ValueError("quantized_all_reduce_config.quant_dtype='mxfp8' requires Atlas A5.")
+            if tp_size != 1 and tp_size not in _SUPPORTED_WORLD_SIZES:
+                raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
 
 
 @config
 class SharedEngramConfig:
+    """Shared Engram owner and per-rank receive capacity."""
+
     model_config = ConfigDict(extra="forbid")
-    backend: Literal["a3"]
+    backend: Literal["a2", "a3", "a5"]
     endpoint: str
+    capacity: int = 65536
+    library_path: str | None = None
+    listen_port: int | None = None
+    local_comm_res: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_backend_options(cls, data: Any) -> Any:
+        options = data.kwargs if isinstance(data, ArgsKwargs) else data
+        if isinstance(options, dict) and options.get("backend") == "a3":
+            # Serialized dataclasses include the other backend's default fields.
+            defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
+            if any(name in options and options[name] != default for name, default in defaults.items()):
+                raise ValueError("A3 does not accept A2/A5 shared Engram options")
+        return data
 
     @model_validator(mode="after")
-    def validate_endpoint(self):
+    def _validate(self):
         host, separator, port = self.endpoint.rpartition(":")
         if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
             raise ValueError("shared Engram endpoint must be host:port")
+        if not 0 < self.capacity <= 262144:
+            raise ValueError("shared Engram capacity must be in [1, 262144]")
+        if self.listen_port is not None and not 0 < self.listen_port < 65536:
+            raise ValueError("shared Engram listen_port must be in [1, 65535]")
+        if self.listen_port is not None and self.local_comm_res:
+            raise ValueError("listen_port and local_comm_res are mutually exclusive")
+        return self
+
+
+@config(config=ConfigDict(frozen=True))
+class ExpertOffloadConfig:
+    """Configuration for exact single-worker expert offload."""
+
+    enabled: bool = False
+    num_device_experts: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_capacity(self):
+        if self.enabled and self.num_device_experts is None:
+            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
         return self
 
 
@@ -488,6 +544,9 @@ class AscendConfig:
     are optional; the values below show every supported key with its default
     value (see the mutex/validation notes below before copying).
 
+    ``quantized_all_reduce_config.quant_dtype`` is omitted below because its
+    default depends on the hardware: ``mxfp8`` on A5 and ``int8`` on A2.
+
         {
             "refresh": false,
             "enable_cpu_binding": true,
@@ -496,6 +555,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "kv_trace": {"enabled": false, "action": "log"},
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
             "sfa_dcp_force_tmajor_restore": false,
@@ -575,13 +635,6 @@ class AscendConfig:
                     "threshold": 256,
                     "long_max_wait_ms": 0.0
                 },
-                "profiling_chunk_config": {
-                    "enabled": false,
-                    "smooth_factor": 1.0,
-                    "min_chunk": 4096,
-                    "need_timing": null,
-                    "max_fit_chunk": 30
-                },
                 "batch_job_sched_config": {
                     "enabled": false,
                     "max_jobs": 20,
@@ -605,7 +658,8 @@ class AscendConfig:
                 "enabled": false,
                 "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 110,
-                "keep_device_kv_cache": false
+                "keep_device_kv_cache": false,
+                "store_port_base": 8500
             }
         }
 
@@ -622,7 +676,7 @@ class AscendConfig:
       ``num_head_replica``.
     - Deprecated top-level scheduler keys (``enable_balance_scheduling``,
       ``recompute_scheduler_enable``, ``short_request_first_config``,
-      ``profiling_chunk_config``, ``batch_job_sched_config``) still resolve,
+      ``batch_job_sched_config``) still resolve,
       but emit deprecation warnings; prefer nesting under
       ``scheduler_config`` as shown above.
     """
@@ -644,6 +698,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
@@ -711,6 +766,7 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -769,12 +825,15 @@ class AscendConfig:
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
-    # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
-    # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
+            if getattr(vc, "shutdown_timeout", 0) <= 0:
+                raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
+            os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
-        if self.shared_engram is not None:
+        if self.shared_engram is not None and self.shared_engram.backend == "a3":
             if not vc.use_v2_model_runner:
                 raise ValueError("shared_engram requires Model Runner V2")
             if not engram_config or not engram_config.cpu_offload:
@@ -808,39 +867,6 @@ class AscendConfig:
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
-        # profiling_chunk vs min_chunk clamp
-        if self.scheduler_config.profiling_chunk_config.enabled:
-            logger.warning_once(
-                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
-                "as of v0.32.0 and has entered the sunset process. It will be removed "
-                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
-                "for details and migration guidance."
-            )
-            max_batched = vc.scheduler_config.max_num_batched_tokens
-            if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
-                logger.warning(
-                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
-                    "max_num_batched_tokens=%d, min_chunk=%d. "
-                    "Clamping min_chunk to %d to avoid it being silently ignored.",
-                    max_batched,
-                    self.scheduler_config.profiling_chunk_config.min_chunk,
-                    max_batched,
-                )
-                self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
-            raise ValueError(
-                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
-                "Please set --pipeline-parallel-size to a value greater than 1, "
-                "or disable profiling_chunk_config."
-            )
-
-        # profiling_chunk vs balance mutex
-        if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
-            raise ValueError(
-                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
-                "cannot be enabled at the same time. Please disable one of them."
-            )
-
         # enable_shared_expert_dp = val and ep and tp>1
         from vllm_ascend.utils import enable_sp
 
@@ -855,15 +881,28 @@ class AscendConfig:
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
+        # Dense Qwen3.5-family sequence parallelism: the same FlashComm switch
+        # also drives SP for dense checkpoints (no MoE to shard).
+        # vllm_ascend.patch.worker.patch_qwen3_5.enable_dense_sp is the single
+        # predicate for runtime reads that only see a VllmConfig (reached
+        # through utils.enable_sp); it is not an AscendConfig field (not an
+        # external interface).
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
+        elif vc.parallel_config.use_sequence_parallel_moe:
             logger.info_once("FlashComm1 is enabled.")
+        elif enable_sp(vllm_config=vc):
+            logger.info_once("FlashComm1 dense sequence parallelism is enabled for the Qwen3.5 dense family.")
+        else:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence "
+                "parallelism (requires tensor_parallel_size > 1, pipeline_parallel_size == 1, "
+                "and an SP-capable model family: MoE with expert parallelism or the dense "
+                "Qwen3.5 family). Disabling."
+            )
 
         # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
         # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
@@ -1426,7 +1465,7 @@ class AscendConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). Integer fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -1442,6 +1481,7 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    qkv_iproj_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1450,6 +1490,7 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1463,6 +1504,22 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
+        if self.qkv_iproj_tensor_parallel_size > 1:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("QKV input projection TP requires TP=1, PCP=1 and PP=1.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("QKV input projection TP is supported only on a PD decode node.")
+            text_config = vc.model_config.hf_text_config
+            if getattr(text_config, "model_type", None) not in ("glm5_next", "glm5_next_text"):
+                raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash only.")
+            if text_config.linear_num_heads % self.qkv_iproj_tensor_parallel_size:
+                raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
+            enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
@@ -1529,6 +1586,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.qkv_iproj_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,
@@ -1580,45 +1638,6 @@ class XliteGraphConfig:
                 "Current cache block size may not be optimal for xlite graph mode: current=%d, recommended=128.",
                 vllm_config.cache_config.block_size,
             )
-
-
-@config
-class ProfilingChunkConfig:
-    """Configuration for profiling-based dynamic chunk sizing.
-
-    Migrated to ``@config`` (pydantic dataclass). Range/positivity checks
-    moved to an ``after`` model_validator. ``need_timing`` uses ``None`` as a
-    "not provided" sentinel so the after-validator can distinguish "user did
-    not set it" (→ default to ``enabled``) from "user explicitly set False"
-    (→ keep False), mirroring the original ``config.get("need_timing", self.enabled)``.
-    """
-
-    enabled: bool = False
-    smooth_factor: float = 1.0
-    min_chunk: int = 4096
-    need_timing: bool | None = None
-    max_fit_chunk: int = 30
-
-    @model_validator(mode="after")
-    def _validate_and_link_need_timing(self):
-        # need_timing defaults to enabled when not explicitly set by the user.
-        # (Original: config.get("need_timing", self.enabled).) Using None as
-        # sentinel distinguishes "not provided" from "explicitly False".
-        if self.need_timing is None:
-            self.need_timing = self.enabled
-        if not self.enabled and self.need_timing:
-            logger.warning(
-                "profiling_chunk_config.need_timing=True is ignored because "
-                "profiling_chunk_config.enabled=False. Setting need_timing to False."
-            )
-            self.need_timing = False
-        if not (0 < self.smooth_factor <= 1.0):
-            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
-        if self.min_chunk <= 0:
-            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
-        if self.max_fit_chunk <= 5:
-            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
-        return self
 
 
 @config
@@ -1730,14 +1749,13 @@ class SchedulerConfig:
     resolves the precedence (nested scheduler_config > top-level legacy >
     default), preserving the original deprecation warnings, and then constructs
     this class from final configuration values. Sub-configs
-    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig) are
+    (ShortRequestFirstConfig / BatchJobSchedConfig) are
     typed fields that pydantic coerces from nested dicts.
     """
 
     enable_balance_scheduling: bool = False
     recompute_scheduler_enable: bool = False
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
-    profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
 
@@ -1778,7 +1796,6 @@ class SchedulerConfig:
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.
             "short_request_first_config": _resolve("short_request_first_config", {}),
-            "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
             "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
         }
@@ -1799,6 +1816,10 @@ class SparseKVOffloadConfig:
     topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
+    # Base TCP port of the MemFabric shared offload store. The data parallel
+    # group ``i`` binds ``store_port_base + i``. Independent services that share
+    # a network namespace must use distinct bases.
+    store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
 
@@ -1813,6 +1834,8 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if not 1 <= self.store_port_base <= 65535:
+            raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
         return self
 
     @classmethod
@@ -2024,7 +2047,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_balance_scheduling",
         "recompute_scheduler_enable",
         "short_request_first_config",
-        "profiling_chunk_config",
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}

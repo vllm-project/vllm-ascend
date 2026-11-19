@@ -65,7 +65,7 @@ class _StateBackend:
 
 def _make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=64),
+        model_config=SimpleNamespace(max_model_len=64, hf_config=SimpleNamespace()),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -76,6 +76,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
             get_resolved_kv_cache_layout=lambda: SimpleNamespace(
                 is_layer_compact=True,
                 is_block_compact=True,

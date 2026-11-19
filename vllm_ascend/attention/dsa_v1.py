@@ -1,3 +1,5 @@
+"""DeepSeek sparse attention backends and kernel runtime interfaces."""
+
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,11 +13,13 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImplBase,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -28,8 +32,14 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     write_dsa_cache,
 )
+from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+)
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapes,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -87,8 +97,11 @@ else:
     dspark_swa_indices_supported = None  # type: ignore
 
 
-# The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
-DSA_METADATA_BUFFER_SIZE = 1024
+# The current SparseFlashMla and MixedQuant SAS ops use 2048 int32 elements;
+# QLI and the legacy metadata op use 1024.
+SAS_METADATA_BUFFER_SIZE = 1024
+SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
+QLI_METADATA_BUFFER_SIZE = 1024
 
 
 class OProjBufferPool:
@@ -308,6 +321,27 @@ class AscendDSABackend(AttentionBackend):
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+
+        V4 stores NHD components regardless of the generic layout selection.
+        Its compressed-token count comes from the spec, not the manager's
+        raw-token kernel block size. The combined indexer view is an alias,
+        rather than a third sequential component.
+        """
+        prefix = (num_blocks, spec.num_kv_heads, spec.num_states)
+        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        if getattr(spec, "scale_dim", 0):
+            shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
+        return tuple(shapes)
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
@@ -755,6 +789,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._step_rope_buffers: dict = {}
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
+        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+        self.compressor_ratio = getattr(
+            kv_cache_spec,
+            "compress_ratio",
+            getattr(kv_cache_spec, "tokens_per_state", 0),
+        )
+        sas_plan = get_dsa_attn_kv_plan(vllm_config, self.compressor_ratio)
+        # Size the buffer for the metadata operator selected by the cache plan.
+        self.sas_metadata_buffer_size = (
+            SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE
+            if sas_plan.get_dsa_sparse_attn_metadata_op()
+            in (
+                sparse_flash_mla_metadata,
+                mixed_quant_sparse_flash_mla_metadata_fp8,
+                mixed_quant_sparse_flash_mla_metadata_turboquant,
+            )
+            else SAS_METADATA_BUFFER_SIZE
+        )
         scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -773,7 +825,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
             self.spec_sas_metadata = [
                 torch.zeros(
-                    DSA_METADATA_BUFFER_SIZE,
+                    self.sas_metadata_buffer_size,
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -811,12 +863,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.tq_group_block_sizes: torch.Tensor | None = None
 
-        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
-        self.compressor_ratio = getattr(
-            kv_cache_spec,
-            "compress_ratio",
-            getattr(kv_cache_spec, "tokens_per_state", 0),
-        )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
         self.layer_names = list(layer_names)
@@ -827,10 +873,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
         self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            self.sas_metadata_buffer_size, dtype=torch.int32, device=self.device
         )
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
-            DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
+            QLI_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
         # the original length. Persistent buffers keep their addresses stable
@@ -899,14 +945,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendDSAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def set_num_actual_tokens(
         self,
@@ -1306,15 +1353,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if preamble is None:
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-            if (
-                self.speculative_config is not None
-                and getattr(self.speculative_config, "method", None) == "dspark"
-                and getattr(self.speculative_config, "enable_adaptive_verification", False)
-                and self.num_prefills == 0
+            if self.speculative_config is not None and getattr(
+                self.speculative_config, "enable_adaptive_verification", False
             ):
-                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                # Adaptive verification redistributes decode tokens on device,
+                # so CPU query lengths may underestimate an individual request.
+                # Include the speculative-token limit plus one bonus token,
+                # while preserving the bound for longer prefill requests.
                 max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
             preamble = (
                 max_seqlen_q,
@@ -1546,8 +1591,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
-                self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
-                    result[:DSA_METADATA_BUFFER_SIZE]
+                self.spec_sas_metadata[draft_index - 1][: self.sas_metadata_buffer_size].copy_(
+                    result[: self.sas_metadata_buffer_size]
                 )
                 return self.spec_sas_metadata[draft_index - 1]
             return result
@@ -1715,7 +1760,7 @@ class AscendDSAAttentionMetadataBuilder(AscendDSAMetadataBuilder):
             if key not in self._sas_variant_buffers:
                 self._sas_variant_buffers[key] = torch.empty_like(output)
             output = self._sas_variant_buffers[key]
-        output[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        output[: self.sas_metadata_buffer_size] = sas_metadata
         if use_specialized_metadata:
             metadata_cache[output_key] = output
         return output
@@ -1985,7 +2030,7 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        self.qli_metadata_buffer[:QLI_METADATA_BUFFER_SIZE] = qli_metadata
         if use_specialized_metadata:
             metadata_cache["qli_output"] = (self.qli_metadata_buffer, qli_seqused_k, qli_cmp_residual_k)
         return self.qli_metadata_buffer

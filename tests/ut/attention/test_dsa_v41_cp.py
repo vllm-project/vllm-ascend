@@ -818,6 +818,7 @@ def runtime(builders, monkeypatch):
         owners = builders(2, rank, decode_sharded=decode_sharded)
         projector = _projector(monkeypatch, 2, rank, events, sharding=sharding, decode_sharded=decode_sharded)
         attn = SimpleNamespace(
+            v41_layer_name=LAYER,
             rotary_emb=SimpleNamespace(layername=LAYER),
             n_heads=2,
             n_local_heads=2,
@@ -831,7 +832,7 @@ def runtime(builders, monkeypatch):
             q_norm=torch.nn.Identity(),
             kv_norm=torch.nn.Identity(),
             dsa_attn=SimpleNamespace(
-                swa_cache_layer=SimpleNamespace(kv_cache=[torch.zeros(256, 2)]),
+                swa_cache_layer=SimpleNamespace(kv_cache=torch.zeros(256, 2)),
                 dsa_attn=SimpleNamespace(impl=projector),
             ),
         )
@@ -892,7 +893,7 @@ def runtime(builders, monkeypatch):
             projector.reference_input = torch.zeros_like(peers[rank])
             projector.reference_input[: len(batch.local_ids)] = canonical[batch.local_ids]
             projector.peer_inputs = [peer.masked_fill((peer == 9999.0), 0) for peer in peers]
-            cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+            cache = attn.dsa_attn.swa_cache_layer.kv_cache
             expected_cache = cache.clone()
             if scenario != "dummy":
                 expected_cache[batch.slots] = canonical[:, :2]
@@ -988,7 +989,7 @@ class TestPCPBatchLifecycle:
             compressor=torch.nn.Identity(),
             rotary_emb=SimpleNamespace(layername=LAYER),
             indexer=SimpleNamespace(update_keys=lambda value, slots, cos, sin: check_rope(value, cos, sin)),
-            long_kv_cache=SimpleNamespace(kv_cache=[object()]),
+            long_kv_cache=SimpleNamespace(kv_cache=object()),
             head_dim=8,
         )
         monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", lambda attn, *args: check_rope(*args))
@@ -1107,7 +1108,7 @@ class TestPCPBatchLifecycle:
         impl.compressor_state_prefix = PREFIXES["compressor_state"]
         impl.topology = SimpleNamespace(index_topk=3)
         attn.shared_state = SimpleNamespace(topk_indices=torch.zeros(64, 3, dtype=torch.int32), topk_lengths=None)
-        attn.long_kv_cache = SimpleNamespace(kv_cache=[torch.zeros(256, 2)])
+        attn.long_kv_cache = SimpleNamespace(kv_cache=torch.zeros(256, 2))
         k_cache, scale_cache = torch.zeros(256, 2), torch.zeros(256, 1)
         indexer = DeepseekV41Indexer.__new__(DeepseekV41Indexer)
         torch.nn.Module.__init__(indexer)
@@ -1116,7 +1117,7 @@ class TestPCPBatchLifecycle:
         indexer.wk, indexer.k_norm = _linear(2, 2).to(torch.bfloat16), torch.nn.Identity()
         indexer.k_norm.weight = torch.nn.Parameter(torch.ones(2))
         indexer.k_norm.variance_epsilon = 1e-6
-        indexer.k_cache = SimpleNamespace(kv_cache=[(k_cache, scale_cache)])
+        indexer.k_cache = SimpleNamespace(kv_cache=(k_cache, scale_cache))
         attn.indexer = indexer
         compressor = DeepseekV41Compressor.__new__(DeepseekV41Compressor)
         torch.nn.Module.__init__(compressor)
@@ -1125,7 +1126,7 @@ class TestPCPBatchLifecycle:
         compressor.norm.weight = torch.nn.Parameter(torch.ones(2))
         compressor.norm.variance_epsilon = 1e-6
         monkeypatch.setattr(
-            compressor, "state_cache", SimpleNamespace(kv_cache=[torch.zeros(256, 32, 1, 4)]), raising=False
+            compressor, "state_cache", SimpleNamespace(kv_cache=torch.zeros(256, 32, 1, 4)), raising=False
         )
         compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2, dtype=torch.bfloat16), 1
         attn.compressor = compressor
@@ -1150,7 +1151,7 @@ class TestPCPBatchLifecycle:
                     ring_state[ring_metadata[4, req_idx], ring_slot].copy_(gathered_kv_scores[source_row_idx])
 
         def scatter(cache, slots, values):
-            block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache[0].data_ptr() else 4
+            block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache.data_ptr() else 4
             valid = slots[:, 0] >= 0
             stores.append(int(valid.sum()))
             indices = slots[valid, 0].long() * block_size + slots[valid, 1]
@@ -1459,9 +1460,9 @@ class TestSparseLayerReuse:
         addresses = (topk.data_ptr(), candidates.data_ptr())
         index_cache, folded_cache, long_cache = (object(), object()), object(), torch.zeros(256, 2)
         state.context.no_compile_layers = {
-            PREFIXES["index_k"]: SimpleNamespace(kv_cache=[index_cache]),
-            PREFIXES["index_k"] + "_folded": SimpleNamespace(kv_cache=[folded_cache]),
-            PREFIXES["long_kv"]: SimpleNamespace(kv_cache=[long_cache]),
+            PREFIXES["index_k"]: SimpleNamespace(kv_cache=index_cache),
+            PREFIXES["index_k"] + "_folded": SimpleNamespace(kv_cache=folded_cache),
+            PREFIXES["long_kv"]: SimpleNamespace(kv_cache=long_cache),
         }
 
         def select(query, values, positions, source_cache, cache_metadata, **kwargs):
@@ -1502,7 +1503,7 @@ class TestSparseLayerReuse:
 
             @staticmethod
             def qsmla(query, swa_cache, cmp_cache, metadata, indices, **kwargs):
-                assert swa_cache is attn.dsa_attn.swa_cache_layer.kv_cache[0]
+                assert swa_cache is attn.dsa_attn.swa_cache_layer.kv_cache
                 assert cmp_cache is long_cache
                 return attention(query, indices)
 

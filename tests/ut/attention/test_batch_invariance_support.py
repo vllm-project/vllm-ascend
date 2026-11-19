@@ -27,6 +27,11 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3SparseBackend,
 )
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+)
 
 _BACKENDS = [
     AscendAttentionBackend,
@@ -39,6 +44,9 @@ _BACKENDS = [
     AscendIndexerKPoolTailBackend,
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3SparseBackend,
+    AscendGDNAttentionBackend,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
 ]
 
 try:

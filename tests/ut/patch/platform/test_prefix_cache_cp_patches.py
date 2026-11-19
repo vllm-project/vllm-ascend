@@ -877,6 +877,70 @@ def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_u
     assert all(isinstance(spec, FullAttentionSpec) for spec in mixed_specs.values())
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("group_kind", ["empty", "attention", "mamba", "mixed"])
+def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
+    attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    mamba = MambaSpec(block_size=16, shapes=((2, 3),), dtypes=(torch.float32,))
+    groups = []
+    for kind, spec in (("attention", attention), ("mamba", mamba)):
+        if group_kind not in (kind, "mixed"):
+            continue
+        specs = {f"{kind}.0": spec}
+        if kind == "mamba":
+            # Homogeneous Mamba groups may contain different per-layer layouts.
+            specs[f"{kind}.1"] = replace(mamba, shapes=((3, 2),))
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs) if wrapped else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec))
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+
+    assert KVCacheConfig.has_mamba_layers.fget.__module__ == "vllm.v1.kv_cache_interface"
+    assert config.has_mamba_layers is (group_kind in ("mamba", "mixed"))
+    assert config.needs_kv_cache_zeroing is config.has_mamba_layers
+
+
+@pytest.mark.parametrize("dcp", [1, 4])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 3])
+@pytest.mark.parametrize("cache_mode", ["align", "none"])
+def test_native_uniform_width_preserves_mamba_speculative_slots(dcp, num_speculative_blocks, cache_mode) -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
+    config.cache_config.mamba_cache_mode = cache_mode
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 3),),
+        dtypes=(torch.float32,),
+        num_speculative_blocks=num_speculative_blocks,
+        mamba_cache_mode=cache_mode,
+    )
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"mamba.0": spec, "mamba.1": replace(spec, shapes=((3, 2),))})
+    assert wrapped is not None
+    assert UniformTypeKVCacheSpecs.max_num_blocks_per_req.__module__ == "vllm.v1.kv_cache_interface"
+    expected = (5 if cache_mode == "align" else 1) + num_speculative_blocks
+    assert wrapped.max_num_blocks_per_req(config, 65) == spec.max_num_blocks_per_req(config, 65) == expected
+
+
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_native_uniform_attention_width_uses_dcp(dcp) -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"attention.0": spec, "attention.1": spec})
+    assert wrapped is not None
+    assert wrapped.max_num_blocks_per_req(config, 65) == math.ceil(65 / (16 * dcp))
+
+
+def test_native_uniform_width_rejects_inconsistent_inner_widths() -> None:
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=2)
+    spec = MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
+    # Bypass from_specs to exercise the native assertion on malformed groups.
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"mamba.0": spec, "mamba.1": replace(spec, num_speculative_blocks=3)},
+    )
+    with pytest.raises(AssertionError, match="same number of block table entries"):
+        wrapped.max_num_blocks_per_req(config, 65)
+
+
 def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
     assert groups is not None
@@ -1576,7 +1640,8 @@ def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     assert not _is_deepseek_v4_kv_cache_spec(unknown_spec)
 
 
-def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> None:
+@pytest.mark.parametrize("dcp,pcp", [(1, 1), (2, 1), (2, 4)])
+def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching(dcp, pcp) -> None:
     mamba_spec = MambaSpec(
         block_size=16,
         shapes=((1,),),
@@ -1596,12 +1661,14 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=1,
-        dcp_world_size=2,
-        pcp_world_size=1,
+        dcp_world_size=dcp,
+        pcp_world_size=pcp,
     )
     manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
+    assert AscendMambaManager.__init__ is AscendMambaManager.__base__.__init__
+    assert manager.dcp_world_size == manager.pcp_world_size == 1
     assert manager.block_size == mamba_spec.block_size
     assert manager.get_num_blocks_to_allocate("prefill", 16, [], 0, 0, 16, prefill_end=16) == 1
 

@@ -59,7 +59,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
         dummy_sampler_run=lambda *args, **kwargs: False,
     )
     runner.kvpp = MagicMock()
-    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
+    runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace())
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
     runner.sampler = create_autospec(Sampler, instance=True)
@@ -295,8 +295,6 @@ def _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=False):
         return "upstream-output"
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
-        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
         patch.object(GPUModelRunner, "execute_model", side_effect=super_execute),
     ):
@@ -388,14 +386,14 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
         ("greedy", False, False, False, None),  # default stays supported
         ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
-        ("greedy", False, False, True, "enable_adaptive_verification"),
+        ("greedy", False, False, True, None),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine. Probabilistic sampling is now
-    supported; bypassing paths, local argmax and adaptive verification retain
-    their independent restrictions."""
+    sampling step in a running engine. Probabilistic sampling and adaptive
+    verification are supported; bypassing paths and local argmax retain their
+    independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass
@@ -410,13 +408,15 @@ def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match
 
 
 def test_production_speculators_carry_lmhead_sampling_mixin():
-    """Every family must keep the mixin (a re-parent silently drops the row
-    alignment and hangs the collectives); bypassing families must keep their
-    opt-out flag (upstream keeps adding them: DSpark, DFlash2)."""
+    """Keep row-alignment support on each family and LiLiCorr opted out.
+
+    DFlash2 aligns candidates itself; LiLiCorr still bypasses that path.
+    """
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
     from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
     from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+    from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import AscendLiLiCorrSpeculator
     from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
     for cls in (
@@ -425,7 +425,9 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         AscendDFlashSpeculator,
         AscendDSparkSpeculator,
         AscendDFlash2Speculator,
+        AscendLiLiCorrSpeculator,
     ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
-    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is True
+    assert AscendLiLiCorrSpeculator._lmhead_tp_sample_draft_supported is False
