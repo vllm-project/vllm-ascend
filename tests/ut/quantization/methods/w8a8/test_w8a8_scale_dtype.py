@@ -151,3 +151,41 @@ def test_fp32_w2_scale_keeps_the_per_channel_layout_for_eplb(monkeypatch):
 
     _, _, _, w2_scale = AscendW8A8DynamicFusedMoEMethod._get_mlp_weights(method, layer)
     assert all(scale.shape == (hidden,) for scale in w2_scale)
+
+
+def test_gmm2_output_dtype_follows_the_model_dtype(monkeypatch):
+    """The fp32 dequant scale must not leak into the grouped-matmul output dtype.
+
+    aclnn rejects a float32 output for A8W8 per-token quant ("y[0] ... has
+    incorrect dtype FLOAT"), so both grouped-matmul calls take the output dtype
+    from the model dtype instead of ``scale[0].dtype``.
+    """
+    import vllm_ascend.quantization.methods.w8a8.w8a8_dynamic as w8a8_dynamic
+
+    captured = {}
+
+    def fake_grouped_matmul(**kwargs):
+        captured.update(kwargs)
+        return [torch.zeros(1)]
+
+    monkeypatch.setattr(w8a8_dynamic.torch_npu, "npu_grouped_matmul", fake_grouped_matmul)
+
+    method = SimpleNamespace(
+        in_dtype=torch.float16,
+        _get_mlp_weights=lambda layer: (
+            [torch.zeros(1)],
+            [torch.ones(1)],
+            [torch.zeros(1)],
+            [torch.ones(1, dtype=torch.float32)],
+        ),
+    )
+    mlp = SimpleNamespace(
+        layer=SimpleNamespace(),
+        hidden_states=torch.zeros(1, dtype=torch.int8),
+        group_list=None,
+        group_list_type=0,
+    )
+    AscendW8A8DynamicFusedMoEMethod.apply_gmm2(method, mlp, torch.zeros(1, dtype=torch.int8), torch.ones(1))
+
+    assert captured["output_dtype"] == torch.float16
+    assert captured["scale"][0].dtype == torch.float32
