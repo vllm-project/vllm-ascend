@@ -1414,6 +1414,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             result[group_id] = mask
         return tuple(result)
 
+    def wait_for_previous_save(self) -> None:
+        self._drain_deferred_last_save()
+
     def _drain_deferred_last_save(self) -> None:
         """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
         if not getattr(self, "_pending_last_save_drain", False):
@@ -1691,15 +1694,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            # Recurrent state may be cleared or copied before the next load
-            # hook. Finish reading shared state before returning from forward.
-            if _LW_DEFER_LAST_SAVE and not any(
-                self.group_uses_align_state[group_id] for group_id in self._reused_layers_by_group
-            ):
-                # PERF-TUNE(2): move the last layer's save drain off the forward
-                # critical path. The drain (host wait + event reset) runs at the
-                # start of the NEXT step's start_load_kv, absorbing the send
-                # thread's tail latency into the inter-step scheduling gap.
+            if _LW_DEFER_LAST_SAVE:
+                # The next step drains pending saves before it can reuse cache pages.
                 self._pending_last_save_drain = True
             else:
                 self._wait_for_final_layer_save(num_local)
