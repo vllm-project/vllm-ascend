@@ -103,7 +103,8 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
-        self._pp_group_owners = self._collect_pp_group_owners()
+        self._ple_group_id = self._find_ple_group_id()
+        self._ple_group_owners = self._collect_ple_group_owners()
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
@@ -189,41 +190,6 @@ class BaseKVPoolWorker(ABC):
             self.total_layers = None
         self.num_layers = model_config.get_num_layers(parallel_config)
 
-    def _collect_pp_group_owners(self) -> tuple[tuple[int, ...], ...] | None:
-        # The KV cache config is projected onto the local stage, while the
-        # lookup worker needs the full set of stages for each group. This also
-        # covers singleton model-level groups such as PLE: non-owner stages
-        # retain the global group slot with an empty layer_names list.
-        if self.pp_size <= 1 or self.use_layerwise or self.kv_cache_config is None:
-            return None
-        cpu_group = getattr(get_pp_group(), "cpu_group", None)
-        if cpu_group is None:
-            return None
-        local_presence = tuple(bool(group.layer_names) for group in self.kv_cache_config.kv_cache_groups)
-        gathered: list[tuple[bool, ...] | None] = [None] * self.pp_size
-        try:
-            torch.distributed.all_gather_object(gathered, local_presence, group=cpu_group)
-        except (RuntimeError, ValueError) as error:
-            logger.warning("Failed to collect PP cache group ownership: %s", error)
-            return None
-
-        if any(presence is None or len(presence) != self.num_kv_cache_groups for presence in gathered):
-            logger.warning("Inconsistent PP cache group ownership; checking all PP ranks during lookup")
-            return None
-        owners = tuple(
-            tuple(rank for rank, presence in enumerate(gathered) if presence is not None and presence[group_id])
-            for group_id in range(self.num_kv_cache_groups)
-        )
-        if any(not ranks for ranks in owners):
-            logger.warning("Unowned PP cache group; checking all PP ranks during lookup")
-            return None
-        logger.info(
-            "Collected PP cache group ownership from projected groups: local=%s owners=%s",
-            local_presence,
-            owners,
-        )
-        return owners
-
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
         self.use_layerwise = use_layerwise
@@ -279,6 +245,54 @@ class BaseKVPoolWorker(ABC):
             self.hash_block_size,
             self.lcm_block_size,
         )
+
+    def _find_ple_group_id(self) -> int | None:
+        """Return the Qwen4Exp PLE group, without changing other models."""
+        model_type = str(getattr(self.hf_config, "model_type", ""))
+        if not model_type.startswith("qwen4_exp") or self.kv_cache_config is None:
+            return None
+
+        ple_group_ids: list[int] = []
+        for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            specs = (
+                tuple(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            if specs and all(
+                isinstance(spec, MambaSpec) and len(spec.shapes) == 1 and bool(getattr(spec, "tp_replicated", False))
+                for spec in specs
+            ):
+                ple_group_ids.append(group_id)
+
+        if len(ple_group_ids) != 1:
+            if ple_group_ids:
+                logger.warning("Expected one Qwen4Exp PLE cache group, got %s", ple_group_ids)
+            return None
+        return ple_group_ids[0]
+
+    def _collect_ple_group_owners(self) -> tuple[int, ...] | None:
+        """Collect only the PP rank owning Qwen4Exp's singleton PLE group."""
+        if self._ple_group_id is None or self.pp_size <= 1 or self.use_layerwise:
+            return None
+        cpu_group = getattr(get_pp_group(), "cpu_group", None)
+        if cpu_group is None:
+            return None
+
+        local_owns_ple = bool(self.kv_cache_config.kv_cache_groups[self._ple_group_id].layer_names)
+        gathered: list[bool | None] = [None] * self.pp_size
+        try:
+            torch.distributed.all_gather_object(gathered, local_owns_ple, group=cpu_group)
+        except (RuntimeError, ValueError) as error:
+            logger.warning("Failed to collect Qwen4Exp PLE PP ownership: %s", error)
+            return None
+
+        owners = tuple(rank for rank, owns_ple in enumerate(gathered) if owns_ple is True)
+        if len(owners) != 1:
+            logger.warning("Expected one Qwen4Exp PLE PP owner, got %s", owners)
+            return None
+        return owners
 
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
@@ -1102,8 +1116,11 @@ class BaseKVPoolWorker(ABC):
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
-        owners = getattr(self, "_pp_group_owners", None)
-        pp_ranks = owners[group_id] if owners is not None and 0 <= group_id < len(owners) else range(self.pp_size)
+        ple_group_id = getattr(self, "_ple_group_id", None)
+        ple_group_owners = getattr(self, "_ple_group_owners", None)
+        pp_ranks = (
+            ple_group_owners if group_id == ple_group_id and ple_group_owners is not None else range(self.pp_size)
+        )
         for pp_rank in pp_ranks:
             for dcp_rank in range(self.dcp_size):
                 for head_or_tp_rank in range(num_head_or_tp_ranks):
@@ -1161,7 +1178,8 @@ class BaseKVPoolWorker(ABC):
                 offset = 0
                 for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                     values = res[offset : offset + count]  # type: ignore[index]
-                    if count and len(values) == count and all(value == 1 for value in values):
+                    complete = group_id != getattr(self, "_ple_group_id", None) or len(values) == count
+                    if values and complete and all(value == 1 for value in values):
                         present.append(chunk_hash)
                     offset += count
 
@@ -1222,7 +1240,7 @@ class BaseKVPoolWorker(ABC):
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-                if len(res) < len(multi_tp_keys):
+                if group_id == getattr(self, "_ple_group_id", None) and len(res) < len(multi_tp_keys):
                     return 0
                 num_block = len(keys)
                 if use_layerwise:
@@ -1396,6 +1414,11 @@ class KVPoolWorker(BaseKVPoolWorker):
         if self._transfer_threads_started:
             return
 
+        empty_ple_group_id = (
+            self._ple_group_id
+            if self._ple_group_id is not None and self.group_num_layers.get(self._ple_group_id, 0) == 0
+            else None
+        )
         if self.can_put:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreSendingThread(
@@ -1415,6 +1438,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
+                empty_ple_group_id=empty_ple_group_id,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1432,6 +1456,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
+                empty_ple_group_id=empty_ple_group_id,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -1497,14 +1522,9 @@ class KVPoolWorker(BaseKVPoolWorker):
             key_list = []
             block_id_list: list[int] = []
             load_masks = self.token_database.load_mask(request.block_hashes, token_len)
-            invalid_descriptors = False
             for group_id in load_group_ids:
-                if not self.token_database.has_local_kv_group(group_id):
-                    logger.debug(
-                        "Skipping KV pool get for PP-local empty group: request=%s group=%d",
-                        request.req_id,
-                        group_id,
-                    )
+                if group_id == self._ple_group_id and self.group_num_layers.get(group_id, 0) == 0:
+                    logger.debug("Skipping PLE cache get on a non-owner PP stage: request=%s", request.req_id)
                     continue
                 if group_id >= len(request.block_ids_by_group):
                     continue
@@ -1538,24 +1558,10 @@ class KVPoolWorker(BaseKVPoolWorker):
                         kv_cache_group_id=group_id,
                         block_id=block_id,
                     )
-                    if not addr or not size or len(addr) != len(size):
-                        logger.warning(
-                            "Skipping KV pool get key without valid local descriptors: request=%s group=%d key=%s",
-                            request.req_id,
-                            group_id,
-                            key,
-                        )
-                        invalid_descriptors = True
-                        break
                     key_list.append(key)
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
-                if invalid_descriptors:
-                    break
-            if invalid_descriptors:
-                self._record_failed_request(request)
-                continue
             if not key_list:
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
