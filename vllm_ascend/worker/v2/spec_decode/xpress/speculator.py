@@ -21,10 +21,6 @@ class AscendXPressSpeculator(XPressSpeculator, AscendDFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         config = vllm_config.speculative_config
         assert config is not None
-        # Keep the initial serving boundary explicit until each combination
-        # has separate NPU correctness and capture/replay coverage.
-        if not config.enforce_eager:
-            raise NotImplementedError("XPress on Ascend currently requires speculative_config.enforce_eager=True.")
         if config.draft_sample_method != "greedy":
             raise NotImplementedError("XPress on Ascend currently requires draft_sample_method='greedy'.")
         if config.use_local_argmax_reduction:
@@ -36,7 +32,16 @@ class AscendXPressSpeculator(XPressSpeculator, AscendDFlashSpeculator):
             raise ValueError("xpress_num_passes must be positive.")
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        super().init_cudagraph_manager(CUDAGraphMode.NONE)
+        # XPress's uniform draft queries can use FULL graphs even when the
+        # target uses PIECEWISE graphs. Keep eager and backend capability checks
+        # in the parent implementation.
+        if cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        super().init_cudagraph_manager(cudagraph_mode)
+        if self.query_cudagraph_manager.cudagraph_mode.has_full_cudagraphs() and self.update_stream is None:
+            # A PIECEWISE-only target does not create an attention update stream.
+            self.update_stream = torch.npu.Stream()
+            self.query_cudagraph_manager.update_stream = self.update_stream
 
     def load_draft_model(
         self,
