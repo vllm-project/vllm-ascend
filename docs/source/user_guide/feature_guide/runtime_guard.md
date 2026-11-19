@@ -131,6 +131,8 @@ Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hard
 
 ## Token repetition (pattern)
 
-See [token_repeat_pattern.md](token_repeat_pattern.md) for tokenizer warmup,
-configuration, alert reasons, and validation. The native extension is built
-with vllm-ascend.
+Field reference, warmup, migration, and alert `detail.reason` /
+`detail.rule` live under
+[runtime_config.md — token_repeat](../configuration/runtime_config.md#token_repeat).
+The native extension builds with vllm-ascend (`native_pattern`); no separate
+pip package.

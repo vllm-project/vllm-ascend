@@ -309,7 +309,6 @@ nav:
         - user_guide/feature_guide/sleep_mode.md
         - user_guide/feature_guide/runtime_guard.md
         - user_guide/feature_guide/kv_trace.md
-        - user_guide/feature_guide/token_repeat_pattern.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
