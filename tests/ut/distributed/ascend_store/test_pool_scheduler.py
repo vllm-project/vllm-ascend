@@ -81,6 +81,7 @@ def test_layerwise_state_lookup_keeps_tp_rank_separate_from_pcp_without_scratch_
     scheduler.tp_size = scheduler.put_step = tp_size
     scheduler.pcp_size = pcp_size
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = None
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["state-key"]))
 
@@ -96,6 +97,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if dspark else None
     scheduler.dspark_draft_only_group_ids = frozenset()
     scheduler.layerwise_max_transfer_blocks = 0
@@ -121,6 +123,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
     scheduler.dspark_draft_only_group_ids = frozenset({3}) if draft_only else frozenset()
     scheduler.layerwise_max_transfer_blocks = 0
@@ -152,6 +155,7 @@ def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(side_effect=lambda *args: ["target"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = (
         DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4) if mode == "dspark" else None
     )
@@ -238,6 +242,7 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
     )
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
     scheduler.dspark_draft_only_group_ids = frozenset(scheduler_config.dspark_draft_only_group_ids)
     draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash")
@@ -1200,6 +1205,7 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     scheduler.enable_partial_hash_hits = False
     scheduler.use_layerwise = False
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1207,7 +1213,9 @@ def test_connector_metadata_preserves_unscheduled_request_order(unfinished_ids, 
     scheduler._preempted_req_ids = set()
     scheduler._async_loading_req_ids = set()
     scheduler._process_new_request = MagicMock(return_value=None)
-    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler._process_async_load_request = MagicMock(
+        side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id, can_save=False)
+    )
     scheduler.retain_blocks_for_save = MagicMock()
     output = SimpleNamespace(
         finished_req_ids=set(),
@@ -1233,6 +1241,7 @@ def test_connector_metadata_without_pending_requests_does_not_scan_cached_ids(cl
     scheduler.enable_partial_hash_hits = False
     scheduler.use_layerwise = False
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
@@ -1277,13 +1286,16 @@ def test_connector_metadata_filter_has_linear_key_lookup_work():
     scheduler.enable_partial_hash_hits = False
     scheduler.use_layerwise = False
     scheduler.num_mamba_speculative_blocks_by_group = {}
+    scheduler._finished_partial_tail_metas = {}
     scheduler.kv_role = "kv_both"
     scheduler.consumer_is_to_put = scheduler.can_put = False
     scheduler._request_trackers = {}
     scheduler._unfinished_requests = {req_id: (None, []) for req_id in request_ids + pending_ids}
     scheduler._preempted_req_ids = set()
     scheduler._async_loading_req_ids = set()
-    scheduler._process_async_load_request = MagicMock(side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id))
+    scheduler._process_async_load_request = MagicMock(
+        side_effect=lambda req_id, *_: SimpleNamespace(req_id=req_id, can_save=False)
+    )
     scheduler.retain_blocks_for_save = MagicMock()
     output = SimpleNamespace(
         finished_req_ids=set(),

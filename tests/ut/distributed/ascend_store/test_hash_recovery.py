@@ -270,7 +270,12 @@ def test_finished_partial_tail_pins_exact_sources_through_next_step(finishing_ta
     assert len(req_meta.block_hashes) == 16
     meta = metadata.AscendConnectorMetadata(preempted_req_ids=set())
     state = SimpleNamespace(boundary_state_offloads={}, get_block_ids=Mock(side_effect=AssertionError("finished")))
-    scheduler._prepare_boundary_saves(meta, SimpleNamespace(kv_connector_block_state=state))
+    if state.boundary_state_offloads:
+        scheduler._handle_boundary_state_offloads(state.boundary_state_offloads, meta)
+    scheduler._apply_current_save_block_ids(meta, SimpleNamespace(kv_connector_block_state=state))
+    for finished_meta in scheduler._finished_partial_tail_metas.values():
+        meta.add_request(finished_meta)
+    scheduler._finished_partial_tail_metas.clear()
     assert meta.requests == [req_meta]
     assert not scheduler._finished_partial_tail_metas
     scheduler.retain_blocks_for_save(req_meta)
@@ -289,6 +294,23 @@ def test_finished_partial_tail_rejects_unusable_handoff(finishing_tail, offloads
     assert scheduler.register_finished_partial_tail(request, ([1, 2, 3], [50]), offloads) is False
     assert not scheduler._finished_partial_tail_metas
     scheduler._block_pool.touch.assert_not_called()
+
+
+def test_current_save_tables_are_refreshed_without_mamba_offloads():
+    scheduler = object.__new__(KVPoolScheduler)
+    req_meta = metadata.ReqMeta(req_id="dense", token_len_chunk=16, can_save=True)
+    meta = metadata.AscendConnectorMetadata(preempted_req_ids=set())
+    meta.add_request(req_meta)
+    state = SimpleNamespace(get_block_ids=Mock(return_value=([7], [8])))
+    scheduler._apply_current_save_block_ids(meta, SimpleNamespace(kv_connector_block_state=state))
+    assert req_meta.block_ids_by_group == [[7], [8]]
+    state.get_block_ids.assert_called_once_with("dense")
+
+
+def test_no_save_jobs_need_no_current_block_state():
+    scheduler = object.__new__(KVPoolScheduler)
+    meta = metadata.AscendConnectorMetadata(preempted_req_ids=set())
+    scheduler._apply_current_save_block_ids(meta, SimpleNamespace(kv_connector_block_state=None))
 
 
 def test_finished_partial_tail_requires_common_boundary(finishing_tail):
@@ -320,7 +342,12 @@ def test_core_boundary_offload_is_not_positional_recurrent_table(partial_hits):
         req_ids={"r"}, resolve_block_ids=tables.__getitem__, boundary_state_offloads={"r": [(1, 9, 8)]}
     )
     meta = metadata.AscendConnectorMetadata(preempted_req_ids=set())
-    scheduler._prepare_boundary_saves(meta, SimpleNamespace(kv_connector_block_state=state))
+    if state.boundary_state_offloads:
+        scheduler._handle_boundary_state_offloads(state.boundary_state_offloads, meta)
+    scheduler._apply_current_save_block_ids(meta, SimpleNamespace(kv_connector_block_state=state))
+    for finished_meta in scheduler._finished_partial_tail_metas.values():
+        meta.add_request(finished_meta)
+    scheduler._finished_partial_tail_metas.clear()
     assert meta.requests[0].boundary_puts == [(1, 9, 8)]
     assert meta.requests[0].block_ids_by_group == [[1], [2]]
     tracker = InFlightSaveBlockTracker(1)

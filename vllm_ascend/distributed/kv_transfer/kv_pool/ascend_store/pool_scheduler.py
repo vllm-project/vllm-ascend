@@ -140,6 +140,7 @@ class BaseKVPoolScheduler(ABC):
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
+        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
         self._preempted_req_ids: set[str] = set()
         # Whether to discard partial chunks
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -606,10 +607,8 @@ class BaseKVPoolScheduler(ABC):
         if not load_spec:
             return None
         num_tokens_to_compute = load_spec.kvpool_cached_tokens
-        if (
-            not self.enable_partial_hash_hits
-            and (num_tokens_to_compute % self._block_size != 0)
-            and (num_tokens_to_compute == len(request.prompt_token_ids) - 1)
+        if (num_tokens_to_compute % self._block_size != 0) and (
+            num_tokens_to_compute == len(request.prompt_token_ids) - 1
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
@@ -728,11 +727,64 @@ class BaseKVPoolScheduler(ABC):
                     if req_meta is not None:
                         meta.add_request(req_meta)
 
-        if not self.use_layerwise and self.num_mamba_speculative_blocks_by_group:
-            self._prepare_boundary_saves(meta, scheduler_output)
+        # TODO: Adapt layerwise saves to consume Core's boundary-state handoff.
+        state = getattr(scheduler_output, "kv_connector_block_state", None)
+        if state is not None and state.boundary_state_offloads and self.can_put:
+            self._handle_boundary_state_offloads(state.boundary_state_offloads, meta)
+        self._apply_current_save_block_ids(meta, scheduler_output)
+        # Finish-time sources were pinned before request cleanup and do not
+        # require a current block table.
+        for req_meta in self._finished_partial_tail_metas.values():
+            meta.add_request(req_meta)
+        self._finished_partial_tail_metas.clear()
         for req_meta in meta.requests:
             self.retain_blocks_for_save(req_meta)
         return meta
+
+    def _handle_boundary_state_offloads(
+        self, offloads: dict[str, list[tuple[int, int, int]]], meta: AscendConnectorMetadata
+    ) -> None:
+        """Attach Core's exact checkpoint sources, creating boundary-only jobs as needed."""
+        save_metas = {req.req_id: req for req in meta.requests if req.can_save}
+        for req_id, entries in offloads.items():
+            tracker = self._request_trackers.get(req_id)
+            request = self._unfinished_requests.get(req_id)
+            if tracker is None or request is None or not self.can_put:
+                continue
+            accepted = [
+                BoundaryPut(group, block, boundary)
+                for group, block, boundary in entries
+                if group in self.cache_coordinator.mamba_group_ids
+                and block > 0
+                and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
+            ]
+            if not accepted:
+                continue
+            req_meta = save_metas.get(req_id)
+            if req_meta is None:
+                req_meta = ReqMeta(
+                    req_id=req_id,
+                    token_len_chunk=0,
+                    can_save=True,
+                    block_hashes=list(request[0].block_hashes),
+                    num_prompt_tokens=tracker.num_prompt_tokens,
+                    completed_token_len=tracker.token_len,
+                )
+                meta.add_request(req_meta)
+                save_metas[req_id] = req_meta
+            req_meta.boundary_puts = accepted
+
+    def _apply_current_save_block_ids(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
+        """Replace tracker mirrors with Core's current tables for save jobs."""
+        save_metas = [req for req in meta.requests if req.can_save]
+        if not save_metas:
+            return
+        state = output.kv_connector_block_state
+        assert state is not None, "Current block tables are required for AscendStore jobs"
+        for req_meta in save_metas:
+            block_ids = state.get_block_ids(req_meta.req_id)
+            assert block_ids is not None, f"Missing Core save block table: {req_meta.req_id}"
+            req_meta.block_ids_by_group = [list(group) for group in block_ids]
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Retain in-flight Mamba blocks according to the transfer mode. It is only used in Blockwise."""
@@ -811,7 +863,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
-        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         super().update_connector_output(connector_output)
@@ -835,6 +886,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep Mamba source blocks alive until bulk save completes."""
+        if req_meta.can_save and req_meta.event_id is None and self.cache_coordinator is not None:
+            if tail := self._partial_tail_non_mamba_puts(req_meta):
+                req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
         self._in_flight_save_blocks.retain(
             req_meta,
             self._block_pool,
@@ -907,49 +961,6 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 num_tokens = min((block_idx + 1) * block_size, proof_end)
                 puts.append(BoundaryPut(group_id, block_id, num_tokens))
         return puts
-
-    def _prepare_boundary_saves(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
-        """Use Core's current tables and exact checkpoint offloads, never a positional Mamba mirror."""
-        state = output.kv_connector_block_state
-        assert state is not None, "Bulk Mamba saves require Core boundary-state handoff"
-        save_metas = {req.req_id: req for req in meta.requests if req.can_save}
-        for req_id, entries in state.boundary_state_offloads.items():
-            tracker = self._request_trackers.get(req_id)
-            request = self._unfinished_requests.get(req_id)
-            if tracker is None or request is None or not self.can_put:
-                continue
-            accepted = [
-                BoundaryPut(group, block, boundary)
-                for group, block, boundary in entries
-                if group in self.cache_coordinator.mamba_group_ids
-                and block > 0
-                and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
-            ]
-            if not accepted:
-                continue
-            req_meta = save_metas.get(req_id)
-            if req_meta is None:
-                req_meta = ReqMeta(
-                    req_id=req_id,
-                    token_len_chunk=0,
-                    can_save=True,
-                    block_hashes=list(request[0].block_hashes),
-                    num_prompt_tokens=tracker.num_prompt_tokens,
-                    completed_token_len=tracker.token_len,
-                )
-                meta.add_request(req_meta)
-                save_metas[req_id] = req_meta
-            req_meta.boundary_puts = accepted
-        for req_meta in save_metas.values():
-            block_ids = state.get_block_ids(req_meta.req_id)
-            assert block_ids is not None, f"Missing Core save block table: {req_meta.req_id}"
-            req_meta.block_ids_by_group = [list(group) for group in block_ids]
-            req_meta.boundary_puts = [*self._partial_tail_non_mamba_puts(req_meta), *(req_meta.boundary_puts or [])]
-        # These blocks were pinned in the finish callback before Core freed the
-        # request. They are intentionally independent of this step's tables.
-        for req_meta in self._finished_partial_tail_metas.values():
-            meta.add_request(req_meta)
-        self._finished_partial_tail_metas.clear()
 
     def register_finished_partial_tail(
         self,
