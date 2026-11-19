@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from unittest.mock import patch
 
 import torch
@@ -129,7 +129,6 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -311,7 +310,7 @@ class NPUWorker(GPUWorker):
     def _init_workspace_and_model_runner(self) -> None:
         raise NotImplementedError("GPUWorker._init_workspace_and_model_runner is not validated on Ascend.")
 
-    def _make_model_runner(self) -> "GPUModelRunner":
+    def _make_model_runner(self) -> NoReturn:
         raise NotImplementedError("GPUWorker._make_model_runner is not validated on Ascend.")
 
     def handle_ft_command(self, ft_request):
