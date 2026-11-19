@@ -1663,10 +1663,22 @@ def _fused_index_topk_operands(
     return _index_score_call_operands(total_q=total_q, max_blocks=max_blocks, num_heads=num_heads)
 
 
+def _index_score_wrapper(*, with_return_choice: bool = True) -> MagicMock:
+    """Model the CANN wrapper, with or without the fused-TopK ``return_choice``."""
+    wrapper = MagicMock(name="msa_index_score")
+    names = ["query", "key", "start_loc", "block_table"]
+    if with_return_choice:
+        names += ["return_choice", "topk"]
+    wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in names]
+    )
+    return wrapper
+
+
 @pytest.fixture
 def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Install a CANN package with the fused TopK and enable it on the device."""
-    ops = SimpleNamespace(msa_index_score=MagicMock(name="msa_index_score"))
+    ops = SimpleNamespace(msa_index_score=_index_score_wrapper())
     # ``from cann_ops_transformer.ops import msa_index_score`` resolves through
     # sys.modules, so replacing both entries makes the import pick up the mock.
     monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(ops=ops))
@@ -1676,7 +1688,9 @@ def fused_index_ops(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
         "get_current_hardware_profile",
         lambda: get_hardware_profile(AscendDeviceType.A5),
     )
-    return ops.msa_index_score
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+    yield ops.msa_index_score
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
 
 
 def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1691,6 +1705,50 @@ def test_topk_fusion_is_enabled_on_a5_only(monkeypatch: pytest.MonkeyPatch) -> N
             lambda device=device: get_hardware_profile(device),
         )
         assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is expected
+
+def test_topk_fusion_requires_the_new_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older CANN package without ``return_choice`` keeps the separate path."""
+    ops = SimpleNamespace(msa_index_score=_index_score_wrapper(with_return_choice=False))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", SimpleNamespace(ops=ops))
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", ops)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+    assert msa_m3_npu_module._index_score_has_return_choice() is False
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
+
+    # 换上带 return_choice 的新算子后同一台 A5 立刻可用。
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+    ops.msa_index_score = _index_score_wrapper()
+    assert msa_m3_npu_module._index_score_has_return_choice() is True
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is True
+
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+
+def test_topk_fusion_is_off_when_the_operator_is_unimportable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``cann_ops_transformer`` at all must not raise, just disable fusion."""
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer", None)
+    monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", None)
+    monkeypatch.setattr(
+        msa_m3_npu_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
+
+    assert msa_m3_npu_module._index_score_has_return_choice() is False
+    assert msa_m3_npu_module._can_use_index_score_topk_fusion(16) is False
+
+    msa_m3_npu_module._index_score_has_return_choice.cache_clear()
 
 
 def test_index_score_requests_fused_topk_indices(fused_index_ops: MagicMock) -> None:

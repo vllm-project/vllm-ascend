@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from importlib import import_module
+from inspect import signature
 from typing import Any
 
 import torch
@@ -482,17 +483,35 @@ def _minimax_m3_index_score_topk(
         idx_q,
         index_kv_cache,
         start_loc,
-        return_choice=1,
+        return_choice=1,  # 1: only ``sparse_indices``; 0: the plain score
         topk=topk,
         block_table=block_table,
         atten_mask=causal_mask,
         actual_seq_qlen=cu_seqlens_q,
         actual_seq_klen=seq_lens,
-        layout_key="BBND",
+        layout_key="BBND",  # paged key: [num_blocks, block_size, heads, dim]
+        # 3 requires ``atten_mask`` and 0 forbids it, so both follow the same call.
         sparse_mode=3 if causal_mask is not None else 0,
         init_blocks=init_blocks,
         local_blocks=local_blocks,
     )
+
+
+@lru_cache
+def _index_score_has_return_choice() -> bool:
+    """Whether the installed CANN package exposes the fused TopK output.
+
+    ``return_choice`` was added with the TopK fusion, so its presence is what
+    separates a new package from an older one. Inspect the wrapper signature
+    rather than the op name: a package without the keyword would reject the call
+    with ``TypeError`` instead of reaching the kernel.
+    """
+    try:
+        from cann_ops_transformer.ops import msa_index_score
+
+        return "return_choice" in signature(msa_index_score).parameters
+    except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> no fusion
+        return False
 
 
 def _can_use_index_score_topk_fusion(topk: int) -> bool:
@@ -507,7 +526,9 @@ def _can_use_index_score_topk_fusion(topk: int) -> bool:
     """
     if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION):
         return False
-    return 0 < topk <= _INDEX_SCORE_TOPK_MAX and topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT == 0
+    if not 0 < topk <= _INDEX_SCORE_TOPK_MAX or topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT != 0:
+        return False
+    return _index_score_has_return_choice()
 
 
 @torch.no_grad()
