@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare three complete QKV-to-O paths on identical examples and a single NPU."""
+"""Compare unfused and TileLang QKV-to-O paths on identical examples and a single NPU."""
 
 import argparse
 import gc
 import json
 import statistics
-from importlib import metadata
 from pathlib import Path
 
 import torch
@@ -15,7 +14,6 @@ from benchmark import capture, paired
 from fused import WEIGHT_REUSE_BATCHES, FusedMiddle
 from inputs import Config, make_inputs
 from native import Native
-from pypto_fused import PyPTOMiddle
 
 TOLERANCES = {
     "output": (0.025, 0.002),
@@ -53,7 +51,7 @@ def run_batch(b, args):
     c = Config(batch=b)
     n = Native(c, make_inputs(c, device="npu", seed=args.seed + b))
     n.cs_base[1:, 3:] = torch.randn_like(n.cs_base[1:, 3:]) * 0.25
-    paths = {"unfused": n, "pypto": PyPTOMiddle(n), "tilelang": FusedMiddle(n, tuned=True, reuse_weights=True)}
+    paths = {"unfused": n, "tilelang": FusedMiddle(n, tuned=True, reuse_weights=True)}
     checks = []
     state = n.state.clone()
     for accept in [1, 2, 6, "mixed"] if b > 1 else [1, 2, 6]:
@@ -63,11 +61,8 @@ def run_batch(b, args):
             n.accepted.fill_(accept)
         n.reset()
         ref = {k: v.clone() for k, v in observe(n, n()).items() if k != "checkpoint"}
-        check = {"accepted": accept}
-        for k in ("pypto", "tilelang"):
-            n.reset()
-            check[k] = validate(n, paths[k](), ref, state)
-        checks.append(check)
+        n.reset()
+        checks.append({"accepted": accept, "tilelang": validate(n, paths["tilelang"](), ref, state)})
     del ref
     n.accepted.fill_(1)
     graphs = {}
@@ -75,7 +70,7 @@ def run_batch(b, args):
         n.reset()
         graphs[k] = capture(f, args.repeat)
     # Change history after capture and poison all public output buffers. This
-    # checks graph replay really executes PyPTO, including state writebacks.
+    # checks that replay recomputes outputs and writes back the state.
     n.accepted.fill_(2)
     n.reset()
     # Capture-time allocations are shared within each graph. Compute the native
@@ -126,7 +121,6 @@ def main():
         "device": torch.npu.get_device_name(0),
         "torch": torch.__version__,
         "torch_npu": torch_npu.__version__,
-        "pypto": metadata.version("pypto"),
         "rows": [],
     }
     for b in batches:
