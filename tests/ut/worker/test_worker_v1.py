@@ -1,6 +1,5 @@
 import importlib
 import unittest
-from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -2162,15 +2161,9 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
-        worker._weight_update_is_draft = False
-        worker._incomplete_weight_updates = set()
-        worker._kv_cache_reclaimable = False
-        worker._weight_update_kv_cache_loan = ExitStack()
-        worker.vllm_config = SimpleNamespace()
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
-        worker.model_runner.extensible_kv_cache = None
         worker.model_config = MagicMock()
         return worker
 

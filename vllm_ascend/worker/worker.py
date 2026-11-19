@@ -259,6 +259,7 @@ class NPUWorker(GPUWorker):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
+        self._draft_weight_update_active = False
         self.npugraph_memory_bytes = 0
         # Buffers and parameters saved before sleep.
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -346,13 +347,56 @@ class NPUWorker(GPUWorker):
             reset_fn()
 
     def get_draft_model(self) -> nn.Module | None:
-        raise NotImplementedError("GPUWorker.get_draft_model is not validated on Ascend.")
+        if not self.use_v2_model_runner:
+            raise RuntimeError("Draft weight updates require Model Runner V2.")
+        return self.model_runner.get_draft_model()
 
     def supports_draft_weight_updates(self) -> bool:
-        return False
+        config = self.vllm_config.weight_transfer_config
+        return (
+            self.use_v2_model_runner
+            and config is not None
+            and config.backend == "hccl"
+            and self.weight_transfer_engine is not None
+            and self.weight_transfer_engine.supports_draft_weight_update
+        )
 
     def _set_draft_weight_update_target(self) -> None:
-        raise NotImplementedError("GPUWorker._set_draft_weight_update_target is not validated on Ascend.")
+        draft_model = self.get_draft_model()
+        speculative_config = self.vllm_config.speculative_config
+        if draft_model is None or speculative_config is None:
+            raise RuntimeError("No draft model is configured for weight updates.")
+        if getattr(speculative_config, "prefill_context_kv_only", False):
+            raise RuntimeError("Draft weights are unavailable with prefill_context_kv_only.")
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
+
+    def start_draft_weight_update(self) -> None:
+        self._check_weight_transfer_engine()
+        if self._weight_update_active:
+            raise RuntimeError("A weight update is already active. Call finish_weight_update first.")
+        if not self.supports_draft_weight_updates():
+            raise RuntimeError("Draft weight updates are supported only by the HCCL Model Runner V2 path.")
+        self._check_nz_disabled()
+        assert self.weight_transfer_engine is not None
+        try:
+            self._set_draft_weight_update_target()
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            raise
+        self._draft_weight_update_active = True
+        self._weight_update_active = True
+
+    def _restore_draft_weight_update_target(self) -> None:
+        assert self.weight_transfer_engine is not None
+        try:
+            self.weight_transfer_engine.reset_weight_update_target()
+        finally:
+            self._draft_weight_update_active = False
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
 
     def get_compilation_match_table(self) -> dict[str, int]:
         raise NotImplementedError("GPUWorker.get_compilation_match_table is not validated on Ascend.")
@@ -522,18 +566,18 @@ class NPUWorker(GPUWorker):
             self.sleep_wakeup_manager.wakeup(tags)
         self.synchronize_device()
 
-    _check_weight_transfer_engine = VllmWorker._check_weight_transfer_engine
-    init_weight_transfer_engine = VllmWorker.init_weight_transfer_engine
-    get_draft_model = VllmWorker.get_draft_model
-    supports_draft_weight_updates = VllmWorker.supports_draft_weight_updates
-    _set_draft_weight_update_target = VllmWorker._set_draft_weight_update_target
-    start_weight_update = VllmWorker.start_weight_update
-    start_draft_weight_update = VllmWorker.start_draft_weight_update
-    update_weights = VllmWorker.update_weights
-    finish_weight_update = VllmWorker.finish_weight_update
-    _end_weight_update = VllmWorker._end_weight_update
-    has_incomplete_weight_update = VllmWorker.has_incomplete_weight_update
-    set_kv_cache_reclaimable = VllmWorker.set_kv_cache_reclaimable
+    def _check_weight_transfer_engine(self) -> None:
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. Please set weight_transfer_config to enable weight transfer."
+            )
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        """Initialize the HCCL weight transfer process group with the trainer."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+        typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
         if get_ascend_config().weight_nz_mode:
@@ -544,12 +588,59 @@ class NPUWorker(GPUWorker):
                 "(enabled: true) which disables NZ automatically."
             )
 
-    def _start_weight_update(self, is_draft: bool = False) -> None:
-        """Validate Ascend reload requirements, then use the upstream lifecycle."""
-        # Reject an unconfigured engine before accessing the Ascend config.
+    def start_weight_update(self) -> None:
+        """Begin a new weight update; prepares the model for layerwise reload."""
         self._check_weight_transfer_engine()
+
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
+            )
+
         self._check_nz_disabled()
-        VllmWorker._start_weight_update(self, is_draft=is_draft)
+
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.start_weight_update()
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: dict) -> None:
+        """Receive a chunk of weights from the trainer and load them in place."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+
+        # state machine driven by start/finish.
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before update_weights.")
+
+        try:
+            self.weight_transfer_engine.update_weights(update_info)
+        except BaseException:
+            self._weight_update_active = False
+            if getattr(self, "_draft_weight_update_active", False):
+                self._restore_draft_weight_update_target()
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update; runs layerwise postprocessing."""
+        self._check_weight_transfer_engine()
+
+        if not self._weight_update_active:
+            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+
+        assert self.weight_transfer_engine is not None
+        if getattr(self, "_draft_weight_update_active", False):
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            finally:
+                self._weight_update_active = False
+                self._restore_draft_weight_update_target()
+            return
+        self.weight_transfer_engine.finish_weight_update()
+        if vllm_version_is("0.33.0"):
+            self.model_runner.reset_lora_state()
+        else:
+            self.model_runner.on_target_weights_replaced()
+        self._weight_update_active = False
 
     def shutdown(self) -> None:
         model = getattr(getattr(self, "model_runner", None), "model", None)
