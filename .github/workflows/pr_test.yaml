@@ -182,14 +182,6 @@ jobs:
           echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "::endgroup::"
 
-      # Keep a step boundary so the Kubernetes runner can synchronize the files
-      # before processing add-matcher outside the job container.
-      - name: Register problem matchers
-        run: |
-          for matcher in actionlint markdownlint mypy; do
-            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
-          done
-
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
         with:
@@ -288,6 +280,14 @@ jobs:
         with:
           path: /tmp/pre-commit-cache
           key: pre-commit-${{ steps.vllm.outputs.PRE_COMMIT_HASH }}
+
+      # Increase the execution interval between the "Copy problem matchers" and "Register problem matchers" steps
+      # to ensure the runner can successfully receive the target file, lower the chance of missing files.
+      - name: Register problem matchers
+        run: |
+          for matcher in actionlint markdownlint mypy; do
+            echo "::add-matcher::$RUNNER_TEMP/$matcher.json"
+          done
 
       - name: Run pre-commit
         timeout-minutes: 10
