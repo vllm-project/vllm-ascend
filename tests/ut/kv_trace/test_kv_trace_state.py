@@ -13,9 +13,9 @@ def test_new_cached_and_resumed_messages(runtime):
     cached = message(bindings={}, counts={"r": 1}, cached={"r": ([[2]], 128)})
     runtime.state.bind(cached)
     assert runtime.state.requests["r"] == ((1, 2),)
-    # Resumed requests are resent through scheduled_new_reqs, so the cached
-    # delta starts from an empty block list.
-    resumed = message(bindings={}, counts={"r": 1}, cached={"r": ([[3]], 0)}, resumed={"r"})
+    # Resumed requests are resent through scheduled_new_reqs, so the fresh
+    # binding replaces the blocks held before the pause.
+    resumed = message(bindings={"r": [[3]]})
     runtime.state.bind(resumed)
     assert runtime.state.requests["r"] == ((3,),)
     assert not reasons(runtime)
