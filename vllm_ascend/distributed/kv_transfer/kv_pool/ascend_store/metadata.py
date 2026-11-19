@@ -62,12 +62,16 @@ def resolve_cache_prefix(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
         cache.block_size = min(block_sizes)
 
     model = vllm_config.model_config
+    # Match upstream hash_config on main, retaining v0.33.0's compute_hash.
+    # Do not use identity-cached hashes for normalized config copies.
+    model_hash = hash_factors(model.compile_factors()) if hasattr(model, "compile_factors") else model.compute_hash()
+    cache_hash = hash_factors(cache.compile_factors()) if hasattr(cache, "compile_factors") else cache.compute_hash()
     prefix = "auto-" + hash_factors(
         {
             "build": build,
-            "model": model.compute_hash(),
+            "model": model_hash,
             "hf_commit": getattr(model.hf_config, "_commit_hash", None),
-            "cache": cache.compute_hash(),
+            "cache": cache_hash,
         }
     )
     logger.info("AscendStore resolved cache_prefix: %s", prefix)

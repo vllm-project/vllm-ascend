@@ -110,6 +110,26 @@ class TestCachePrefixResolution(unittest.TestCase):
         self.env.VLLM_IMAGE_TAG = "image-v2"
         self.assertNotEqual(original, metadata.resolve_cache_prefix(config))
 
+    def test_compile_factors_identity_matches_current_upstream_hashing(self):
+        config = config_for("auto")
+        config.model_config.compile_factors = lambda: {"model": "model-v1"}
+        config.model_config.compute_hash = MagicMock(side_effect=AssertionError("legacy hash must not be used"))
+        config.cache_config = SimpleNamespace(
+            block_size=32,
+            compile_factors=lambda: {"block_size": 32, "cache_dtype": "bfloat16"},
+            compute_hash=MagicMock(side_effect=AssertionError("legacy hash must not be used")),
+        )
+        expected_model = hashlib.sha256(json.dumps({"model": "model-v1"}, sort_keys=True).encode()).hexdigest()
+        expected_cache = hashlib.sha256(
+            json.dumps({"block_size": 32, "cache_dtype": "bfloat16"}, sort_keys=True).encode()
+        ).hexdigest()
+        self.assertTrue(metadata.resolve_cache_prefix(config).startswith("auto-"))
+        self.hash_factors.assert_called_with(
+            {"build": "image-v1", "model": expected_model, "hf_commit": "hf-v1", "cache": expected_cache}
+        )
+        config.model_config.compute_hash.assert_not_called()
+        config.cache_config.compute_hash.assert_not_called()
+
     def test_commit_fallback_and_missing_build(self):
         config = config_for("auto")
         for image in ("", "local/vllm-openai:dev"):

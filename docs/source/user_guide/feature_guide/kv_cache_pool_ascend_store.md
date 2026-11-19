@@ -1652,12 +1652,15 @@ Set `"cache_prefix": "auto"` to hash the following identity factors:
   `local/vllm-openai:dev` and `unknown`, respectively, are ignored. Startup fails
   when neither provides a usable identity; use an immutable image tag or known
   build commit.
-- **Model identity:** upstream `model_config.compute_hash()` (including model
+- **Model identity:** the upstream model configuration hash (including model
   path, revision, dtype and quantization) and the resolved Hugging Face
   configuration commit (`hf_config._commit_hash`, when available).
-- **KV cache identity:** upstream `cache_config.compute_hash()` (including KV
+- **KV cache identity:** the upstream cache configuration hash (including KV
   dtype and block size). The connector normalizes the block size from resolved
   cache groups so scheduler lookup and worker PUT/GET use the same fingerprint.
+
+Current vLLM hashes `compile_factors()` through `hash_factors()` (equivalent to
+`hash_config()`); v0.33.0 uses the configuration's `compute_hash()` method.
 
 Identical identity factors produce the same prefix; a change to a hashed factor
 produces a different namespace. Different model paths or build identities can
