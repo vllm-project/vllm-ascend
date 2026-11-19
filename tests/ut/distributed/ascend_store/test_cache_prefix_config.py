@@ -19,7 +19,7 @@ if not _MOCK_VLLM_DEPS:
     import torch
     from transformers import OPTConfig
     from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import _resolve_cache_prefix
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker as mooncake_worker
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import resolve_cache_prefix
@@ -31,6 +31,11 @@ def make_config(model_path, prefix="auto", **kwargs):
         device_config=DeviceConfig("cpu"),
         kv_transfer_config=KVTransferConfig(
             kv_connector="AscendStoreConnector",
+            # Resolve the real connector through the supported upstream API,
+            # without depending on plugin-wide startup registration in CPU UTs.
+            kv_connector_module_path=(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+            ),
             kv_role="kv_both",
             kv_connector_extra_config={"backend": "mooncake", "cache_prefix": prefix},
         ),
@@ -53,12 +58,27 @@ class TestRealCachePrefixConfig(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_literal_conversion_without_upstream_private_helper(self):
+        for value, expected in (
+            ("", ""),
+            ("custom", "custom"),
+            ("AUTO", "AUTO"),
+            (None, "None"),
+            (False, "False"),
+            (0, "0"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(resolve_cache_prefix(make_config(self.model_path, value)), expected)
+
     def test_upstream_parity_for_literal_conversion_and_auto(self):
+        upstream_resolver = getattr(mooncake_worker, "_resolve_cache_prefix", None)
+        if upstream_resolver is None:
+            self.skipTest("this vLLM release has no automatic cache-prefix reference helper")
         values: tuple[object, ...] = ("", "custom", "AUTO", None, False, 0, [], {}, "auto")
         for value in values:
             with self.subTest(value=value):
                 config = make_config(self.model_path, value)
-                self.assertEqual(resolve_cache_prefix(config), _resolve_cache_prefix(config))
+                self.assertEqual(resolve_cache_prefix(config), upstream_resolver(config))
 
     def test_actual_group_geometry_normalizes_without_mutating_configs(self):
         worker = make_config(self.model_path, cache_config=CacheConfig(block_size=32))
@@ -107,13 +127,21 @@ class TestRealCachePrefixConfig(unittest.TestCase):
     def test_independent_process_uses_identical_namespace(self):
         code = (
             "import sys; "
+            # A plain Python child does not load pytest's conftest. Reuse the
+            # existing CPU dependency bootstrap before importing _mock_deps.
+            "import tests.ut.conftest; "
             "from tests.ut.distributed.ascend_store.test_cache_prefix_config import make_config; "
             "from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import resolve_cache_prefix; "
             "print('PREFIX_RESULT=' + resolve_cache_prefix(make_config(sys.argv[1])))"
         )
         result = subprocess.run(
-            [sys.executable, "-c", code, str(self.model_path)], capture_output=True, text=True, check=True, timeout=120
+            [sys.executable, "-c", code, str(self.model_path)],
+            cwd=Path(__file__).resolve().parents[4],
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
         prefixes = [
             line.removeprefix("PREFIX_RESULT=")
             for line in result.stdout.splitlines()
