@@ -45,6 +45,10 @@ projections across all requests with dense linear operators. The TileLang mixed 
 reads the gate rows for each head and performs convolution, state projection, recurrence
 and normalization. Smaller batches compute both gate projections inside the mixed kernel.
 
+For batches 24 through 80, Vector instructions widen BF16 convolution outputs and gate
+inputs directly in registers. The kernel precomputes the output gate times the normalization
+weight and stores the normalized BF16 output with packed Vector stores.
+
 For batches 14, 17, 19 and 22, the tuned benchmark pads the input projection by six rows,
 producing GEMMs with 90, 108, 120 and 138 rows respectively. It slices the result back to the
 valid tokens before the mixed kernel. Graph timings include the padding and projection.
