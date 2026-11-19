@@ -19,7 +19,13 @@ from vllm_ascend.models.qwen4_exp.quantization import (  # noqa: E402
     quantize_qsa_rows,
     quantize_qsa_values,
 )
-from vllm_ascend.ops.triton.qwen4_exp.c8 import store_qsa_c8_rows  # noqa: E402
+from vllm_ascend.ops.triton.qwen4_exp.c8 import quantize_qsa_query, store_qsa_c8_rows  # noqa: E402
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _initialize_triton():
+    init_device_properties_triton()
 
 
 @torch.inference_mode()
@@ -79,7 +85,9 @@ def test_c8_attention_eager_and_changed_input_graph_replay(dim, row_count, kv_he
     v_scale = torch.rand(kv_heads, dim, device="npu") * 0.01 + 0.01
     p_scale = torch.tensor([127.0], device="npu")
     store_qsa_c8_rows(
-        key_cache, slots, torch.randn(512, kv_heads, dim, dtype=torch.bfloat16, device="npu"),
+        key_cache,
+        slots,
+        torch.randn(512, kv_heads, dim, dtype=torch.bfloat16, device="npu"),
         key_scales=key_scales,
     )
     store_qsa_c8_rows(
@@ -97,7 +105,17 @@ def test_c8_attention_eager_and_changed_input_graph_replay(dim, row_count, kv_he
 
     def run():
         return qsa_c8_attention(
-            query, key_cache, value_cache, compact, table, requests, positions, lengths, output, v_scale, p_scale,
+            query,
+            key_cache,
+            value_cache,
+            compact,
+            table,
+            requests,
+            positions,
+            lengths,
+            output,
+            v_scale,
+            p_scale,
             key_scales=key_scales,
         )
 
@@ -160,3 +178,36 @@ def test_c8_static_v_store_channel_scales_and_saturation():
     for row, slot in enumerate((0, 127, 128)):
         torch.testing.assert_close(cache[slot // 128, slot % 128].cpu(), expected[row].cpu(), atol=0, rtol=0)
     assert (cache[2].cpu() == 37).all()
+
+
+@pytest.mark.parametrize("heads, dim", [(8, 128), (3, 256)])
+@pytest.mark.parametrize("tokens", [3, 96, 4096])
+@torch.inference_mode()
+def test_c8_query_fusion_matches_reference(heads, dim, tokens):
+    generator = torch.Generator().manual_seed(84359)
+    query = torch.randn(tokens, dim, heads, generator=generator).transpose(1, 2)
+    query[0].zero_()
+    query[1].mul_(1e-9)
+    query[2, :, :6] = torch.tensor([127.0, -127.0, 0.5, 1.5, -0.5, -1.5])
+    query = query.to(device="npu", dtype=torch.bfloat16)
+    assert not query.is_contiguous()
+    torch.testing.assert_close(quantize_qsa_query(query), quantize_qsa_rows(query), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("heads, dim", [(8, 128), (3, 256)])
+@torch.inference_mode()
+def test_c8_query_fusion_graph_replay_matches_reference(heads, dim):
+    torch.manual_seed(17)
+    query = torch.randn(96, heads, dim, device="npu", dtype=torch.bfloat16)
+    quantize_qsa_query(query)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = quantize_qsa_query(query)
+
+    query.mul_(0.25)
+    query[0].zero_()
+    query[1, :, :6] = torch.tensor([127.0, -127.0, 0.5, 1.5, -0.5, -1.5], device="npu", dtype=torch.bfloat16)
+    graph.replay()
+    torch.npu.synchronize()
+    torch.testing.assert_close(captured, quantize_qsa_rows(query), rtol=0, atol=0)

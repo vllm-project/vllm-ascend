@@ -4,7 +4,71 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.models.qwen4_exp.quantization import C8_QUANT_MAX, C8_SCALE_MIN, qsa_c8_indexer_cache_views
+from vllm_ascend.models.qwen4_exp.quantization import (
+    C8_QUANT_MAX,
+    C8_SCALE_MIN,
+    qsa_c8_indexer_cache_views,
+    quantize_qsa_rows,
+)
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+@triton.jit
+def _quantize_c8_query(
+    query,
+    codes,
+    scales,
+    num_rows,
+    blocks_per_core,
+    DIM: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
+    SCALE_MIN: tl.constexpr,
+):
+    channels = tl.arange(0, DIM)
+    for block in range(blocks_per_core):
+        rows = (tl.program_id(0) * blocks_per_core + block) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+        valid = rows < num_rows
+        offsets = rows[:, None] * DIM + channels[None, :]
+        values = tl.load(query + offsets, valid[:, None], other=0).to(tl.float32)
+        # Match the PyTorch FP32 scale and division so halfway values reach
+        # nearbyint with the same round-to-nearest-even semantics.
+        scale = tl.maximum(tl.div_rn(tl.max(tl.abs(values), axis=1), QUANT_MAX), SCALE_MIN)
+        rounded = tl.extra.cann.libdevice.nearbyint(tl.div_rn(values, scale[:, None]))
+        codes_i8 = tl.minimum(tl.maximum(rounded, -QUANT_MAX), QUANT_MAX).to(tl.int8)
+        tl.store(codes + offsets, codes_i8, valid[:, None])
+        tl.store(scales + rows, scale, valid)
+
+
+def quantize_qsa_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse C8 query quantization with the reference FP32 division and rounding."""
+    if (
+        query.device.type != "npu"
+        or query.ndim != 3
+        or query.dtype != torch.bfloat16
+        or query.shape[-1] not in (128, 256)
+        or not query.numel()
+    ):
+        return quantize_qsa_rows(query)
+    tokens, heads, dim = query.shape
+    codes = torch.empty(query.shape, dtype=torch.int8, device=query.device)
+    scales = torch.empty((tokens, heads), dtype=torch.float32, device=query.device)
+    rows = tokens * heads
+    block_rows = 16
+    blocks = triton.cdiv(rows, block_rows)
+    cores = min(blocks, get_vectorcore_num())
+    _quantize_c8_query[(cores,)](
+        query.contiguous(),
+        codes,
+        scales,
+        rows,
+        triton.cdiv(blocks, cores),
+        DIM=dim,
+        BLOCK_ROWS=block_rows,
+        QUANT_MAX=float(C8_QUANT_MAX),
+        SCALE_MIN=C8_SCALE_MIN,
+    )
+    return codes, scales
 
 
 @triton.jit
