@@ -77,6 +77,7 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
+      cpu_ut: ${{ steps.filter.outputs.cpu_ut }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -243,6 +244,27 @@ jobs:
               - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
+            # Files that can affect CPU UT execution but are covered by neither
+            # src nor ci_pipeline: everything tests/ut reads from disk, not only
+            # what it imports from under tests/. That includes shared tests/
+            # helpers (e.g. tests/deepseek_v41_utils.py), example scripts that UT
+            # imports or spawns as subprocesses (e.g.
+            # examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py,
+            # examples/rl/rlhf_http_hccl.py), and the specific .github files UT
+            # inspects: top-level workflow YAMLs (FLA pin checks in
+            # tests/ut/ops/test_gdn_window_guard.py), workflow scripts and the
+            # csrc-l1-restore action imported/read by tests/ut/_tools, and the
+            # pinned vLLM refs that decide which versions the UT matrix runs
+            # against. Other .github metadata (CODEOWNERS, labeler, templates)
+            # cannot affect UT and is intentionally left out.
+            # A cpu_ut-only change runs cpu-ut without requiring a test label.
+            cpu_ut:
+                - 'tests/**'
+                - 'examples/**'
+                - 'Dockerfile*'
+                - '.github/vllm-release-tag.commit'
+                - '.github/vllm-main-verified.commit'
+                - '!**/*.md'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -316,9 +338,25 @@ jobs:
     # main commit and once on the matched release tag. Independent of the
     # main2main label, which only widens the NPU matrix. Release branches only
     # run the release tag (see the pre-commit ref resolution).
+    # Docs-only PRs skip this job: it runs when the diff touches src,
+    # ci_pipeline, or cpu_ut paths (shared tests/ helpers, example scripts UT
+    # imports or spawns, the CI files UT inspects, and the pinned vLLM refs),
+    # or when a run-enabling label (main2main / ready-precise) forces it. The
+    # labels are required because the run-selected-tests* jobs below require
+    # cpu-ut success, so cpu-ut must run whenever NPU tests would run.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    if: >-
+      ${{
+        needs.pre-commit.result == 'success' &&
+        (
+          needs.pre-commit.outputs.src == 'true' ||
+          needs.pre-commit.outputs.ci_pipeline == 'true' ||
+          needs.pre-commit.outputs.cpu_ut == 'true' ||
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-precise')
+        )
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -940,6 +978,11 @@ jobs:
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 == 'true' }}"
+          # Path categories from the pre-commit paths-filter, read once so the
+          # cpu-ut check and the select-tests skip branch below share them.
+          SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
+          CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
+          CPU_UT_FILTER="${{ needs.pre-commit.outputs.cpu_ut }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
@@ -960,7 +1003,16 @@ jobs:
           fi
 
           if [ "${CPU_UT_RESULT}" != "success" ]; then
-            fail "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
+            # cpu-ut is skipped on purpose for docs-only PRs (no src,
+            # ci_pipeline, or cpu_ut paths, no run-enabling label). Any other
+            # skip is a workflow bug and must fail the gate.
+            if [ "${CPU_UT_RESULT}" = "skipped" ] && [ "${SRC_FILTER}" != "true" ] \
+              && [ "${CI_PIPELINE_FILTER}" != "true" ] && [ "${CPU_UT_FILTER}" != "true" ] \
+              && [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
+              echo "::notice::cpu-ut skipped: PR changes no src/ci_pipeline/cpu_ut paths and carries no run-enabling label"
+            else
+              fail "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
+            fi
           fi
 
           # /run-triggered runs skip the codeowner-approval job on purpose
@@ -980,8 +1032,6 @@ jobs:
             # (ready-precise / main2main). An unlabeled run
             # passes the gate when (and only when) the paths-filter in
             # pre-commit found no src or ci_pipeline paths in the diff.
-            SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
-            CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
             if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
               echo "::notice::No source paths changed; precision tests are not required for this PR."
               echo "=== CI Gate: PASSED ==="

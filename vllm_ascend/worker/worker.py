@@ -1440,6 +1440,13 @@ class NPUWorker(GPUWorker):
             # Connector construction must see loader-owned draft caches before
             # planning target layerwise scratch buffers or pool transfers.
             kv_cache_config.dspark_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
+        if (
+            speculative is not None
+            and speculative.method == "dflash"
+            and speculator is not None
+            and get_layerwise_reuse_config(self.vllm_config.kv_transfer_config) is not None
+        ):
+            kv_cache_config.dflash_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
