@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP32 C2 ring compressor, ratio-1 path, and fused RMS normalization."""
 
+from typing import cast
+
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -55,10 +57,11 @@ class DeepseekV41Compressor(nn.Module):
     def pool_projected(self, kv, scores, metadata, *, prev_rows, prev_row_indices):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
+        ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
         pooled = compressor_from_projected(
             kv,
             scores,
-            self.state_cache.kv_cache[0].squeeze(-2),
+            ring_state.squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
             # Metadata keeps the graph descriptor bound. A C2 launch cannot
