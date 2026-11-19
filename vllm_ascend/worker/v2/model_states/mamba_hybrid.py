@@ -39,6 +39,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
@@ -383,6 +384,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        # Same wiring as default.py: rebuild the per-group table each step and feed the
+        # xlite adapter's per-group consumer via the build-time callback.
+        self._decoder_replay_common_metadata = {}
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
         if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
@@ -591,6 +595,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            common_metadata_callback=(
+                lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
+            )
+            if get_ascend_config().xlite_graph_config.enabled
+            else None,
         )
         graph_writes: dict[GDNGraphStateUpdater, list] = {}
         for group_id, group, builder, (first_layer, updater) in followers:
