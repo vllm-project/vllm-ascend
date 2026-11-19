@@ -11,7 +11,7 @@ def check_completion(result, output_tokens):
     choice = result["choices"][0]
     assert choice["finish_reason"] == "length"
     logs = choice["logprobs"]
-    assert len(logs["tokens"]) == len(logs["token_logprobs"]) == output_tokens
+    assert len(logs["tokens"]) == len(logs["token_logprobs"]) == output_tokens, "Unexpected token/logprob count"
     assert all(math.isfinite(value) for value in logs["token_logprobs"]), "Non-finite token log probabilities"
     return logs
 
@@ -28,11 +28,3 @@ def check_state_pulls(workers, expected_pulls=2):
     for offsets in groups.values():
         assert set(offsets) == set(range(expected_pulls)), "Missing PCP state shard"
         assert len(set(offsets.values())) == 1, "Unequal PCP state shard copy counts"
-
-
-def check_same_completion(expected, actual, output_tokens, tolerance=0.02):
-    left, right = check_completion(expected, output_tokens), check_completion(actual, output_tokens)
-    assert left["tokens"] == right["tokens"], "PD token mismatch"
-    assert all(abs(a - b) <= tolerance for a, b in zip(left["token_logprobs"], right["token_logprobs"])), (
-        "PD logprob mismatch"
-    )
