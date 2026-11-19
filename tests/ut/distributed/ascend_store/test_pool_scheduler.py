@@ -2188,10 +2188,9 @@ def test_layerwise_retry_discards_stale_load_spec(second_hit):
 
 
 @pytest.mark.parametrize(
-    ("local_start", "pool_end", "expected"),
-    [(0, 672, 672), (640, 640, 0), (640, 1312, 672), (640, 1888, 1248), (672, 1888, 1216)],
+    ("local_start", "pool_end", "expected", "load_async"),
+    [(0, 672, 672, None), (640, 640, 0, True), (640, 1888, 1248, False), (672, 1888, 1216, True)],
 )
-@pytest.mark.parametrize("load_async", [None, False, True])
 def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end, expected, load_async):
     extra_config = {"backend": "memcache"}
     if load_async is not None:

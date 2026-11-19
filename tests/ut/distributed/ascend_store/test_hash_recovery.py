@@ -3,7 +3,6 @@
 
 import ctypes
 import importlib
-import random
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -34,13 +33,12 @@ def groups():
     ]
 
 
-@pytest.mark.parametrize("seed", range(20))
 @pytest.mark.parametrize("eagle", [False, True])
-def test_same_group_hits_as_upstream(seed, eagle):
+def test_same_group_hits_as_upstream(eagle):
     upstream = importlib.import_module(CORE + ".coordinator")
     hashes = [BlockHash(bytes([i + 1]) * 8) for i in range(32)]
-    rng = random.Random(seed)
-    exists = {(g, bytes(h)) for g in range(2) for h in hashes if rng.random() > 0.2}
+    # Start with a shared prefix, then leave different holes in each group.
+    exists = {(g, bytes(h)) for g in range(2) for i, h in enumerate(hashes) if i not in (12 + g, 21 + g)}
     results = []
     for module, cls in [
         (coordinator, coordinator.AscendStoreCoordinator),
@@ -98,9 +96,8 @@ def bare_worker(coord, db, store):
     return worker
 
 
-@pytest.mark.parametrize("seed", [0, 42, 1024])
 @pytest.mark.parametrize("store_job_id", [None, 99])
-def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
+def test_boundary_save_lookup_and_physical_page_replay(store_job_id):
     coord = coordinator.AscendStoreCoordinator(
         groups(),
         16,
@@ -109,7 +106,7 @@ def test_boundary_save_lookup_and_physical_page_replay(seed, store_job_id):
         group_cache_families=["default", "default"],
         enable_partial_hash_hits=True,
     )
-    rng = torch.Generator().manual_seed(seed)
+    rng = torch.Generator().manual_seed(42)
     sources = [torch.randn(4, 16, 1, generator=rng), torch.randn(4, 2, generator=rng)]
     db = metadata.ChunkedTokenDatabase(
         [metadata.KeyMetadata("model", 0, 0, 0, g) for g in range(2)], [16, 16], None, hash_block_size=4

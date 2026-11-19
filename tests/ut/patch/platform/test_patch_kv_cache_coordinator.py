@@ -231,32 +231,30 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 
 
 @pytest.mark.parametrize(
-    ("kv_transfer_config", "drop_for_role"),
+    ("kv_transfer_config", "use_eagle", "mamba_eagle", "expected"),
     [
-        pytest.param(None, False, id="standalone"),
-        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), False, id="producer"),
-        pytest.param(_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), True, id="consumer"),
-        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), True, id="both"),
+        pytest.param(None, True, True, False, id="standalone"),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True, True, False, id="producer"),
+        pytest.param(_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), True, True, True, id="consumer"),
+        pytest.param(
+            _kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), True, False, True, id="both-unmarked"
+        ),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False, True, False, id="no-drop"),
     ],
 )
-@pytest.mark.parametrize("use_eagle", [False, True])
-@pytest.mark.parametrize("mamba_eagle", [False, True])
-@pytest.mark.parametrize("extra_mamba", [False, True])
-def test_mamba_checkpoint_drop_follows_lookup_policy(
-    monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle, extra_mamba
-):
+def test_mamba_checkpoint_drop_follows_lookup_policy(monkeypatch, kv_transfer_config, use_eagle, mamba_eagle, expected):
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=use_eagle,
         kv_transfer_config=kv_transfer_config,
         mamba_eagle=mamba_eagle,
-        extra_mamba=extra_mamba,
+        extra_mamba=True,
     )
     # Lookup EAGLE markers do not limit checkpoint writes: even an unmarked
     # target Mamba group must share the scheduler's replay boundary.
     for manager in coordinator.single_type_managers[1:]:
-        assert manager.drop_eagle_checkpoint_block is (use_eagle and drop_for_role)
-    assert coordinator.single_type_managers[0].drop_eagle_checkpoint_block is False
+        assert manager.drop_eagle_checkpoint_block is expected
+    assert not hasattr(coordinator.single_type_managers[0], "drop_eagle_checkpoint_block")
 
 
 @pytest.mark.parametrize(

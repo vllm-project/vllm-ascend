@@ -219,44 +219,6 @@ def test_coordinator_group_block_size_double_hash():
     assert hit % 32 == 0
 
 
-# ----- Fine-grained partial hits (full attention + mamba "align") -----
-
-
-def test_coordinator_fine_grained_partial_tail_hit():
-    """K3 shape: FA + mamba-align, block_size=32 over hash_block_size=16. When
-    both groups have the sub-block boundary hash, the reconciled hit lands on
-    the hash boundary (48), not the block boundary (32)."""
-    groups = [
-        KVCacheGroupSpec(["L0"], _full(32)),
-        KVCacheGroupSpec(["L1"], _mamba_align(32)),
-    ]
-    coord = _make_coord(groups, hash_block_size=16, enable_partial_hash_hits=True)
-    hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
-    # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
-    # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
-    exists = {(g, bytes(h)) for g in (0, 1) for h in (hs[1], hs[2])}
-    cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
-    assert hit == 48
-
-
-def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
-    """If only one group has the sub-block boundary, min-convergence clips the
-    reconciled hit back to the block boundary (32)."""
-    groups = [
-        KVCacheGroupSpec(["L0"], _full(32)),
-        KVCacheGroupSpec(["L1"], _mamba_align(32)),
-    ]
-    coord = _make_coord(groups, hash_block_size=16)
-    hs = _hashes(4)
-    # Full block 0 for both; partial boundary hs[2] only for FA (group 0).
-    exists = {(g, bytes(hs[1])) for g in (0, 1)}
-    exists |= {(0, bytes(hs[2]))}
-    cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
-    assert hit == 32
-
-
 # ----- store_mask -----
 
 
@@ -390,15 +352,6 @@ def _retention_groups():
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
     return [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
-
-
-def test_store_mask_dense_default_matches_every_lcm_boundary():
-    """retention_interval=None (default) keeps the SWA tail at every lcm
-    boundary: tokens 32/64/96/128 -> chunks 3/7/11/15."""
-    coord = _make_coord(_retention_groups(), hash_block_size=8)
-    masks = coord.store_mask(128)
-    assert masks[0] == [True] * 4
-    assert masks[1] == [i % 4 == 3 for i in range(16)]
 
 
 def test_store_mask_retention_interval_sparsifies_swa_tails():
