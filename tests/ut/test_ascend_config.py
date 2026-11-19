@@ -285,6 +285,20 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
 
+    def test_eplb_env_truthy_values_are_case_insensitive(self):
+        """DYNAMIC_EPLB and EXPERT_MAP_RECORD gate the same EPLB paths, so both
+        must accept the same truthy spellings."""
+        for var_name in ("DYNAMIC_EPLB", "EXPERT_MAP_RECORD"):
+            for value in ("true", "True", "TRUE", "1"):
+                with patch.dict(os.environ, {"DYNAMIC_EPLB": "", "EXPERT_MAP_RECORD": "", var_name: value}):
+                    self.assertTrue(EplbConfig(dynamic_eplb=True).dynamic_eplb, f"{var_name}={value!r}")
+            for value in ("false", "0", "yes"):
+                with (
+                    patch.dict(os.environ, {"DYNAMIC_EPLB": "", "EXPERT_MAP_RECORD": "", var_name: value}),
+                    self.assertRaisesRegex(ValueError, "must be set to true"),
+                ):
+                    EplbConfig(dynamic_eplb=True)
+
     def test_stair_config_defaults_and_overrides(self):
         defaults = EplbConfig().stair_config
         config = EplbConfig(stair_config={"rank_transfer_limit": 2, "load_risk_quantile": 0.9})

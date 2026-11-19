@@ -332,10 +332,14 @@ class EplbConfig:
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
-            assert (
-                os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-                or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+            # Both variables gate the same EPLB code paths, so they must accept
+            # the same truthy spellings; EXPERT_MAP_RECORD used to require an
+            # exact lowercase "true" and silently rejected "True"/"1".
+            dynamic_eplb_enabled = os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
+            expert_map_record_enabled = os.getenv("EXPERT_MAP_RECORD", "false").lower() in ("true", "1")
+            assert dynamic_eplb_enabled or expert_map_record_enabled, (
+                "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
+            )
         if self.eplb_heat_collection_stage not in ["all", "prefill", "decode"]:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
