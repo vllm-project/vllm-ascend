@@ -8,7 +8,7 @@ Qwen3.6 compatibility patch applied (fp32 dequant scale + fp32 mamba state,
 same-package PR). Model Runner V1 no longer exists on main, so a main-native
 recording is the only reference this suite can reproduce; the Model Runner V1
 parity evidence is a separate acceptance record taken on vLLM-Ascend v0.30.0
-(11 cross-runner pairs, token-identical, max same-token logprob delta 1.55e-06).
+(13 cross-runner pairs, token-identical, max same-token logprob delta 1.55e-06).
 
 Trying to assert a v0.30.0-recorded golden on main does not work: the two stacks
 agree for 19 of the 24 tokens and then flip a near-tie (logprob delta 0.1297,
