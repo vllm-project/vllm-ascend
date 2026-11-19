@@ -387,41 +387,6 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
-6. **A2/A3 FA3 for DFlash2 targets and drafts**: model runner V2
-   automatically selects FA3 for both `DFlash2DraftModel` and its dense
-   `Qwen3_5ForConditionalGeneration` target when the optional `flash_attn_npu`
-   package installs the `flash_attn_npu_3` module.
-   The verified Qwen3.8-27B checkpoint declares this target architecture.
-   Other architectures, including Qwen MoE, keep their existing backend.
-   The Qwen target uses FA3 for full attention and keeps GDN for linear attention.
-   Full attention uses the default unlimited window and the original page table.
-   FA3 consumes exact device lengths after rejection, with
-   packed TND queries in eager and graph execution. With FA3 0.5.0, eager TND
-   still reads one scalar query boundary per call; graph replay skips that host
-   check. Full attention at KV capacity >=1024 also reads lengths back to the
-   host. With FA3 0.5.0 this fails during graph capture with `aclrtMemcpy` error
-   `107030`, including `FULL_DECODE_ONLY`; use eager execution for this path.
-   FA3 0.5.1 removes these host length reads when scheduler metadata is supplied,
-   allowing full-attention graph capture and replay with the default window.
-   A configured draft sliding window avoids that branch when smaller than the
-   capacity. No artificial window is added for the target.
-
-   This path requires FP16/BF16 queries with matching unquantized KV, head size
-   <=256, and PP/PCP/DCP sizes of 1. Unsupported attention features or an absent
-   `flash_attn_npu_3` module retain the existing backend. An installed package
-   must provide `get_scheduler_metadata` and `flash_attn_with_kvcache`; missing
-   interfaces raise an error when the worker uses FA3 instead of falling back.
-   Skipping the runner Event additionally
-   requires KV parallel size 1, without KV transfer, sparse KV offload or adaptive
-   verification. Output-completion events remain.
-   A5 and MiniMax keep their existing selection and synchronization behavior.
-
-   Check numerical accuracy and graph replay on A2/A3 with:
-
-    ```shell
-    pytest -sv tests/e2e/pull_request/one_card/test_dflash2_fa3_precision.py
-    ```
-
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
