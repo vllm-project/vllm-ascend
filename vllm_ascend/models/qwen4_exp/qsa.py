@@ -51,7 +51,7 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
-from .c8_attention import C8_PROBABILITY_QUANT_SCALE, qsa_c8_attention
+from .c8_attention import C8_PROBABILITY_QUANT_SCALE, c8_prefill_kv_length, qsa_c8_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning, qsa_select_paged_tokens_quantized
 from .quantization import C8_SCALE_BYTES, QSAC8Spec, QSAStaticVParameters, uses_qsa_c8_quantization
@@ -637,9 +637,13 @@ class AscendQSAImpl:
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         packed_width = layer.indexer.token_topk // layer.indexer.compress_ratio + layer.indexer.compress_ratio - 1
         compact_indices = selected_indices[:, :packed_width]
+        request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if getattr(layer, "c8_enabled", False):
             if len(kv_cache) != 3:
                 raise ValueError("QSA C8 cache requires K, V and K scales")
+            prefill_kv_length = (
+                c8_prefill_kv_length(request_plan, num_tokens) if attn_metadata.block_table.shape[0] == 1 else None
+            )
             return qsa_c8_attention(
                 query[:num_tokens],
                 key_cache,
@@ -653,8 +657,8 @@ class AscendQSAImpl:
                 layer.fa_v.scale,
                 layer.c8_p_scale,
                 key_scales=kv_cache[2],
+                prefill_kv_length=prefill_kv_length,
             )
-        request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
             return qsa_gbsa_attention(

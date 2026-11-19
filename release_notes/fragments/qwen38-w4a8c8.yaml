@@ -8,3 +8,8 @@ entries:
       --quantization ascend --kv-cache-dtype auto with Model Runner V2 on
       Ascend 910B/A3 and CANN 9.3.0. Main attention uses native INT8 GBSA and
       the indexer uses INT8 QLI-v2. Dynamic-V checkpoints need re-quantization.
+  - category: performance
+    text: >-
+      Qwen3.8-Flash-Next C8 prefill on Ascend 910B reuses paged INT8 KV within
+      eligible single-request chunks. In a 10,240-token prompt measured on
+      Ascend 910B3, the cumulative prefill GBSA kernel time fell by 50%.
