@@ -2,3 +2,5 @@ pr: 21680
 entries:
   - category: feature
     text: Added opt-in DSpark expert-pool routing for compatible DeepSeek models using ModelRunner V2 and single-device expert offload.
+  - category: bugfix
+    text: Fixed redundant expert-weight transfers caused by padding rows during ACL Graph replay with expert offload.

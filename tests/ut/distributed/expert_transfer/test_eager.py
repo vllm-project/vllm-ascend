@@ -34,7 +34,9 @@ def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_fa
         manager.has_prefill = prefill
         ids = torch.tensor(logical, dtype=torch.int32)
         before = binding.slot_to_expert
-        view, physical, _ = binding.prepare(layer, ids)
+        weights = torch.ones_like(ids, dtype=torch.float32)
+        view, physical, actual_weights, _ = binding.prepare(layer, ids, weights)
+        assert actual_weights is weights
         full_pool = prefill or ids.unique().numel() > binding.num_slots
         assert manager.get_comm.call_args.args[-1] == (binding.num_experts if full_pool else binding.num_slots)
         if full_pool:
@@ -57,7 +59,7 @@ def test_full_pool_is_shared_between_layers(expert_factory, manager_factory):
     addresses = {name: value.data_ptr() for name, value in manager.full_pool.tensors.items()}
     for layer in (first, second, first):
         binding = layer._expert_offload_binding
-        view, physical, _ = binding.prepare(layer, torch.tensor([[1, 4]]))
+        view, physical, _, _ = binding.prepare(layer, torch.tensor([[1, 4]]), torch.ones((1, 2)))
         expected = binding.adapter.load_experts(binding.host_store, (1, 4), "cpu")
         for name in binding.adapter.output_names:
             torch.testing.assert_close(getattr(view, name)[physical.long()].reshape_as(expected[name]), expected[name])
@@ -91,6 +93,8 @@ def test_prefill_does_not_read_routes_on_cpu(expert_factory, manager_factory):
             pytest.fail("prefill must not copy routes to the CPU")
 
     routes = DeviceRoutes()
-    view, physical, _ = layer._expert_offload_binding.prepare(layer, routes)
+    weights = torch.ones((1, 2))
+    view, physical, actual_weights, _ = layer._expert_offload_binding.prepare(layer, routes, weights)
     assert physical is routes
+    assert actual_weights is weights
     assert view.w13_weight is manager.full_pool.tensors["w13_weight"]

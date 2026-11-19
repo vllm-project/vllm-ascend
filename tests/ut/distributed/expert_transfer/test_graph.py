@@ -12,6 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
 
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.distributed.expert_transfer.expert_weight_transfer import ACL_MEMCPY_HOST_TO_DEVICE
 
 
 def test_graph_capacity_includes_speculative_and_padding_rows():
@@ -91,7 +92,7 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
             physical = binding.prepare_graph(ids)
             assert native_runtime.npu._launch_host_func.call_args.args[-1] == ids.numel()
         else:
-            _, physical, _ = binding.prepare(layer, ids)
+            _, physical, _, _ = binding.prepare(layer, ids, torch.ones_like(ids, dtype=torch.float32))
         assert binding.slot_to_expert == expected_slots
         for name in binding.adapter.output_names:
             torch.testing.assert_close(binding.resident[name][physical.long()], reference[name][ids.long()])
@@ -107,6 +108,72 @@ def test_graph_replay_refreshes_experts_and_reuses_storage(expert_factory, manag
     manager.unsubscribe_graph_streams()
     native_runtime.npu._subscribe_report.assert_called_once_with(native_runtime.stream)
     native_runtime.npu._unsubscribe_report.assert_called_once_with(native_runtime.stream)
+
+
+def test_graph_padding_does_not_load_experts_or_change_real_outputs(
+    expert_factory, manager_factory, native_runtime, load_hook_class, monkeypatch
+):
+    layer, _ = expert_factory(experts=102, top_k=6, slots=84)
+    manager = manager_factory(layer)
+    binding = layer._expert_offload_binding
+    reference_weights = manager.full_pool.tensors["w13_weight"]
+    binding.host_store.convert_to_native_layout(binding.adapter, "cpu")
+    binding.device = SimpleNamespace(type="npu")
+    monkeypatch.setattr(native_runtime.npu, "is_current_stream_capturing", lambda: True, raising=False)
+
+    padding = torch.empty(12, dtype=torch.bool)
+    runner = load_hook_class(
+        "vllm_ascend/worker/v2/model_runner.py",
+        "NPUModelRunner",
+        {"prepare_padding_mask"},
+        object,
+        {},
+    )()
+    runner.input_buffers = SimpleNamespace(is_padding=padding)
+    forward_context = SimpleNamespace(is_padding=padding)
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.expert_transfer.expert_offload_manager.get_forward_context",
+        lambda: forward_context,
+        raising=False,
+    )
+
+    class ReferenceMoEMethod:
+        def apply(self, layer, x, topk_weights, topk_ids, **kwargs):
+            self.slots = topk_ids
+            return x * (layer.w13_weight[topk_ids, 0, 0].float() * topk_weights).sum(dim=1, keepdim=True)
+
+    method = load_hook_class(
+        "vllm_ascend/distributed/expert_transfer/expert_offload_method.py",
+        "ExpertOffloadMoEMethod",
+        {"apply"},
+        ReferenceMoEMethod,
+        {"_EXTRA_CTX": SimpleNamespace(moe_comm_method=None)},
+    )()
+
+    real_ids = torch.stack([torch.arange(84, 90).roll(row) for row in range(6)])
+    real_weights = torch.arange(1, 7, dtype=torch.float32).repeat(6, 1) / 21
+    x = torch.arange(1, 13, dtype=torch.float32)[:, None]
+    expected = x[:6] * (reference_weights[real_ids, 0, 0].float() * real_weights).sum(dim=1, keepdim=True)
+
+    for padding_start, expected_loads in ((90, 6), (96, 0)):
+        # Simulate reuse of the same buffer after a batch with a different mask.
+        padding.fill_(padding_start == 90)
+        assert runner.prepare_padding_mask(6, 12).data_ptr() == padding.data_ptr()
+        padding_ids = torch.arange(padding_start, padding_start + 6).repeat(6, 1)
+        ids = torch.cat((real_ids, padding_ids)).to(torch.int32)
+        native_runtime.calls.clear()
+        output = method.apply(layer, x, real_weights.repeat(2, 1), ids)
+
+        copies = [
+            call for call in native_runtime.calls if isinstance(call, tuple) and call[0] == ACL_MEMCPY_HOST_TO_DEVICE
+        ]
+        assert len(copies) == expected_loads * len(binding.adapter.output_names)
+        assert set(range(84, 90)).issubset(binding.slot_to_expert)
+        assert set(range(90, 102)).isdisjoint(binding.slot_to_expert)
+        assert padding.tolist() == [False] * 6 + [True] * 6
+        torch.testing.assert_close(method.slots[6:], method.slots[:1].expand(6, -1), rtol=0, atol=0)
+        torch.testing.assert_close(output[:6], expected, rtol=0, atol=0)
+        torch.testing.assert_close(output[6:], torch.zeros_like(expected), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("graph_callback", [False, True])

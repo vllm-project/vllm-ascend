@@ -264,12 +264,15 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
     original_comm, slot_comm, view = object(), object(), object()
     context = SimpleNamespace(moe_comm_method=original_comm)
     logical, physical = torch.tensor([[4, 5]]), torch.tensor([[0, 1]])
+    logical_weights = torch.ones(1, 2)
+    execution_weights = torch.zeros_like(logical_weights)
     x = torch.ones(1, 4)
 
     class Parent:
         def apply(self, **kwargs):
             assert kwargs["layer"] is view
             assert torch.equal(kwargs["topk_ids"], physical)
+            assert kwargs["topk_weights"] is execution_weights
             assert context.moe_comm_method is slot_comm
             return kwargs["x"]
 
@@ -281,8 +284,8 @@ def test_quantized_execution_uses_slot_weights_ids_and_comm(load_hook_class):
         {"_EXTRA_CTX": context},
     )
     binding = Mock()
-    binding.prepare.return_value = view, physical, slot_comm
+    binding.prepare.return_value = view, physical, execution_weights, slot_comm
     layer = SimpleNamespace(_expert_offload_binding=binding)
-    assert cls().apply(layer, x, torch.ones(1, 2), logical) is x
-    binding.prepare.assert_called_once_with(layer, logical)
+    assert cls().apply(layer, x, logical_weights, logical) is x
+    binding.prepare.assert_called_once_with(layer, logical, logical_weights)
     assert context.moe_comm_method is original_comm

@@ -8,6 +8,7 @@ from itertools import takewhile
 from typing import TYPE_CHECKING, cast
 
 import torch
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 from .expert_offload_config import validate_expert_offload_layer
@@ -165,14 +166,22 @@ class LayerOffloadBinding:
             getattr(layer, name).data = tensor
         self.slot_to_expert = tuple(range(self.num_slots))
 
-    def prepare(self, layer, topk_ids):
+    def prepare(self, layer, topk_ids, topk_weights):
         # Loading attaches the manager and creates the map before any forward.
         manager = cast(ExpertOffloadManager, self.manager)
         mapping = cast(ExpertMapBuffer, self.mapping)
         if self.device.type == "npu" and torch.npu.is_current_stream_capturing():
+            padding = get_forward_context().is_padding
+            if padding is not None:
+                padding = padding[: topk_ids.shape[0], None]
+                # Real rows form the prefix. Reuse the first row's IDs so padding
+                # needs no extra expert loads and still maps to valid slots.
+                topk_ids = torch.where(padding, topk_ids[:1], topk_ids)
+                topk_weights = topk_weights.masked_fill(padding, 0)
             return (
                 ExpertWeightView(layer, self.resident),
                 self.prepare_graph(topk_ids),
+                topk_weights,
                 manager.get_comm(self, layer.moe_config, self.num_slots),
             )
         if not manager.has_prefill:
@@ -185,12 +194,14 @@ class LayerOffloadBinding:
                 return (
                     ExpertWeightView(layer, self.resident),
                     mapping.remap(topk_ids),
+                    topk_weights,
                     manager.get_comm(self, layer.moe_config, self.num_slots),
                 )
         # Prefill and decode batches exceeding resident capacity use all experts.
         return (
             ExpertWeightView(layer, manager.full_pool.load_layer(self)),
             topk_ids,
+            topk_weights,
             manager.get_comm(self, layer.moe_config, self.num_experts),
         )
 

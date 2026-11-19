@@ -48,12 +48,14 @@ class ExpertOffloadMoEMethod(AscendFusedMoEMethod):
     ) -> torch.Tensor:
         original_comm = _EXTRA_CTX.moe_comm_method
         try:
-            execution_layer, physical_topk_ids, execution_comm = layer._expert_offload_binding.prepare(layer, topk_ids)
+            execution_layer, physical_topk_ids, execution_weights, execution_comm = (
+                layer._expert_offload_binding.prepare(layer, topk_ids, topk_weights)
+            )
             _EXTRA_CTX.moe_comm_method = execution_comm
             return super().apply(
                 layer=execution_layer,
                 x=x,
-                topk_weights=topk_weights,
+                topk_weights=execution_weights,
                 topk_ids=physical_topk_ids,
                 shared_experts=shared_experts,
                 shared_experts_input=shared_experts_input,
