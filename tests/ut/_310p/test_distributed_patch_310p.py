@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, create_autospec
 
 import pytest
 import torch
@@ -12,7 +12,7 @@ from vllm_ascend.patch.platform.patch_distributed import communication_adaptatio
 
 @pytest.fixture
 def native_broadcast(monkeypatch):
-    original = Mock()
+    original = create_autospec(dist.distributed_c10d.broadcast)
     for api in (dist, dist.distributed_c10d):
         monkeypatch.setattr(api, "broadcast", original)
         monkeypatch.setattr(api, "all_reduce", Mock())

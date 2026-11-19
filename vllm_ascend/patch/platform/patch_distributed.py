@@ -36,6 +36,7 @@ def communication_adaptation_310p():
             if src is None and group_src is None:
                 src = 0
             if tensor.device == torch.device("cpu"):
+                # PyTorch 2.10 uses global ranks for src and group-relative ranks for group_src.
                 return fn(tensor, src=src, group=group, async_op=async_op, group_src=group_src)
             if group_src is None:
                 group_src = src if group is None else torch.distributed.get_group_rank(group, src)
