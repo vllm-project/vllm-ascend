@@ -274,12 +274,7 @@ class BaseKVPoolWorker(ABC):
 
     def _collect_ple_group_owners(self) -> tuple[int, ...] | None:
         """Collect only the PP rank owning Qwen4Exp's singleton PLE group."""
-        if (
-            self._ple_group_id is None
-            or self.kv_cache_config is None
-            or self.pp_size <= 1
-            or self.use_layerwise
-        ):
+        if self._ple_group_id is None or self.kv_cache_config is None or self.pp_size <= 1 or self.use_layerwise:
             return None
         cpu_group = getattr(get_pp_group(), "cpu_group", None)
         if cpu_group is None:
