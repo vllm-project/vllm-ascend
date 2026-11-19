@@ -206,6 +206,7 @@
 /vllm_ascend/models/kimi_k3 @Dawn952 @hust17yixuan
 /vllm_ascend/models/kimi_k3/recoverssm_config.py @drslark @chenxi-hh
 /vllm_ascend/models/kimi_k3/recoverssm_metadata.py @drslark @chenxi-hh
+/vllm_ascend/models/step5/ @realliujiaxu
 # /vllm_ascend/models/d3.py
 # /vllm_ascend/models/gemma4_mm.py
 # /vllm_ascend/models/llama_eagle3.py
