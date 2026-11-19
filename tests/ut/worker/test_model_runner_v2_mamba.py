@@ -119,6 +119,7 @@ def _kv_cache_config(
 
 def _group(spec: MambaSpec):
     return SimpleNamespace(
+        kernel_block_size=None,
         kv_cache_group_id=0,
         kv_cache_spec=spec,
         layer_names=["linear_attn"],

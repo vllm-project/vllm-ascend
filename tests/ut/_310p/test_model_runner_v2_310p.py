@@ -1218,6 +1218,7 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
     reason="This vLLM version does not map block tables in AttentionGroup",
 )
 @pytest.mark.parametrize("for_capture", [False, True])
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
 def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_capture: bool) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[128],
