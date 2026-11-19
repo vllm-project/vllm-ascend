@@ -110,6 +110,20 @@ def test_early_exits(model, ended, enabled):
         manager.clear_backend()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_enable_in_reasoning_with_close_reopen(model, enabled):
+    model_path, tokenizer = model
+    manager = _manager(model_path, enable_in_reasoning=enabled)
+    try:
+        opening = tokenizer.encode("<|open|>think<|sep|>", add_special_tokens=False)
+        closing = tokenizer.encode("<|close|>think<|sep|>", add_special_tokens=False)
+        request = _request(manager, opening, None)
+        draft = closing + opening
+        assert _boundary(manager, request, draft) == (0 if enabled else len(closing))
+    finally:
+        manager.clear_backend()
+
+
 def test_other_parser_delegates(model):
     manager = _manager(model[0], parser="deepseek_r1")
     try:

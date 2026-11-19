@@ -12,6 +12,8 @@ from functools import wraps
 import vllm.v1.structured_output as structured_output
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 
+_PATCH_MARKER = "_ascend_kimi_first_boundary"
+
 
 class _TokenView(Sequence[int]):
     """A bounded history + draft view, including on vLLM without TokenBuffer."""
@@ -97,7 +99,7 @@ def _apply_patch():
     has_bounds = hasattr(manager_cls, "_get_constraint_bounds")
     method_name = "_get_constraint_bounds" if has_bounds else "_get_constraint_start"
     original = getattr(manager_cls, method_name)
-    if getattr(original, "_ascend_kimi_first_boundary", False):
+    if getattr(original, _PATCH_MARKER, False):
         return
 
     @wraps(original)
@@ -109,7 +111,7 @@ def _apply_patch():
             return structured_output.ConstraintBounds(start, start)
         return start
 
-    boundary._ascend_kimi_first_boundary = True
+    setattr(boundary, _PATCH_MARKER, True)
     setattr(manager_cls, method_name, boundary)
 
 
