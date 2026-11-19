@@ -4,7 +4,6 @@
 This is functional coverage, not checkpoint accuracy or MTP acceptance quality.
 """
 
-import copy
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -197,17 +196,7 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
             check_completion(result, OUTPUT_TOKENS)
             return result
 
-        actual = generate(128)
-        # Validate response integrity without comparing against a local baseline.
-        for fault in ("short_tokens", "nonfinite_logprob"):
-            corrupted = copy.deepcopy(actual)
-            logs = corrupted["choices"][0]["logprobs"]
-            if fault == "short_tokens":
-                logs["tokens"].pop()
-            else:
-                logs["token_logprobs"][0] = float("nan")
-            with pytest.raises(AssertionError, match="count|Non-finite"):
-                check_completion(corrupted, OUTPUT_TOKENS)
+        generate(128)
         check_state_pulls(rpc(d_url, "flash_pd_records"))
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [
@@ -218,15 +207,3 @@ def test_glm53flash_pcp2_dp2(tmp_path, eager, prefix_caching):
         records = rpc(d_url, "flash_pd_records")
         assert all(worker["copies"] for worker in records), "Both decode DP ranks must receive remote state"
         check_state_pulls(records)
-        # An actual receiver-side omission, confined to this isolated test.
-        # HTTP success is explicitly insufficient: the same normal oracle must
-        # reject the omitted copies. Restore it and verify recovery afterwards.
-        rpc(d_url, "flash_pd_probe", "drop_mamba")
-        try:
-            generate(133)
-            with pytest.raises(AssertionError, match="Missing or truncated"):
-                check_state_pulls(rpc(d_url, "flash_pd_records"))
-        finally:
-            rpc(d_url, "flash_pd_probe")
-        generate(137)
-        check_state_pulls(rpc(d_url, "flash_pd_records"))

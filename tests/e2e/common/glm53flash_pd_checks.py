@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Device-free assertions shared by the live PD test and its fault tests."""
+"""Output validity and state-transfer assertions for the Flash PD test."""
 
 import math
 from collections import Counter, defaultdict
