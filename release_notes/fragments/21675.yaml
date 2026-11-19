@@ -25,3 +25,8 @@ entries:
       attention now fail fast at startup when those layers would share one KV
       cache group, instead of silently applying the last layer's causality to
       the whole group and corrupting draft attention.
+  - category: bugfix
+    text: Fixed the Kimi K3.1 target model not building its input embedding on
+      the last pipeline-parallel stage when a speculative draft that reads
+      target embeddings runs with pipeline parallelism, which left the stage
+      without embedding weights to share with the draft.

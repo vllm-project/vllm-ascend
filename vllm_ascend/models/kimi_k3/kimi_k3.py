@@ -52,6 +52,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
@@ -926,6 +927,13 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return prefix_sum, block_residual, hidden_states
 
 
+def _needs_target_embedding(vllm_config: VllmConfig) -> bool:
+    """Whether this PP stage must own the target input embedding."""
+    return get_pp_group().is_first_rank or spec_decode_needs_target_embed(
+        vllm_config
+    )
+
+
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
@@ -979,7 +987,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             and parallel_config.tensor_parallel_size > 1
         )
 
-        if get_pp_group().is_first_rank:
+        if _needs_target_embedding(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
