@@ -539,7 +539,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # scale dtype here used to be equivalent because the checkpoint scales were
         # fp16; the fp32 copies kept for A8W8 would otherwise turn the output into
         # float32, which aclnn rejects ("y[0] ... has incorrect dtype FLOAT").
-        out_dtype = mlp_compute_input.hidden_states.dtype
+        out_dtype = self.in_dtype
         # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
         # then scales must be per-expert too — aclnn grouped_matmul requires
         # len(scale) == len(weight). The stacked path keeps a single-element list.
@@ -566,7 +566,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
         scale = w2_scale
         # Same reason as apply_gmm1: the fp32 dequant scale is not the output dtype.
-        out_dtype = mlp_compute_input.hidden_states.dtype
+        out_dtype = self.in_dtype
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w2,
