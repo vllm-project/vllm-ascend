@@ -22,7 +22,6 @@ import math
 import os
 from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
@@ -980,12 +979,8 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             vllm_config.kv_transfer_config.enable_permute_local_kv = False
 
-        # Validate KV transfer parallelism (tp/dp) and make engine_id unique so
-        # P/D nodes or restarts never collide; _engine_id_patched keeps it idempotent.
+        # Validate KV transfer parallelism (tp/dp).
         check_kv_extra_config(vllm_config)
-        if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
-            vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
-            vllm_config.kv_transfer_config._engine_id_patched = True
 
     # ==================== 8. Attention Config ====================
     if vllm_config.attention_config:
