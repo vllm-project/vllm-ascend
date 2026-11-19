@@ -35,6 +35,7 @@ variants:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
         docker_serve_command: "vllm serve"
+        docker_shm_size: 100g
         install:
           pip: false
   ascend_w8a8:
@@ -79,6 +80,7 @@ variants:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
         docker_serve_command: "vllm serve"
+        docker_shm_size: 100g
         install:
           pip: false
   ascend_mxfp8:
@@ -128,6 +130,7 @@ variants:
       ascend_950dt_8x:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a5
         docker_serve_command: "vllm serve"
+        docker_shm_size: 60g
         install:
           pip: false
   ascend_w8a8_1m:
@@ -170,14 +173,17 @@ variants:
       - '--additional-config'
       - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":false,"weight_nz_mode":2,"enable_flashcomm1":true,"enable_reduce_sample":false}'
     extra_env:
-      VLLM_PP_LAYER_PARTITION: '15,15,15,15'
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '7200'
       HCCL_BUFFSIZE: '256'
     hardware_overrides:
+      npu:
+        extra_env:
+          VLLM_PP_LAYER_PARTITION: '15,15,15,15'
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
         docker_serve_command: "vllm serve"
+        docker_shm_size: 100g
         install:
           pip: false
   ascend_mxfp8_1m_tp8:
@@ -288,7 +294,7 @@ guide_sections:
   ascend: |
     ### Huawei Ascend (vLLM Ascend)
 
-    Six single-node layouts are covered here, all taken from the
+    The single-node and distributed layouts below come from the
     [MiniMax-M3 tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html).
     **Pick the variant explicitly** - the GPU variants on this page (`default`,
     `mxfp8`, `nvfp4`, `mxfp4`) still appear when an Ascend card is selected, but
@@ -352,19 +358,45 @@ guide_sections:
     variants. The 950DT 1M layouts also need the `experimental_950_transformer`
     vendor package.
 
-    #### Not covered by this page
+    #### Multi-node and prefill/decode layouts
 
-    - **Dual-node**: BF16 runs TP8 / DP4 / dp-local 2 and W8A8 TP4 / DP8 /
-      dp-local 4, both with the Eagle3 head. TP stays inside a node, DP spans
-      them. The builder cannot emit a `dp-local` other than 1, so these stay
-      hand-written.
-    - **Prefill/decode disaggregation**: `MooncakeConnectorV1` (and
-      `MultiConnector` with `AscendStoreConnector` for the Mooncake KV cache
-      pool) driven by the tutorial's `launch_online_dp.py`. The generator only
-      offers the NIXL path and sizes each role as one whole-node TP pool, so the
-      tutorial's 1P1D / 1P2D commands are not reproduced here.
+    Use the linked presets for the tutorial's distributed configurations.
 
-    Source: https://github.com/vllm-project/vllm-ascend/blob/91db901e4716f2de54608c210a79694a0327e2b4/docs/source/tutorials/models/MiniMax-M3.md
+    | Layout | Weights | Preset |
+    | --- | --- | --- |
+    | A3, 2 nodes, TP8 / DP4 / local DP2 | BF16 | [A3 BF16 dual-node](?hardware=ascend_910c&variant=ascend_bf16&strategy=multi_node_tp_dp&nodes=2&preset=ascend_bf16_dual_node) |
+    | A3, 2 nodes, TP4 / DP8 / local DP4 | W8A8 | [A3 W8A8 dual-node](?hardware=ascend_910c&variant=ascend_w8a8&strategy=multi_node_tp_dp&nodes=2&preset=ascend_w8a8_dual_node) |
+    | A3, 1 P + 2 D nodes, P TP4 / PP4 and D TP4 / DP8 | W8A8 | [A3 W8A8 PD](?hardware=ascend_910c&variant=ascend_w8a8&strategy=pd_cluster&preset=ascend_w8a8_pd) |
+    | 950DT, 1 P + 1 D node, TP4 / DP2 per role | MXFP8 | [950DT MXFP8 PD](?hardware=ascend_950dt_8x&variant=ascend_mxfp8&strategy=pd_cluster&preset=ascend_mxfp8_pd) |
+    | A3, 1 P + 2 D nodes, P TP8 / PP2 and D TP8 / DP4 | W8A8 | [A3 W8A8 1M PD](?hardware=ascend_910c&variant=ascend_w8a8_1m&strategy=pd_cluster&preset=ascend_w8a8_1m_pd) |
+
+    For [dual-node serving](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html#52-multi-node-deployment),
+    set `HEAD_IP` to the first node's communication IP, `LOCAL_IP` to the
+    current host's IP and `IFACE_NAME` to its communication NIC. Add
+    `--headless` to the second node's generated command. The renderer generates
+    its DP start rank and leaves the follower's HTTP mode to the operator.
+    Start both nodes before waiting for the head API on port 11223.
+
+    For PD, set each role node's IP and the communication NIC. The generated
+    commands use vLLM's native multi-port external DP where the tutorial starts
+    multiple local engines. Wait for every engine's `/health` before starting
+    the Ascend proxy. Set `ROUTER_PORT` to 8009 for the sub-1M presets or 18919
+    for A3 1M, matching the tutorial. These are reference deployments.
+
+    The 950DT preset follows the two-node SuperPod (UB) example. Set up the
+    CANN/Mooncake library paths and host devices as described in
+    [the 950DT tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html#531-prefill-decode-disaggregation).
+    Before running the generated shell or Docker commands, run
+    `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` in the same shell.
+    Follow the tutorial's RoCE instructions when deploying on a RoCE fabric.
+
+    The A3 1M preset uses text-only serving and a fixed Decode KV cache budget
+    of 47620449894 bytes per NPU, from
+    [section 5.4.2](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/MiniMax-M3.html#542-prefill-decode-disaggregation).
+    Check the reported KV token capacity on your hardware before serving a 1M
+    request.
+
+    Source: https://github.com/vllm-project/vllm-ascend/blob/b64139a5ec48d36f22c63f5d14e774cc1fcdf644/docs/source/tutorials/models/MiniMax-M3.md
 hardware_overrides:
   npu:
     extra_args:
@@ -413,24 +445,291 @@ features:
         args:
           - '--mm-encoder-tp-mode'
           - data
+
+# Topologies and runtime settings follow sections 5.2, 5.3.1 and 5.4.2 below.
+# The existing variants still supply the checkpoint and single-node command.
+presets:
+  ascend_bf16_dual_node:
+    label: A3 BF16 dual-node
+    hardware: ascend_910c
+    strategy: multi_node_tp_dp
+    variants: [ascend_bf16]
+    default: true
+    select:
+      nodes: 2
+      features: {reasoning: true, tool_calling: false, spec_decoding: eagle3_gqa}
+    args:
+      - --host
+      - 0.0.0.0
+      - --port
+      - '11223'
+      - --served-model-name
+      - minimax-m3
+      - --tensor-parallel-size
+      - '8'
+      - --data-parallel-size-local
+      - '2'
+      - --max-num-seqs
+      - '32'
+    json_args:
+      --additional-config:
+        enable_shared_expert_dp: true
+  ascend_w8a8_dual_node:
+    label: A3 W8A8 dual-node
+    hardware: ascend_910c
+    strategy: multi_node_tp_dp
+    variants: [ascend_w8a8]
+    default: true
+    select:
+      nodes: 2
+      features: {reasoning: true, tool_calling: false, spec_decoding: eagle3_gqa}
+    args:
+      - --host
+      - 0.0.0.0
+      - --port
+      - '11223'
+      - --served-model-name
+      - minimax-m3
+      - --tensor-parallel-size
+      - '4'
+      - --data-parallel-size-local
+      - '4'
+    remove_args:
+      - --api-server-count
+      - --max-num-batched-tokens
+      - --long-prefill-token-threshold
+  ascend_w8a8_pd:
+    label: A3 W8A8 PD (3 nodes)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    default: true
+    select: &ascend_pd_with_eagle3
+      frontend: python
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: 'off'
+      features: {reasoning: true, tool_calling: false, spec_decoding: eagle3_gqa}
+    args: &ascend_pd_args
+      - --host
+      - 0.0.0.0
+      - --served-model-name
+      - minimax-m3
+      - --seed
+      - '1024'
+    remove_args:
+      - --api-server-count
+      - --long-prefill-token-threshold
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tp
+        pp: 4
+        args:
+          - --port
+          - '31050'
+          - --enforce-eager
+          - --max-num-batched-tokens
+          - '8192'
+          - --data-parallel-size
+          - '1'
+        remove_args: [--compilation-config]
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '1024'
+          VLLM_PP_LAYER_PARTITION: '16,15,15,14'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_connector_extra_config: &ascend_a3_pd_link
+              use_ascend_direct: true
+              prefill: {pp_layer_partition: '16,15,15,14'}
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 4
+        args:
+          - --port
+          - '31260'
+          - --data-parallel-rpc-port
+          - '31422'
+          - --max-num-seqs
+          - '128'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '2048'
+          HCCL_OP_EXPANSION_MODE: AIV
+        json_args:
+          --additional-config:
+            enable_fused_mc2: 0
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_connector_extra_config: *ascend_a3_pd_link
+  ascend_mxfp8_pd:
+    label: 950DT MXFP8 PD (2 nodes)
+    hardware: ascend_950dt_8x
+    strategy: pd_cluster
+    variants: [ascend_mxfp8]
+    default: true
+    select: *ascend_pd_with_eagle3
+    args: *ascend_pd_args
+    remove_args:
+      - --async-scheduling
+      - --limit-mm-per-prompt
+    env:
+      ASCEND_LOCAL_COMM_RES: $ASCEND_LOCAL_COMM_RES
+      HCCL_OP_EXPANSION_MODE: AIV
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 4
+        args:
+          - --port
+          - '31050'
+          - --data-parallel-rpc-port
+          - '6884'
+          - --enforce-eager
+          - --max-num-seqs
+          - '128'
+          - --max-num-batched-tokens
+          - '32768'
+        remove_args: [--compilation-config]
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          HCCL_BUFFSIZE: '256'
+        json_args:
+          --additional-config:
+            ascend_compilation_config: {fuse_qknorm_rope: true, fuse_norm_quant: true}
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_port: '30000'
+            kv_connector_extra_config: {use_ascend_direct: true}
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 4
+        args:
+          - --port
+          - '31060'
+          - --data-parallel-rpc-port
+          - '5964'
+          - --max-num-seqs
+          - '256'
+          - --max-num-batched-tokens
+          - '32768'
+        remove_args: [--enable-chunked-prefill, --enable-prefix-caching]
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '2048'
+        json_args:
+          --additional-config:
+            ascend_compilation_config: {fuse_qknorm_rope: null}
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV1
+            kv_port: '26900'
+            kv_connector_extra_config: {use_ascend_direct: true}
+  ascend_w8a8_1m_pd:
+    label: A3 W8A8 1M PD (3 nodes)
+    hardware: ascend_910c
+    strategy: pd_cluster
+    variants: [ascend_w8a8_1m]
+    default: true
+    select:
+      frontend: python
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      kv_offload: 'off'
+      features: {reasoning: true, tool_calling: false, spec_decoding: false}
+    args:
+      - --host
+      - 0.0.0.0
+      - --served-model-name
+      - minimax-m3
+      - --seed
+      - '1024'
+      - --enforce-eager
+      - --kv-cache-dtype
+      - auto
+    env:
+      ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+    json_args:
+      --compilation-config: {cudagraph_mode: NONE}
+      --additional-config:
+        enable_reduce_sample: null
+        enable_shared_expert_dp: false
+        enable_flashcomm1: true
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tp
+        pp: 2
+        args: [--port, '31050']
+        env:
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_PP_LAYER_PARTITION: '30,30'
+        json_args:
+          --additional-config: {multistream_overlap_shared_expert: true}
+          --kv-transfer-config: &ascend_a3_1m_pd_link
+            kv_connector: MooncakeConnectorV1
+            kv_buffer_device: npu
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill: {pp_layer_partition: '30,30'}
+      decode:
+        nodes: 2
+        parallelism: dep
+        tp: 8
+        # Override the single-node variant's PP4 for this DEP role.
+        args:
+          - --pipeline-parallel-size
+          - '1'
+          - --port
+          - '31260'
+          - --data-parallel-rpc-port
+          - '31422'
+          - --max-num-batched-tokens
+          - '8'
+          - --long-prefill-token-threshold
+          - '8'
+          - --gpu-memory-utilization
+          - '0.99'
+          - --kv-cache-memory-bytes
+          - '47620449894'
+        env:
+          HCCL_IF_IP: $DECODE_NODE_1
+          HCCL_BUFFSIZE: '64'
+          HCCL_OP_EXPANSION_MODE: AIV
+        json_args:
+          --additional-config: {multistream_overlap_shared_expert: false}
+          --kv-transfer-config: *ascend_a3_1m_pd_link
+strategy_overrides:
+  multi_node_tp_dp:
+    hardware_overrides:
+      ascend_910c:
+        extra_env:
+          HCCL_IF_IP: $LOCAL_IP
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+  pd_cluster:
+    hardware_overrides:
+      npu:
+        # Generation-level strategy overrides replace the shared NPU block.
+        extra_args: [--trust-remote-code, --distributed-executor-backend, mp]
+        extra_env:
+          VLLM_USE_MODELSCOPE: 'True'
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
 strategy_hardware:
-  # Every variant carries the tutorial's exact single-node split, so single_node_tp
-  # is the only strategy that reproduces a documented command. The rest are opted
-  # out because they would rewrite that split:
-  #   - TEP/DEP and the multi-node TP variants re-size TP, add PP, or add a second
-  #     DP on top of the one the variant already sets;
-  #   - multi_node_tp_dp pins TP to the whole node with dp-local 1 (TP16 / DP2 on
-  #     A3), while the tutorial asks for TP8 / DP4 / dp-local 2 on BF16 and
-  #     TP4 / DP8 / dp-local 4 on W8A8 - a recipe cannot set dp-local;
-  #   - pd_cluster can only offer the NIXL connector on NPU and sizes each role as
-  #     one whole-node TP pool (TP16 x DP4), not the tutorial's 1P1D / 1P2D.
-  # The guide links the tutorial sections for the dual-node and PD layouts.
   single_node_tep:
     npu: unsupported
   single_node_dep:
     npu: unsupported
   multi_node_tp_dp:
     npu: unsupported
+    ascend_910c: supported
   multi_node_tp:
     npu: unsupported
   multi_node_tep:
@@ -441,3 +740,5 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910c: supported
+    ascend_950dt_8x: supported
