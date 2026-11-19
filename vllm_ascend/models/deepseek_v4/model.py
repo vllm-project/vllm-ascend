@@ -550,6 +550,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
+        self.wo_a.force_float_nz = True
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
             self.dim,
@@ -559,6 +560,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
             return_bias=False,
         )
+        self.wo_b.force_float_nz = True
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
 
         if self.compress_ratio > 1:

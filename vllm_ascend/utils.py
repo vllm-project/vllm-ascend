@@ -367,7 +367,7 @@ MIN_MATMUL_WEIGHT_NDIMS = 2
 SINGLETON_DIM_SIZE = 1
 
 
-def _should_trans_nz(weight: torch.Tensor) -> bool:
+def _should_trans_nz(weight: torch.Tensor, *, force_float_nz: bool = False) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
         return False
@@ -396,9 +396,9 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if not nz_mode:
         return False
 
-    # BF16/FP16 convert only when nz_mode == 2.
+    # BF16/FP16 convert in mode 2, or in mode 1 for layers that opt in.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return nz_mode == 2
+        return nz_mode == 2 or force_float_nz
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -425,8 +425,10 @@ def maybe_trans_nz(
     weight: torch.Tensor,
     customize_dtype: torch.dtype | None = None,
     input_dtype: torch.dtype | None = None,
+    *,
+    force_float_nz: bool = False,
 ) -> torch.Tensor:
-    if not _should_trans_nz(weight):
+    if not _should_trans_nz(weight, force_float_nz=force_float_nz):
         return weight
     kwargs = {}
     if customize_dtype is not None:
