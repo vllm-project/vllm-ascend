@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -246,7 +248,36 @@ class FullModelConfigTests(unittest.TestCase):
                 self.assertEqual(max(sizes), seqs * query_length)
                 self.assertEqual(compilation["max_cudagraph_capture_size"], max(sizes))
                 for clients in (7, 32, 40, 80, 340):
-                    self.assertIn(math.ceil(clients / global_dp) * query_length, sizes)
+                    self.assertGreaterEqual(max(sizes), math.ceil(clients / global_dp) * query_length)
+                self.assertEqual(sizes, [6, 12, 30, 48, 132, 192])
+
+    def test_case_timeout_overrides_and_master_readiness(self):
+        from tests.e2e.common.multi_node.external_dp.runtime import wait_master_rank_stopped
+
+        path = next(CONFIG_DIR.glob("*.yaml"))
+        config = ExternalDPConfigLoader.from_yaml(str(path), cluster_ips=[f"192.0.2.{i + 1}" for i in range(4)])
+        self.assertEqual(config.server_ready_timeout_seconds, 14400)
+        self.assertEqual(config.worker_wait_timeout_seconds, 21600)
+        for value in (0, -1, True, "14400"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(config, server_ready_timeout_seconds=value)
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw.pop("server_ready_timeout_seconds")
+        raw.pop("worker_wait_timeout_seconds")
+        with tempfile.TemporaryDirectory() as directory:
+            defaults_path = Path(directory) / "defaults.yaml"
+            defaults_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+            defaults = ExternalDPConfigLoader.from_yaml(
+                str(defaults_path), cluster_ips=[f"192.0.2.{i + 1}" for i in range(4)]
+            )
+            self.assertEqual(defaults.server_ready_timeout_seconds, 3600)
+            self.assertEqual(defaults.worker_wait_timeout_seconds, 9000)
+        ranks = RankResolver(config).resolve()
+        module = "tests.e2e.common.multi_node.external_dp.runtime"
+        with patch(module + ".wait_http_ready") as ready, patch(module + ".wait_http_unready") as stopped:
+            wait_master_rank_stopped(ranks, config.worker_wait_timeout_seconds, config.server_ready_timeout_seconds)
+            self.assertEqual(ready.call_args.kwargs["timeout"], 14400)
+            self.assertEqual(stopped.call_args.kwargs["timeout"], 21600)
 
     def test_decode_profiles_and_uncalibrated_gates(self):
         config = yaml.safe_load(next(CONFIG_DIR.glob("*.yaml")).read_text(encoding="utf-8"))

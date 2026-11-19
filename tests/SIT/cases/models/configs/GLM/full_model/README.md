@@ -23,16 +23,25 @@ query tokens per sequence (one target plus five draft tokens).
 | ---: | ---: | ---: |
 | 7 | 1 | 6 |
 | 32 | 2 | 12 |
-| 40 | 3 | 18 |
+| 40 | 3 | 30 (padded from 18) |
 | 80 | 5 | 30 |
 | 340 | 22 | 132 |
 
-Capture candidates are [6,12,18,24,30,36,48,72,96,132,192], maximum192.
+Capture candidates are [6,12,30,48,132,192], maximum192.
 The32-sequence budget leaves skew margin above22; this does not guarantee
 uniform routing. Intermediate loads can pad to the next capture size.
 Verify actual runner capture sizes, padding, per-rank running/waiting and
 startup duration on hardware. Do not equate a CPU loader test with capture
 success or claim that fewer configured sizes guarantees faster startup.
+The six tiers retain the two formal Decode sizing points and skew margin.
+Intermediate loads, especially between48 and132, incur padding and must be
+checked for performance impact. Run44286450331 completed only3/11 captures
+in38 minutes before the old3600-second readiness budget expired.
+This case now allows14400 seconds for readiness and21600 seconds for worker
+waiting; the workflow stream budget is360 minutes and job budget420 minutes.
+Other cases retain their defaults. AOP PR runs retain their longer budgets.
+These are calibration limits, not a completion-time or performance guarantee.
+
 Keep max-model-len131072 for GPQA output65536 and its original prompts.
 
 ## Workloads and boundaries

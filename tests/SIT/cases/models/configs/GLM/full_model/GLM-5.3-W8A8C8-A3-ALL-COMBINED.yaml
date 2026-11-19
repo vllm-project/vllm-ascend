@@ -8,6 +8,10 @@ num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
 
+# Static-kernel startup budget; worker lifetime includes all benchmark phases.
+server_ready_timeout_seconds: 14400
+worker_wait_timeout_seconds: 21600
+
 routing:
   type: "disaggregated_prefill"
   groups:
@@ -146,7 +150,7 @@ templates:
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 48, 72, 96, 132, 192], "max_cudagraph_capture_size": 192}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 30, 48, 132, 192], "max_cudagraph_capture_size": 192}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -201,7 +205,7 @@ templates:
       - "--speculative-config"
       - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 18, 24, 30, 36, 48, 72, 96, 132, 192], "max_cudagraph_capture_size": 192}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 30, 48, 132, 192], "max_cudagraph_capture_size": 192}'
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
