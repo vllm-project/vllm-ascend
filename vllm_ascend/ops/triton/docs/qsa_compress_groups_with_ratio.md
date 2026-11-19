@@ -55,12 +55,12 @@ Raw-ring updates and downstream Indexer scoring/TopK remain outside the kernel.
 
 ## Test Cases
 
-`test_qsa_compress_norm_store.py` compares against pooling followed by the existing
+`test_qsa_compress_groups_with_ratio.py` compares against pooling followed by the existing
 Norm/MRoPE and cache store with exact BF16 equality. Cases cover chunk sizes
 1/4/7, strided rings, optional positions, invalid slots, empty rows, graph replay
 and repeated ring updates. Foriv reported 9 passes on A3 at commit `5c0b6728`;
 this is prior operator evidence, not a current-head or model-accuracy result.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_compress_norm_store.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_compress_groups_with_ratio.py
 ```
