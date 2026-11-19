@@ -239,57 +239,6 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
-    def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
-        for padding_size in (0, 3):
-            kwargs: dict[str, Any] = dict(
-                input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
-            )
-            if vllm_version_is("0.33.0") and padding_size:
-                with self.assertRaisesRegex(ValueError, "output padding requires"):
-                    AscendMergedColumnParallelLinear(**kwargs)
-                continue
-            layer = AscendMergedColumnParallelLinear(**kwargs)
-            self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
-            for value in (1.0, 2.0):
-                # Dirty the complete allocation to verify reload clears only
-                # padding while loading every real checkpoint row and bias.
-                layer.weight.data.fill_(-7)
-                layer.bias.data.fill_(-7)
-                for shard, size in enumerate((4, 6)):
-                    layer.weight_loader(layer.weight, torch.full((size, 8), value), shard)
-                    layer.weight_loader(layer.bias, torch.full((size,), value), shard)
-                torch.testing.assert_close(layer.weight[:10], torch.full_like(layer.weight[:10], value))
-                torch.testing.assert_close(layer.bias[:10], torch.full_like(layer.bias[:10], value))
-                if padding_size:
-                    torch.testing.assert_close(layer.weight[10:], torch.zeros_like(layer.weight[10:]))
-                    torch.testing.assert_close(layer.bias[10:], torch.zeros_like(layer.bias[10:]))
-                    self.assertEqual(layer.weight.weight_loader_numel, 80)
-                    self.assertEqual(layer.bias.weight_loader_numel, 10)
-                    self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
-                    self.assertEqual(layer.shard_ids, (0, 1))
-
-    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
-    def test_custom_allocations_preserve_missing_shard_validation(self):
-        layers: tuple[Any, ...] = (
-            AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),
-            AscendQKVParallelLinear(hidden_size=8, head_size=2, total_num_heads=2, bias=False, disable_tp=True),
-        )
-        for layer in layers:
-            with self.subTest(layer=type(layer).__name__):
-                shards = layer.shard_ids
-                first = shards[0]
-                size = layer._get_shard_size_mapping(first)
-                layer.weight_loader(layer.weight, torch.ones(size, 8), first)
-                self.assertEqual(layer.pop_missing_shards(), [f"weight.{shard}" for shard in shards[1:]])
-                # A new complete load must start fresh and cover every shard.
-                for shard in shards:
-                    size = layer._get_shard_size_mapping(shard)
-                    layer.weight_loader(layer.weight, torch.ones(size, 8), shard)
-                self.assertEqual(layer.pop_missing_shards(), [])
-                torch.testing.assert_close(layer.weight, torch.ones_like(layer.weight))
-                with self.assertRaises(ValueError):
-                    layer.validate_shard_id("invalid", layer.weight)
-
     def test_shared_tp_loads_paired_gate_up_and_matching_down_shard(self):
         with (
             patch("vllm_ascend.ops.linear_op.shared_expert_tp_enable", return_value=True),
@@ -319,6 +268,35 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
         down.weight.weight_loader(down.weight, down_weight)
         torch.testing.assert_close(gate_up.weight, torch.cat([gate_weight[:4], up_weight[:4]]))
         torch.testing.assert_close(down.weight, down_weight[:, :4])
+
+    def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
+        for padding_size in (0, 3):
+            kwargs: dict[str, Any] = dict(
+                input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
+            )
+            if vllm_version_is("0.33.0") and padding_size:
+                with self.assertRaisesRegex(ValueError, "output padding requires"):
+                    AscendMergedColumnParallelLinear(**kwargs)
+                continue
+            layer = AscendMergedColumnParallelLinear(**kwargs)
+            self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
+            for value in (1.0, 2.0):
+                # Dirty the complete allocation to verify reload clears only
+                # padding while loading every real checkpoint row and bias.
+                layer.weight.data.fill_(-7)
+                layer.bias.data.fill_(-7)
+                for shard, size in enumerate((4, 6)):
+                    layer.weight_loader(layer.weight, torch.full((size, 8), value), shard)
+                    layer.weight_loader(layer.bias, torch.full((size,), value), shard)
+                torch.testing.assert_close(layer.weight[:10], torch.full_like(layer.weight[:10], value))
+                torch.testing.assert_close(layer.bias[:10], torch.full_like(layer.bias[:10], value))
+                if padding_size:
+                    torch.testing.assert_close(layer.weight[10:], torch.zeros_like(layer.weight[10:]))
+                    torch.testing.assert_close(layer.bias[10:], torch.zeros_like(layer.bias[10:]))
+                    self.assertEqual(layer.weight.weight_loader_numel, 80)
+                    self.assertEqual(layer.bias.weight_loader_numel, 10)
+                    self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
+                    self.assertEqual(layer.shard_ids, (0, 1))
 
     @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
     def test_custom_allocations_preserve_missing_shard_validation(self):
