@@ -1,4 +1,4 @@
-pr: 22122
+pr: 22500
 entries:
   - category: bugfix
     text: Fixed DeepSeek V4.1 DSpark auxiliary hidden-state capture to use the checkpoint's zero-based target layer IDs in regular forward and SWA bounded replay.
