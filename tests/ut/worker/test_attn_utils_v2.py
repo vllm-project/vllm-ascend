@@ -1193,6 +1193,119 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     assert spec.is_draft is is_draft_layer
 
 
+@pytest.mark.parametrize("use_flashmla", [False, True])
+@pytest.mark.parametrize(
+    ("kernel_blocks_per_manager", "block_outer"),
+    [
+        pytest.param(1, False, id="layer-outer-1-to-1"),
+        pytest.param(2, False, id="layer-outer-1-to-2"),
+        pytest.param(1, True, id="block-outer-1-to-1"),
+        pytest.param(2, True, id="block-outer-1-to-2-keeps-legacy"),
+    ],
+)
+def test_k3_unified_allocator_preserves_runtime_views(
+    monkeypatch, use_flashmla, kernel_blocks_per_manager, block_outer
+):
+    mla_names = ["layers.0.mla", "layers.1.mla"]
+    kda_name = "layers.2.kda"
+    num_blocks, kernel_block_size = 2, 128
+    manager_block_size = kernel_blocks_per_manager * kernel_block_size
+    mla_spec = AscendMLAAttentionSpec(
+        block_size=manager_block_size,
+        num_kv_heads=1,
+        head_size=576,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        dtype=torch.bfloat16,
+        mla_cache_layout="token_interleaved" if use_flashmla else "component_major",
+        page_size_padded=manager_block_size * 640 * torch.bfloat16.itemsize,
+    )
+    mla_spec = AscendMLAAttentionSpec.merge([mla_spec, mla_spec])
+    page_bytes = mla_spec.page_size_bytes
+    kda_spec = MambaSpec(
+        block_size=mla_spec.block_size,
+        shapes=((4,), (2,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=page_bytes,
+    )
+    layer_stride = page_bytes if block_outer else num_blocks * page_bytes
+    block_stride = len(mla_names) * page_bytes if block_outer else page_bytes
+    offset = 16
+    backing_size = offset + len(mla_names) * num_blocks * page_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=backing_size,
+                layers=names,
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+                offset=offset,
+            )
+            for names in (mla_names, [kda_name])
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=mla_names, kv_cache_spec=mla_spec),
+            KVCacheGroupSpec(layer_names=[kda_name], kv_cache_spec=kda_spec),
+        ],
+    )
+    layers = dict.fromkeys(mla_names, SimpleNamespace(get_attn_backend=lambda: AscendMLABackend))
+    kda_backend = SimpleNamespace(full_cls_name=lambda: "KdaBackend")
+    layers[kda_name] = SimpleNamespace(get_attn_backend=lambda: kda_backend)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")),
+        kv_transfer_config=None,
+        speculative_config=None,
+        cache_config=SimpleNamespace(use_replayssm=False, cache_dtype="auto"),
+        additional_config={},
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: True)
+
+    legacy_result = {}
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", lambda *args, **kwargs: legacy_result)
+    monkeypatch.setattr(attn_utils, "_reshape_kv_cache_v2", lambda **kwargs: legacy_result)
+    caches = attn_utils.allocate_kv_cache_main(
+        config, torch.device("cpu"), None, [kernel_block_size, kda_spec.block_size], allocate=None
+    )
+    if block_outer and kernel_blocks_per_manager > 1:
+        assert caches is legacy_result
+        return
+
+    assert caches.keys() == layers.keys()
+    kernel_slot_bytes = block_stride // kernel_blocks_per_manager
+    widths = (576,) if use_flashmla else (512, 64)
+    backing_addresses = set()
+    for index, name in enumerate(mla_names):
+        cache = caches[name]
+        assert isinstance(cache, torch.Tensor if use_flashmla else tuple)
+        components = (cache,) if use_flashmla else cache
+        component_offset = offset + index * layer_stride
+        for tensor, width in zip(components, widths, strict=True):
+            assert tensor.shape == (num_blocks * kernel_blocks_per_manager, kernel_block_size, 1, width)
+            assert tensor.dtype == torch.bfloat16
+            assert tensor.stride() == (kernel_slot_bytes // tensor.element_size(), width, width, 1)
+            assert tensor.storage_offset() * tensor.element_size() == component_offset
+            for block_id in range(tensor.shape[0]):
+                assert tensor[block_id].data_ptr() - tensor.data_ptr() == block_id * kernel_slot_bytes
+            component_offset += kernel_block_size * width * tensor.element_size()
+            backing_addresses.add(tensor.untyped_storage().data_ptr())
+
+    states = caches[kda_name]
+    assert isinstance(states, list)
+    state_offset = offset
+    for tensor, shape, dtype in zip(states, kda_spec.shapes, kda_spec.dtypes, strict=True):
+        assert tensor.shape == (num_blocks, *shape)
+        assert tensor.dtype == dtype
+        assert tensor.stride() == (block_stride // tensor.element_size(), 1)
+        assert tensor.storage_offset() * tensor.element_size() == state_offset
+        state_offset += shape[0] * tensor.element_size()
+        backing_addresses.add(tensor.untyped_storage().data_ptr())
+    assert len(backing_addresses) == 1
+
+
 @pytest.mark.parametrize(
     ("model_type", "expected_num_heads"),
     [("kimi_linear", 1), ("deepseek_v3", 12)],
@@ -1221,6 +1334,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     layer.kv_lora_rank = 512
     layer.qk_rope_head_dim = 64
     layer.attn_backend = AscendMLABackend
+    layer.impl.use_flashmla = True
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
     layer.is_draft_layer = is_draft_layer
@@ -1248,6 +1362,9 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
 
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.num_heads == expected_num_heads
+    if model_type == "kimi_linear":
+        assert (spec.kv_lora_rank, spec.qk_rope_head_dim) == (512, 64)
+        assert spec.mla_cache_layout == "token_interleaved"
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)
