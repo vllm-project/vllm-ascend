@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from unittest.mock import patch
 
 import torch
@@ -120,6 +120,7 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -128,7 +129,6 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -310,7 +310,7 @@ class NPUWorker(GPUWorker):
     def _init_workspace_and_model_runner(self) -> None:
         raise NotImplementedError("GPUWorker._init_workspace_and_model_runner is not validated on Ascend.")
 
-    def _make_model_runner(self) -> "GPUModelRunner":
+    def _make_model_runner(self) -> NoReturn:
         raise NotImplementedError("GPUWorker._make_model_runner is not validated on Ascend.")
 
     def handle_ft_command(self, ft_request):
@@ -568,7 +568,10 @@ class NPUWorker(GPUWorker):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
+        if vllm_version_is("0.33.0"):
+            self.model_runner.reset_lora_state()
+        else:
+            self.model_runner.on_target_weights_replaced()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
@@ -1537,7 +1540,11 @@ class NPUWorker(GPUWorker):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        num_tokens = (
+            getattr(self.model_runner, "uniform_decode_query_len", 1)
+            if vllm_version_is("0.33.0")
+            else self.model_runner.decode_query_len
+        )
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)

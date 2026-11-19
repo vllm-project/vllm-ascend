@@ -101,7 +101,8 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
     draft_model = SimpleNamespace(model=object(), config=draft_config.hf_config)
     target_model = SimpleNamespace(model=object())
     monkeypatch.setattr(loader, "get_draft_load_config", lambda _: config.load_config)
-    monkeypatch.setattr(loader, "get_pp_safe_draft_load_config", lambda value: value)
+    if dflash_module.vllm_version_is("0.33.0"):
+        monkeypatch.setattr(loader, "get_pp_safe_draft_load_config", lambda value: value)
     monkeypatch.setattr(loader, "maybe_share_target_embed", lambda *_: None)
     monkeypatch.setattr(loader, "get_target_lm_head", lambda *_: None)
     monkeypatch.setattr(
@@ -622,6 +623,13 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
 
 
+def _native_dflash_inputs(inputs, block_stride=None):
+    if dflash_module.vllm_version_is("0.33.0"):
+        return inputs
+    stride = inputs[17] if block_stride is None else block_stride
+    return [*inputs[:18], stride, *inputs[18:]]
+
+
 def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate(monkeypatch):
     kernel = MagicMock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
@@ -629,7 +637,7 @@ def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate
     inputs[17] = 16  # Kernel block size, distinct from physical KV blocks.
     inputs[-1] = True  # sample_from_anchor
 
-    dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
+    dflash_module.prepare_dflash_inputs_factory(128)(*_native_dflash_inputs(inputs))
 
     kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
 
@@ -642,7 +650,7 @@ def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
     inputs = [object() for _ in range(28)]
     inputs[-1] = True  # sample_from_anchor
 
-    dflash_module.prepare_dflash_inputs_factory(128)(*inputs, 5)
+    dflash_module.prepare_dflash_inputs_factory(128)(*_native_dflash_inputs([*inputs, 5]))
 
     kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=128)
 
@@ -661,7 +669,7 @@ def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch
     inputs[16] = block_table
     inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
     inputs[-1] = True  # sample_from_anchor
-    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*_native_dflash_inputs(inputs))
 
     restored = kernel.call_args.args[17]
     assert restored == 128
@@ -680,6 +688,24 @@ def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
     inputs[16] = torch.zeros(2, 4, dtype=torch.int32)
 
     with pytest.raises(RuntimeError, match="unknown to AscendBlockTables"):
-        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
+        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*_native_dflash_inputs(inputs))
 
     kernel.assert_not_called()
+
+
+@pytest.mark.parametrize("native_block_stride", [384, 1536])
+def test_dflash_input_preparation_keeps_expanded_kernel_page_addressing(monkeypatch, native_block_stride):
+    kernel = MagicMock()
+    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
+    block_table = torch.tensor([[6, 7, 8]], dtype=torch.int32)
+    block_tables = SimpleNamespace(kernel_block_sizes=[128], input_block_tables=[block_table])
+    inputs = [object() for _ in range(28)]
+    inputs[16:18] = [block_table, 384]
+    inputs[-1] = True
+
+    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*_native_dflash_inputs(inputs, native_block_stride))
+
+    assert kernel.call_args.args[16] is block_table
+    assert kernel.call_args.args[17] == 128
+    assert kernel.call_args.args[18:] == tuple(inputs[18:])
+    assert kernel.call_args.kwargs == {"num_reqs_override": None, "kv_cache_block_size": 384}
