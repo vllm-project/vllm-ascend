@@ -42,14 +42,17 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi && \
-    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
+    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
     python3 -m pip uninstall -y triton && \
     # The same step also builds the optional Rust frontend (vllm-rs).
     cd /vllm-workspace/vllm && \
     export PATH="/root/.cargo/bin:$PATH" && \
     export PROTOC_INCLUDE=/usr/include && \
-    python3 -m pip install -r requirements/build/rust.txt && \
+    # v0.23.0 does NOT have requirements/build/rust.txt, guard this line for version compatibility
+    if [ -f requirements/build/rust.txt ]; then \
+        python3 -m pip install -r requirements/build/rust.txt; \
+    fi && \
     bash tools/build_rust.sh && \
     python3 -m pip cache purge
 
