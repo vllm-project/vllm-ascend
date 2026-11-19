@@ -20,7 +20,7 @@ _CASES = [
     dict(actual_rows=0, graph_rows=2, width=4, token_count=0, query=[0]),
     dict(actual_rows=3, graph_rows=5, width=3, token_count=9, query=[1, 3, 6, 10]),
     dict(actual_rows=4, graph_rows=8, width=4, token_count=12, query=[0, 2, 5, 9, 12]),
-    dict(actual_rows=2, graph_rows=2, width=1, token_count=0, query=[7, 8]),
+    dict(actual_rows=2, graph_rows=2, width=1, token_count=0, query=[7, 8, 9]),
 ]
 
 
