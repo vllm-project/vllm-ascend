@@ -634,6 +634,19 @@ class TestUnifiedApplyActivation(unittest.TestCase):
         self.assertEqual(out, "out")
         mock_act.assert_called_once_with("x")
 
+    def test_mc2_clipped_silu_forwards_group_metadata(self):
+        inputs = _mlp_compute_input(has_mc2_dispatch_capacity=True, swiglu_limit=2.0, activation=MoEActivation.SILU)
+        with (
+            patch(f"{MOE_MLP}.HAS_TRITON", True),
+            patch(f"{MOE_MLP}.get_current_hardware_profile") as profile,
+            patch(f"{MOE_MLP}.can_use_routed_swiglu", return_value=True, create=True),
+            patch(f"{MOE_MLP}.routed_swiglu", create=True) as kernel,
+        ):
+            profile.return_value.supports.return_value = True
+            result = _unified_apply_activation(inputs, inputs.hidden_states, self._quant_method())
+        kernel.assert_called_once_with(inputs.hidden_states, inputs.group_list, inputs.group_list_type, 2.0)
+        self.assertIs(result, kernel.return_value)
+
     def test_silu_clamped_when_limit_set(self):
         x = torch.randn(4, 8)
         with patch(f"{MOE_MLP}.torch_npu.npu_swiglu", return_value="out", create=True) as mock_act:

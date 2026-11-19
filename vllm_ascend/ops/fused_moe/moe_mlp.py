@@ -18,11 +18,16 @@
 import torch
 import torch_npu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.activation.routed_swiglu import can_use_routed_swiglu, routed_swiglu
 
 
 def maybe_record_event() -> torch.npu.Event | None:
@@ -111,6 +116,24 @@ def _unified_apply_activation(
         hidden_states = torch.nn.functional.gelu(gate, approximate="tanh") * up
     else:
         if mlp_compute_input.swiglu_limit > 0:
+            if (
+                HAS_TRITON
+                and activation == MoEActivation.SILU
+                and mlp_compute_input.has_mc2_dispatch_capacity
+                and mlp_compute_input.lora_context is None
+                and mlp_compute_input.topk_scales is None
+                and not mlp_compute_input.quant.is_quant
+                and get_current_hardware_profile().supports(HardwareCapability.ROUTED_BF16_SWIGLU)
+                and can_use_routed_swiglu(
+                    hidden_states, mlp_compute_input.group_list, mlp_compute_input.group_list_type
+                )
+            ):
+                return routed_swiglu(
+                    hidden_states,
+                    mlp_compute_input.group_list,
+                    mlp_compute_input.group_list_type,
+                    mlp_compute_input.swiglu_limit,
+                )
             gate, up = hidden_states.chunk(2, dim=-1)
             gate.clamp_(max=mlp_compute_input.swiglu_limit)
             up.clamp_(min=-mlp_compute_input.swiglu_limit, max=mlp_compute_input.swiglu_limit)
