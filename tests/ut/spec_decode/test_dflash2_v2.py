@@ -281,9 +281,16 @@ def test_patch_swaps_upstream_selector_walk_kernel():
 
 
 def _spec_config(arch: str) -> SimpleNamespace:
+    speculator_classes = {
+        "DFlash2DraftModel": "vllm.v1.worker.gpu.spec_decode.dflash2.speculator.DFlash2Speculator",
+        "LiLiCorrDraftModel": "vllm.v1.worker.gpu.spec_decode.lilicorr.speculator.LiLiCorrSpeculator",
+        "DFlashDraftModel": "vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashSpeculator",
+    }
     return SimpleNamespace(
         method="dflash",
         enforce_eager=None,
+        custom_method=None,
+        speculator_config=SimpleNamespace(speculator_class=speculator_classes[arch]),
         use_dspark=lambda: False,
         use_dflash=lambda: True,
         draft_model_config=SimpleNamespace(architectures=[arch]),
