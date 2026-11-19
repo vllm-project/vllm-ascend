@@ -26,26 +26,9 @@
 
     {% endraw %}
 
-    The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`:
+    The output must be `default=ascend`. If it prints `runc`, check the `Runtimes:` line of `docker info`: when `ascend` is listed, add `--runtime ascend` to `docker run` or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker; when it is missing, rerun the installation and restart Docker.
 
-    1. If `ascend` is listed, either add `--runtime ascend` to `docker run`, or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker.
-    2. If `ascend` is missing, rerun the installation and restart Docker.
-
-    **The runtime is the recommended path, not a hard requirement.** When you cannot install it on the host, either because you have no root there or because `/etc/docker/daemon.json` belongs to the cluster, pass the devices and driver paths explicitly instead. The list depends on the product; for the A2 series it looks like this:
-
-    ```bash
-    docker run --rm \
-        --device=/dev/davinci0 --device=/dev/davinci_manager \
-        --device=/dev/devmm_svm --device=/dev/hugepages \
-        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        ...
-    ```
-
-    With the runtime installed, no `--privileged` is needed on the A2, A3 and A5 hosts we tested with driver 26.1.0 or later. A host still on driver 25.x fails with `EBUSY` and needs `--privileged` until the driver is upgraded.
-
-    The runtime mounts `/etc/ascend-docker-runtime.d/base.list` into every container, read-only. To mount an extra host path in every container, add it to `base.list`, one path per line. To mount a path only in selected containers, create another lowercase `.list` file in that directory and name it in `ASCEND_RUNTIME_MOUNTS`, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`; otherwise the container loses the driver libraries and `npu-smi`.
+    The runtime mounts `/etc/ascend-docker-runtime.d/base.list` into every container, read-only. To mount an extra host path in every container, add it to `base.list`, one path per line. To mount a path only in selected containers, create another lowercase `.list` file in that directory and name it in `ASCEND_RUNTIME_MOUNTS`, for example `-e ASCEND_RUNTIME_MOUNTS=mylist,base`: that variable replaces the default list, so include `base`, or the container loses the driver libraries and `npu-smi`.
 
     === "Select an official image"
 
