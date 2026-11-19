@@ -1,0 +1,7 @@
+pr: 21655
+entries:
+  - category: performance
+    text: Fused gate calculation, beta sigmoid, and Q/K normalization into supported A5 recurrent GDN execution, with fallback for unsupported configurations.
+    hardware: [A5]
+  - category: bugfix
+    text: Refreshed cached recurrent GDN gate bias in place after successful weight reloads and completed weight-transfer updates, preserving graph buffer addresses.
