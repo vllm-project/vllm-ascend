@@ -1,0 +1,5 @@
+pr: 22013
+entries:
+  - category: performance
+    text: Use wider KeyPoolIndexer pages for eligible GLM-5.3-Flash BF16 decode and colocated FP8 scoring.
+    model: glm-5.3-flash

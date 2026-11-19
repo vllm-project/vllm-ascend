@@ -16,6 +16,19 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 
+GLM5_NEXT_WIDE_INDEXER_BLOCK_SIZES = (512, 384)
+
+
+def get_wide_indexer_block_size(logical_block_size: int, kernel_block_size: int) -> int:
+    return next(
+        (
+            size
+            for size in GLM5_NEXT_WIDE_INDEXER_BLOCK_SIZES
+            if logical_block_size % size == 0 and size % kernel_block_size == 0
+        ),
+        kernel_block_size,
+    )
+
 
 def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     strides = [1] * len(shape)
@@ -56,6 +69,8 @@ def view_compressed_indexer_cache(
     raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     attn_backend: AttentionBackend,
     kernel_block_size: int,
+    *,
+    use_wide_fp8_pages: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     if isinstance(raw_cache, tuple):
         if len(raw_cache) != 1:
@@ -64,6 +79,8 @@ def view_compressed_indexer_cache(
     else:
         raw_single = raw_cache
     compression_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
+    if use_wide_fp8_pages and kv_cache_spec.dtype == torch.float8_e4m3fn and compression_ratio == 4:
+        kernel_block_size = get_wide_indexer_block_size(kv_cache_spec.block_size, kernel_block_size)
     indexer_kernel_block_size = kernel_block_size // compression_ratio
     num_blocks = raw_single.numel() // kv_cache_spec.page_size_bytes
     num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // indexer_kernel_block_size

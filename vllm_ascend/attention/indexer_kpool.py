@@ -40,6 +40,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.cache_views import get_wide_indexer_block_size
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -234,6 +235,7 @@ class AscendIndexerKPoolMetadata:
     pcp_local_token_count: int = 0
     # Per-rank contiguous scoring slice, or None for the replicated path.
     indexer_row_shard: AscendIndexerKPoolRowShard | None = None
+    scoring_block_table_stride: int = 1
 
 
 @dataclass
@@ -297,6 +299,15 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
         # MTP tables count expanded kernel pages.
         self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        self.scoring_block_table_stride = 1
+        scoring_block_size = get_wide_indexer_block_size(self.logical_block_size, GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE)
+        if (
+            scoring_block_size != GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+            and kv_cache_spec.dtype == torch.bfloat16
+            and compress_ratio == 4
+            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
+        ):
+            self.scoring_block_table_stride = scoring_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         scheduler_config = vllm_config.scheduler_config
         # Builders also run in CPU unit tests without the distributed runtime;
         # treat that as TP1 so the sharding gate stays closed there.
@@ -521,6 +532,13 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             self.compress_ratio,
         )
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        table_stride = (
+            self.scoring_block_table_stride
+            if self.scoring_block_table_stride > 1
+            and common_attn_metadata.max_query_len == 1
+            and block_table.shape[1] % self.scoring_block_table_stride == 0
+            else 1
+        )
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
@@ -539,6 +557,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             ],
             keypool_state_table=state_table,
             keypool_start_offsets=buffers.start_offsets[:num_reqs],
+            scoring_block_table_stride=table_stride,
         )
 
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata) -> AscendIndexerKPoolMetadata:
@@ -1126,9 +1145,16 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             assert indexer_scale_cache is not None
             query = q_values
             indexer_op = partial(self._pool_key_indexer_fp8, k_descale=indexer_scale_cache[..., 0])
+            table_stride, extra_rows = divmod(indexer_cache.shape[1], indexer_metadata.block_size)
+            if extra_rows or not table_stride:
+                raise ValueError("FP8 KeyPool pages must contain whole block-table subpages.")
         else:
             query = q_values.to(indexer_cache.dtype)
             indexer_op = self._cann_pool_key_indexer
+            table_stride = indexer_metadata.scoring_block_table_stride
+            if table_stride > 1:
+                # Consecutive BF16 subpages within a logical block share contiguous storage.
+                indexer_cache = indexer_cache.view(-1, indexer_cache.shape[1] * table_stride, *indexer_cache.shape[2:])
         indices, _ = self._pool_key_indexer(
             indexer_op,
             query,
@@ -1138,6 +1164,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             actual_seq_q=scoring.cum_query_lens,
             actual_seq_k=scoring.seq_lens,
             block_table=row_shard.block_table if row_shard is not None else indexer_metadata.block_table,
+            block_table_stride=table_stride,
             layout_q="TND",
             layout_k="PA_BBND",
             topk=self.topk_tokens,

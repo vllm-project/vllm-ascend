@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -671,12 +672,12 @@ def _config():
     )
 
 
-def _builder(config):
+def _builder(config, dtype=torch.bfloat16):
     spec = AscendMLAAttentionSpec(
         block_size=config.cache_config.block_size,
         num_kv_heads=1,
         head_size=128,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         model_version="glm5_next",
         **_ratio_kwargs(4),
     )
@@ -702,6 +703,30 @@ def _common():
         slot_mapping=torch.tensor([2, -1, 4, 5, 6, 7, 135, 136, -1, -1]),
         positions=torch.tensor([2, 3, 4, 5, 6, 7, 7, 8, 3, 7]),
     )
+
+
+@pytest.mark.parametrize(
+    ("block_size", "max_query_len", "dtype", "expected_stride"),
+    [
+        (512, 1, torch.bfloat16, 4),
+        (1152, 1, torch.bfloat16, 3),
+        (640, 1, torch.bfloat16, 1),
+        (1152, 6, torch.bfloat16, 1),
+        (1152, 1, torch.float8_e4m3fn, 1),
+    ],
+)
+def test_indexer_wide_pages_require_aligned_bf16_single_query_scoring(
+    block_size, max_query_len, dtype, expected_stride
+):
+    config = _config()
+    config.cache_config.block_size = block_size
+    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    common = _common()
+    common.max_query_len = max_query_len
+    common.block_table_tensor = torch.arange(2 * (block_size // 128), dtype=torch.int32).view(2, -1)
+    metadata = _builder(config, dtype).build(0, common)
+    assert metadata.scoring_block_table_stride == expected_stride
+    assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
 
 
 @pytest.mark.parametrize("input_tokens", [9, 10])

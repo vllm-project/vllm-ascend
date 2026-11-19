@@ -25,6 +25,9 @@ def _prepare_nonempty_keypool_inputs_kernel(
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     TABLE_COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    TABLE_BLOCK: tl.constexpr,
+    TABLE_LOAD_BLOCK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     block = tl.program_id(0)
@@ -48,24 +51,34 @@ def _prepare_nonempty_keypool_inputs_kernel(
         tl.store(padded_ends + offsets, tl.where(offsets < requests, end, tokens + 1), offsets < requests + 1)
         tl.store(padded_lengths + offsets, tl.maximum(length, 1), offsets < requests + 1)
         tl.store(padded_tails + offsets, tail, offsets < requests + 1)
-    if block * BLOCK < (table_rows + 1) * TABLE_COLS:
-        offsets = block * BLOCK + tl.arange(0, BLOCK)
-        value = tl.load(table + offsets, offsets < table_rows * TABLE_COLS, other=0)
+    if block * TABLE_BLOCK < (table_rows + 1) * TABLE_COLS:
+        offsets = block * TABLE_BLOCK + tl.arange(0, TABLE_BLOCK)
+        if TABLE_STRIDE == 1:
+            value = tl.load(table + offsets, offsets < table_rows * TABLE_COLS, other=0)
+        else:
+            # Load contiguous tiles and gather the first page ID of each group on chip.
+            source_offsets = block * TABLE_BLOCK * TABLE_STRIDE + tl.arange(0, TABLE_LOAD_BLOCK)
+            source = tl.load(table + source_offsets, source_offsets < table_rows * TABLE_COLS * TABLE_STRIDE, other=0)
+            indices = tl.arange(0, TABLE_BLOCK) * TABLE_STRIDE
+            first_page = tl.gather(source.to(tl.float32, bitcast=True), indices, 0).to(tl.int32, bitcast=True)
+            value = tl.where(first_page < 0, first_page, first_page // TABLE_STRIDE)
         tl.store(padded_table + offsets, value, offsets < (table_rows + 1) * TABLE_COLS)
 
 
-def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table):
+def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table, block_table_stride=1):
     """Append safe CANN sentinel inputs in one launch, without temporary fills.
 
     Allocate outputs per invocation so independently captured graphs and layers
     cannot alias a mutable workspace. Graph replay reuses captured allocations.
-    Contiguous inputs use a single vector-copy launch. Normalize strided views
-    first to avoid scalar gather lowering on A3; contiguous() is a no-op on the
-    ordinary backend inputs. All operator inputs returned here are contiguous.
+    Fuse table compaction with the sentinel writes. Normalize strided inputs
+    ahead of the launch to avoid scalar gathers. All returned inputs are contiguous.
     """
     tokens, heads, dim = query.shape
     requests = ends.numel()
-    table_rows, table_cols = table.shape
+    table_rows, source_table_cols = table.shape
+    if source_table_cols % block_table_stride:
+        raise ValueError("KeyPool block table rows must align to scoring pages.")
+    table_cols = source_table_cols // block_table_stride
     padded_query = query.new_empty((tokens + 1, heads, dim))
     padded_weights = weights.new_empty((tokens + 1, heads))
     padded_ends = ends.new_empty((requests + 1,))
@@ -73,8 +86,10 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
     padded_tails = tails.new_empty((requests + 1,))
     padded_table = table.new_empty((table_rows + 1, table_cols))
     block = 8192
-    size = max(padded_query.numel(), padded_weights.numel(), requests + 1, padded_table.numel())
-    grid = max(triton.cdiv(size, block), triton.cdiv(requests + 1, 16))
+    table_block = 256 if block_table_stride > 1 else block
+    table_load_block = triton.next_power_of_2(table_block * block_table_stride)
+    size = max(padded_query.numel(), padded_weights.numel())
+    grid = max(triton.cdiv(size, block), triton.cdiv(requests + 1, 16), triton.cdiv(padded_table.numel(), table_block))
     _prepare_nonempty_keypool_inputs_kernel[(grid,)](
         query.contiguous(),
         weights.contiguous(),
@@ -94,6 +109,9 @@ def prepare_nonempty_keypool_inputs(query, weights, ends, lengths, tails, table)
         heads,
         dim,
         table_cols,
+        block_table_stride,
+        table_block,
+        table_load_block,
         block,
     )
     return padded_query, padded_weights, padded_ends, padded_lengths, padded_tails, padded_table

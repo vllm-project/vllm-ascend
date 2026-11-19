@@ -1908,6 +1908,8 @@ def _reshape_kv_cache_v2(
                     raw_cache,
                     group.backend,
                     kernel_block_size * get_kv_cache_compression_ratio(kv_cache_spec),
+                    # KV connectors transfer the packed page layout between workers.
+                    use_wide_fp8_pages=vllm_config.kv_transfer_config is None,
                 )
                 continue
             if isinstance(kv_cache_spec, MambaSpec):
