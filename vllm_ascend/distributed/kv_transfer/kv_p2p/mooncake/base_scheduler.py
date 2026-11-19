@@ -79,6 +79,7 @@ class MooncakeMetadataThread(threading.Thread):
         if self.use_kv_pp and self.dcp_size != 1:
             raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
         metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
+        self.has_quant_flashmla_layout = any(pp.quant_flashmla_layers for pp in metadata_by_pp_rank.values())
         self.encoded_metadata = encoder.encode(
             MooncakeTransferMetadataGroups(
                 engine_id=engine_id,
@@ -203,7 +204,7 @@ class MooncakeMetadataThread(threading.Thread):
             # have been checked against the corresponding structural signature.
             layer_source_by_name: dict[str, tuple[MooncakeTransferMetadata, int]] = {}
             # layer_name -> (group index, block size, strides, lengths, shapes,
-            #                block-size scales, indexer replication size).
+            #                block-size scales, indexer replication size, QuantFlashMLA layout).
             layer_signature_by_name: dict[str, tuple[object, ...]] = {}
             reference_layer_names: set[str] | None = None
             for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
@@ -231,6 +232,7 @@ class MooncakeMetadataThread(threading.Thread):
                             worker_metadata.block_shapes[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
                             worker_metadata.indexer_replication_sizes[local_layer_index],
+                            layer_name in worker_metadata.quant_flashmla_layers,
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -243,6 +245,7 @@ class MooncakeMetadataThread(threading.Thread):
                                 "block_shapes",
                                 "block_size_scales",
                                 "indexer_replication_sizes",
+                                "quant_flashmla_layout",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -267,6 +270,7 @@ class MooncakeMetadataThread(threading.Thread):
             block_shapes: list[list[tuple[int, ...]]] = []
             block_size_scales: list[list[int]] = []
             indexer_replication_sizes: list[int] = []
+            quant_flashmla_layers: list[str] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
@@ -277,6 +281,8 @@ class MooncakeMetadataThread(threading.Thread):
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
                 indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
+                if layer_name in worker_metadata.quant_flashmla_layers:
+                    quant_flashmla_layers.append(layer_name)
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
             metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
@@ -315,6 +321,7 @@ class MooncakeMetadataThread(threading.Thread):
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
                 indexer_replication_sizes=indexer_replication_sizes,
+                quant_flashmla_layers=tuple(quant_flashmla_layers),
             )
         return merged
 

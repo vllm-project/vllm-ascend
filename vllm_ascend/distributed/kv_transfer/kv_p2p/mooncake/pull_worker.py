@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeTransferAddressMixin,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
+    QUANT_FLASHMLA_LAYOUT_CAPABILITY,
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
     MooncakeTransferMetadata,
@@ -242,6 +243,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         groups_by_pp_rank: dict[int, dict[tuple[int, int], list[list[int]]]] = {}
         layer_pairs_by_pp_rank: dict[int, list[tuple[int, int]]] = {}
         matched_local_layer_indices: set[int] = set()
+        local_quant_flashmla_layers = set(self.local_metadata.quant_flashmla_layers)
         # Local spec and remote sequence layout -> topology-derived candidate
         # groups before the per-layer KVPP owner filter.
         raw_tp_rank_groups_by_spec: dict[tuple[int, bool, tuple[int, ...]], list[list[int]]] = {}
@@ -252,6 +254,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             remote_layer_index_by_name = {
                 layer_name: layer_index for layer_index, layer_name in enumerate(pp_metadata.layer_names)
             }
+            remote_quant_flashmla_layers = set(pp_metadata.quant_flashmla_layers)
             # remote_layer_index -> TP-major/PCP-minor flattened worker ranks
             # that physically own this layer.
             owner_worker_ranks_by_layer_index: list[set[int]] = [set() for _ in pp_metadata.layer_names]
@@ -267,6 +270,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 if remote_layer_index is None:
                     continue
 
+                local_quant_flashmla = layer_name in local_quant_flashmla_layers
+                remote_quant_flashmla = layer_name in remote_quant_flashmla_layers
+                if local_quant_flashmla != remote_quant_flashmla:
+                    raise ValueError(
+                        f"Mooncake QuantFlashMLA page layout mismatch for layer {layer_name!r}: "
+                        f"producer={remote_quant_flashmla}, consumer={local_quant_flashmla}"
+                    )
                 layer_pair = (local_layer_index, remote_layer_index)
                 layer_index_pairs.append(layer_pair)
                 matched_local_layer_indices.add(local_layer_index)
@@ -1296,7 +1306,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((b"get_meta_msg",)),
+                self.encoder.encode((b"get_meta_msg", QUANT_FLASHMLA_LAYOUT_CAPABILITY)),
                 path,
             )
             metadata_bytes = ensure_zmq_recv(sock, path)

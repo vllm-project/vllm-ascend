@@ -289,7 +289,8 @@ def test_quant_flashmla_writer_scales_refresh_in_place():
     torch.testing.assert_close(scales[1], torch.full((512,), 8.0))
 
 
-def test_quant_flashmla_no_rope_writer_scales_only_latent_cache(monkeypatch):
+@pytest.mark.parametrize("return_quantized_current", [False, True])
+def test_quant_flashmla_no_rope_writer_scales_only_latent_cache(monkeypatch, return_quantized_current):
     normalized = torch.full((2, 1, 512), 2.0, dtype=torch.bfloat16)
     layernorm = MagicMock(return_value=normalized)
     scatter = MagicMock()
@@ -308,11 +309,17 @@ def test_quant_flashmla_no_rope_writer_scales_only_latent_cache(monkeypatch):
     cache = fused[..., :512], fused[..., 512:]
     slots = torch.tensor([2, 7], dtype=torch.int64)
 
-    k_pe, k_nope = AscendMLAImpl._exec_kv_no_rope(impl, kv_input, cache, slots)
-    torch.testing.assert_close(k_nope, normalized)
-    torch.testing.assert_close(k_pe.view(2, 64), positional)
+    k_pe, k_nope = AscendMLAImpl._exec_kv_no_rope(
+        impl, kv_input, cache, slots, return_quantized_current=return_quantized_current
+    )
     cached_latent = scatter.call_args.kwargs["key"]
-    assert cached_latent.dtype == fused.dtype
+    cached_positional = scatter.call_args.kwargs["value"]
+    assert cached_latent.dtype == cached_positional.dtype == fused.dtype
     torch.testing.assert_close(cached_latent.float(), torch.full_like(cached_latent.float(), 8.0))
-    # The positional cache is deliberately not multiplied by k's descale reciprocal.
-    assert scatter.call_args.kwargs["value"] is k_pe
+    torch.testing.assert_close(cached_positional.view(2, 64).bfloat16(), positional)
+    if return_quantized_current:
+        assert k_pe is cached_positional
+        assert k_nope is cached_latent
+    else:
+        torch.testing.assert_close(k_pe.view(2, 64), positional)
+        torch.testing.assert_close(k_nope, normalized)
