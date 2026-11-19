@@ -963,12 +963,15 @@ guide_sections:
     | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | TP2 PP4 DP1 (EP2) | TP2 DP4 (EP8) | TP4 DP1 (EP4) | TP4 DP1 (EP4) |
     | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | TP2 PP2 DP2 (EP4) | TP2 DP4 (EP8) | TP2 DP2 (EP4) | TP2 DP2 (EP4) |
 
-    Prepare the hardware-specific container from Section 4.1 for basic, image or
-    long-context serving. For pooling, use Section 4.3 and complete Section 5.5
-    through MetaService readiness, including the storage device mounts, limits,
-    libraries, per-role configuration files and environment setup. The generated
-    Docker command supplies the shm size. Use the pooling container from the guide
-    to make the backing devices and MemCache configuration available. Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
+    **MemCache three-tier pooling:** This recipe currently does not support end-to-end
+    pool deployment. The A3 and 950DT pooling presets generate the Prefill and Decode
+    worker commands. For A2, A3, and 950DT, follow [Section 4.3](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling)
+    to prepare the container and mount the storage devices. Then follow the hardware
+    tab in [Section 5.5](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool)
+    to configure MemCache, start or reuse MetaService, and verify cache reuse.
+
+    For basic, image or long-context serving, prepare the hardware-specific container
+    from Section 4.1. Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
     and interface. In each role shell, initialize CANN/ATB, unset proxy variables
     and any inherited `VLLM_PP_LAYER_PARTITION`, and add Mooncake to the library path:
 
