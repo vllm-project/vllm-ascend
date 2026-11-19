@@ -157,6 +157,7 @@ class BaseKVPoolWorker(ABC):
         self.model_name = model_config.model.split("/")[-1]
 
         self.pp_layer_offset = 0
+        self.pp_layer_end = None
         self.total_layers = None
         if self.pp_size > 1 and self.pcp_size > 1:
             # vLLM 0.33.0 derives the PP stage without the PCP rank dimension.
@@ -170,9 +171,9 @@ class BaseKVPoolWorker(ABC):
             return
 
         try:
-            start, _ = model_config.get_layers_start_end_indices(parallel_config)
-            self.pp_layer_offset = start
+            start, end = model_config.get_layers_start_end_indices(parallel_config)
             self.total_layers = model_config.get_total_num_hidden_layers()
+            self.pp_layer_offset, self.pp_layer_end = start, end
         except AttributeError:
             # Older vLLM without PP layer-index APIs: fall back to the
             # non-PP layout (offset 0, total == local).
