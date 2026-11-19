@@ -11,13 +11,18 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 
 _RESAMPLE_BLOCK_SIZE = 1024
 
+_VECTORCORE_NUM = -1
+
 
 def _get_vectorcore_num() -> int:
-    try:
-        return int(get_vectorcore_num())
-    except AssertionError:
-        init_device_properties_triton()
-        return int(get_vectorcore_num())
+    global _VECTORCORE_NUM
+    if _VECTORCORE_NUM <= 0:
+        try:
+            _VECTORCORE_NUM = int(get_vectorcore_num())
+        except AssertionError:
+            init_device_properties_triton()
+            _VECTORCORE_NUM = int(get_vectorcore_num())
+    return _VECTORCORE_NUM
 
 
 @triton.jit(
@@ -53,8 +58,10 @@ def _resample_kernel(
     temp_ptr,
     cumulative_log_p_ptr,
     num_reqs,
-    num_blocks,
-    vocab_size,
+    # Vocabulary geometry is fixed for a given model: constexpr so that the
+    # tiling is resolved at compile time instead of per launch.
+    num_blocks: tl.constexpr,
+    vocab_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
@@ -181,8 +188,10 @@ def _categorical_finalize_kernel(
     seed_ptr,
     pos_ptr,
     cumulative_log_p_ptr,
-    vocab_size,
-    num_blocks,
+    # Vocabulary geometry is fixed for a given model: constexpr so that the
+    # tiling is resolved at compile time instead of per launch.
+    vocab_size: tl.constexpr,
+    num_blocks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     PADDED_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -438,8 +447,8 @@ def resample(
         temperature,
         cumulative_log_p,
         num_reqs,
-        num_blocks,
-        vocab_size,
+        num_blocks=num_blocks,
+        vocab_size=vocab_size,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_BLOCK_VERIFICATION=use_block_verification,
@@ -471,8 +480,8 @@ def resample(
         seed,
         pos,
         cumulative_log_p,
-        vocab_size,
-        num_blocks,
+        vocab_size=vocab_size,
+        num_blocks=num_blocks,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         HAS_DRAFT_LOGITS=has_draft_logits,
