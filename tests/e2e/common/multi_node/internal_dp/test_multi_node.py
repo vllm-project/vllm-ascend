@@ -197,6 +197,16 @@ def _run_benchmarks_with_acceptance_window(config: MultiNodeConfig, host: str, p
     num_speculative_tokens = _speculative_num_tokens(config)
     metrics_servers = _spec_metrics_servers(config)
 
+    # TODO: temporary smoke diagnostics, remove before merging
+    logger.info(
+        "acceptance window: bound_index=%s num_speculative_tokens=%s endpoints=%s baseline=%s tolerance=%s",
+        bound_index,
+        num_speculative_tokens,
+        [(e.host, e.port) for e in metrics_servers],
+        baseline_val,
+        tolerance,
+    )
+
     warmup_fn = make_chat_warmup_fn(f"http://{host}:{port}/v1/chat/completions", config.model)
 
     # Unbound configs keep the legacy whole-session sampling window.

@@ -93,6 +93,9 @@ def measure_acceptance_rate(
 
     num_drafts, num_accepted_tokens_per_pos = _sum_metrics(server, num_speculative_tokens)
 
+    # TODO: temporary smoke diagnostics, remove before merging
+    print(f"[debug] base_drafts={base_drafts} final_drafts={num_drafts} positions={num_speculative_tokens}")
+
     num_drafts -= base_drafts
     for i in range(len(num_accepted_tokens_per_pos)):
         if i < len(base_accepted):

@@ -231,6 +231,16 @@ def _run_benchmarks_with_acceptance_window_ext(
     tolerance = float(config.acceptance_rate.get("tolerance", 0.05))
     num_speculative_tokens = _speculative_num_tokens(config, ranks, all_commands)
 
+    # TODO: temporary smoke diagnostics, remove before merging
+    logger.info(
+        "acceptance window: bound_index=%s num_speculative_tokens=%s endpoints=%s baseline=%s tolerance=%s",
+        bound_index,
+        num_speculative_tokens,
+        [(e.host, e.port) for e in metrics_servers],
+        baseline_val,
+        tolerance,
+    )
+
     warmup_fn = make_chat_warmup_fn(completion_server.url_for("v1", "chat", "completions"), config.model)
 
     def write_results(results: list[Any]) -> None:
