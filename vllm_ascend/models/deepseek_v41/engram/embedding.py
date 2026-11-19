@@ -154,13 +154,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         if self._shared_group is not None:
             # One physical copy of the mapped range, registered by each
             # rank in the sharing group.
-            self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
+            self._codes_uva = SharedUvaBuffer(
+                codes_shape, self.storage_dtype, device, self._shared_group, "_codes_uva", self
+            )
             if quantized:
-                self._scales_uva = SharedUvaBuffer(scales_shape, self.scale_dtype, device, self._shared_group)
+                self._scales_uva = SharedUvaBuffer(
+                    scales_shape, self.scale_dtype, device, self._shared_group, "_scales_uva", self
+                )
             return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
-        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
+        self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device, "_codes_uva", self)
         if quantized:
-            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device)
+            self._scales_uva = HostUvaBuffer(scales_shape, self.scale_dtype, device, "_scales_uva", self)
             self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
@@ -188,6 +192,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 continue
             buffer.close()
             setattr(self, name, None)
+            # The address table the buffer registered is dead too: drop it so a
+            # later wake cannot restore a tensor over the freed device memory.
+            ptrs_name = f"{name}_ptrs"
+            if hasattr(self, ptrs_name):
+                delattr(self, ptrs_name)
             param = getattr(self, alias)
             setattr(
                 self,
