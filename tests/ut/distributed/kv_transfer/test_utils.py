@@ -8,7 +8,6 @@ from unittest.mock import patch
 import torch
 
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    PD_QOS_DEFAULT,
     QOS_KEY,
     collect_storage_merged_register_regions,
     inject_qos,
@@ -18,40 +17,51 @@ ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
 
 
 class TestAscendResourceConfig(unittest.TestCase):
-    def test_pd_only(self):
+    def test_omitted_pd_qos_leaves_environment_unchanged(self):
         with patch.dict(os.environ, {}, clear=True):
-            inject_qos(PD_QOS_DEFAULT)
-            self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: 1})
+            inject_qos({})
+            self.assertNotIn(ENV, os.environ)
+
+        existing = '{"comm_resource_config.qos": 6, "store": {"comm_resource_config": {"qos": 2}}}'
+        with patch.dict(os.environ, {ENV: existing}):
+            inject_qos({"prefill": {}})
+            self.assertEqual(os.environ[ENV], existing)
 
     def test_preserves_other_fields(self):
         initial = {QOS_KEY: 3, "other": {"x": [1, 2]}, "store": {QOS_KEY: 4, "pool_other": 9}}
         with patch.dict(os.environ, {ENV: json.dumps(initial)}):
-            inject_qos(2)
+            inject_qos({"qos_priority": 2})
             self.assertEqual(json.loads(os.environ[ENV]), {**initial, QOS_KEY: 2})
 
     def test_explicit_pd_qos(self):
-        for qos in range(5):
+        for qos in range(8):
             with self.subTest(qos=qos), patch.dict(os.environ, {}, clear=True):
-                inject_qos(qos)
+                inject_qos({"qos_priority": qos})
                 self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: qos})
 
+    def test_high_pd_qos_warns(self):
+        with patch.dict(os.environ, {}, clear=True), self.assertLogs("vllm", level="WARNING") as logs:
+            inject_qos({"qos_priority": 7})
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("QoS 7", logs.output[0])
+
     def test_invalid_inputs_leave_environment_unchanged(self):
-        for qos in (True, False, "1", 1.5, None, -1, 5, 6, 7, 8):
+        for qos in (True, False, "1", 1.5, None, -1, 8):
             with self.subTest(qos=qos), patch.dict(os.environ, {ENV: "{}"}):
                 with self.assertRaises(ValueError):
-                    inject_qos(qos)
+                    inject_qos({"qos_priority": qos})
                 self.assertEqual(os.environ[ENV], "{}")
         for raw in ("{unquoted: 1}", "[]", "null"):
             with self.subTest(raw=raw), patch.dict(os.environ, {ENV: raw}):
                 with self.assertRaises(ValueError):
-                    inject_qos(1)
+                    inject_qos({"qos_priority": 1})
                 self.assertEqual(os.environ[ENV], raw)
 
     def test_repeated_injection_is_idempotent(self):
         with patch.dict(os.environ, {}, clear=True):
-            inject_qos(1)
+            inject_qos({"qos_priority": 1})
             before = os.environ[ENV]
-            inject_qos(1)
+            inject_qos({"qos_priority": 1})
             self.assertEqual(os.environ[ENV], before)
 
     def test_injection_logs(self):
@@ -61,7 +71,7 @@ class TestAscendResourceConfig(unittest.TestCase):
                 patch.dict(os.environ, {ENV: json.dumps(initial)}),
                 patch("vllm_ascend.distributed.kv_transfer.utils.utils.logger") as log,
             ):
-                inject_qos(1)
+                inject_qos({"qos_priority": 1})
                 if QOS_KEY in initial:
                     log.warning.assert_called_once()
                     self.assertEqual(log.warning.call_args.args[1:], (initial[QOS_KEY], 1))
@@ -77,7 +87,7 @@ class TestAscendResourceConfig(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.utils.utils.logger") as log,
         ):
             with self.assertRaises(ValueError):
-                inject_qos(1)
+                inject_qos({"qos_priority": 1})
             log.info.assert_not_called()
 
 
