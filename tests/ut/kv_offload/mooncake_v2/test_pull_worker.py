@@ -3,7 +3,7 @@
 import queue
 import random
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -71,6 +71,8 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.invalid_block_ids_lock = threading.Lock()
     thread.finished_requests = queue.SimpleQueue()
     thread.request_queue = queue.Queue()
+    thread.peer_transfers = {}
+    thread.peer_transfers_lock = threading.Lock()
     for name, value in overrides.items():
         setattr(thread, name, value)
     return thread
@@ -1292,42 +1294,32 @@ def test_submit_transfer_requests_preserves_tasks_after_submission_error(
 ) -> None:
     thread = make_thread(can_report_invalid_block_ids=can_report)
     remote_pp = make_pp_metadata(tp_base_addrs={0: [[5000]], 1: [[6000]]})
-    remote_groups = make_metadata_groups(tp_size=2, pp_metadata=remote_pp)
-    thread._get_remote_metadata = MagicMock(return_value=remote_groups)  # type: ignore[method-assign]
+    thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(tp_size=2, pp_metadata=remote_pp))
     thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0], [1]]}}}
     thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
-    thread._build_transfer_block_buckets = MagicMock(  # type: ignore[method-assign]
-        return_value=(
-            {
-                (0, 0): {0: {(0, 0): [("request-a", [1], [2])]}},
-                (0, 1): {0: {(0, 0): [("request-b", [3], [4])]}},
-            },
-            {(0, 0): {"request-a"}, (0, 1): {"request-b"}},
-        )
-    )
 
-    completed_future: Future[None] = Future()
+    def build(_metadata, _layers, _ranks, _pcp, _dcp, requests, cache, **kwargs):
+        name = next(iter(requests))
+        rank = 0 if name == "request-a" else 1
+        return {(0, rank): {0: {(0, 0): [(name, [1], [2])]}}}, {(0, rank): {name}}
+
+    thread._build_transfer_block_buckets = MagicMock(side_effect=build)
+    completed_future = Future()
     completed_future.set_result(None)
     completed_result = MagicMock(wraps=completed_future.result)
-    completed_future.result = completed_result  # type: ignore[method-assign]
+    completed_future.result = completed_result
 
-    def submit(_func: object, _pp: int, _pcp: int, tp_rank: int, *_args: object) -> Future[None]:
+    def submit(_session, _pp, _pcp, tp_rank, *_args):
         if tp_rank == 0:
             return completed_future
         if submission_error:
             raise RuntimeError("submit failed")
-        future: Future[None] = Future()
-        if tp_rank == 1:
-            future.set_exception(RuntimeError("remote TP failed"))
-        else:
-            future.set_result(None)
+        future = Future()
+        future.set_exception(RuntimeError("remote TP failed"))
         return future
 
-    thread.executor = MagicMock()
-    thread.executor.submit.side_effect = submit
-    thread._prepare_tp_transfer_bucket = MagicMock(side_effect=lambda pp, pcp, tp, *args: (pp, pcp, tp))
+    thread._submit_peer_transfer = MagicMock(side_effect=submit)
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
-
     results = list(thread._submit_transfer_requests("engine-p", "10.0.0.1", 6000, requests, selection_index_offset=3))
     assert [result[0] for result in results] == ["request-a", "request-b"]
     assert completed_future in results[0][1]
@@ -1342,8 +1334,10 @@ def test_submit_transfer_requests_preserves_tasks_after_submission_error(
         assert tasks[failed_future][3] == {"request-b"}
         assert isinstance(failed_future.exception(), RuntimeError)
     completed_result.assert_not_called()
-    thread._build_transfer_block_buckets.assert_called_once()
-    assert thread._build_transfer_block_buckets.call_args.kwargs["selection_index_offset"] == 3
+    assert [call.kwargs["selection_index_offset"] for call in thread._build_transfer_block_buckets.call_args_list] == [
+        3,
+        4,
+    ]
 
 
 @pytest.mark.parametrize("mode,read_count", [("batch", 1), ("request", 2)])
@@ -1379,9 +1373,7 @@ def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_co
     assert [address for call in calls for address in call.args[2]] == [5384, 5896]
     assert [length for call in calls for length in call.args[3]] == [256, 256]
     assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"a", "b"})
-    expected_fn = (
-        thread._prepare_and_execute_tp_transfer_bucket if mode == "batch" else thread._execute_tp_transfer_bucket
-    )
+    expected_fn = thread._prepare_and_execute_tp_transfer_bucket
     assert all(call.args[0] == expected_fn for call in thread.executor.submit.call_args_list)
 
 
@@ -1668,47 +1660,38 @@ def test_request_pipeline_concurrent_callbacks_finish_once() -> None:
 
 
 @pytest.mark.parametrize("complete_previous", [False, True])
-def test_engine_batch_submits_each_prepared_request_before_preparing_next(complete_previous: bool) -> None:
+def test_engine_batch_submits_each_request_before_mapping_next(complete_previous: bool) -> None:
     thread = make_thread()
-    remote_pp = make_pp_metadata()
-    thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=remote_pp))
+    thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
     thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0]]}}}
     thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
-    # More than 32 requests can be submitted without waiting for any READ.
     requests = {str(i): make_req_meta() for i in range(40)}
     futures = []
-    prepared_ids = []
+    mapped_ids = []
 
-    entries = [(name, [10], [20]) for name in requests]
-    thread._build_transfer_block_buckets = MagicMock(
-        return_value=({(0, 0): {0: {(0, 0): entries}}}, {(0, 0): set(requests)})
-    )
-
-    def prepare(pp, pcp, tp, remote_pcp, remote_tp, remote_dcp, metadata, specs):
-        assert len(futures) == len(prepared_ids)
+    def build(_metadata, _layers, _ranks, _pcp, _dcp, request, cache, **kwargs):
+        assert len(request) == 1
+        assert len(futures) == len(mapped_ids)
         if complete_previous and futures:
             futures[-1].set_result(None)
-            assert thread.finished_requests.get_nowait() == (prepared_ids[-1], False)
-        request_entries = specs[0][(0, 0)]
-        assert len(request_entries) == 1
-        prepared_ids.append(request_entries[0][0])
-        return (pp, pcp, tp, "session", [prepared_ids[-1]], [100], [200], [128])
+            assert thread.finished_requests.get_nowait() == (mapped_ids[-1], False)
+        name = next(iter(request))
+        mapped_ids.append(name)
+        return {(0, 0): {0: {(0, 0): [(name, [10], [20])]}}}, {(0, 0): {name}}
 
-    def submit(fn, *args):
-        assert fn == thread._execute_tp_transfer_bucket
-        assert args[4] == [prepared_ids[-1]]
+    def submit(_session, *args):
+        assert args[-1][0][(0, 0)][0][0] == mapped_ids[-1]
         future = Future()
         futures.append(future)
         return future
 
-    thread._prepare_tp_transfer_bucket = MagicMock(side_effect=prepare)
-    thread.executor = MagicMock()
-    thread.executor.submit.side_effect = submit
+    thread._build_transfer_block_buckets = MagicMock(side_effect=build)
+    thread._submit_peer_transfer = MagicMock(side_effect=submit)
+    thread._prepare_tp_transfer_bucket = MagicMock()
     thread._submit_requests("engine-p", requests)
     thread._get_remote_metadata.assert_called_once()
-    thread._build_transfer_block_buckets.assert_called_once()
-    assert thread._build_transfer_block_buckets.call_args.args[5] is requests
-    assert prepared_ids == list(requests)
+    thread._prepare_tp_transfer_bucket.assert_not_called()
+    assert mapped_ids == list(requests)
     assert len(futures) == 40
     assert thread.finished_requests.empty()
     futures[-1].set_result(None)
@@ -1719,7 +1702,7 @@ def test_engine_batch_submits_each_prepared_request_before_preparing_next(comple
     assert len(thread.get_and_clear_finished_requests().finished_recving) == (0 if complete_previous else 39)
 
 
-@pytest.mark.parametrize("failure_stage", ["prepare", "submit"])
+@pytest.mark.parametrize("failure_stage", ["mapping", "prepare", "submit"])
 def test_partial_request_failure_drains_reads_and_allows_later_requests(failure_stage: str) -> None:
     thread = make_thread()
     remote = make_metadata_groups(pp_metadata=make_pp_metadata())
@@ -1732,35 +1715,33 @@ def test_partial_request_failure_drains_reads_and_allows_later_requests(failure_
 
     def build(_metadata, _layers, _ranks, _pcp, _dcp, request, cache, **kwargs):
         caches.append(cache)
-        assert not futures
+        if failure_stage == "mapping" and len(caches) == 2:
+            raise ValueError("invalid block table")
         entries = [(name, [10], [20]) for name in request]
         return {(0, 0): {0: {(0, 0): entries}}}, {(0, 0): set(request)}
 
-    def prepare(pp, pcp, tp, _remote_pcp, _remote_tp, _dcp, _metadata, specs):
+    def submit(_session, pp, _pcp, _tp, _remote_pcp, _remote_tp, _dcp, _metadata, specs):
         name = specs[0][(0, 0)][0][0]
-        if failure_stage == "prepare" and name == "a" and pp == 1:
-            raise ValueError("invalid address layout")
-        return pp, pcp, tp, "session", [name], [100], [200], [128]
-
-    def submit(_fn, pp, _pcp, _tp, _session, names, *_args):
-        if failure_stage == "submit" and names == ["a"] and pp == 1:
-            raise RuntimeError("executor unavailable")
+        if name == "a" and pp == 1:
+            if failure_stage == "submit":
+                raise RuntimeError("executor unavailable")
+            future = Future()
+            future.set_exception(ValueError("invalid address layout"))
+            return future
         future = Future()
         futures.append(future)
         return future
 
     thread._build_transfer_block_buckets = MagicMock(side_effect=build)
-    thread._prepare_tp_transfer_bucket = MagicMock(side_effect=prepare)
-    thread.executor = MagicMock()
-    thread.executor.submit.side_effect = submit
+    thread._submit_peer_transfer = MagicMock(side_effect=submit)
     thread._submit_requests("engine-p", {"a": make_req_meta(local=([10],)), "b": make_req_meta(local=([20],))})
-
-    assert len(caches) == 2
+    assert len(caches) == 4
     assert caches[0] is caches[1]
+    assert caches[2] is caches[3]
+    assert caches[0] is not caches[2]
     assert len(futures) == 3
     assert thread.finished_requests.empty()
     assert thread.invalid_block_ids == set()
-    # B becomes runnable while A's successfully submitted READ is still pending.
     futures[1].set_result(None)
     assert thread.finished_requests.empty()
     futures[2].set_result(None)
@@ -1773,15 +1754,13 @@ def test_partial_request_failure_drains_reads_and_allows_later_requests(failure_
 
 def test_request_pipeline_preserves_replica_selection_across_pp_ranks() -> None:
     thread = make_thread()
-    remote = make_metadata_groups(tp_size=2, pp_metadata=make_pp_metadata())
+    remote = make_metadata_groups(tp_size=2, pp_metadata=make_pp_metadata(tp_base_addrs={0: [[5000]], 1: [[6000]]}))
     remote.metadata_by_pp_rank[1] = remote.metadata_by_pp_rank[0]
     thread._get_remote_metadata = MagicMock(return_value=remote)
     thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0, 1]]} for pp in range(2)}}
     thread.remote_layer_index_pairs = {"engine-p": {pp: [(0, 0)] for pp in range(2)}}
     thread._compute_group_block_ids = MagicMock(wraps=thread._compute_group_block_ids)
-    thread._prepare_tp_transfer_bucket = MagicMock(side_effect=lambda pp, pcp, tp, *args: (pp, pcp, tp))
-    thread.executor = MagicMock()
-    thread.executor.submit.side_effect = lambda *_args: Future()
+    thread._submit_peer_transfer = MagicMock(side_effect=lambda *_args: Future())
 
     results = list(
         thread._submit_transfer_requests("engine-p", "10.0.0.1", 6000, {"a": make_req_meta(), "b": make_req_meta()})
@@ -2946,24 +2925,89 @@ def test_nonpositive_length_does_not_append():
         assert (src, dst, lengths) == ([], [], [])
 
 
-def test_engine_batch_mapping_failure_submits_no_reads() -> None:
+def test_request_mapping_failure_allows_later_requests() -> None:
     thread = make_thread()
-    remote = make_metadata_groups(pp_metadata=make_pp_metadata())
-    remote.metadata_by_pp_rank[1] = remote.metadata_by_pp_rank[0]
-    thread._get_remote_metadata = MagicMock(return_value=remote)
-    thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0]]} for pp in range(2)}}
-    thread.remote_layer_index_pairs = {"engine-p": {pp: [(0, 0)] for pp in range(2)}}
-    entries = [("a", [10], [30]), ("b", [20], [40])]
+    thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
+    thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0]]}}}
+    thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
     thread._build_transfer_block_buckets = MagicMock(
         side_effect=[
-            ({(0, 0): {0: {(0, 0): entries}}}, {(0, 0): {"a", "b"}}),
             ValueError("invalid block table"),
+            ({(0, 0): {0: {(0, 0): [("b", [20], [40])]}}}, {(0, 0): {"b"}}),
         ]
     )
-    thread.executor = MagicMock()
+    future = Future()
+    thread._submit_peer_transfer = MagicMock(return_value=future)
     thread._submit_requests("engine-p", {"a": make_req_meta(local=([10],)), "b": make_req_meta(local=([20],))})
-    thread.executor.submit.assert_not_called()
-    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
-        finished_recving={"a", "b"}, failed_recving={"a", "b"}
-    )
-    assert thread.invalid_block_ids == {10, 20}
+    thread._submit_peer_transfer.assert_called_once()
+    assert thread.finished_requests.get_nowait() == ("a", True)
+    assert thread.finished_requests.empty()
+    future.set_result(None)
+    assert thread.finished_requests.get_nowait() == ("b", False)
+    assert thread.invalid_block_ids == {10}
+
+
+@pytest.mark.parametrize("failure_stage", [None, "prepare", "read"])
+def test_peer_reads_serialize_preparation_and_allow_other_peers(failure_stage: str | None) -> None:
+    thread = make_thread()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    prepared = []
+    caller = threading.get_ident()
+
+    def prepare(name):
+        assert threading.get_ident() != caller
+        prepared.append(name)
+        if name == "a1" and failure_stage == "prepare":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+            raise RuntimeError("preparation failed")
+        return (name,)
+
+    def execute(name):
+        if name == "a1":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+            if failure_stage == "read":
+                raise RuntimeError("READ failed")
+
+    thread._prepare_tp_transfer_bucket = MagicMock(side_effect=prepare)
+    thread._execute_tp_transfer_bucket = MagicMock(side_effect=execute)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        thread.executor = executor
+        try:
+            first = thread._submit_peer_transfer("peer-a", "a1")
+            assert first_started.wait(timeout=5)
+            second = thread._submit_peer_transfer("peer-a", "a2")
+            other = thread._submit_peer_transfer("peer-b", "b1")
+            other.result(timeout=5)
+            assert not first.done()
+            assert not second.done()
+            assert prepared == ["a1", "b1"]
+        finally:
+            release_first.set()
+        if failure_stage is not None:
+            with pytest.raises(RuntimeError, match="failed"):
+                first.result(timeout=5)
+        else:
+            first.result(timeout=5)
+        second.result(timeout=5)
+    assert prepared == ["a1", "b1", "a2"]
+    assert not thread.peer_transfers
+
+
+def test_peer_queue_resubmission_failure_finishes_queued_requests() -> None:
+    thread = make_thread()
+    running = Future()
+    thread.executor = MagicMock()
+    thread.executor.submit.side_effect = [running, RuntimeError("executor unavailable")]
+    first = thread._submit_peer_transfer("peer", "a")
+    second = thread._submit_peer_transfer("peer", "b")
+    third = thread._submit_peer_transfer("peer", "c")
+    thread.executor.submit.assert_called_once()
+    running.set_result(None)
+    assert first.result() is None
+    for future in (second, third):
+        with pytest.raises(RuntimeError, match="executor unavailable"):
+            future.result(timeout=5)
+    assert not thread.peer_transfers

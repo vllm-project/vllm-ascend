@@ -459,22 +459,28 @@ aggregated transfers are needed. Other
 values are rejected during decoder worker initialization. This option controls
 V2 pull transfers only; the producer does not need a matching setting.
 
-Request mode first plans block mappings for the received engine batch, then
-prepares and submits each request's addresses without waiting for earlier READs.
-If batch planning fails, no READs are submitted and the batch is reported as failed.
-Address-preparation and submission failures are handled per request, after all
-already-submitted READs for that request have stopped.
+Request mode plans and queues one request before mapping the next. Address
+preparation runs in the transfer pool, immediately before the corresponding READ.
+Each remote transfer session has a FIFO queue with at most one active transfer;
+different sessions can run concurrently, including the PP/PCP/TP pieces needed
+by one request. A peer rejoins the shared pool after each transfer, allowing
+other peers to make progress. Request completion still waits for all its pieces.
+Mapping, preparation, submission and READ failures are handled per request;
+other requests can continue. Already-submitted READs must stop before a failed
+receive is reported.
 
-Request mode removes the batch completion barrier that can delay a completed
-request behind other long requests. It can also increase READ call overhead
-and memory occupied by queued address lists. Compare both modes under the same
-workload before choosing a deployment setting. Both modes wait for submitted
-READs to stop before reporting a failed receive.
+This removes the batch mapping and completion barriers and avoids splitting a
+peer's bandwidth between concurrent requests. It can increase READ call overhead
+or reduce bandwidth when one READ cannot saturate a peer. Queued requests retain
+block mappings, but materialize address lists only when their transfer starts.
+Compare both modes under the same workload before choosing a deployment setting.
 
 Set `pull_max_workers` in the same decoder `kv_connector_extra_config` to
 configure the pull thread pool size. It applies to both `batch` and `request`
 mode, defaults to **32**, and must be a positive integer (booleans and strings
-are rejected). The limit is per decoder worker, not per request or per session.
+are rejected). The pool limit is per decoder worker. In request mode, increasing
+it allows more remote sessions to run concurrently; each session still has at
+most one active transfer.
 For example:
 
 ```json

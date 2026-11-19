@@ -5,6 +5,7 @@
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
@@ -124,6 +125,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             initializer=torch.npu.set_device,
             initargs=(self.device,),
         )
+        self.peer_transfers: dict[str, deque[tuple[Future[None], tuple[Any, ...]]]] = {}
+        self.peer_transfers_lock = threading.Lock()
         self.can_report_invalid_block_ids = len(kv_cache_config.kv_cache_groups) == 1
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeTransferMetadataGroups)
@@ -600,65 +603,60 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         requests: dict[str, ReqMeta],
         selection_index_offset: int = 0,
     ) -> Iterator[tuple[str, dict[Future[None], tuple[int, int, int, set[str]]], Exception | None]]:
-        """Plan an engine batch once and stream prepared requests to the pool."""
+        """Submit each request before planning the next, preserving replica selection."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
-        tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
-        layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
-        # Share spec/block mappings across all layers and PP ranks of the batch.
-        transfer_block_ids_by_spec: dict[
-            str,
-            dict[
-                tuple[int, int, tuple[tuple[int, ...], ...], int, tuple[int, ...]],
-                list[tuple[int, list[int], list[int]]],
-            ],
-        ] = {}
-        entries_by_request: dict[
-            str, dict[tuple[int, int, int], dict[int, dict[tuple[int, int], list[tuple[str, list[int], list[int]]]]]]
-        ] = {request_id: {} for request_id in requests}
-        for remote_pp_rank, layer_pairs in layer_pairs_by_pp_rank.items():
-            pp_metadata = remote_metadata.metadata_by_pp_rank[remote_pp_rank]
-            buckets, _ = self._build_transfer_block_buckets(
-                pp_metadata,
-                layer_pairs,
-                tp_rank_groups_by_pp_rank[remote_pp_rank],
-                remote_metadata.pcp_size,
-                remote_metadata.dcp_size,
-                requests,
-                transfer_block_ids_by_spec,
-                selection_index_offset=selection_index_offset,
+        for selection_index, (request_id, request) in enumerate(requests.items(), start=selection_index_offset):
+            futures, error = self._submit_transfer_group(
+                remote_engine_id, remote_metadata, {request_id: request}, selection_index_offset=selection_index
             )
-            for (pcp_rank, tp_rank), specs in buckets.items():
-                for spec_index, layers in specs.items():
-                    for layer_pair, entries in layers.items():
-                        for entry in entries:
-                            request_specs = entries_by_request[entry[0]].setdefault(
-                                (remote_pp_rank, pcp_rank, tp_rank), {}
-                            )
-                            request_specs.setdefault(spec_index, {}).setdefault(layer_pair, []).append(entry)
-
-        for request_id in requests:
-            futures: dict[Future[None], tuple[int, int, int, set[str]]] = {}
-            error: Exception | None = None
-            try:
-                for (pp_rank, pcp_rank, tp_rank), entries in entries_by_request.pop(request_id).items():
-                    prepared = self._prepare_tp_transfer_bucket(
-                        pp_rank,
-                        pcp_rank,
-                        tp_rank,
-                        remote_metadata.pcp_size,
-                        remote_metadata.tp_size,
-                        remote_metadata.dcp_size,
-                        remote_metadata.metadata_by_pp_rank[pp_rank],
-                        entries,
-                    )
-                    if prepared is not None:
-                        future = self.executor.submit(self._execute_tp_transfer_bucket, *prepared)
-                        futures[future] = (pp_rank, pcp_rank, tp_rank, {request_id})
-            except Exception as exc:
-                error = exc
-            # The caller attaches callbacks before this generator prepares the
-            # next request. Partial submission failures still drain all reads.
+            # Attach completion callbacks before planning the next request.
             yield request_id, futures, error
+
+    def _submit_peer_transfer(self, session_id: str, *args: Any) -> Future[None]:
+        """Queue address preparation and READ together, with one active task per peer."""
+        future: Future[None] = Future()
+        with self.peer_transfers_lock:
+            transfers = self.peer_transfers.setdefault(session_id, deque())
+            transfers.append((future, args))
+            start = len(transfers) == 1
+        if start:
+            self._start_peer_transfer(session_id)
+        return future
+
+    def _start_peer_transfer(self, session_id: str) -> None:
+        with self.peer_transfers_lock:
+            _, args = self.peer_transfers[session_id][0]
+        try:
+            task = self.executor.submit(self._prepare_and_execute_tp_transfer_bucket, *args)
+        except Exception as exc:
+            # No READ was submitted for these queued tasks. Fail them without
+            # leaving requests waiting forever on an unavailable executor.
+            with self.peer_transfers_lock:
+                transfers = self.peer_transfers.pop(session_id)
+            for future, _ in transfers:
+                future.set_exception(exc)
+            return
+        task.add_done_callback(lambda completed: self._finish_peer_transfer(session_id, completed))
+
+    def _finish_peer_transfer(self, session_id: str, task: Future[None]) -> None:
+        with self.peer_transfers_lock:
+            transfers = self.peer_transfers[session_id]
+            future, _ = transfers.popleft()
+            has_next = bool(transfers)
+            if not has_next:
+                del self.peer_transfers[session_id]
+        # Publish completion outside the queue lock: request callbacks can run
+        # inline. Each request still waits for all of its PP/PCP/TP pieces.
+        try:
+            task.result()
+        except Exception as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(None)
+        if has_next:
+            # Rejoin the shared pool after every request piece, so a busy peer
+            # cannot occupy its worker indefinitely while other peers wait.
+            self._start_peer_transfer(session_id)
 
     def _submit_transfer_group(
         self,
@@ -710,10 +708,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         # pool workers, along with its aggregated READ calls.
                         future = self.executor.submit(self._prepare_and_execute_tp_transfer_bucket, *args)
                     else:
-                        prepared = self._prepare_tp_transfer_bucket(*args)
-                        if prepared is None:
-                            continue
-                        future = self.executor.submit(self._execute_tp_transfer_bucket, *prepared)
+                        tp_metadata = pp_metadata.metadata_by_pcp_rank[pcp_rank].metadata_by_tp_rank[tp_rank]
+                        session_id = f"{tp_metadata.local_ip}:{tp_metadata.te_rpc_port}"
+                        future = self._submit_peer_transfer(session_id, *args)
                     futures[future] = (pp_rank, pcp_rank, tp_rank, request_ids_by_rank[(pcp_rank, tp_rank)])
         except Exception as exc:
             error = exc
@@ -1308,7 +1305,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     )
 
     def _prepare_and_execute_tp_transfer_bucket(self, *args: Any) -> None:
-        """Build addresses and execute a batch bucket on a transfer-pool worker."""
+        """Build addresses and execute a transfer bucket on a pool worker."""
         prepared = self._prepare_tp_transfer_bucket(*args)
         if prepared is not None:
             self._execute_tp_transfer_bucket(*prepared)
