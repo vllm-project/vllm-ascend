@@ -43,8 +43,7 @@
 - With FP32 residual connections enabled, the decoder checks input dtypes,
   shapes, and layouts before any sequence parallel all-gather and after any
   reduce-scatter. Other cases use the existing path.
-- The custom op supplies fake output shape and dtype metadata for graph tracing.
-  The A5 TP8 Step5 benchmark exercised `FULL_DECODE_ONLY` graph replay with MTP.
+- The Python wrapper allocates outputs and launches the Triton kernel directly.
 - Row count is a non-specialized runtime argument. Tile width, weight centering,
   residual presence, and pointer dtypes can produce different variants.
 

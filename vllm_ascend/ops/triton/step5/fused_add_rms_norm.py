@@ -3,7 +3,6 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -79,58 +78,6 @@ def can_use_fused_add_rms_norm_cast(
     return residual.dtype == torch.float32 and residual.shape == x.shape and residual.is_contiguous()
 
 
-def _fused_add_rms_norm_cast_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor | None,
-    weight: torch.Tensor,
-    eps: float,
-    zero_centered: bool,
-) -> list[torch.Tensor]:
-    outputs = _fused_add_rms_norm_cast_fake(x, residual, weight, eps, zero_centered)
-    if x.numel() == 0:
-        return outputs
-
-    hidden_size = x.shape[-1]
-    total_rows = x.numel() // hidden_size
-    grid = (min(get_vectorcore_num(), total_rows),)
-    block_n = triton.next_power_of_2(hidden_size)
-    _fused_add_rms_norm_cast_kernel[grid](
-        x,
-        residual,
-        outputs[0],
-        outputs[1] if residual is not None else None,
-        weight,
-        eps,
-        total_rows,
-        hidden_size,
-        HAS_RESIDUAL=residual is not None,
-        ZERO_CENTERED=zero_centered,
-        BLOCK_N=block_n,
-    )
-    return outputs
-
-
-def _fused_add_rms_norm_cast_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor | None,
-    weight: torch.Tensor,
-    eps: float,
-    zero_centered: bool,
-) -> list[torch.Tensor]:
-    outputs = [x.new_empty(x.shape, dtype=torch.bfloat16)]
-    if residual is not None:
-        outputs.append(x.new_empty(x.shape, dtype=torch.float32))
-    return outputs
-
-
-direct_register_custom_op(
-    op_name="ascend_step5_fused_add_rms_norm_cast",
-    op_func=_fused_add_rms_norm_cast_impl,
-    mutates_args=[],
-    fake_impl=_fused_add_rms_norm_cast_fake,
-)
-
-
 def fused_add_rms_norm_cast(
     x: torch.Tensor,
     residual: torch.Tensor | None,
@@ -139,6 +86,26 @@ def fused_add_rms_norm_cast(
     zero_centered: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return BF16 norm output and FP32 residual, reusing x when residual is None."""
-    outputs = torch.ops.vllm.ascend_step5_fused_add_rms_norm_cast(x, residual, weight, eps, zero_centered)
-    # Keep the alias outside the custom op, whose outputs use fresh storage.
-    return outputs[0], x if residual is None else outputs[1]
+    out = x.new_empty(x.shape, dtype=torch.bfloat16)
+    residual_out = x if residual is None else x.new_empty(x.shape, dtype=torch.float32)
+    if x.numel() == 0:
+        return out, residual_out
+
+    hidden_size = x.shape[-1]
+    total_rows = x.numel() // hidden_size
+    grid = (min(get_vectorcore_num(), total_rows),)
+    block_n = triton.next_power_of_2(hidden_size)
+    _fused_add_rms_norm_cast_kernel[grid](
+        x,
+        residual,
+        out,
+        residual_out if residual is not None else None,
+        weight,
+        eps,
+        total_rows,
+        hidden_size,
+        HAS_RESIDUAL=residual is not None,
+        ZERO_CENTERED=zero_centered,
+        BLOCK_N=block_n,
+    )
+    return out, residual_out
