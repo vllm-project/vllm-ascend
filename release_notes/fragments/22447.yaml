@@ -1,0 +1,4 @@
+pr: 22447
+entries:
+  - category: bugfix
+    text: Fixed live weight updates on Ascend when `update_info` is a list of payloads indexed by global worker rank across data-parallel replicas.

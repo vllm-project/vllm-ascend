@@ -518,21 +518,6 @@ class NPUWorker(GPUWorker):
         self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
-    def update_weights(self, update_info: dict) -> None:
-        """Receive a chunk of weights from the trainer and load them in place."""
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        # state machine driven by start/finish.
-        if not self._weight_update_active:
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-
-        try:
-            self.weight_transfer_engine.update_weights(update_info)
-        except BaseException:
-            self._weight_update_active = False
-            raise
-
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
         self._check_weight_transfer_engine()

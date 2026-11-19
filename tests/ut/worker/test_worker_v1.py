@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -2323,6 +2324,10 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker._weight_update_kv_cache_loan = ExitStack()
+        worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_index=0, world_size=1))
+        worker.rank = 0
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
@@ -2387,26 +2392,59 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    def test_update_weights_dispatches_to_engine(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_dispatches_to_engine(self, mock_get_ascend_config):
+        from vllm.config import get_current_vllm_config
+
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        worker._weight_update_active = True
+        def check_config(_update_info):
+            self.assertIs(get_current_vllm_config(), worker.vllm_config)
 
+        engine.update_weights.side_effect = check_config
+        worker.start_weight_update()
         worker.update_weights({"foo": "bar"})
+        worker.finish_weight_update()
 
         engine.update_weights.assert_called_once_with({"foo": "bar"})
+        engine.finish_weight_update.assert_called_once_with()
+        self.assertFalse(worker._weight_update_active)
 
-    def test_update_weights_resets_active_on_error(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_selects_payload_by_global_rank(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
-        engine.update_weights.side_effect = ValueError("boom")
         worker = self._make_worker(engine=engine)
-        worker._weight_update_active = True
+        worker.vllm_config.parallel_config.data_parallel_index = 1
+        worker.vllm_config.parallel_config.world_size = 2
+        worker.rank = 1
+        payloads = [{"worker_rank": rank} for rank in range(4)]
+
+        worker.start_weight_update()
+        worker.update_weights(payloads)
+        worker.finish_weight_update()
+
+        engine.update_weights.assert_called_once_with(payloads[3])
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_update_weights_resets_active_on_error(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
+        engine = MagicMock()
+        engine.update_weights.side_effect = [ValueError("boom"), None]
+        worker = self._make_worker(engine=engine)
+        worker.start_weight_update()
 
         with self.assertRaisesRegex(ValueError, "boom"):
             worker.update_weights({"foo": "bar"})
 
         self.assertFalse(worker._weight_update_active)
+        engine.reset_weight_update_target.assert_called_once_with()
+        worker.start_weight_update()
+        worker.update_weights({"foo": "bar"})
+        worker.finish_weight_update()
+        engine.finish_weight_update.assert_called_once_with()
 
     def test_finish_weight_update_resets_lora_state_after_base_weights(self):
         engine = MagicMock()
