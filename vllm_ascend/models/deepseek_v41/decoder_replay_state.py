@@ -94,17 +94,12 @@ class DecoderReplayState:
             & ~self.keeps_rows[global_batch.idx_mapping_np[:num_global_reqs]]
         )
         global_kept = np.where(trim, np.minimum(global_lens, self.layers.window), global_lens)
+        # Compaction is a global decision: any trimmed request saves rows. Do not
+        # compare with this rank's padded width; a replay window can span several
+        # PCP ranks, so the global window may be wider than any one rank.
         if not (global_kept < global_lens).any():
             return None
         num_padded = int(global_kept.sum())
-        # Compaction is a global decision. A replay window can span several PCP
-        # ranks, so each rank's local padded width says nothing about whether
-        # trimming saves rows. Comparing against it can skip the compact replay
-        # on a prefix hit, leaving the replay layers in the ordinary main pass
-        # with a floor the rebuilt window does not cover.
-        global_extent = int(global_batch.query_start_loc_np[num_global_reqs])
-        if num_padded >= global_extent:
-            return None
 
         starts = np.zeros(self.keeps_rows.size, dtype=np.int32)
         starts[global_batch.idx_mapping_np[:num_global_reqs]] = np.where(

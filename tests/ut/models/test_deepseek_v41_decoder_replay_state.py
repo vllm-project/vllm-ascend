@@ -114,40 +114,80 @@ def test_pcp_decoder_replay_keeps_only_original_tail_owners(state, local_end, ex
     assert replay_start.tolist() == [6]
 
 
-def test_pcp_decoder_replay_compacts_when_rank_local_width_is_smaller(state):
-    # A prefix hit schedules the hit's last window plus the uncached tail. The
-    # window is spread across the PCP ranks, so this rank only sees one row.
-    # Compaction is a global decision: comparing the global kept count (2)
-    # with the rank-local padded width (1) would incorrectly skip the replay.
+def pcp_prefix_hit_inputs(world, rank, *, seq_len=16):
+    # A prefix hit schedules the hit's last replay window plus the uncached tail.
+    # PCP splits that query into 2 * world chunks (one token each here); each rank
+    # owns chunks ``rank`` and ``2 * world - 1 - rank`` as two local segments.
+    num_chunks = query_len = 2 * world
+    num_computed = seq_len - query_len
+    owned = (rank, num_chunks - 1 - rank)
     local_batch = SimpleNamespace(
-        num_reqs=1,
+        num_reqs=2,
         is_dummy=False,
-        num_tokens_after_padding=1,
-        query_start_loc_np=np.array([0, 1], dtype=np.int32),
-        seq_lens_np=np.array([16], dtype=np.int32),
-        idx_mapping_np=np.array([0], dtype=np.int32),
+        num_tokens_after_padding=2,
+        query_start_loc_np=np.array([0, 1, 2], dtype=np.int32),
+        seq_lens_np=np.array([num_computed + chunk + 1 for chunk in owned], dtype=np.int32),
+        idx_mapping_np=np.array([0, 0], dtype=np.int32),
     )
     global_batch = SimpleNamespace(
         num_reqs=1,
-        query_start_loc_np=np.array([0, 8], dtype=np.int32),
-        seq_lens_np=np.array([16], dtype=np.int32),
+        query_start_loc_np=np.array([0, query_len], dtype=np.int32),
+        seq_lens_np=np.array([num_computed + query_len], dtype=np.int32),
         is_prefilling_np=np.array([True]),
         idx_mapping_np=np.array([0], dtype=np.int32),
     )
-    replay_inputs = replay_mod.DecoderReplayInputs(
-        local_batch,
-        (),
-        torch.empty(1, 8),
-        [],
-        torch.zeros(1, dtype=torch.int32),
-        SimpleNamespace(global_batch=global_batch),
+    context = SimpleNamespace(
+        global_batch=global_batch,
+        local_token_indices=torch.tensor(owned),
+    )
+    return replay_mod.DecoderReplayInputs(
+        local_batch, (), torch.empty(1, 2 * query_len), [], torch.zeros(2, dtype=torch.int32), context
     )
 
-    kept_lens, padded, replay_start = state._pcp_kept_lengths(replay_inputs)
 
-    assert kept_lens.tolist() == [1]
+@pytest.mark.parametrize(
+    ("world", "rank", "expected_kept", "expected_rows"),
+    [
+        (2, 0, [0, 1], [3]),
+        (2, 1, [0, 1], [2]),
+        (4, 0, [0, 1], [7]),
+        (4, 1, [0, 1], [6]),
+        (4, 2, [0, 0], []),
+    ],
+    ids=[
+        "pcp2-owner-of-tail",
+        "pcp2-owner-before-tail",
+        "pcp4-owner-of-tail",
+        "pcp4-owner-before-tail",
+        "pcp4-no-owner",
+    ],
+)
+def test_pcp_decoder_replay_spreads_prefix_hit_window_across_ranks(state, world, rank, expected_kept, expected_rows):
+    # The global window (2 rows) is as wide as each rank's padded width, so the
+    # decision must not depend on the rank-local width.
+    replay_inputs = pcp_prefix_hit_inputs(world, rank)
+    kept_lens, padded, replay_start = state._pcp_kept_lengths(replay_inputs)
+    assert kept_lens.tolist() == expected_kept
     assert padded == 2
-    assert replay_start.tolist() == [14]
+    assert replay_start.tolist() == [14, 14]
+    # Each rank keeps the tail of its local segments; map them to global rows.
+    local_ends = replay_inputs.batch.query_start_loc_np[1:]
+    local_rows = [row for end, kept in zip(local_ends, kept_lens) for row in range(end - kept, end)]
+    assert replay_inputs.pcp_context.local_token_indices[local_rows].tolist() == expected_rows
+
+
+def test_pcp_prefix_hit_prepare_uses_compact_replay(state, monkeypatch):
+    replay_inputs = pcp_prefix_hit_inputs(2, 0)
+    replay_context = object()
+    builder = Mock(return_value=replay_context)
+    monkeypatch.setattr(state, "_build_replay_pcp_context", builder)
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+    assert state.layers.rows is not None
+    assert state.layers.rows.numel() == 1
+    assert state.layers.num_padded_rows == 2
+    assert state.replay_pcp_context is replay_context
+    assert builder.call_args.args[1].tolist() == [2]
+    assert state._gather.call_args.args[0].encoder_replay_start.tolist() == [14, 14]
 
 
 def test_pcp_decoder_replay_keeps_prompt_logprob_rows(state):
