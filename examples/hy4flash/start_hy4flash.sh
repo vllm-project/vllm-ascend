@@ -68,6 +68,7 @@ exec vllm serve "${HY4FLASH_CHECKPOINT:-/home/hy4nxt}" \
   --gpu-memory-utilization "${HY4FLASH_GPU_MEMORY_UTILIZATION:-0.85}" \
   --seed 1024 \
   "${mode_args[@]}" \
-  --no-enable-prefix-caching \
+  --enable-prefix-caching \
+  --async-scheduling \
   --additional-config "$additional_config" \
   "$@"

@@ -39,7 +39,7 @@ BS9 有一路在首 token 已分叉，两轮 prefill 调度也有差异。表中
 | DFly 5 | 此前讨论的 DFlash 5。Checkpoint 自带 5 层 draft，vLLM 方法名为 `dfly`。每轮提出最多 5 个草稿 token，目标模型最多每路联合验证 6 个 query。Draft 使用目标层的候选快照和分页 KV，draft attention 和后续计算均已入 FULL 图。 |
 | Engram | 4 张 embedding 表按 TP 分片，默认用 pinned CPU 内存保存。图回放前按本轮 token 算 hash 并拷入查到的行。当前 checkpoint 的表为 BF16，约 126.7 GB 合计。 |
 | 共享专家双流 | 共享专家和路由专家可用不同 NPU stream。此前同步调度的开关对照覆盖 10 个请求、120 个生成 token，token、logprob 与 top-5 均一致。最新 FULL 整网回归启用了双流。 |
-| Prefix cache | 已在 eager 和此前的分段图中验证纯文本、SWA/IndexPool 长度边界和图片前缀命中。冷热请求采用不同 prefill 分块时概率可变，控制成相同分块后逐值一致。当前启动默认关闭，启用时须关闭 DFly。最新 FULL + prefix 的组合回归待补。 |
+| Prefix cache | 已在 eager 和此前的分段图中验证纯文本、SWA/IndexPool 长度边界和图片前缀命中。TP8 + FULL 下与 DFly 5、异步调度同时开启，完整一轮 AIME2026 为 30/30，均自然结束。默认开启，允许与 DFly 叠加；冷热请求仍可能存在概率和贪心输出差异。 |
 
 ### 目标模型和 draft 的数据流
 
@@ -106,18 +106,16 @@ export HY4FLASH_MAX_MODEL_LEN=131072
 
 ### 用 CLI 切换的特性
 
-- **Prefix cache**。开启前设置 `export HY4FLASH_ENABLE_DFLY=0`，启动命令追加 `--enable-prefix-caching`。模型在启动时拒绝同时开启这两项。下面使用已验证的 eager 配置。默认启动传入 `--no-enable-prefix-caching`。
+- **Prefix cache**。默认与 DFly 5、FULL decode 图和异步调度同时开启，无需额外参数。需要对照时可追加 `--no-enable-prefix-caching`，DFly 仍可保持开启。
 
   ```bash
-  export HY4FLASH_GRAPH_MODE=eager
-  export HY4FLASH_ENABLE_DFLY=0
-  ./start_hy4flash.sh --enable-prefix-caching
+  ./start_hy4flash.sh
   ```
 
 - **Engram CPU offload**。默认 `cpu_offload=true`，TP 本地表使用 pinned CPU 内存。传入 `--engram-config '{"cpu_offload":false}'` 将表放在 NPU，TP8 下仅表权重平均每卡约 15.8 GB。传入 `--engram-config '{"cpu_offload":true}'` 可显式开启。
 - **Engram DP 共享 CPU 表**。同机 TP4 × DP2 可传入 `--engram-config '{"cpu_offload":true,"dp_shared_memory":true}'`，使两个 DP 副本中相同 TP rank 的 worker 共用一份表分片。要求 DP peer 位于同一节点和共享内存命名空间，`/dev/shm` 能容纳表权重；当前 BF16 checkpoint 的 16 份共享分片合计约 118 GiB。显式传入 `dp_shared_memory:false` 时仍按 DP 副本各自存表，不再被强制改为 true。共享模式不支持 dummy checkpoint；`embedding_across_dp` 和磁盘 offload 仍未接入。
 - **文本或视觉**。默认加载视觉塔。启动追加 `--language-model-only` 可用于纯文本评测。
-- **调度对照**。启动追加 `--no-async-scheduling` 可固定到同步调度。比较精度时还要核对实际 prefill 分块和 batch。
+- **调度对照**。默认传入 `--async-scheduling`；启动追加 `--no-async-scheduling` 可固定到同步调度。比较精度时还要核对实际 prefill 分块和 batch。
 
 ### 算子调试与实验开关
 
@@ -217,17 +215,17 @@ C8 QSFA 和 SMLA 当前仅有算子探针。模型的 attention 使用分页读�
 
 `all-optimizations.json` 保存 950DT、TP8 + EP、DFly 5 和 C8 的已验证配置，包含 Gate 旁流及量化融合、SWA 共读及 query RMSNorm 量化融合、IndexPool Hadamard 和分页打分、分页 C8 读取与 FP32 QK。第 1 层（从 0 编号）的 `q_b_proj` 固定使用 checkpoint 解量后的 BF16 权重。启动脚本根据 checkpoint 选择计算 dtype。
 
-从两份源码的上一级目录，可按本轮评测的服务设置启动。
+从两份源码的上一级目录，可默认开启 prefix cache 和异步调度启动。
 
 ```bash
 export HY4FLASH_MAX_NUM_SEQS=32
 export HY4FLASH_MAX_MODEL_LEN=131072
 export HY4FLASH_GPU_MEMORY_UTILIZATION=0.70
-./start_hy4flash.sh --language-model-only --no-async-scheduling \
+./start_hy4flash.sh --language-model-only \
   --additional-config "$(cat vllm-ascend/examples/hy4flash/all-optimizations.json)"
 ```
 
-EvalScope 1.15.0 使用并发 16、`temperature=0.9`、`top_p=1` 和 `top_k=-1`，完整评测 AIME2026 与 GPQA-Diamond 各三轮。每轮都重新生成输出。
+以下历史三轮结果来自关闭 prefix cache、使用同步调度的 TP8 服务。EvalScope 1.15.0 使用并发 16、`temperature=0.9`、`top_p=1` 和 `top_k=-1`，完整评测 AIME2026 与 GPQA-Diamond 各三轮。每轮都重新生成输出。
 
 | 数据集 | 第一轮 | 第二轮 | 第三轮 | 平均正确率 |
 | --- | ---: | ---: | ---: | ---: |
@@ -235,6 +233,8 @@ EvalScope 1.15.0 使用并发 16、`temperature=0.9`、`top_p=1` 和 `top_k=-1`�
 | GPQA-Diamond | 184 / 198 | 181 / 198 | 181 / 198 | 91.92% |
 
 684 次作答均自然结束。AIME 第一轮的生成上限为 32,768，最长输出 30,452。其后五轮请求使用 131,072 的总上下文预算。AIME 第二轮最长输出 97,818 token。文本检查中，29 条 AIME 思考段出现了局部公式控制字符，最终答案段未检出这些字符。
+
+2026-11-19，TP8 + EP、FULL decode 图、prefix cache、DFly 5 和异步调度同时开启，使用相同的 EvalScope 版本、并发和采样参数，完成 AIME2026 单轮 30/30。上下文和请求输出上限均为 131,072；全部自然结束，0 截断、0 失败，最长输出 101,115 token。独立前缀探针在 129 和 513 token 输入上仍观察到冷热请求贪心序列不同，单轮 AIME 得分不能证明冷热数值严格等价。
 
 16,384 输入、1,024 输出、8 路并发的单次无 profiler 测量，逐请求 TPOT 均值为 123.40 ms/token。8 路全部进入 decode 的 20.0 秒区间中，TPOT 均值为 27.39 ms/token，P50 为 24.62 ms/token。较早开始生成的请求会在其余请求分块 prefill 时累计等待，逐请求 TPOT 包含这段等待。
 

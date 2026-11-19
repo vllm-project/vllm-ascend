@@ -51,10 +51,8 @@ def validate_runtime(vllm_config: VllmConfig) -> None:
     if get_ascend_config().enable_fused_mc2:
         raise ValueError("HYV4 Flash Ascend requires fused MC2 disabled")
     spec = vllm_config.speculative_config
-    if spec is not None and (
-        getattr(spec, "custom_method", None) != METHOD or vllm_config.cache_config.enable_prefix_caching
-    ):
-        raise ValueError("HYV4 Flash Ascend requires DFly with prefix caching disabled for speculative decoding")
+    if spec is not None and getattr(spec, "custom_method", None) != METHOD:
+        raise ValueError("HYV4 Flash Ascend requires DFly for speculative decoding")
     # Packed cache pages include IndexPool and position state. Mooncake V2 pull
     # copies these replicated MLA pages whole, including across unequal TP sizes.
     transfer = vllm_config.kv_transfer_config
