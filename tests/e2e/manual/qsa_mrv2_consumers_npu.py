@@ -18,6 +18,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.models.qwen4_exp.cache_config import get_qwen4_exp_kv_cache_config
 from vllm_ascend.worker.v2 import attn_utils
