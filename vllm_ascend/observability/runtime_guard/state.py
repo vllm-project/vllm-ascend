@@ -581,6 +581,20 @@ class RequestGuardStore:
             if req_id:
                 self.clear(str(req_id), detectors=detectors)
 
+    def reset_detect_io_keep_prompts(self) -> list[str]:
+        """Clear cumulative outputs / stop flags; keep Store rows and prompts.
+
+        Used when hot-reload turns all detectors off. Mid-flight re-enable can
+        still report the cached prompt; new samples append as a suffix. Finished
+        rows stay so the next sync wave can reap them.
+        """
+        with self._lock:
+            ids = list(self._by_req)
+            for state in self._by_req.values():
+                state.output_token_ids.clear()
+                state.detection_stopped = False
+            return ids
+
     # ---- IO helpers -------------------------------------------------------
 
     def append_output_ids(self, req_id: str, token_ids: list[int]) -> None:
