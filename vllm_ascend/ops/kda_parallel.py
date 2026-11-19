@@ -59,6 +59,9 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
         # #66784 moves padding ownership to the merged layer, but this class
         # bypasses MergedColumnParallelLinear.__init__ (see below), so it must
         # append and zero the padding rows on every supported vLLM revision.
+        # v0.34.0's upstream wrapper consumes the keyword before super() and
+        # only stashes it on the instance, so recover the budget from there.
+        padding_size = padding_size or getattr(self, "padding_size", 0)
         self.padding_size = padding_size
         self.output_sizes = output_sizes.copy()
         self.shard_ids = tuple(range(len(output_sizes)))

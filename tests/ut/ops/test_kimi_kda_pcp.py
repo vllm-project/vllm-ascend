@@ -100,7 +100,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
 
 @pytest.mark.parametrize(("head_dim", "padding"), [(4, 10), (14, 0)])
 @pytest.mark.parametrize("loader", ["weight_loader", "weight_loader_v2"])
-def test_pcp_projection_caller_allocates_padding_once(head_dim, padding, loader):
+def test_pcp_projection_allocates_padding_once(head_dim, padding, loader):
     layer = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     torch.nn.Module.__init__(layer)
     layer.num_heads = 8
