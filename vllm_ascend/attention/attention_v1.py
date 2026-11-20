@@ -884,13 +884,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         view, so the read gathers the blocks this step's block table
         references and permutes them into the accepted layout.
 
-        The gather is deduplicated on device (torch.unique with
-        return_inverse) so only referenced blocks are copied, and the block
-        table is remapped to the gathered block indices; no host
-        synchronization is introduced. Under ACL-graph capture the dedup
-        output shape is not static, so the full table width is gathered
-        instead (duplicate blocks are harmless: each row is read only up to
-        its seq len, and unfilled entries are clamped to block 0).
+        The gather is deliberately NOT deduplicated: torch.unique on a
+        device tensor produces a data-dependent output shape, which forces
+        the host synchronization AsyncScheduler must avoid, and in the
+        common case (requests not sharing physical blocks) every table
+        entry is distinct so there is nothing to remove. The full-table-
+        width gather matches the ACL-graph capture path (a static shape is
+        required there); duplicate blocks are harmless because each row is
+        read by the kernel only up to its seq len, and unfilled entries
+        are clamped to block 0. The gathered size is batch x table-width
+        blocks per layer per step - never more than the dedup worst case,
+        only forgoing the shrink of shared prefixes - and is the documented
+        read overhead of the HND layout.
 
         This is a read-side view builder only: the bound cache tensors keep
         their identity and geometry for the scatter write path and the
@@ -898,14 +903,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         overhead of the HND layout.
         """
         num_rows, table_width = block_table.shape
-        # Unfilled table entries can hold negative ids; rows are read only up
-        # to each request's seq len, so mapping them to block 0 is safe.
+        # Unfilled table entries can hold negative ids; rows are read by the
+        # kernel only up to each request's seq len, so mapping them to block
+        # 0 is safe. Gather the full table width (see the docstring: no
+        # device-side dedup, so no host synchronization).
         flat_ids = block_table.reshape(-1).to(torch.int64).clamp(min=0)
-        if _EXTRA_CTX.capturing:
-            gathered_ids = flat_ids
-            remapped = torch.arange(flat_ids.numel(), device=flat_ids.device)
-        else:
-            gathered_ids, remapped = torch.unique(flat_ids, return_inverse=True)
+        gathered_ids = flat_ids
+        remapped = torch.arange(flat_ids.numel(), device=flat_ids.device)
         block_size = self.key_cache.shape[2]
 
         def to_token_major(cache: torch.Tensor) -> torch.Tensor:
