@@ -1,0 +1,6 @@
+pr: 20852
+entries:
+  - category: performance
+    text: Improved Qwen3.8-Flash-Next decode throughput and latency by overlapping the QSA indexer prolog with main QKV preparation on Ascend NPU.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]
