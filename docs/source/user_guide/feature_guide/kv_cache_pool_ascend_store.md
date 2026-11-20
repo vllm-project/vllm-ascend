@@ -1732,7 +1732,7 @@ Note the following when enabling KV Pool for DSv4. Other historical known issues
 
 For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390](https://github.com/vllm-project/vllm-ascend/issues/12390).
 
-### Issue 8: vLLM Service Hangs During Startup With Fabric Memory and Specific Models
+### Issue 8: Lazy Init for KV Pool with Fabric Memory and Specific Models
 
 On HDK versions earlier than 26.1, when fabric memory is enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and running one of the affected model families below, the vLLM service hangs during startup with the KV Pool enabled. Lazy store initialization defers the store setup so the service starts normally.
 
