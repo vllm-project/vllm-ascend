@@ -51,7 +51,7 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
-# Shapes are in storage elements, in the dimension order consumed by the kernel.
+# Shapes use kernel axis order and count elements of each component's storage dtype, including the last axis.
 KVCacheRuntimeShapesAndDtypes = tuple[tuple[tuple[int, ...], ...], tuple[torch.dtype, ...]]
 
 
