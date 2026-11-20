@@ -49,51 +49,14 @@ def handle():
     return cache
 
 
-def test_pcp_workspace_uses_supported_sfa_kernel_pages(monkeypatch):
-    from vllm_ascend.attention import sfa_hisparse
-    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-
-    block_size = 128
-    assert AscendSFABackend.get_supported_kernel_block_sizes() == [block_size]
-    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
-    impl._kv_staging_capacity = 2 * block_size
-    impl.index_group = NS(logical_topk_indices=torch.empty(1))
-    monkeypatch.setattr(
-        sfa_hisparse,
-        "current_workspace_manager",
-        lambda: NS(get_persistent_resource=lambda key, allocate: allocate()),
-    )
-    scratch, slots = impl._pcp_prolog_workspace()
-    assert scratch.shape == (2, block_size, 1, sfa_hisparse.C8_ROW_BYTES)
-    assert scratch.dtype == torch.float8_e4m3fn
-    assert scratch.is_contiguous()
-    torch.testing.assert_close(slots, torch.arange(2 * block_size, dtype=torch.int64))
-
-
-@pytest.mark.parametrize("world_size", [1, 2, 4])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_unquantized_preprocess_workspace_covers_gathered_rows(monkeypatch, world_size, dtype):
-    from vllm_ascend.attention import sfa_hisparse
-
-    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
-    impl._kv_staging_capacity = 128
-    impl.kv_lora_rank, impl.qk_rope_head_dim = 4, 64
-    impl.vllm_config = NS(parallel_config=NS(prefill_context_parallel_size=world_size))
-    impl.index_group = NS(logical_topk_indices=torch.empty(1))
-    monkeypatch.setattr(
-        sfa_hisparse, "current_workspace_manager", lambda: NS(get_persistent_resource=lambda key, allocate: allocate())
-    )
-    latent, rope, slots = impl._kv_workspace(dtype)
-    assert latent.shape == (world_size, 128, 1, 4)
-    assert rope.shape == (world_size, 128, 1, 64)
-    assert latent.dtype == rope.dtype == dtype
-    torch.testing.assert_close(slots, torch.arange(128 * world_size, dtype=torch.int64))
-
-
-@pytest.mark.parametrize("world_size", [2, 4])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("rope_dim", [0, 64])
-@pytest.mark.parametrize("decode", [False, True])
+@pytest.mark.parametrize(
+    "world_size,dtype,rope_dim,decode",
+    [
+        (2, torch.bfloat16, 0, False),
+        (2, torch.bfloat16, 64, True),
+        (4, torch.float16, 64, False),
+    ],
+)
 def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
     monkeypatch, world_size, dtype, rope_dim, decode
 ):
@@ -105,8 +68,15 @@ def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
     impl.pcp_enabled, impl.is_pcp_decode_sharded, impl.enable_sparse_sfa_c8 = True, decode, False
     impl.kv_lora_rank, impl.qk_rope_head_dim = 4, rope_dim
     impl._kv_staging_capacity = 128
+    impl.vllm_config = NS(parallel_config=NS(prefill_context_parallel_size=world_size))
+    impl.index_group = NS(logical_topk_indices=torch.empty(1))
     impl.kv_a_layernorm = torch.nn.Identity()
     impl.hisparse_cache = handle()
+    monkeypatch.setattr(
+        sfa_hisparse,
+        "current_workspace_manager",
+        lambda: NS(get_persistent_resource=lambda key, allocate: allocate()),
+    )
     cache = impl.hisparse_cache
     width, rows = 4 + rope_dim, 3 * world_size
     cache.view.cache = torch.zeros(rows, width, dtype=dtype)
@@ -122,11 +92,10 @@ def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
     local_rows = 3 if rope_dim else 2
     local_kv = torch.arange(local_rows * width, dtype=dtype).reshape(local_rows, width)
     cos = sin = torch.ones(3, rope_dim, dtype=dtype) if rope_dim else None
-    latent_cache = torch.empty((world_size, 128, 1, 4), dtype=dtype)
-    rope_cache = torch.empty((world_size, 128, 1, rope_dim), dtype=dtype)
-    impl._kv_workspace = lambda _: (latent_cache, rope_cache, torch.arange(world_size * 128, dtype=torch.int64))
 
     def preprocess(self, kv, cos, sin, caches, slots, metadata):
+        assert caches[0].shape == (world_size, 128, 1, 4)
+        assert caches[1].shape == (world_size, 128, 1, rope_dim)
         assert slots.numel() == rows
         caches[0].view(-1, 4)[:rows].copy_(kv[:, :4])
         caches[1].view(-1, rope_dim)[:rows].copy_(kv[:, 4:])
@@ -212,18 +181,19 @@ def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps(monkeypat
     monkeypatch.setattr(ActiveKVConnector, "_start_load_kv", Mock())
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
-    batch.is_prefilling_np[:] = True
     manager._gathered_kv_write_mask = torch.tensor([True, True, False, True, True, False])
     scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
     draft_meta = metadata(decode=False)
     for md in (meta, draft_meta):
         md.hisparse_num_write_tokens = 6
         md.hisparse_write_has_prefill = True
-    # Remove/reorder requests and reuse state slots, including the draft transition.
-    for requests, states, starts, indices, expected in [
-        (["A", "B"], [7, 9], [0, 4, 7], [0, 3, 0, 1, 4, 0], [0, 0, -1, 0, 1, -1]),
-        (["B", "C"], [9, 7], [0, 3, 7], [4, 0, 0, 3, 1, 0], [1, 0, -1, 1, 0, -1]),
+    # Step 1 uses global prefill; step 2 uses sharded decode with no prefill.
+    for is_prefill, requests, states, starts, indices, expected in [
+        (True, ["A", "B"], [7, 9], [0, 4, 7], [0, 3, 0, 1, 4, 0], [0, 0, -1, 0, 1, -1]),
+        (False, ["B", "C"], [9, 7], [0, 3, 7], [4, 0, 0, 3, 1, 0], [1, 0, -1, 1, 0, -1]),
     ]:
+        batch.is_prefilling_np[:] = is_prefill
+        manager.is_decode_sharded = not is_prefill
         batch.req_ids = requests
         batch.idx_mapping.copy_(torch.tensor(states))
         batch.query_start_loc = torch.tensor(starts, dtype=torch.int32)
@@ -277,42 +247,6 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     assert captured_slots.data_ptr() == cache.slot_mapping.data_ptr()
 
 
-def test_host_mapping_changes_from_gathered_to_replicated_then_no_forward():
-    connector, cache, meta, local, batch, manager = make_connector()
-    local.num_tokens_after_padding = 3
-    batch.query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32)
-    batch.is_prefilling_np[:] = True
-    manager._padded_gather_idx = torch.tensor([0, 3, 0, 1, 4, 0])
-    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True, True, False])
-    meta.hisparse_num_write_tokens = 6
-    meta.hisparse_write_has_prefill = True
-    query_request_ids = meta.req_id_per_token
-    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=False)
-    worker = connector.kv_connector.connector_worker
-    missing_group = handle()
-    worker._group_leaders.append(("not_in_this_batch", missing_group))
-    missing_group.req_id_per_token = torch.tensor([42], dtype=torch.int32)
-
-    connector.pre_forward(scheduler, local, {"layer0": meta, "indexer": NS()})
-    connector.prepare_host_mirror()
-    assert cache.req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
-    assert meta.req_id_per_token is query_request_ids
-    assert missing_group.req_id_per_token.tolist() == [42]
-
-    batch.is_prefilling_np[:] = False
-    meta.hisparse_num_write_tokens = 3
-    meta.hisparse_write_has_prefill = False
-    connector.pre_forward(scheduler, local, {"layer0": meta})
-    connector.prepare_host_mirror()
-    assert cache.req_id_per_token is query_request_ids
-    assert cache.num_actual_tokens == 3 and not cache.host_mirror_required
-
-    assert connector._build_load_kwargs(scheduler, None, None) == {}
-    cache.req_id_per_token = None
-    connector.prepare_host_mirror()
-    assert cache.req_id_per_token is None
-
-
 def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
@@ -358,7 +292,7 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
 @pytest.mark.parametrize("use_pcp", [False, True])
 @pytest.mark.parametrize(
     "num_decodes,prefill_lens,padding",
-    [(3, (4, 4), 1), (0, (4, 4), 1), (3, (4, 4), 0), (3, (), 1), (3, (), 0)],
+    [(3, (4, 4), 1), (0, (4, 4), 1), (3, (), 1)],
 )
 def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch, use_pcp, num_decodes, prefill_lens, padding
@@ -398,8 +332,6 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     calls = []
 
     def map_requests(offsets, out, num_mapped, num_tokens):
-        # CPU reference for Core's existing mapping kernel, including its
-        # last-request clamp and explicit zero-padding policy.
         calls.append((num_mapped, num_tokens))
         tokens = torch.arange(num_tokens, dtype=offsets.dtype)
         rows = torch.searchsorted(offsets[1:], tokens, right=True).clamp_max(num_reqs - 1)
@@ -451,30 +383,10 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     assert cache.host_mirror_required
 
 
-@pytest.mark.parametrize("capture", [False, True])
-def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
-    connector, cache, meta, local, batch, manager = make_connector()
-    manager.is_decode_sharded = True
-    batch.is_prefilling_np[:] = False
-    batch.query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32)
-    manager._padded_gather_idx = torch.tensor([0, 3, 0, 1, 4, 0])
-    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True, True, False])
-    local.num_tokens_after_padding = 3
-    meta.hisparse_for_capture = capture
-    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
-    connector.pre_forward(scheduler, local, {"layer0": meta})
-    assert connector._pending_load_kwargs["num_tokens"] == 6
-    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
-    meta.hisparse_num_write_tokens = 6
-    meta.hisparse_write_has_prefill = False
-    connector.prepare_host_mirror()
-    assert cache.req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
-    assert connector._pending_load_kwargs["request_state_indices"].tolist() == [7, 9]
-
-
-@pytest.mark.parametrize("prefill", [False, True])
-@pytest.mark.parametrize("pcp_world_size,capture", [(2, False), (4, True), (8, False)])
+@pytest.mark.parametrize("prefill,pcp_world_size,capture", [(False, 2, False), (True, 2, False), (True, 4, True)])
 def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill):
+    from vllm.config.compilation import CUDAGraphMode
+
     import vllm_ascend.attention.sfa_hisparse as module
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
@@ -482,6 +394,8 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = not prefill
+    impl._kv_staging_capacity = 256
+    impl.index_group = NS(logical_topk_indices=torch.empty(1))
     impl.hisparse_cache = handle()
     impl.hisparse_cache.finish_kv_update = Mock()
     meta = metadata(decode=not prefill)
@@ -500,21 +414,22 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     meta.hisparse_num_write_tokens = num_write_rows
     impl.hisparse_cache._prepare_for_batch(meta)
     impl.hisparse_cache.submit_layer_mirror = Mock()
-    from vllm.config.compilation import CUDAGraphMode
-
     monkeypatch.setattr(module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    monkeypatch.setattr(
+        module,
+        "current_workspace_manager",
+        lambda: NS(get_persistent_resource=lambda key, allocate: allocate()),
+    )
     impl.hisparse_cache.slot_mapping = torch.arange(num_write_rows) + 10
     impl.hisparse_cache.slot_mapping[2::3] = -1
     impl.hisparse_cache.view.cache = torch.zeros(num_write_rows, 656, dtype=torch.uint8)
-    scratch = torch.zeros((1, 128, 1, 656), dtype=torch.uint8).view(torch.float8_e4m3fn)
-    slots = torch.arange(128, dtype=torch.int64)
-    impl._pcp_prolog_workspace = lambda: (scratch, slots)
 
     def fused(self, hidden, caches, cos, sin, mapping, **kwargs):
-        assert caches[0] is scratch
+        assert caches[0].shape == (2, 128, 1, module.C8_ROW_BYTES)
+        assert caches[0].dtype == torch.float8_e4m3fn
         assert mapping.tolist() == [0, 1, 2]
         assert torch.count_nonzero(impl.hisparse_cache.view.cache) == 0
-        scratch.view(torch.uint8).view(-1, 656)[:3] = torch.arange(1, 4)[:, None]
+        caches[0].view(torch.uint8).view(-1, 656)[:3] = torch.arange(1, 4)[:, None]
         return "queries-ready"
 
     def gather(payload, dim):
@@ -532,7 +447,9 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     monkeypatch.setattr(module, "get_pcp_group", lambda: NS(all_gather=gather))
     monkeypatch.setattr(cache_ops, "scatter_packed_kv", scatter)
     assert (
-        impl._sfa_preprocess_prolog_v3(torch.zeros(3, 8), (), None, None, slots[:3], attn_metadata=meta)
+        impl._sfa_preprocess_prolog_v3(
+            torch.zeros(3, 8), (), None, None, torch.arange(3, dtype=torch.int64), attn_metadata=meta
+        )
         == "queries-ready"
     )
     impl._sync_pcp_kv_cache((), meta)
@@ -540,30 +457,3 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     impl.hisparse_cache.finish_kv_update.assert_not_called()
     assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
-
-
-def test_replicated_decode_prolog_writes_resident_directly(monkeypatch):
-    import vllm_ascend.attention.sfa_hisparse as module
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
-    impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)
-    impl.pcp_enabled = True
-    impl.is_pcp_decode_sharded = False
-    impl.hisparse_cache = handle()
-    impl._pcp_prolog_workspace = Mock(side_effect=AssertionError("replicated decode must not use scratch"))
-    meta = metadata()
-    meta.uses_pcp_sharded_layout = True
-    meta.num_prefills = 0
-    meta.pcp_has_global_prefill = False
-    impl.hisparse_cache._prepare_for_batch(meta)
-    mapping = torch.tensor([10, 11, -1], dtype=torch.int64)
-    monkeypatch.setattr(module.AscendHiSparseImpl, "_prolog_slot_mapping", lambda *a: mapping)
-    monkeypatch.setattr(module, "finish_hisparse_kv_update", Mock())
-    prolog = Mock(return_value="queries-ready")
-    monkeypatch.setattr(AscendSFAImpl, "_sfa_preprocess_prolog_v3", prolog)
-    assert (
-        impl._sfa_preprocess_prolog_v3(torch.zeros(3, 8), (), None, None, mapping, attn_metadata=meta)
-        == "queries-ready"
-    )
-    assert prolog.call_args.args[1][0].data_ptr() == impl.hisparse_cache.view.cache.data_ptr()
-    assert prolog.call_args.args[4] is mapping

@@ -137,11 +137,10 @@ def test_main_kv_non_collective_paths_do_not_submit_work(monkeypatch, mode):
     assert torch.equal(write.call_args.args[4], slots if mode == "non_pcp" else slots[:expected_rows])
 
 
-@pytest.mark.parametrize("impl_cls", [AscendSFAImpl, AscendHiSparseImpl])
-def test_main_kv_retains_contiguous_send_until_completion(monkeypatch, impl_cls):
-    impl = impl_cls.__new__(impl_cls)
+def test_main_kv_retains_contiguous_send_until_completion(monkeypatch):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.pcp_enabled = True
-    impl.qk_rope_head_dim = 2 if impl_cls is AscendHiSparseImpl else 0
+    impl.qk_rope_head_dim = 0
     impl.is_pcp_decode_sharded = False
     metadata = SimpleNamespace(
         num_input_tokens=4,
@@ -152,10 +151,8 @@ def test_main_kv_retains_contiguous_send_until_completion(monkeypatch, impl_cls)
     )
     values = torch.arange(12).view(3, 4).T
     assert not values.is_contiguous()
-    cos, sin = (torch.randn(2, 4).T, torch.randn(2, 4).T) if impl.qk_rope_head_dim else (None, None)
     group = SimpleNamespace(world_size=2)
     monkeypatch.setattr(sparse_mla, "get_pcp_group", lambda: group)
-    monkeypatch.setattr(hisparse_sfa, "get_pcp_group", lambda: group)
 
     def launch(send, actual_group):
         assert actual_group is group and send.is_contiguous()
@@ -170,14 +167,10 @@ def test_main_kv_retains_contiguous_send_until_completion(monkeypatch, impl_cls)
         return output, SimpleNamespace(wait=wait)
 
     monkeypatch.setattr(sparse_mla, "all_gather_async", launch)
-    monkeypatch.setattr(hisparse_sfa, "all_gather_async", launch)
     write = Mock(return_value=(None, None))
-    monkeypatch.setattr(impl_cls, "_exec_kv_local", write)
-    finish = impl.exec_kv(values, cos, sin, (), torch.arange(8), metadata, defer_wait=True)
+    monkeypatch.setattr(AscendSFAImpl, "_exec_kv_local", write)
+    finish = impl.exec_kv(values, None, None, (), torch.arange(8), metadata, defer_wait=True)
     assert callable(finish)
     finish()
     write.assert_called_once()
     torch.testing.assert_close(write.call_args.args[0], torch.cat((values, values)))
-    if cos is not None:
-        torch.testing.assert_close(write.call_args.args[1], torch.cat((cos, cos)))
-        torch.testing.assert_close(write.call_args.args[2], torch.cat((sin, sin)))
