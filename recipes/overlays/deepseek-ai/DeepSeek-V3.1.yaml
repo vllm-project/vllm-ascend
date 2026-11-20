@@ -1,0 +1,50 @@
+# Source: https://github.com/vllm-project/vllm/blob/9e6c6b007ae698bd8604620b17d5720a89169da8/recipes/models/deepseek-ai/DeepSeek-V3.1.yaml
+# Extracted with vllm-project/recipes@8509229176ba2d1837339ffc4cbb4f34c1bf5e66.
+variants:
+  ascend_w8a8:
+    model_id: Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot
+    precision: int8
+    label: W8A8 MTP QuaRot (Ascend)
+    vram_minimum_gb: 822
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    extra_args:
+      - '--data-parallel-size'
+      - '4'
+      - '--speculative-config'
+      - '{"num_speculative_tokens": 3, "method": "mtp"}'
+      - '--quantization'
+      - ascend
+      - '--no-enable-prefix-caching'
+      - '--max-num-seqs'
+      - '16'
+      - '--max-model-len'
+      - '16384'
+      - '--max-num-batched-tokens'
+      - '4096'
+      - '--gpu-memory-utilization'
+      - '0.92'
+      - '--served-model-name'
+      - deepseek_v3
+      - '--seed'
+      - '1024'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: AIV
+      VLLM_ASCEND_BALANCE_SCHEDULING: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+          docker: true
+    description: "ModelSlim W8A8 MTP QuaRot (weights on ModelScope: Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot) — 1 Atlas 800 A3 (16 die), TP4×DP4 + MTP."
+meta:
+  hardware:
+    # First-party bring-up 2026-10-28 (single-node TP4/DP4 + MTP, benchmarked
+    # repeatedly without engine errors); official runner-CI end-to-end
+    # verification pending (weights not yet available; companion Ascend recipe
+    # vllm-ascend/vllm-ascend-recipes#102).
+    ascend_910c: supported
