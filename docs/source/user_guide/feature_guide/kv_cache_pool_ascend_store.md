@@ -48,6 +48,13 @@ in each connector's own extra config; the V2 option selects the P/D Push protoco
     | Software Dependencies | • Mooncake >= 0.3.11.post1 (non-default tenant requires >= 0.3.12).<br>• Mooncake wheel requires glibc >= 2.35.<br>• Layerwise support requires Mooncake >= 0.3.14. |
     | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios, Store/PD traffic separation applies to A3 and 950PR&950DT Products. |
 
+    With `backend: "mooncake"` and `use_layerwise: true`, loads and saves from multiple
+    cache groups at the same execution layer are combined before applying the
+    configured transfer limits. Layer prefetch ordering and per-group failure
+    tracking are preserved. Saves synchronize the layer's write event once and
+    retain each group's final-layer commit boundary; no additional configuration
+    is required.
+
 === "Memcache backend"
 
     | Category | Constraints |

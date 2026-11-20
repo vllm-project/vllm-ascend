@@ -515,7 +515,13 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_unequal_cache_entries_in_one_physical_layer(self):
         worker, store, arrays, jobs, errors = self.make_hybrid(extra_entry=True)
-        request = self.save_prefix(worker)
+        for layer in range(4):
+            worker.sync_save_events[layer] = MagicMock()
+        with patch.object(store, "batch_copy_put", wraps=store.batch_copy_put) as put:
+            request = self.save_prefix(worker)
+        self.assertEqual(put.call_count, 4)
+        for event in worker.sync_save_events:
+            event.synchronize.assert_called_once()
         self.assertEqual(sorted(len(value) for value in store.objects.values()), [16] * 4 + [32] + [48] * 2)
         saved = {name: array.copy() for name, array in arrays.items()}
         for array in arrays.values():
@@ -527,10 +533,13 @@ class TestMooncakeHybrid(unittest.TestCase):
         meta.add_request(request)
         worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
-        for _ in range(4):
-            worker.wait_for_layer_load()
-            with attention_transfer_window():
-                pass
+        with patch.object(store, "batch_copy_get", wraps=store.batch_copy_get) as get:
+            for _ in range(4):
+                worker.wait_for_layer_load()
+                with attention_transfer_window():
+                    pass
+        self.assertFalse(worker.has_shared_kv)
+        self.assertEqual(get.call_count, 4)  # One GET per layer, including mixed cache groups.
         for name, array in arrays.items():
             slots = [4] if "state" in name else [1, 2] if "c4" in name else [1, 2, 3, 4]
             np.testing.assert_array_equal(array[slots], saved[name][slots])
@@ -573,11 +582,25 @@ class TestMooncakeHybrid(unittest.TestCase):
         real_put = store.batch_copy_put
 
         def put(keys, buffers, sizes, offsets):
-            if all("@group:1@" in key for key in keys):
-                return [-1] * len(keys)
-            return real_put(keys, buffers, sizes, offsets)
+            results = real_put(keys, buffers, sizes, offsets)
+            return [-1 if "@group:1@" in key else result for key, result in zip(keys, results, strict=True)]
 
         store.batch_copy_put = put
+        self.save_prefix(worker)
+        self.assertEqual(len(store.complete), 5)
+        self.assertTrue(all("@group:1@" not in key for key in store.objects))
+        self.assertFalse(worker._put_started_keys)
+        self.assertFalse(errors)
+
+    def test_failed_commit_revokes_only_affected_group_keys(self):
+        worker, store, _, _, errors = self.make_hybrid()
+        real_commit = store.batch_commit
+
+        def commit(keys):
+            results = real_commit(keys)
+            return [-1 if "@group:1@" in key else result for key, result in zip(keys, results, strict=True)]
+
+        store.batch_commit = commit
         self.save_prefix(worker)
         self.assertEqual(len(store.complete), 5)
         self.assertTrue(all("@group:1@" not in key for key in store.objects))
