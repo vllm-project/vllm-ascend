@@ -30,6 +30,7 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
     model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
     ple = _source("vllm_ascend/models/qwen4_exp/ple.py")
+    torch_utils_patch = _source("vllm_ascend/patch/platform/patch_torch_utils.py")
     assert "class AscendQwen4ExpDecoderLayer" not in model
     assert model.count("def forward(") == 1
     assert "for layer_idx" not in model
@@ -57,9 +58,12 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "class AscendQwen4ExpModelState" in model_state
     assert "ple_layer_ids = []" not in model_state
     assert "if intermediate_tensors is None:" in mtp
-    assert "def _get_npu_view_from_cpu_tensor(" in ple
-    assert "torch.ops._C_ascend.get_npu_view_from_cpu_tensor(" in ple
-    assert ("upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor") in ple
+    assert "get_npu_view_from_cpu_tensor" not in ple
+    assert "def get_npu_view_from_cpu_tensor(" in torch_utils_patch
+    assert "torch.ops._C_ascend.get_npu_view_from_cpu_tensor(" in torch_utils_patch
+    assert (
+        "upstream_torch_utils.get_accelerator_view_from_cpu_tensor = get_npu_view_from_cpu_tensor" in torch_utils_patch
+    )
 
 
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
