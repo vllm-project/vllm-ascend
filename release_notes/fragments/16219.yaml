@@ -1,0 +1,10 @@
+pr: 16219
+entries:
+  - category: feature
+    text: Added NPU graph writeback and per-rank fused-overlap membership staging for the Mooncake sparse KV offload backend.
+  - category: performance
+    text: >-
+      Fused-overlap sparse decode can combine current-token K and RoPE hot-buffer
+      writes into one Triton kernel with either MemFabric or Mooncake. Set
+      VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER=0 to use native scatter operations;
+      unsupported layouts also fall back to native scatter.

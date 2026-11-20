@@ -189,20 +189,27 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
-        metadata_cls: type[AscendSFAOffloadMetadata] | None = None,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        # MRV2 keeps draft/MTP KV in HBM even when the target uses offload.
+        # Builders are constructed after draft_config_context exits; use the
+        # planned placement rather than the process-wide offload switch.
+        self.store_on_host = bool(getattr(kv_cache_spec, "store_on_host", True))
         cfg = get_ascend_config().sparse_kv_offload_config
-        _validate_fused_copy_sfa_config(vllm_config, cfg)
+        if self.store_on_host:
+            _validate_fused_copy_sfa_config(vllm_config, cfg)
+        if metadata_cls is None:
+            metadata_cls = AscendSFAOffloadMetadata if self.store_on_host else AscendSFAMetadata
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
-            metadata_cls if metadata_cls is not None else AscendSFAOffloadMetadata,
+            metadata_cls,
             supports_dcp_with_varlen,
         )
-        self.use_fused_copy_sfa = cfg.use_fused_copy_sfa
+        self.use_fused_copy_sfa = self.store_on_host and cfg.use_fused_copy_sfa
         if self.use_fused_copy_sfa:
             self._init_copy_sfa_metadata_buffers(vllm_config, device)
         kv_transfer_config = vllm_config.kv_transfer_config
@@ -311,6 +318,17 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.copy_sfa_reuse_logical_lens = None
         metadata.copy_sfa_copy_src_offsets = None
         if not self.use_fused_copy_sfa:
+            # The normalization below only runs on the fused copy path. Without
+            # it a decode-only batch keeps the ChunkedPrefill state that
+            # build_attn_state derives from its multi-token query, so the sparse
+            # offload mistakes the MTP draft/verify step for prefill and refuses
+            # to read the offloaded device KV cache.
+            if num_prefills == 0 and num_decodes > 0:
+                metadata.attn_state = (
+                    AscendAttentionState.SpecDecoding
+                    if common_attn_metadata.max_query_len > 1
+                    else AscendAttentionState.DecodeOnly
+                )
             return metadata
         if draft_index is None:
             draft_index = getattr(common_attn_metadata, "copy_sfa_draft_index", None)
@@ -474,8 +492,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         **kwargs: Any,
-    ) -> AscendSFAOffloadMetadata:
+    ) -> AscendSFAMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+        if not self.store_on_host:
+            return metadata
         return self._populate_offload_metadata(cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata)
 
     def build_for_drafting(
@@ -483,12 +503,14 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         draft_index: int,
         **kwargs: Any,
-    ) -> AscendSFAOffloadMetadata:
+    ) -> AscendSFAMetadata:
         metadata = super().build_for_drafting(
             common_attn_metadata,
             draft_index,
             **kwargs,
         )
+        if not self.store_on_host:
+            return metadata
         return self._populate_offload_metadata(
             cast(AscendSFAOffloadMetadata, metadata), common_attn_metadata, draft_index
         )
@@ -1186,7 +1208,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self._fused_overlap_selection_capacity[3] < cache_blocks_per_row
             or self.selection_kv_block_table.device != device
             or self.selection_kv_block_status.device != device
-            or self.selection_membership_map.device.type != "cpu"
+            or not get_sparse_kv_offload_manager().is_fused_membership_storage(self.selection_membership_map)
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
