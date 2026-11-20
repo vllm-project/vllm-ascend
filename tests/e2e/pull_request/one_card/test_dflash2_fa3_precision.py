@@ -24,10 +24,10 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
     [(None, 4, True), (None, 32, False), (32, 32, True), (2048, 32, True)],
 )
 @pytest.mark.parametrize("head_size", [128, 192])
-@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize(("num_kv_heads", "page_layout"), [(1, "BBND"), (4, "BBND"), (4, "BNBD")])
 @torch.inference_mode()
 def test_dflash2_fa3_rejection_and_padded_graph_replay(
-    dtype, causal, window, blocks_per_req, capture_graph, head_size, num_kv_heads
+    dtype, causal, window, blocks_per_req, capture_graph, head_size, num_kv_heads, page_layout
 ):
     pytest.importorskip("flash_attn_npu_3")
     if not get_current_hardware_profile().supports(HardwareCapability.FLASH_ATTN_NPU_3):
@@ -40,15 +40,24 @@ def test_dflash2_fa3_rejection_and_padded_graph_replay(
     # with capacity >=1024, so cover that case in eager mode. Graph cases use
     # either short full attention or a sliding window smaller than capacity.
     num_blocks = num_reqs * blocks_per_req
-    # Match the runner's interleaved K/V pages, including page padding.
-    page_stride = 2 * block_size * num_kv_heads * head_size + 128
+    page_elements = block_size * num_kv_heads * head_size
+    page_stride = 2 * page_elements + 128
     backing = torch.empty((num_blocks, page_stride), dtype=dtype, device=device)
-    key = backing.as_strided(
-        (num_blocks, block_size, num_kv_heads, head_size), (page_stride, num_kv_heads * head_size, head_size, 1)
+    page_shape = (
+        (block_size, num_kv_heads, head_size) if page_layout == "BBND" else (num_kv_heads, block_size, head_size)
     )
-    value = backing.as_strided(key.shape, key.stride(), storage_offset=block_size * num_kv_heads * head_size)
-    key.copy_(torch.randn_like(key))
-    value.copy_(torch.randn_like(value))
+    key = backing[:, :page_elements].view(num_blocks, *page_shape)
+    value = backing[:, page_elements : 2 * page_elements].view(num_blocks, *page_shape)
+    if page_layout == "BNBD":
+        # The paged FA3 ABI always takes [block, token, head, dim].
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        expected_strides = (page_stride, head_size, block_size * head_size, 1)
+    else:
+        expected_strides = (page_stride, num_kv_heads * head_size, head_size, 1)
+    for tensor in (key, value):
+        assert tensor.shape == (num_blocks, block_size, num_kv_heads, head_size)
+        assert tensor.stride() == expected_strides
     query = torch.randn(num_reqs * query_len, num_heads, head_size, dtype=dtype, device=device)
     tables = torch.randperm(num_blocks, device=device).to(torch.int32).reshape(num_reqs, blocks_per_req)
     original_tables = tables.clone()
@@ -84,6 +93,18 @@ def test_dflash2_fa3_rejection_and_padded_graph_replay(
     )
     layer = SimpleNamespace(layer_name="draft.attn", _k_scale_float=1.0, _v_scale_float=1.0)
     cache = (key, value)
+    key_input = torch.randn(key.shape, dtype=dtype, device=device)
+    value_input = torch.randn(value.shape, dtype=dtype, device=device)
+    if page_layout == "BBND":
+        slots = torch.arange(num_blocks * block_size, dtype=torch.int32, device=device)
+        impl.do_kv_cache_update(layer, key_input.flatten(0, 1), value_input.flatten(0, 1), cache, slots)
+    else:
+        # Exercise FA3 reads of head-major storage independently of the BBND scatter used by this backend.
+        key.copy_(key_input)
+        value.copy_(value_input)
+    key_cpu, value_cpu = key_input.cpu(), value_input.cpu()
+    torch.testing.assert_close(key.cpu(), key_cpu, rtol=0, atol=0)
+    torch.testing.assert_close(value.cpu(), value_cpu, rtol=0, atol=0)
     output = torch.empty_like(query)
     eager_output = torch.empty_like(query)
 
@@ -98,7 +119,7 @@ def test_dflash2_fa3_rejection_and_padded_graph_replay(
         with torch.npu.graph(graph):
             impl.forward(layer, query, None, None, cache, capture_metadata, output)
 
-    query_cpu, key_cpu, value_cpu = query.cpu(), key.cpu(), value.cpu()
+    query_cpu = query.cpu()
     # Change rejection counts, request order and active size in one captured bucket.
     for exact_lengths, order in [([2048, 1499], [1, 0]), ([3065], [2]), ([1501, 2052, 3069], [0, 1, 2])]:
         exact_lengths = [n // length_divisor for n in exact_lengths]
