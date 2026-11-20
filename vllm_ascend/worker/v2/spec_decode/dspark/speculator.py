@@ -47,7 +47,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import draft_metadata_request_count
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    draft_metadata_request_count,
+    install_ascend_dflash_input_preparation,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -267,6 +270,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+            install_ascend_dflash_input_preparation()
 
     @contextmanager
     def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:

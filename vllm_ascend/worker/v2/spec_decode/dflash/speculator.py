@@ -11,11 +11,13 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -34,6 +36,63 @@ def draft_metadata_request_count(speculator: Any, num_reqs: int):
         yield
     finally:
         speculator._draft_metadata_num_reqs = previous
+
+
+def install_ascend_dflash_input_preparation() -> None:
+    # DFlash and DSpark share the input-preparation symbol in the upstream module.
+    if vllm_version_is("0.33.0"):
+        dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_triton
+    else:
+        dflash_speculator.prepare_dflash_inputs = _prepare_dflash_inputs_with_block_stride
+
+
+def _prepare_dflash_inputs_with_block_stride(
+    input_buffers: InputBuffers,
+    query_slot_mapping: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    input_temperature: torch.Tensor,
+    input_seeds: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    block_stride: int,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    # Upstream main passes block_stride between block_size and cp_rank.
+    prepare_dflash_inputs_triton(
+        input_buffers,
+        query_slot_mapping,
+        context_positions,
+        context_slot_mapping,
+        sample_indices,
+        sample_pos,
+        sample_idx_mapping,
+        temperature,
+        seeds,
+        input_batch,
+        num_sampled,
+        num_rejected,
+        last_sampled,
+        next_prefill_tokens,
+        input_temperature,
+        input_seeds,
+        block_table,
+        block_size,
+        *args,
+        block_stride=block_stride,
+        **kwargs,
+    )
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
@@ -161,6 +220,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
+        install_ascend_dflash_input_preparation()
 
     def propose(
         self,

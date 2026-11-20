@@ -8,8 +8,9 @@
 - **Implementation**:
     - `vllm_ascend/ops/triton/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
-    - The DFlash and DSpark workers use the upstream vLLM
-      `prepare_dflash_inputs` entry point with manager block tables.
+    - The Ascend DFlash and DSpark workers bind the upstream entry point to
+      the Ascend launcher. The adapter forwards the physical block stride
+      supplied by vLLM main.
 - **Formula**:
     - Request context range:
       `ctx_start = query_start_loc[req]`,
@@ -25,7 +26,8 @@
       The same manager size indexes the public block table:
       `block_index = min(local_position // block_size, block_table_stride - 1)`,
       `manager_block_id = block_table[req, block_index]`, and
-      `slot = manager_block_id * block_size + local_position % block_size`.
+      `slot = manager_block_id * block_stride + local_position % block_size`.
+      For contiguous pages, `block_stride = block_size`.
       The slot is `PAD_SLOT_ID` when the rank does not own the position or
       `manager_block_id == 0`.
     - Query construction:
@@ -82,6 +84,7 @@
 | `input_seeds` | Input | Source sampling seed per request-state slot | int64 | dense tensor |
 | `block_table` | Input | Request-to-manager-block table, shape `[max_num_reqs, max_num_blocks]` | int32 | dense tensor |
 | `block_size` | Input/Attribute | Manager block size used for DCP ownership, table lookup, and slot offsets | int | scalar |
+| `block_stride` | Input/Attribute | Physical distance in slots between manager blocks, defaulting to `block_size` | int or None | scalar |
 | `cp_rank` | Input/Attribute | DCP rank that owns local KV slots | int | scalar |
 | `cp_size` | Input/Attribute | Number of DCP ranks used in block indexing and slot ownership | int | scalar |
 | `cp_interleave` | Input/Attribute | Number of adjacent positions assigned to one DCP rank per round | int | scalar |
@@ -117,11 +120,11 @@
 
 ## Upstream Compatibility
 
-The optimized 2-D launcher accepts the vLLM 0.33.0 positional signature.
-Each draft cache group supplies its public manager block table and matching
-`block_size`. Multimodal
-input positions are unsupported because KV slots currently derive from scalar
-position IDs.
+The Ascend launcher accepts the vLLM 0.33.0 positional signature. The
+worker adapter passes vLLM main's extra `block_stride` argument by keyword.
+Each draft group supplies a manager block table and its matching
+`block_size`. Multimodal positions are unsupported because the kernel
+derives KV slots from scalar position IDs.
 
 ## Origin and Differences
 
@@ -151,7 +154,8 @@ The cases cover the captured DFlash inference shapes plus branch-specific cases:
 - DCP ranks 0, 1, and 2; interleave sizes 1, 2, and 4; cross-block positions,
   non-owned positions, and null manager blocks.
 - DCP with manager `block_size=384`, validating rank 5 ownership and
-  matching manager-table lookup around position 2048.
+  matching manager-table lookup around position 2048. The worker entry
+  point also checks a physical stride of 768 on vLLM main.
 
 The test compares Context mapping, Query construction, Sample mapping, per-request sampling state, and all graph-padding regions against an independent Python reference. Since this operator performs integer indexing and direct state copies, the unified precision requirement is bit-exact (`rtol=0, atol=0`).
 
@@ -161,8 +165,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_
 
 ## Example
 
-The single-card tests call the Ascend launcher directly. The example below
-shows that launcher with a manager-granular block table:
+The example calls the Ascend launcher with a manager-granular block table:
 
 ```python
 prepare_dflash_inputs_triton(

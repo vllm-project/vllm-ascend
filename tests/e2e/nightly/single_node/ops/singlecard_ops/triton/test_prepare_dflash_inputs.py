@@ -3,17 +3,20 @@
 
 import gc
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.spec_decode.dflash import speculator as dflash_worker
 
 ACCURACY_CASES = [
     {
@@ -287,7 +290,7 @@ def _build_positions(req_lens, position_starts):
     return values
 
 
-def _local_slot(position, block_table_row, block_size, cp_rank, cp_size, cp_interleave):
+def _local_slot(position, block_table_row, block_size, block_stride, cp_rank, cp_size, cp_interleave):
     if cp_size == 1:
         local_position = position
     else:
@@ -302,7 +305,7 @@ def _local_slot(position, block_table_row, block_size, cp_rank, cp_size, cp_inte
     kernel_block = block_table_row[block_idx]
     if kernel_block == 0:
         return PAD_SLOT_ID
-    return kernel_block * block_size + local_position % block_size
+    return kernel_block * block_stride + local_position % block_size
 
 
 def _allocate_outputs(max_num_reqs, max_num_tokens, num_speculative_steps, device):
@@ -408,6 +411,7 @@ def _build_reference(data, case):
     num_query_per_req = case["num_query_per_req"]
     num_speculative_steps = case["num_speculative_steps"]
     block_size = case["block_size"]
+    block_stride = case.get("block_stride", block_size)
     cp_rank = case.get("cp_rank", 0)
     cp_size = case.get("cp_size", 1)
     cp_interleave = case.get("cp_interleave", 1)
@@ -458,7 +462,7 @@ def _build_reference(data, case):
             ctx_pos = positions[ctx_idx]
             ref.context_positions[ctx_idx] = ctx_pos
             ref.context_slot_mapping[ctx_idx] = _local_slot(
-                ctx_pos, block_table[req_idx], block_size, cp_rank, cp_size, cp_interleave
+                ctx_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
             )
 
         query_base = req_idx * num_query_per_req
@@ -473,7 +477,7 @@ def _build_reference(data, case):
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
             ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], block_size, cp_rank, cp_size, cp_interleave
+                query_pos, block_table[req_idx], block_size, block_stride, cp_rank, cp_size, cp_interleave
             )
 
         for sample_local in range(num_speculative_steps):
@@ -638,5 +642,30 @@ def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_fr
         # vLLM main takes block_stride after block_size. These cache pages are contiguous.
         args.insert(18, case["block_size"])
     prepare_dflash_inputs(*args)
+    _validate_outputs(data, case, _build_reference(data, case))
+    _cleanup()
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_worker_entry_point_uses_ascend_launcher(monkeypatch):
+    case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_manager384_rank5").copy()
+    has_block_stride = not vllm_version_is("0.33.0")
+    if has_block_stride:
+        case["block_stride"] = 768
+    data = _build_inputs(case, "npu")
+    args = _impl_args(data, case)
+    if has_block_stride:
+        args.insert(18, case["block_stride"])
+
+    # Keep the global binding scoped to this test.
+    monkeypatch.setattr(dflash_speculator, "prepare_dflash_inputs", prepare_dflash_inputs)
+    launcher = Mock(wraps=prepare_dflash_inputs_triton)
+    monkeypatch.setattr(dflash_worker, "prepare_dflash_inputs_triton", launcher)
+    dflash_worker.install_ascend_dflash_input_preparation()
+    dflash_speculator.prepare_dflash_inputs(*args)
+    launcher.assert_called_once()
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
