@@ -36,9 +36,9 @@ MLA_HEAD_DIM = 512
 INDEX_HEAD_DIM = 128
 INDEX_FOLD_ROWS = 8
 
-# A3 INT8 CSA stores one packed 608-byte record per cache token:
+# INT8 CSA stores one packed 608-byte record per cache token:
 #   rope(64 bf16) | nope(448 int8) | scale(7 bf16) | padding(18 bytes)
-A3_INT8_KV_RECORD_BYTES = 608
+INT8_KV_RECORD_BYTES = 608
 
 
 def uses_a5_packed_cache() -> bool:
@@ -46,8 +46,8 @@ def uses_a5_packed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
 
 
-def uses_a3_int8_packed_cache(cache_dtype: str | None = None) -> bool:
-    """Select the A3 INT8 CSA packed-cache ABI for --kv-cache-dtype int8."""
+def uses_int8_packed_cache(cache_dtype: str | None = None) -> bool:
+    """Select the INT8 CSA packed-cache ABI for --kv-cache-dtype int8."""
     profile = get_current_hardware_profile()
     return (
         str(cache_dtype).lower() == "int8"
@@ -74,13 +74,13 @@ def make_swa_cache_spec(
         dtype = torch.uint8
         cache_dtype = "a5_mxfp8_bf16_scale"
     elif packed_int8:
-        if not uses_a3_int8_packed_cache(cache_dtype):
-            raise ValueError("A3 INT8 packed SWA cache requires --kv-cache-dtype int8")
+        if not uses_int8_packed_cache(cache_dtype):
+            raise ValueError("INT8 packed SWA cache requires --kv-cache-dtype int8")
         if head_size != MLA_HEAD_DIM:
-            raise ValueError(f"A3 INT8 CSA requires head size {MLA_HEAD_DIM}, got {head_size}")
-        head_size = A3_INT8_KV_RECORD_BYTES
+            raise ValueError(f"INT8 CSA requires head size {MLA_HEAD_DIM}, got {head_size}")
+        head_size = INT8_KV_RECORD_BYTES
         dtype = torch.int8
-        cache_dtype = "a3_int8_packed"
+        cache_dtype = "int8_bf16_rope_scale"
     return AscendSlidingWindowMLASpec(
         block_size=block_size,
         num_kv_heads=1,
@@ -102,10 +102,10 @@ def make_mla_cache_spec(*, block_size, head_size, compress_ratio, cache_dtype=No
         head_size = head_size // 2 + (head_size // 16) * torch.bfloat16.itemsize
         dtype = torch.uint8
         scale_dtype = torch.bfloat16
-    elif uses_a3_int8_packed_cache(cache_dtype) and compress_ratio in (1, 2):
+    elif uses_int8_packed_cache(cache_dtype) and compress_ratio in (1, 2):
         if head_size != MLA_HEAD_DIM:
-            raise ValueError(f"A3 INT8 CSA requires head size {MLA_HEAD_DIM}, got {head_size}")
-        head_size = A3_INT8_KV_RECORD_BYTES
+            raise ValueError(f"INT8 CSA requires head size {MLA_HEAD_DIM}, got {head_size}")
+        head_size = INT8_KV_RECORD_BYTES
         dtype = torch.int8
         scale_dtype = torch.bfloat16
     else:

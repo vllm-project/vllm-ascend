@@ -268,7 +268,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         use_packed_backend = backend is not None and (
             getattr(backend, "uses_a5_packed_cache", False)
             or (
-                getattr(backend, "uses_a3_int8_packed_cache", False)
+                getattr(backend, "uses_int8_packed_cache", False)
                 and cache_tensor.dtype == torch.int8
                 and cache_tensor.shape[-1] == 608
             )
@@ -277,7 +277,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             # A5's cache is physically packed and must be updated through the
             # device-routed writer.  The draft proposer already supplies linear
             # physical slots, so keep them in that form for the native kernel.
-            # A3's draft SWA cache stays standard BF16, so only its packed
+            # The draft SWA cache stays standard BF16, so only its packed
             # 608-byte target caches take this branch.
             backend.write_attention_cache(
                 cache_tensor,

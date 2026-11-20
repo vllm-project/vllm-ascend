@@ -340,7 +340,7 @@ def _packed_cache_ready(backend, *caches: torch.Tensor | None) -> bool:
         return False
     if getattr(backend, "uses_a5_packed_cache", False):
         return True
-    if getattr(backend, "uses_a3_int8_packed_cache", False):
+    if getattr(backend, "uses_int8_packed_cache", False):
         return all(cache is not None and cache.dtype == torch.int8 and cache.shape[-1] == 608 for cache in caches)
     return False
 
@@ -755,7 +755,7 @@ class AscendDSAV41Impl:
             id(op_metadata),
         )
         if metadata.swa.replay_block_table is not None:
-            # Rebase only SWA: A3 CSA cannot mask its missing prefix with
+            # Rebase only SWA: INT8 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
@@ -895,7 +895,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
         self._uses_packed_cache = self._device_backend is not None
         self._uses_a5_packed_cache = bool(getattr(self._device_backend, "uses_a5_packed_cache", False))
-        self._uses_a3_int8_packed_cache = bool(getattr(self._device_backend, "uses_a3_int8_packed_cache", False))
+        self._uses_int8_packed_cache = bool(getattr(self._device_backend, "uses_int8_packed_cache", False))
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         self._window_size = window_size
@@ -1581,13 +1581,13 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
             )
 
         if (
-            self._uses_a3_int8_packed_cache
+            self._uses_int8_packed_cache
             and req.cache_kind == "swa"
             and self._v41_layer_compress_ratio in (1, 2)
             and self._packed_smla_metadata is not None
         ):
 
-            def build_a3_int8_smla_metadata() -> None:
+            def build_int8_smla_metadata() -> None:
                 if metadata_tokens == 0 or req.num_reqs == 0:
                     self._packed_smla_metadata.zero_()
                     return
@@ -1621,14 +1621,14 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 "smla:a3-int8",
                 self._packed_smla_metadata,
                 DeviceMetadataStage.ATTENTION,
-                build_a3_int8_smla_metadata,
+                build_int8_smla_metadata,
             )
 
         if (
             self._supports_device_ops
             and not self._uses_a5_packed_cache
             and not (
-                self._uses_a3_int8_packed_cache
+                self._uses_int8_packed_cache
                 and req.cache_kind == "swa"
                 and self._v41_layer_compress_ratio in (1, 2)
             )

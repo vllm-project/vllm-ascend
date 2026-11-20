@@ -79,7 +79,7 @@ from vllm_ascend.utils import (
 from .cache_config import (
     make_mla_cache_spec,
     make_swa_cache_spec,
-    uses_a3_int8_packed_cache,
+    uses_int8_packed_cache,
 )
 from .compressor import DeepseekV41Compressor
 from .decoder_replay_layers import make_decoder_replay
@@ -713,7 +713,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             reduce_results=reduce_results,
             use_yarn=role.has_long_context,
             swa_packed_int8=(
-                uses_a3_int8_packed_cache(vllm_config.cache_config.cache_dtype)
+                uses_int8_packed_cache(vllm_config.cache_config.cache_dtype)
                 and role.compress_ratio in (1, 2)
             ),
         )
@@ -725,7 +725,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         backend = DeviceOperator.get_dsv41_packed_cache_ops(vllm_config.cache_config.cache_dtype)
         if (
             backend is not None
-            and getattr(backend, "uses_a3_int8_packed_cache", False)
+            and getattr(backend, "uses_int8_packed_cache", False)
             and role.compress_ratio not in (1, 2)
         ):
             backend = None
