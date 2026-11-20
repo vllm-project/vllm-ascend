@@ -43,6 +43,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
     prepare_pos_seq_lens,
@@ -281,6 +282,10 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        if self.model_config.is_diffusion:
+            # Diffusion uses upstream input preparation rather than the FIA
+            # synthetic-request padding path.
+            self.input_buffers.query_start_loc = self.input_buffers.query_start_loc[: self.max_num_reqs + 1]
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -295,7 +300,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
-        self.decode_query_len = self.num_speculative_steps + 1
+        bonus_tokens = 0 if self.model_config.is_diffusion else 1
+        self.decode_query_len = self.num_speculative_steps + bonus_tokens
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
@@ -1176,10 +1182,13 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
-        num_active_loras: int,  # noqa: ARG002
-    ) -> AscendInputBatch:
+        num_active_loras: int,
+    ) -> InputBatch:
         # vLLM #56456 added num_active_loras to prepare_inputs on main; it
         # only feeds FastPrefillHelper, which this Ascend path does not use.
+        if self.model_config.is_diffusion:
+            # Preserve upstream canvas allocation and its zero bonus tokens.
+            return super().prepare_inputs(scheduler_output, batch_req_state, batch_desc, num_active_loras)
         return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
 
     def prepare_dummy_attn(
