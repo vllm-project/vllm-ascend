@@ -157,10 +157,10 @@ def test_attention_tp_groups_cover_replication_split_and_dcp() -> None:
     [
         (1, 1, list(range(16))),
         (1, 2, list(range(16))),
-        (1, 16, list(range(16))),
+        (1, 16, [*range(0, 16, 2), *range(1, 16, 2)]),
         (4, 1, [0, 1, 2, 3]),
         (4, 2, [0, 1, 2, 3]),
-        (4, 4, [0, 1, 2, 3]),
+        (4, 4, [0, 2, 1, 3]),
     ],
 )
 def test_pcp2_tp8_remote_groups_cover_mla_and_gqa(
@@ -206,27 +206,39 @@ def test_pcp_dcp_selects_one_complete_replica_group() -> None:
     assert result == [(2, [10], [20]), (3, [11], [20])]
 
 
-def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
-    physical_ranks: list[int] = []
-    for dcp_rank in range(8):
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_full_dcp_block_order_matches_vllm_rank_order(tp_size: int) -> None:
+    pcp_size = 2
+    dcp_size = pcp_size * tp_size
+    for dcp_rank in range(dcp_size):
+        pcp_rank, tp_rank = divmod(dcp_rank, tp_size)
         thread = make_thread(
-            tp_size=4,
-            pcp_size=2,
-            dcp_size=8,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
+            dcp_size=dcp_size,
             dcp_rank=dcp_rank,
+        )
+        remote_groups = thread._get_attention_remote_tp_rank_groups(
+            remote_tp_size=tp_size,
+            remote_pcp_size=pcp_size,
+            local_dcp_size=dcp_size,
+            remote_dcp_size=dcp_size,
+            total_num_kv_heads=1,
         )
         result = thread._compute_group_block_ids(
             request_id="request",
-            remote_tp_rank_groups=[list(range(8))],
-            remote_dcp_size=8,
+            remote_tp_rank_groups=remote_groups,
+            remote_dcp_size=dcp_size,
             spec_index=0,
             local_block_size=16,
             remote_block_size=16,
             local_group_block_ids=[10],
             local_full_group_block_ids=[10],
             remote_group_block_ids=[20],
-            local_num_prompt_tokens=128,
-            remote_num_prompt_tokens=128,
+            local_num_prompt_tokens=16 * dcp_size,
+            remote_num_prompt_tokens=16 * dcp_size,
             num_computed_tokens=0,
             local_block_size_scale=1,
             remote_block_size_scale=1,
@@ -235,11 +247,7 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
             remote_interleave_size=16,
         )
 
-        assert result == [(dcp_rank, [10], [20])]
-        tp_rank, pcp_rank = divmod(dcp_rank, 2)
-        physical_ranks.append(pcp_rank * 4 + tp_rank)
-
-    assert physical_ranks == [0, 4, 1, 5, 2, 6, 3, 7]
+        assert result == [(tp_rank * pcp_size + pcp_rank, [10], [20])]
 
 
 @pytest.mark.parametrize("local_pcp", [False, True])
