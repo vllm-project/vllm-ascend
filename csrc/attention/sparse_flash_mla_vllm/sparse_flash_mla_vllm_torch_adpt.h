@@ -8,12 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 /*!
- * \file sparse_flash_mla_vllm.cpp
+ * \file sparse_flash_mla.cpp
  * \brief
  */
 
-#ifndef SPARSE_FLASH_MLA_VLLM_TORCH_ADPT_H
-#define SPARSE_FLASH_MLA_VLLM_TORCH_ADPT_H
+#ifndef SPARSE_FLASH_MLA_TORCH_ADPT_H
+#define SPARSE_FLASH_MLA_TORCH_ADPT_H
 
 namespace vllm_ascend {
 constexpr int64_t DIM_0 = 0;
@@ -24,7 +24,7 @@ constexpr int64_t DIM_4 = 4;
 
 constexpr int64_t SMLA_METADATA_SIZE = 1024;
 
-inline at::Tensor GetValidSparseFlashMlaVllmTensor(
+inline at::Tensor GetValidSparseFlashMlaTensor(
     const c10::optional<at::Tensor> &tensor, const at::Device &device)
 {
     return tensor.has_value()
@@ -32,11 +32,7 @@ inline at::Tensor GetValidSparseFlashMlaVllmTensor(
                : at::empty({0}, at::TensorOptions().dtype(at::kInt).device(device));
 }
 
-// IMPORTANT: The public Torch name intentionally differs from the CANN name.
-// Keep torch.ops._C_ascend.npu_sparse_flash_mla_metadata unchanged for callers.
-// This adapter calls aclnnSparseFlashMlaMetadataVllm; the Vllm suffix isolates
-// our CANN operator from other implementations. Do not propagate it to the Torch API.
-at::Tensor npu_sparse_flash_mla_metadata_vllm(
+at::Tensor npu_sparse_flash_mla_metadata(
     int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDim, const c10::optional<at::Tensor> &cuSeqlensQ,
     const c10::optional<at::Tensor> &cuSeqlensOriKv, const c10::optional<at::Tensor> &cuSeqlensCmpKv,
     const c10::optional<at::Tensor> &sequsedQ, const c10::optional<at::Tensor> &sequsedOriKv,
@@ -68,15 +64,15 @@ at::Tensor npu_sparse_flash_mla_metadata_vllm(
     }
 
     at::Tensor output = torch::empty({SMLA_METADATA_SIZE}, torch::dtype(torch::kInt32).device(outputDevice));
-    auto cuSeqlensQVal = GetValidSparseFlashMlaVllmTensor(cuSeqlensQ, outputDevice);
-    auto cuSeqlensOriKvVal = GetValidSparseFlashMlaVllmTensor(cuSeqlensOriKv, outputDevice);
-    auto cuSeqlensCmpKvVal = GetValidSparseFlashMlaVllmTensor(cuSeqlensCmpKv, outputDevice);
-    auto sequsedQVal = GetValidSparseFlashMlaVllmTensor(sequsedQ, outputDevice);
-    auto sequsedOriKvVal = GetValidSparseFlashMlaVllmTensor(sequsedOriKv, outputDevice);
-    auto sequsedCmpKvVal = GetValidSparseFlashMlaVllmTensor(sequsedCmpKv, outputDevice);
-    auto cmpResidualKvVal = GetValidSparseFlashMlaVllmTensor(cmpResidualKv, outputDevice);
-    auto oriTopkLengthVal = GetValidSparseFlashMlaVllmTensor(oriTopkLength, outputDevice);
-    auto cmpTopkLengthVal = GetValidSparseFlashMlaVllmTensor(cmpTopkLength, outputDevice);
+    auto cuSeqlensQVal = GetValidSparseFlashMlaTensor(cuSeqlensQ, outputDevice);
+    auto cuSeqlensOriKvVal = GetValidSparseFlashMlaTensor(cuSeqlensOriKv, outputDevice);
+    auto cuSeqlensCmpKvVal = GetValidSparseFlashMlaTensor(cuSeqlensCmpKv, outputDevice);
+    auto sequsedQVal = GetValidSparseFlashMlaTensor(sequsedQ, outputDevice);
+    auto sequsedOriKvVal = GetValidSparseFlashMlaTensor(sequsedOriKv, outputDevice);
+    auto sequsedCmpKvVal = GetValidSparseFlashMlaTensor(sequsedCmpKv, outputDevice);
+    auto cmpResidualKvVal = GetValidSparseFlashMlaTensor(cmpResidualKv, outputDevice);
+    auto oriTopkLengthVal = GetValidSparseFlashMlaTensor(oriTopkLength, outputDevice);
+    auto cmpTopkLengthVal = GetValidSparseFlashMlaTensor(cmpTopkLength, outputDevice);
 
     // convert str
     std::string layoutQStr = std::string(layoutQ);
@@ -123,7 +119,7 @@ int64_t GetKvHeadNum(const c10::optional<at::Tensor> &oriKv, const c10::optional
     return kv.size(DIM_2);
 }
 
-std::tuple<at::Tensor, at::Tensor> MakeSparseFlashMlaVllmOutputs(const at::Tensor &q,
+std::tuple<at::Tensor, at::Tensor> MakeSparseFlashMlaOutputs(const at::Tensor &q,
                                                              const c10::optional<at::Tensor> &oriKv,
                                                              const c10::optional<at::Tensor> &cmpKv,
                                                              const std::string &layoutQStr,
@@ -149,11 +145,7 @@ std::tuple<at::Tensor, at::Tensor> MakeSparseFlashMlaVllmOutputs(const at::Tenso
     return {attenOut, softmaxLse};
 }
 
-// IMPORTANT: The public Torch name intentionally differs from the CANN name.
-// Keep torch.ops._C_ascend.npu_sparse_flash_mla unchanged for callers.
-// This adapter calls aclnnSparseFlashMlaVllm; the Vllm suffix isolates
-// our CANN operator from other implementations. Do not propagate it to the Torch API.
-std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_vllm(
+std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla(
     const at::Tensor &q, const c10::optional<at::Tensor> &oriKv, const c10::optional<at::Tensor> &cmpKv,
     const c10::optional<at::Tensor> &oriSparseIndices, const c10::optional<at::Tensor> &cmpSparseIndices,
     const c10::optional<at::Tensor> &oriBlockTable, const c10::optional<at::Tensor> &cmpBlockTable,
@@ -174,7 +166,7 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_vllm(
 
     // construct the atten_out tensor
     std::tuple<at::Tensor, at::Tensor> sparseFlashMlaAttenOut =
-        MakeSparseFlashMlaVllmOutputs(q, oriKv, cmpKv, layoutQStr, layoutKvStr, returnSoftmaxLse);
+        MakeSparseFlashMlaOutputs(q, oriKv, cmpKv, layoutQStr, layoutKvStr, returnSoftmaxLse);
     at::Tensor attenOut = std::get<0>(sparseFlashMlaAttenOut);
     at::Tensor softmaxLse = std::get<1>(sparseFlashMlaAttenOut);
 
@@ -187,4 +179,4 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_vllm(
 
 } // namespace vllm_ascend
 
-#endif // SPARSE_FLASH_MLA_VLLM_TORCH_ADPT_H
+#endif // SPARSE_FLASH_MLA_TORCH_ADPT_H

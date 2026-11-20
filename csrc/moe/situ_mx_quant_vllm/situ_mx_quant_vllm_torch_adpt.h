@@ -14,16 +14,12 @@
  * limitations under the License.
  */
 
-#ifndef SITU_MX_QUANT_VLLM_TORCH_ADPT_H
-#define SITU_MX_QUANT_VLLM_TORCH_ADPT_H
+#ifndef SITU_MX_QUANT_TORCH_ADPT_H
+#define SITU_MX_QUANT_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
-// IMPORTANT: The public Torch name intentionally differs from the CANN name.
-// Keep torch.ops._C_ascend.situ_mx_quant unchanged for callers.
-// This adapter calls aclnnSituMxQuantVllm; the Vllm suffix isolates
-// our CANN operator from other implementations. Do not propagate it to the Torch API.
-std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm(
+std::tuple<at::Tensor, at::Tensor> situ_mx_quant(
     const at::Tensor& x,
     double beta,
     double linear_beta,
@@ -73,4 +69,4 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_vllm(
 
 }  // namespace vllm_ascend
 
-#endif  // SITU_MX_QUANT_VLLM_TORCH_ADPT_H
+#endif  // SITU_MX_QUANT_TORCH_ADPT_H

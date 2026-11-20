@@ -14,16 +14,12 @@
  * limitations under the License.
  */
 
-#ifndef DEQUANT_SITU_QUANT_VLLM_TORCH_ADPT_H
-#define DEQUANT_SITU_QUANT_VLLM_TORCH_ADPT_H
+#ifndef DEQUANT_SITU_QUANT_TORCH_ADPT_H
+#define DEQUANT_SITU_QUANT_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
-// IMPORTANT: The public Torch name intentionally differs from the CANN name.
-// Keep torch.ops._C_ascend.dequant_situ_quant unchanged for callers.
-// This adapter calls aclnnDequantSituQuantVllm; the Vllm suffix isolates
-// our CANN operator from other implementations. Do not propagate it to the Torch API.
-std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm(
+std::tuple<at::Tensor, at::Tensor> dequant_situ_quant(
     const at::Tensor& x,
     const c10::optional<at::Tensor>& weight_scale,
     const c10::optional<at::Tensor>& activation_scale,
@@ -75,4 +71,4 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_vllm(
 
 } // namespace vllm_ascend
 
-#endif // DEQUANT_SITU_QUANT_VLLM_TORCH_ADPT_H
+#endif // DEQUANT_SITU_QUANT_TORCH_ADPT_H

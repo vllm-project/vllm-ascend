@@ -2898,7 +2898,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                   float linear_beta=25.0, "
         "                   bool activate_left=True, "
         "                   str quant_mode=\"dynamic\") -> (Tensor y, Tensor scale)");
-    ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant_vllm);
+    ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant);
 
     ops.def(
         "situ_mx_quant(Tensor x, "
@@ -2906,7 +2906,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              float linear_beta=0.0, "
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
-    ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant_vllm);
+    ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
 
     ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
@@ -3123,7 +3123,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int next_tokens=9223372036854775807, int attention_mode=2,"
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
-    ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention_vllm);
+    ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
 
     ops.def(
         "npu_generic_block_sparse_attention_metadata(Tensor sparse_block_idx, Tensor sparse_block_count, "
@@ -3199,7 +3199,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool has_ori_kv=True, bool has_cmp_kv=True) -> Tensor"
     );
     ops.impl("npu_sparse_flash_mla_metadata", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_flash_mla_metadata_vllm);
+             &vllm_ascend::npu_sparse_flash_mla_metadata);
 
     ops.def(
         "npu_sparse_flash_mla(Tensor q, *, Tensor? ori_kv=None, Tensor? cmp_kv=None, "
@@ -3214,7 +3214,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool return_softmax_lse=False) -> (Tensor, Tensor)"
     );
     ops.impl("npu_sparse_flash_mla", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_flash_mla_vllm);
+             &vllm_ascend::npu_sparse_flash_mla);
 
     ops.def(
         "npu_kv_quant_sparse_flash_attention_vllm(Tensor query, Tensor key, Tensor value,"
