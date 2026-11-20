@@ -68,6 +68,22 @@ def _pick_head_chunk(num_heads: int, head_dim: int) -> int:
     return h
 
 
+def _allocate_indexer_outputs(
+    index_q: torch.Tensor,
+    index_k: torch.Tensor,
+    index_z: torch.Tensor,
+    q_width: int,
+    kv_width: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Allocate Q/K/Z outputs for real, zero-token and fake paths."""
+    tokens = index_q.shape[0]
+    return (
+        index_q.new_empty((tokens, q_width), dtype=torch.float8_e4m3fn),
+        index_k.new_empty((tokens, kv_width)),
+        index_z.new_empty((tokens, kv_width)),
+    )
+
+
 @triton.jit
 def _norm_rope_tile_npu_chunk(
     x_ptr,
@@ -460,22 +476,14 @@ def _fused_indexer_qkz_norm_rope_impl(
             f"index_k and index_z must have shape ({tokens}, {num_k_heads * head_dim}), "
             f"got {tuple(index_k.shape)} and {tuple(index_z.shape)}"
         )
+    out_q, out_k, out_z = _allocate_indexer_outputs(
+        index_q, index_k, index_z, num_q_heads * head_dim, num_k_heads * head_dim
+    )
     if tokens == 0:
-        return (
-            torch.empty((0, num_q_heads * head_dim), device=index_q.device, dtype=torch.float8_e4m3fn),
-            torch.empty((0, num_k_heads * head_dim), device=index_k.device, dtype=index_k.dtype),
-            torch.empty((0, num_k_heads * head_dim), device=index_z.device, dtype=index_z.dtype),
-        )
+        return out_q, out_k, out_z
     # index_q comes out pre-quantized to e4m3: its only consumer (the fused
     # indexer scoring) wants fp8, so the quantization rides along with the
     # norm+rope store instead of a separate cast at the scoring entry.
-    out_q = torch.empty(
-        (tokens, num_q_heads * head_dim),
-        device=index_q.device,
-        dtype=torch.float8_e4m3fn,
-    )
-    out_k = torch.empty((tokens, num_k_heads * head_dim), device=index_q.device, dtype=index_k.dtype)
-    out_z = torch.empty((tokens, num_k_heads * head_dim), device=index_q.device, dtype=index_z.dtype)
 
     grid = lambda meta: (
         min(
@@ -552,15 +560,9 @@ def _fused_indexer_qkz_norm_rope_fake(
     subtract_mean_q: bool = False,
     subtract_mean_k: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    tokens = index_q.shape[0]
-    q = torch.empty(
-        (tokens, num_q_heads * head_dim),
-        device=index_q.device,
-        dtype=torch.float8_e4m3fn,
+    return _allocate_indexer_outputs(
+        index_q, index_k, index_z, num_q_heads * head_dim, num_k_heads * head_dim
     )
-    k = torch.empty((tokens, num_k_heads * head_dim), device=index_k.device, dtype=index_k.dtype)
-    z = torch.empty((tokens, num_k_heads * head_dim), device=index_z.device, dtype=index_z.dtype)
-    return q, k, z
 
 
 direct_register_custom_op(
