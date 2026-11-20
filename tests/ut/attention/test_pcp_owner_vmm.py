@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 
 from vllm_ascend.attention.context_parallel import pcp_owner_vmm as owner_vmm
 
@@ -79,7 +80,21 @@ def _layer_specs(config):
     return {name: spec for group in config.kv_cache_groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
 
 
-def test_dsv41_owner_allocation_uses_one_slab_for_the_shared_backing(monkeypatch) -> None:
+@pytest.fixture
+def _packed_pages(monkeypatch):
+    """Opt the synthetic oracle config out of the page-contiguity guard.
+
+    ``make_cache_config`` packs long KV and indexer planes into one slot but
+    leaves them non-turboquant, while the production guard only expects that
+    packing when the cache is turboquant. These allocation tests exercise slab
+    wiring, not the contiguity check.
+    """
+    from vllm_ascend.worker.v2 import attn_utils
+
+    monkeypatch.setattr(attn_utils, "uses_turboquant_groups", lambda groups: True)
+
+
+def test_dsv41_owner_allocation_uses_one_slab_for_the_shared_backing(monkeypatch, _packed_pages) -> None:
     from vllm_ascend.worker.v2 import attn_utils
 
     config = _fake_v41_config()
@@ -113,7 +128,7 @@ def test_dsv41_owner_allocation_uses_one_slab_for_the_shared_backing(monkeypatch
         assert value.untyped_storage().data_ptr() == tensor.untyped_storage().data_ptr()
 
 
-def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch) -> None:
+def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch, _packed_pages) -> None:
     from vllm_ascend.worker.v2 import attn_utils
 
     monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_INDEX", "1")
@@ -121,13 +136,14 @@ def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch) -> None:
     specs = _layer_specs(config)
     assert len({descriptor.size for descriptor in config.kv_cache_tensors}) == 2
 
-    raw = attn_utils._allocate_deepseek_v41_shared_cache(
-        config,
-        specs,
-        2 * 1024 * 1024,
-        torch.device("cpu"),
-        owner_allocator=None,
-    )
+    with set_current_vllm_config(SimpleNamespace(kv_transfer_config=None)):
+        raw = attn_utils._allocate_deepseek_v41_shared_cache(
+            config,
+            specs,
+            2 * 1024 * 1024,
+            torch.device("cpu"),
+            owner_allocator=None,
+        )
     index_names = {name for name in raw if ".indexer.k_cache" in name}
     kv_names = set(raw) - index_names
     index_storage = {raw[name].untyped_storage().data_ptr() for name in index_names}
@@ -137,7 +153,7 @@ def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch) -> None:
     assert index_storage.isdisjoint(kv_storage)
 
 
-def test_dsv41_owner_allocation_falls_back_to_replicated(monkeypatch) -> None:
+def test_dsv41_owner_allocation_falls_back_to_replicated(monkeypatch, _packed_pages) -> None:
     from vllm_ascend.worker.v2 import attn_utils
 
     config = _fake_v41_config()
