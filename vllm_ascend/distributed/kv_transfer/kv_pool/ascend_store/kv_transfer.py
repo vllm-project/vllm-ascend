@@ -60,10 +60,7 @@ class KVTransferThread(threading.Thread):
         self.finished_requests: set[str] = set()
         self.failed_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
-        # Replicated events are reported by every TP worker. Sharded events
-        # are reported by exactly one worker because put_step split the blocks.
         self.kv_events: list[BlockStored] = []
-        self.sharded_kv_events: list[BlockStored] = []
         self._fatal_error: BaseException | None = None
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
@@ -386,33 +383,14 @@ class KVTransferThread(threading.Thread):
         exists_states = self.lookup(keys)
         return [index for index, exists in enumerate(exists_states) if not exists]
 
-    def update_kv_event(self, event: list[BlockStored], *, sharded: bool = False) -> None:
-        """Queue CPU KV events.
-
-        ``sharded`` is true when this worker owns a disjoint block subset
-        (``tp_replicas > 1``). Those events are ready for immediate release.
-        Replicated events stay pending until every TP rank reports the same block.
-        """
+    def update_kv_event(self, event: list[BlockStored]) -> None:
         with self.kv_event_lock:
-            if sharded:
-                self.sharded_kv_events.extend(event)
-            else:
-                self.kv_events.extend(event)
-
-    def take_kv_events(self) -> tuple[list[BlockStored], list[BlockStored]]:
-        """Return queued ``(replicated, sharded)`` events and clear them."""
-        with self.kv_event_lock:
-            replicated = self.kv_events.copy()
-            sharded = self.sharded_kv_events.copy()
-            self.kv_events.clear()
-            self.sharded_kv_events.clear()
-        return replicated, sharded
+            self.kv_events.extend(event)
 
     def get_kv_events(self) -> list[BlockStored]:
         with self.kv_event_lock:
-            events = self.kv_events.copy() + self.sharded_kv_events.copy()
+            events = self.kv_events.copy()
             self.kv_events.clear()
-            self.sharded_kv_events.clear()
         return events
 
     @staticmethod
@@ -845,14 +823,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
             stored_ranges,
         )
         if stored_events:
-            self.update_kv_event(stored_events, sharded=self._tp_replicas(group_id) > 1)
+            self.update_kv_event(stored_events)
 
     def _tp_replicas(self, group_id: int) -> int:
-        """TP ranks that emit the same logical blocks for this cache group.
+        """Number of TP replicas used to distribute this group's block writes.
 
         ``put_step`` splits blocks across KV-head replicas. DCP and align-state
         Mamba groups keep every TP rank on the same blocks. KVPP forces
-        ``put_step`` to 1 before events are published, so it stays replicated.
+        ``put_step`` to 1, so each worker keeps the same logical blocks.
         """
         align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
         if self.dcp_size > 1 or align_state_group:
@@ -957,8 +935,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if not keys:
                 continue
-            # missing_indices index this list. Events cover only keys this put stores.
-            selected_ranges = list(zip(starts, ends))
             partitions = getattr(self.token_database, "partitions", None)
             if self.kv_role == "kv_consumer" and partitions is not None and len(partitions) > 1:
                 # Decode consumers split one logical block across Prefill PP
@@ -994,7 +970,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 len(keys),
                 keys[:3],
             )
-            prepared_indices: list[int] = []
+            stored_ranges: list[tuple[int, int]] = []
             prepared_keys: list[str] = []
             prepared_addrs: list[list[int]] = []
             prepared_sizes: list[list[int]] = []
@@ -1020,7 +996,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         keys[index],
                     )
                     continue
-                prepared_indices.append(index)
+                stored_ranges.append((start, ends[index]))
                 prepared_keys.append(keys[index])
                 prepared_addrs.append(addr)
                 prepared_sizes.append(size)
@@ -1059,31 +1035,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
                     return False
                 if not all(put_result):
-                    if len(put_result) % logical_key_count != 0:
-                        logger.error(
-                            "KV store returned %s physical results for %s logical keys",
-                            len(put_result),
-                            logical_key_count,
-                        )
-                        return False
-                    physical_keys_per_logical = len(put_result) // logical_key_count
-                    logical_success = [
-                        all(put_result[start : start + physical_keys_per_logical])
-                        for start in range(0, len(put_result), physical_keys_per_logical)
-                    ]
-                    if len(logical_success) == len(prepared_indices):
-                        stored_ranges = [
-                            selected_ranges[missing_indices[prepared_indices[index]]]
-                            for index, succeeded in enumerate(logical_success)
-                            if succeeded
-                        ]
-                        self._record_cpu_store_events(req_meta, group_id, token_len, stored_ranges)
                     logger.error("KV store backend partially failed to put request %s", req_id)
                     return False
             elif put_result is False:
                 logger.error("KV store backend failed to put request %s", req_id)
                 return False
-            stored_ranges = [selected_ranges[missing_indices[index]] for index in prepared_indices]
             self._record_cpu_store_events(req_meta, group_id, token_len, stored_ranges)
         return True
 

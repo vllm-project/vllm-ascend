@@ -714,7 +714,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(events[0].block_size, 16)
         store.exists.assert_called_once()
 
-    def test_missing_descriptors_publish_only_prepared_successful_grains(self):
+    def test_missing_descriptors_publish_prepared_grains_after_batch_success(self):
         for put_result in (None, [True, False]):
             with self.subTest(put_result=put_result):
                 thread, store = self._make_thread([0, 0, 0], enable_kv_event=True)
@@ -740,7 +740,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 ):
                     thread._handle_request(request)
                 self.assertEqual(len(store.put_calls[0][0]), 2)
-                expected = [b"h1", b"h2"] if put_result is None else [b"h1"]
+                expected = [b"h1", b"h2"] if put_result is None else []
                 self.assertEqual(
                     [e.block_hashes for e in thread.get_kv_events()], [[maybe_convert_block_hash(h)] for h in expected]
                 )
@@ -793,20 +793,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
-        replicated, sharded = t.take_kv_events()
-        self.assertEqual(replicated, [])
+        events = t.get_kv_events()
         self.assertEqual(
-            [event.block_hashes for event in sharded],
+            [event.block_hashes for event in events],
             [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h2")]],
         )
-        self.assertEqual([event.parent_block_hash for event in sharded], [None, maybe_convert_block_hash(b"h1")])
+        self.assertEqual([event.parent_block_hash for event in events], [None, maybe_convert_block_hash(b"h1")])
         self.assertEqual(
-            [event.token_ids for event in sharded],
+            [event.token_ids for event in events],
             [list(range(128)), list(range(256, 384))],
         )
         self.assertEqual(len(store.put_calls), 1)
 
-    def test_cpu_events_stay_replicated_when_every_tp_rank_owns_the_blocks(self):
+    def test_cpu_events_cover_blocks_owned_by_each_tp_rank(self):
         for dcp_size, align_state in ((2, False), (1, True)):
             with self.subTest(dcp_size=dcp_size, align_state=align_state):
                 t, store = self._make_thread([0, 0, 0, 0], enable_kv_event=True, block_size=128)
@@ -824,10 +823,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 t.add_stored_request(req)
                 t.request_queue.put(req)
                 t._handle_request(req)
-                replicated, sharded = t.take_kv_events()
-                self.assertEqual(sharded, [])
+                events = t.get_kv_events()
                 self.assertEqual(
-                    [event.block_hashes for event in replicated],
+                    [event.block_hashes for event in events],
                     [[maybe_convert_block_hash(block_hash)] for block_hash in (b"h0", b"h1", b"h2", b"h3")],
                 )
                 self.assertEqual(len(store.put_calls), 1)
@@ -846,11 +844,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
-        replicated, sharded = t.take_kv_events()
-        self.assertEqual(replicated, [])
-        self.assertEqual(sharded, [])
+        events = t.get_kv_events()
+        self.assertEqual(events, [])
 
-    def test_partial_put_publishes_only_successful_grains(self):
+    def test_partial_put_does_not_publish_events(self):
         t, store = self._make_thread([0, 0], enable_kv_event=True)
         store.put = MagicMock(return_value=[True, False])
         req = ReqMeta(
@@ -865,9 +862,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         with self.assertLogs("vllm", level="ERROR"):
             t._handle_request(req)
-        replicated, sharded = t.take_kv_events()
-        self.assertEqual(sharded, [])
-        self.assertEqual([event.block_hashes for event in replicated], [[maybe_convert_block_hash(b"h0")]])
+        events = t.get_kv_events()
+        self.assertEqual(events, [])
 
     def test_cpu_events_skip_empty_or_partial_grains(self):
         t, _ = self._make_thread(enable_kv_event=True, block_size=128)
