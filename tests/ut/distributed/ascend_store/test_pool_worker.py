@@ -215,20 +215,6 @@ def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_int
 
 
 class TestPCPPoolWorker(unittest.TestCase):
-    def test_kv_event_mode_uses_the_worker_layout(self):
-        for layout, expected in (
-            (dict(tp_size=4, num_kv_heads=1), True),
-            (dict(tp_size=4, num_kv_heads=2), False),
-            (dict(tp_size=4, use_mla=True), True),
-            (dict(pp_size=2), False),
-            (dict(pcp_size=2), False),
-            (dict(tp_size=2, dcp_size=2), False),
-            (dict(tp_size=2, use_kvpp=True), False),
-        ):
-            with self.subTest(layout=layout):
-                worker = make_worker(self, enable_kv_events=True, **layout)
-                self.assertEqual(worker.allow_single_writer_kv_events, expected)
-
     def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
         for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
             with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):

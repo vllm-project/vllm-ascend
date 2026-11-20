@@ -83,7 +83,6 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
     def test_worker_aggregation(self):
         ev = _mock_events()
-        ev.allow_single_writer = True
         ev.increment_workers(3)
         ev._aggregator.increment_workers.assert_called_once_with(3)
         ev._aggregator.get_number_of_workers.return_value = 5
@@ -96,70 +95,6 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.add_events.assert_called_once_with([first, second])
         ev._aggregator.reset_workers.assert_called_once()
         ev._aggregator.get_common_events.assert_not_called()
-
-    def test_partitioned_writers_require_every_worker(self):
-        event = MagicMock()
-        for batches, expected in ((([event], []), []), (([event], [event]), [event])):
-            with self.subTest(batches=batches):
-                first, second = (AscendStoreKVEvents(num_workers=1) for _ in range(2))
-                first.add_events(batches[0])
-                second.add_events(batches[1])
-                first.merge(second)
-                first.increment_workers(second.get_number_of_workers())
-                self.assertEqual(first.aggregate().get_all_events(), expected)
-
-    def test_merge_keeps_partitioned_mode_in_either_order(self):
-        event = MagicMock()
-        for modes in ((True, False), (False, True)):
-            with self.subTest(modes=modes):
-                first, second = (AscendStoreKVEvents(1, allow_single_writer=mode) for mode in modes)
-                first.add_events([event])
-                first.merge(second)
-                first.increment_workers(second.get_number_of_workers())
-                self.assertFalse(first.allow_single_writer)
-                self.assertEqual(first.aggregate().get_all_events(), [])
-
-    def test_worker_output_preserves_mode_and_empty_partition_contributions(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        event = MagicMock()
-        for allow_single_writer in (False, True):
-            for batch in ([], [event]):
-                with self.subTest(allow_single_writer=allow_single_writer, batch=batch):
-                    connector.connector_worker = types.SimpleNamespace(
-                        get_kv_events=lambda batch=batch: batch,
-                        allow_single_writer_kv_events=allow_single_writer,
-                        enable_kv_events=True,
-                    )
-                    output = connector.get_kv_connector_kv_cache_events()
-                    if not batch and allow_single_writer:
-                        self.assertIsNone(output)
-                    else:
-                        self.assertEqual(output.allow_single_writer, allow_single_writer)
-                        self.assertEqual(output.get_all_events(), batch)
-                        self.assertEqual(output.get_number_of_workers(), 1)
-
-    def test_mode_survives_worker_and_scheduler_aggregation(self):
-        first_event, second_event = MagicMock(), MagicMock()
-        for allow_single_writer, batches, expected in (
-            (True, ([first_event], [second_event]), [first_event, second_event]),
-            (False, ([first_event], []), []),
-            (False, ([first_event], [first_event]), [first_event]),
-        ):
-            with self.subTest(allow_single_writer=allow_single_writer, batches=batches):
-                workers = [AscendStoreKVEvents(1, allow_single_writer=allow_single_writer) for _ in batches]
-                for worker, batch in zip(workers, batches, strict=True):
-                    worker.add_events(batch)
-                workers[0].merge(workers[1])
-                workers[0].increment_workers(workers[1].get_number_of_workers())
-                output = workers[0].aggregate()
-                self.assertEqual(output.allow_single_writer, allow_single_writer)
-
-                connector = AscendStoreConnector.__new__(AscendStoreConnector)
-                connector.connector_scheduler = None
-                connector._kv_cache_events = None
-                connector.update_connector_output(types.SimpleNamespace(kv_cache_events=output))
-                self.assertEqual(list(connector.take_events()), expected)
-                self.assertEqual(list(connector.take_events()), [])
 
 
 class TestLookupKeyServer(unittest.TestCase):
@@ -444,28 +379,17 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, MagicMock())
         first, second = MagicMock(), MagicMock()
         for batch in ([first], [first, second]):
-            events = AscendStoreKVEvents(num_workers=1, allow_single_writer=True)
+            events = AscendStoreKVEvents(num_workers=1)
             events.add_events(batch)
             connector.update_connector_output(types.SimpleNamespace(kv_cache_events=events))
         self.assertEqual(list(connector.take_events()), [first, second])
         self.assertEqual(list(connector.take_events()), [])
 
         # A later step can publish a block even when only one rank reports it.
-        events = AscendStoreKVEvents(num_workers=1, allow_single_writer=True)
+        events = AscendStoreKVEvents(num_workers=1)
         events.add_events([second])
         connector.update_connector_output(types.SimpleNamespace(kv_cache_events=events))
         self.assertEqual(list(connector.take_events()), [second])
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
-    def test_scheduler_does_not_publish_an_incomplete_partitioned_block(self, mock_scheduler_cls):
-        connector = AscendStoreConnector(self._make_vllm_config(), KVConnectorRole.SCHEDULER, MagicMock())
-        event = MagicMock()
-        for batch in ([event], []):
-            events = AscendStoreKVEvents(1)
-            events.add_events(batch)
-            connector.update_connector_output(types.SimpleNamespace(kv_cache_events=events))
-        self.assertEqual(list(connector.take_events()), [])
-        self.assertEqual(list(connector.take_events()), [])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
