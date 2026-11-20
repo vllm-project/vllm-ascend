@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -191,6 +192,47 @@ def test_messages_continuation_opens_only_the_last_assistant_message(continuing)
     assert converted.max_completion_tokens == 7
     assert converted.continue_final_message is continuing
     assert converted.add_generation_prompt is not continuing
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_responses_tool_loop_returns_interrupted_output_before_dispatch(interrupted):
+    transfer = {PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED, "remaining_tokens": 7} if interrupted else None
+    context = SimpleNamespace(
+        kv_transfer_params=None,
+        need_builtin_tool_call=lambda: True,
+        call_tool=AsyncMock(side_effect=RuntimeError("tool dispatched")),
+    )
+
+    def append_output(output):
+        context.kv_transfer_params = output.kv_transfer_params
+
+    context.append_output = append_output
+
+    async def generate(*args, **kwargs):
+        yield SimpleNamespace(kv_transfer_params=transfer, metrics=None)
+
+    backend = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=128),
+        engine_client=SimpleNamespace(generate=generate),
+        _log_inputs=Mock(),
+    )
+
+    async def run():
+        outputs = responses_serving.OpenAIServingResponses._generate_with_builtin_tools(
+            backend, "req", {}, None, context
+        )
+        assert await anext(outputs) is context
+        assert context.kv_transfer_params == transfer
+        if interrupted:
+            with pytest.raises(StopAsyncIteration):
+                await anext(outputs)
+            context.call_tool.assert_not_awaited()
+        else:
+            with pytest.raises(RuntimeError, match="tool dispatched"):
+                await anext(outputs)
+            context.call_tool.assert_awaited_once()
+
+    asyncio.run(run())
 
 
 def test_responses_continuation_selects_the_open_assistant_item():

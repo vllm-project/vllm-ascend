@@ -177,7 +177,13 @@ def _text_stream(api, result, *, recompute=None):
             if not recompute:
                 events.extend(
                     [
-                        {"type": "response.output_text.done", **indices, "text": part["text"], "logprobs": []},
+                        {
+                            "type": "response.output_text.done",
+                            **indices,
+                            "text": part["text"],
+                            "logprobs": [],
+                            "backend_marker": result["id"],
+                        },
                         {"type": "response.content_part.done", **indices, "part": part},
                         {"type": "response.output_item.done", "output_index": 0, "item": item},
                     ]
@@ -324,6 +330,8 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
     routes = []
     old_stream = None
     original = native_request(api, streaming)
+    if api == "/responses":
+        original.update(_structured_options(api, "mcp"))
     progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
     partial = _text_result(api, "first-attempt", "第一段 ", 5)
     final = _text_result(api, "winning-attempt", "第二段", 2, input_tokens=59)
@@ -437,6 +445,8 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
     if after_output:
         events = _events(data) if streaming else None
         usage = _assert_resumed_response(api, events, data, "第一段 第二段", ("第一段 ", "第二段"))
+        if streaming and api == "/responses":
+            assert next(e for e in events if e["type"] == "response.output_text.done")["backend_marker"] == final["id"]
         assert usage["output_tokens"] == 2
     elif streaming:
         events = _events(data)
@@ -605,8 +615,11 @@ def test_two_recomputes_preserve_one_request_and_its_budget(installed_runtime, a
     _assert_no_load(scheduler)
 
 
-@pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("case", ["schema", "reasoning", "client-tool"])
+@pytest.mark.parametrize(
+    "api,case",
+    [(api, case) for api in ("/messages", "/responses") for case in ("schema", "reasoning", "client-tool")]
+    + [("/responses", "mcp")],
+)
 @pytest.mark.parametrize("streaming", [False, True])
 def test_recompute_with_structured_output(installed_runtime, api, case, streaming):
     scheduler, prefill, _ = installed_runtime
@@ -690,8 +703,11 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
     _assert_no_load(scheduler)
 
 
-@pytest.mark.parametrize("api", ["/messages", "/responses"])
-@pytest.mark.parametrize("case", ["client-tool", "reasoning"])
+@pytest.mark.parametrize(
+    "api,case",
+    [(api, case) for api in ("/messages", "/responses") for case in ("client-tool", "reasoning")]
+    + [("/responses", "mcp")],
+)
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("text_first", [True, False])
 def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming, text_first):
@@ -968,59 +984,6 @@ def test_disconnect_closes_native_stream_even_if_response_head_is_not_sent(insta
     asyncio.run(run())
     assert stream.closed
     _assert_no_load(scheduler)
-
-
-@pytest.mark.parametrize("recompute", [None, "before_output", "after_output"])
-@pytest.mark.parametrize("streaming", [False, True])
-def test_responses_server_tools_do_not_retry_recompute(installed_runtime, recompute, streaming):
-    scheduler, prefill, _ = installed_runtime
-    runtime = proxy.get_runtime()
-    api = "/responses"
-    options = _structured_options(api, "mcp")
-    native = {**native_request(api, streaming), **options}
-    result, events = _structured_attempt(api, "mcp", "tool-attempt", interrupted=False)
-    if recompute is None:
-        chunks = _frame_chunks(api, events) if streaming else [json.dumps(result).encode()]
-    else:
-        # Zero output in a later generation step can follow a completed tool call.
-        progress = (
-            {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50} if recompute == "after_output" else None
-        )
-        error = _recompute_error(api, progress, streaming=streaming)
-        chunks = _frame_chunks(api, [*_start(api, "interrupted"), error]) if streaming else [json.dumps(error).encode()]
-    status = 200 if streaming or recompute is None else 500
-    tool_calls = []
-    opened = []
-
-    def backend(request):
-        payload = json.loads(request.content)
-        assert payload["tools"] == options["tools"]
-        assert scheduler.request_num == 1
-        tool_calls.append(request.headers["X-Request-Id"])
-        stream = Chunks(chunks)
-        opened.append(stream)
-        return httpx.Response(status, stream=stream)
-
-    async def run():
-        async with httpx.AsyncClient(base_url="http://decoder/v1", transport=httpx.MockTransport(backend)) as client:
-            runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = client
-            response = await proxy.handle_completions_impl(api, _request(native))
-            return response.status_code, await _body(response)
-
-    status_code, raw = asyncio.run(run())
-    assert len(tool_calls) == len(prefill.posts) == 1
-    assert opened[0].closed
-    _assert_no_load(scheduler)
-    if recompute is None:
-        assert status_code == 200
-        response = _events(raw)[-1]["response"] if streaming else json.loads(raw)
-        assert response["output"] == result["output"]
-    else:
-        assert status_code == 502
-        error = json.loads(raw)["error"]
-        assert error["type"] == "server_error"
-        assert error["code"] == "ascend_pd_recompute_tool_replay_blocked"
-        assert "server-side tool call" in error["message"]
 
 
 @pytest.mark.parametrize("streaming", [False, True])

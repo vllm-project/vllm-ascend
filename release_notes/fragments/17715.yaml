@@ -12,5 +12,5 @@ entries:
       example proxy can retry decode recomputation through the load balancer.
       Text replies can continue from visible output with the remaining token
       budget. Interrupted tool-call and thinking fragments are discarded;
-      only visible text is used to continue generation. Responses requests with server-side tools also end
-      with an error on recomputation to avoid repeating a tool call.
+      only visible text is used to continue generation. Retries retain the original tool configuration,
+      so a server-side tool may run again.

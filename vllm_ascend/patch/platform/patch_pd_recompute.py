@@ -79,6 +79,21 @@ def _wrap_generate(
     return generate_with_pd_recompute
 
 
+def _wrap_responses_tool_loop(generate: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(generate)
+    async def generate_until_recompute(self, *args, **kwargs):
+        async with aclosing(generate(self, *args, **kwargs)) as contexts:
+            async for context in contexts:
+                transfer = context.kv_transfer_params or {}
+                interrupted = transfer.get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_INTERRUPTED
+                yield context
+                if interrupted:
+                    # Return partial JSON to the proxy before the backend dispatches the incomplete call.
+                    return
+
+    return generate_until_recompute
+
+
 def _wrap_responses_streaming_error(convert_error: Callable[..., str]) -> Callable[..., str]:
     @wraps(convert_error)
     def convert_with_pd_recompute(self, error):
@@ -126,6 +141,7 @@ def _install(async_llm: type[Any], responses_module: Any) -> None:
     async_llm.generate = _wrap_generate(async_llm.generate)
     responses_module.StreamingResponsesResponse |= ResponseErrorEvent
     serving = responses_module.OpenAIServingResponses
+    serving._generate_with_builtin_tools = _wrap_responses_tool_loop(serving._generate_with_builtin_tools)
     serving._convert_generation_error_to_streaming_response = _wrap_responses_streaming_error(
         serving._convert_generation_error_to_streaming_response
     )
