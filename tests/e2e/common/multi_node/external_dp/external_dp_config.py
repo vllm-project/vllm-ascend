@@ -136,12 +136,6 @@ class ExternalDPConfig:
     server_ready_timeout_seconds: int = 3600
     worker_wait_timeout_seconds: int = 9000
 
-    def __post_init__(self) -> None:
-        for name in ("server_ready_timeout_seconds", "worker_wait_timeout_seconds"):
-            value = getattr(self, name)
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-
     @property
     def is_disaggregated_prefill(self) -> bool:
         return self.routing.type == ROUTING_DISAGGREGATED_PREFILL

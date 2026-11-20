@@ -256,7 +256,7 @@ def test_external_dp() -> None:
             proxy_launcher,
         ):
             if is_master:
-                wait_ranks_ready(ranks, timeout=max(max_wait_seconds, config.server_ready_timeout_seconds))
+                wait_ranks_ready(ranks, timeout=max_wait_seconds)
                 proxy_launcher.wait_ready()
 
                 all_commands = build_all_server_commands(config, ranks)

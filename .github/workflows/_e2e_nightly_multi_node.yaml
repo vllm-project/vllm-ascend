@@ -180,14 +180,12 @@ jobs:
     name: ${{ inputs.config_file_path }}
     # Stream logs enforces the test-run budget (120 min for scheduled runs,
     # 240 min or 1440 min with AOP for PR runs). The job timeout is the overall
-    # GLM-5.3 A3 combined calibration uses 360 min stream / 420 min job.
-    # The budget must also cover checkout, LWS creation, NPU queue wait and log
+    # budget and must also cover checkout, LWS creation, NPU queue wait and log
     # collection/upload, otherwise GitHub cancels the job mid-test.
     timeout-minutes: >-
       ${{ inputs.request_id != '' &&
-          (inputs.aop_multi_enabled && 1560 ||
-           inputs.config_file_path == 'GLM-5.3-W8A8C8-A3-ALL-COMBINED.yaml' && 420 || 360) ||
-          (inputs.config_file_path == 'GLM-5.3-W8A8C8-A3-ALL-COMBINED.yaml' && 420 || inputs.job_timeout) }}
+          (inputs.aop_multi_enabled && 1560 || 360) ||
+          inputs.job_timeout }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -403,7 +401,7 @@ jobs:
 
       - name: Stream logs
         id: stream_logs
-        timeout-minutes: ${{ inputs.request_id != '' && inputs.aop_multi_enabled && 1440 || inputs.config_file_path == 'GLM-5.3-W8A8C8-A3-ALL-COMBINED.yaml' && 360 || inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+        timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || inputs.config_file_path == 'GLM-5.3-W8A8C8-A3-ALL-COMBINED.yaml' && 240 || fromJSON(inputs.testcase_timeout) }}
         run: |
           set -euo pipefail
 
