@@ -24,7 +24,10 @@ exactly which gate failed and where the two legs diverge.
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py`.
 """
 
+import faulthandler
 import os
+import threading
+import time
 from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
@@ -101,6 +104,12 @@ POOL_PERF_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + POOL_LCM_BLOCK_SIZE // 9
 # still produces bitwise-identical H3 outputs.
 POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = max(POOL_PROMPT_TOKENS, POOL_PERF_PROMPT_TOKENS) + 128
+# CI hung past the 2h job cap in the 16K pool leg (Q4). Dump every thread stack
+# every 5 minutes so a stuck job leaves evidence instead of only a cancel.
+POOL_HANG_DUMP_SECONDS = 300
+# Fail before the 2h job cap so the step finishes (exit 1) and its log artifact
+# uploads; a cancelled job leaves no test logs (Q9).
+POOL_WALL_LIMIT_SECONDS = 6000
 
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
@@ -186,7 +195,16 @@ def _run_pool_test(
         print(f"[{case_name}] leg finished use_pool={use_pool}", flush=True)
 
     def _accuracy(runner) -> None:
+        print(
+            f"[{case_name}] accuracy start: prompts={len(PROMPTS_SHORT)} max_tokens={MAX_TOKENS}",
+            flush=True,
+        )
+        accuracy_started = time.perf_counter()
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
+        print(
+            f"[{case_name}] accuracy generate done in {time.perf_counter() - accuracy_started:.1f}s",
+            flush=True,
+        )
         metrics = runner.model.get_metrics()
         for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
             print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
@@ -235,27 +253,53 @@ def _run_pool_test(
             tag=f"dsv4-cp-{model.split('/')[-1]}",
         )
 
-    run_pool_ab(
-        case_name=case_name,
-        build_leg=_leg,
-        accuracy=_accuracy,
-        hit=_hit,
-        prompt_ids=prompt_ids,
-        perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
-        # Design doc sec.2.4 (acceptance class): both legs pass their own
-        # per-position acceptance assertions and the A/B per-position delta
-        # stays inside the same tolerance.
-        acceptance_tolerance=ACCEPTANCE_RATE_TOLERANCE,
-        # Perf was flaky: collect 10 timed samples, drop the highest 2 and the
-        # lowest 2, and gate on the middle 6 (same policy for both A and B).
-        perf_sample_count=10,
-        perf_trim_count=2,
-        # Full gates: cross-leg token identity and the A/B perf comparison
-        # (helper limits: TTFT x1.08, throughput x0.92) fail the test;
-        # run_pool_ab still dumps the A/B token diff for diagnosis.
-        token_identity=True,
-        perf_gate=True,
+    print(
+        f"[{case_name}] pool watch start: model={model} max_model_len={POOL_MAX_MODEL_LEN} "
+        f"max_num_batched_tokens={POOL_BATCHED_TOKENS} hit_prompt_tokens={len(prompt_ids)} "
+        f"perf_prompt_tokens={POOL_PERF_PROMPT_TOKENS} stack_dump_every={POOL_HANG_DUMP_SECONDS}s "
+        f"wall_limit={POOL_WALL_LIMIT_SECONDS}s",
+        flush=True,
     )
+
+    def _wall_limit_exceeded() -> None:
+        # A hard stop before the job cap: the stack below is the only evidence a
+        # hung 16K leg produces today.
+        print(
+            f"[{case_name}] wall-clock limit {POOL_WALL_LIMIT_SECONDS}s exceeded; dumping stacks",
+            flush=True,
+        )
+        faulthandler.dump_traceback()
+        os._exit(1)
+
+    watchdog = threading.Timer(POOL_WALL_LIMIT_SECONDS, _wall_limit_exceeded)
+    watchdog.daemon = True
+    watchdog.start()
+    faulthandler.dump_traceback_later(POOL_HANG_DUMP_SECONDS, repeat=True)
+    try:
+        run_pool_ab(
+            case_name=case_name,
+            build_leg=_leg,
+            accuracy=_accuracy,
+            hit=_hit,
+            prompt_ids=prompt_ids,
+            perf_prompt_tokens=POOL_PERF_PROMPT_TOKENS,
+            # Design doc sec.2.4 (acceptance class): both legs pass their own
+            # per-position acceptance assertions and the A/B per-position delta
+            # stays inside the same tolerance.
+            acceptance_tolerance=ACCEPTANCE_RATE_TOLERANCE,
+            # Perf was flaky: collect 10 timed samples, drop the highest 2 and the
+            # lowest 2, and gate on the middle 6 (same policy for both A and B).
+            perf_sample_count=10,
+            perf_trim_count=2,
+            # Full gates: cross-leg token identity and the A/B perf comparison
+            # (helper limits: TTFT x1.08, throughput x0.92) fail the test;
+            # run_pool_ab still dumps the A/B token diff for diagnosis.
+            token_identity=True,
+            perf_gate=True,
+        )
+    finally:
+        watchdog.cancel()
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.mark.e2e_model(MTP_MODEL)

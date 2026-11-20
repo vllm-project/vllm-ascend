@@ -296,19 +296,42 @@ def run_pool_hit_sequence(
             tag=round_full_tag,
         )
 
+    round_timer = time.perf_counter()
+
+    def _round_start(round_tag: str, ids: list[int]) -> None:
+        nonlocal round_timer
+        round_timer = time.perf_counter()
+        print(
+            f"[kv_pool] {tag} {round_tag} start: prompt_tokens={len(ids)} "
+            f"replicas={replicas} max_tokens={max_tokens}",
+            flush=True,
+        )
+
+    def _round_done(round_tag: str) -> None:
+        print(
+            f"[kv_pool] {tag} {round_tag} done in {(time.perf_counter() - round_timer) * 1000:.0f} ms",
+            flush=True,
+        )
+
     # R1: cold start writes the pool; writes are visible when generate() returns.
+    _round_start("R1", prompt_a)
     cold, cold_texts = _generate(prompt_a)
+    _round_done("R1")
     snap1 = snapshot_metrics(runner)
 
     # R2: first hit
+    _round_start("R2", prompt_a)
     hit_1, hit_1_texts = _generate(prompt_a)
+    _round_done("R2")
     snap2 = snapshot_metrics(runner)
     ratio_r2 = _assert_hit(snap1, snap2, "R2")
     if check_output:
         _assert_outputs(cold, hit_1, "R2")
 
     # R3: repeated hit must not decay
+    _round_start("R3", prompt_a)
     hit_2, hit_2_texts = _generate(prompt_a)
+    _round_done("R3")
     snap3 = snapshot_metrics(runner)
     ratio_r3 = _assert_hit(snap2, snap3, "R3")
     if check_output:
@@ -322,7 +345,9 @@ def run_pool_hit_sequence(
             )
 
     # R4: disjoint prompt must not hit.
+    _round_start("R4", prompt_b)
     _generate(prompt_b)
+    _round_done("R4")
     snap4 = snapshot_metrics(runner)
     assert_no_hit(snap3, snap4, tag=f"{tag} R4")
 
@@ -501,7 +526,8 @@ def _collect_perf(
         raise ValueError("trim_count must be non-negative and leave at least one kept sample")
     if stability_policy not in {"fail", "record"}:
         raise ValueError("stability_policy must be 'fail' or 'record'")
-    for index in range(warmup_count + drift_count + sample_count):
+    total_calls = warmup_count + drift_count + sample_count
+    for index in range(total_calls):
         if index == warmup_count:
             # Let scheduling and in-flight async writes settle before timing.
             time.sleep(AB_PERF_SETTLE_SECONDS)
@@ -509,9 +535,21 @@ def _collect_perf(
             # DPVllmRunner does not expose `.model`.
             with contextlib.suppress(RuntimeError):
                 runner.model.reset_prefix_cache(reset_connector=False)
+        if index < warmup_count:
+            phase = "warmup"
+        elif index < warmup_count + drift_count:
+            phase = "drift"
+        else:
+            phase = "timed"
         begin = time.perf_counter()
         runner.generate_greedy([prompt] * concurrency, 1)
         elapsed = (time.perf_counter() - begin) * 1000.0
+        # Progress line per call: the next CI hang must show which call stalled.
+        print(
+            f"[kv_pool_perf] call {index + 1}/{total_calls} phase={phase} "
+            f"prompt_tokens={prompt_tokens} concurrency={concurrency} elapsed_ms={elapsed:.1f}",
+            flush=True,
+        )
         if index >= warmup_count:
             if index == warmup_count + drift_count:
                 # Throughput wall-clock starts at the first kept sample.
@@ -528,10 +566,13 @@ def _collect_perf(
     mean = sum(ttft) / len(ttft) if ttft else 0.0
     minimum = min(ttft) if ttft else 0.0
     maximum = max(ttft) if ttft else 0.0
-    # Design doc sec.2.5: (max-min)/mean > 5% over the sampled window means
-    # the leg is not usable for the gate, even when trimming is requested.
-    window_mean = sum(kept_all) / len(kept_all) if kept_all else 0.0
-    stability_ratio = (max(kept_all) - min(kept_all)) / window_mean if window_mean else 0.0
+    # Design doc sec.2.5: (max-min)/mean > 5% means the leg is not usable for the
+    # gate. Trimmed outliers are already excluded from the stats, so the window
+    # must match the gated samples; otherwise trim_count cannot damp one-off
+    # scheduler spikes (dsv4_dp2: gate window 1.09%, untrimmed 5.56%).
+    stability_ratio = (maximum - minimum) / mean if mean else 0.0
+    raw_mean = sum(kept_all) / len(kept_all) if kept_all else 0.0
+    raw_stability_ratio = (max(kept_all) - min(kept_all)) / raw_mean if raw_mean else 0.0
     drift = ", ".join(f"{value:.1f}" for value in timed[:drift_count])
     kept_samples = ", ".join(f"{value:.1f}" for value in kept_all)
     samples = ", ".join(f"{value:.1f}" for value in ttft)
@@ -539,19 +580,37 @@ def _collect_perf(
         f"[kv_pool_perf] timed={len(timed)} kept={len(kept_all)} trim={trim_count} gate={len(ttft)} "
         f"concurrency={concurrency} "
         f"mean_ms={mean:.2f} min_ms={minimum:.2f} max_ms={maximum:.2f} "
-        f"range_ratio={stability_ratio:.2%} drift_ms=[{drift}] kept_ms=[{kept_samples}] "
-        f"gate_ms=[{samples}]",
+        f"range_ratio={stability_ratio:.2%} raw_range_ratio={raw_stability_ratio:.2%} "
+        f"drift_ms=[{drift}] kept_ms=[{kept_samples}] gate_ms=[{samples}]",
         flush=True,
     )
     if mean and stability_ratio > AB_STABILITY_LIMIT:
         message = (
             f"perf samples unstable: (max-min)/mean={stability_ratio:.2%} "
-            f"> {AB_STABILITY_LIMIT:.0%}; samples_ms=[{samples}]"
+            f"> {AB_STABILITY_LIMIT:.0%}; gate_ms=[{samples}] kept_ms=[{kept_samples}] "
+            f"drift_ms=[{drift}]"
         )
         if stability_policy == "fail":
             raise PerfUnstable(message)
         print(f"[kv_pool_perf] {message}; recording without failure", flush=True)
     return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall, mean, minimum, maximum
+
+
+def _first_diff_summary(a_outputs: Sequence[Sequence[int]], b_outputs: Sequence[Sequence[int]]) -> str:
+    """Compact A/B divergence summary for one-line failure messages."""
+    parts: list[str] = [f"outputs={len(a_outputs)}/{len(b_outputs)}"]
+    for index, (a_ids, b_ids) in enumerate(zip(a_outputs, b_outputs)):
+        if list(a_ids) == list(b_ids):
+            continue
+        first_diff = next(
+            (i for i, (x, y) in enumerate(zip(a_ids, b_ids)) if x != y),
+            min(len(a_ids), len(b_ids)),
+        )
+        num_diff = sum(1 for x, y in zip(a_ids, b_ids) if x != y) + abs(len(a_ids) - len(b_ids))
+        parts.append(
+            f"output[{index}] len={len(a_ids)}/{len(b_ids)} num_diff={num_diff} first_diff={first_diff}"
+        )
+    return ", ".join(parts)
 
 
 def _dump_ab_token_diff(a_outputs: list[list[int]], b_outputs: list[list[int]], case_name: str) -> None:
@@ -597,9 +656,24 @@ def _control_hit_outputs(
     diff, which involves no pool recovery on either side.
     """
     prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    print(
+        f"[kv_pool_control] B cold start: prompt_tokens={len(prompt)} max_tokens={max_tokens}",
+        flush=True,
+    )
+    cold_started = time.perf_counter()
     cold_outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    print(
+        f"[kv_pool_control] B cold start done in {(time.perf_counter() - cold_started) * 1000:.0f} ms",
+        flush=True,
+    )
     before = _prefix_cache_hits(runner)
+    print("[kv_pool_control] B local-hit round start", flush=True)
+    hit_started = time.perf_counter()
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
+    print(
+        f"[kv_pool_control] B local-hit round done in {(time.perf_counter() - hit_started) * 1000:.0f} ms",
+        flush=True,
+    )
     after = _prefix_cache_hits(runner)
     assert after > before, (
         f"CONTROL_DEFECT: B leg got no local prefix-cache hit (prefix_cache_hits Δ{after - before:.0f})"
@@ -661,6 +735,11 @@ def run_pool_ab(
     def _run(use_pool: bool, leg: str) -> tuple[LegResult | None, str | None, bool, bool]:
         """Return (result, error, original-assertion failed, env failed)."""
         accuracy_ok = False
+        leg_started = time.perf_counter()
+        print(
+            f"[kv_pool_ab] {case_name} leg={leg} start (use_pool={int(use_pool)})",
+            flush=True,
+        )
         try:
             with build_leg(use_pool, f"{case_name}_{leg}") as runner:
                 acceptance = accuracy(runner) or []
@@ -707,6 +786,11 @@ def run_pool_ab(
             # Engine/store failures are ENV_BLOCKED, not pool assertions; only
             # AssertionError above is classified as a defect.
             return None, f"{type(exc).__name__}: {exc}", False, True
+        finally:
+            print(
+                f"[kv_pool_ab] {case_name} leg={leg} end in {time.perf_counter() - leg_started:.1f}s",
+                flush=True,
+            )
 
     b, b_err, b_fatal, b_env = _run(False, "b")
     if b_err is None:
@@ -786,10 +870,39 @@ def run_pool_ab(
     report.emit()
     a_msg = a_err or ("ok" if a is not None else "skipped")
     b_msg = b_err or ("ok" if b is not None else "skipped")
+    # CI keeps only the last line of a failed step, so the verdict itself must
+    # name the failing gate with its numbers instead of a bare "A/B comparison
+    # failed".
+    reasons: list[str] = []
+    if a_err:
+        reasons.append(f"A={a_err}")
+    if b_err:
+        reasons.append(f"B={b_err}")
+    if token_diff:
+        reasons.append(f"token identity mismatch [{_first_diff_summary(a_result.outputs, b_result.outputs)}]")
+    if perf_bad:
+        def _ratio(numerator: float, denominator: float) -> float:
+            return numerator / denominator if denominator else 0.0
+
+        reasons.append(
+            f"perf A/B p50={a_result.ttft_p50:.2f}/{b_result.ttft_p50:.2f}ms "
+            f"(x{_ratio(a_result.ttft_p50, b_result.ttft_p50):.3f}, limit x{AB_TTFT_LIMIT}) "
+            f"p95={a_result.ttft_p95:.2f}/{b_result.ttft_p95:.2f}ms "
+            f"(x{_ratio(a_result.ttft_p95, b_result.ttft_p95):.3f}) "
+            f"throughput={a_result.throughput:.1f}/{b_result.throughput:.1f} "
+            f"(x{_ratio(a_result.throughput, b_result.throughput):.3f}, limit x{AB_THROUGHPUT_LIMIT})"
+        )
+    if acceptance_diff:
+        reasons.append(
+            f"acceptance A={[round(rate, 4) for rate in a_result.acceptance]} "
+            f"B={[round(rate, 4) for rate in b_result.acceptance]} tol={acceptance_tolerance}"
+        )
+    detail = "; ".join(reasons) if reasons else "no leg error recorded"
+    print(f"[kv_pool_ab] case={case_name} verdict={label} detail=[{detail}]", flush=True)
     if a_env or b_env or (incomplete and label == "ENV_BLOCKED"):
         raise AssertionError(f"[{case_name}] ENV_BLOCKED: A={a_msg}; B={b_msg}")
     if a_fatal or b_fatal:
-        raise AssertionError(f"[{case_name}] {label}: original assertions failed (A={a_msg}; B={b_msg})")
+        raise AssertionError(f"[{case_name}] {label}: original assertions failed; {detail}")
     if gate and label != "PASS":
-        raise AssertionError(f"[{case_name}] {label}: A/B comparison failed")
+        raise AssertionError(f"[{case_name}] {label}: A/B comparison failed; {detail}")
     return report

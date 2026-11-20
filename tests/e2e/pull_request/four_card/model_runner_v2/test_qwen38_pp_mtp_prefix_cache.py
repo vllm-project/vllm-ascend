@@ -253,4 +253,11 @@ def test_qwen38_pp_mtp_prefix_cache():
         # P50/P95 (x1.08) and input throughput (x0.92).
         perf_sample_count=10,
         perf_trim_count=2,
+        # Qwen PP2xTP2 MTP warms up slowly: with the default 6 warmups the
+        # gated samples still drifted upward (167.0 -> 177.6 ms, range 6.1%)
+        # and tripped the 5% stability gate before the A leg could run. The
+        # warm-up and drift heads are discarded, so extending them only costs
+        # a few extra prefills and keeps the gated window in steady state.
+        perf_warmup_count=12,
+        perf_drift_count=6,
     )
