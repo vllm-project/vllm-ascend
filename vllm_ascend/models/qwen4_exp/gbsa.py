@@ -67,7 +67,7 @@ def qsa_gbsa_attention(
         mask_mode=1,
         quant_mode=0,
         softmax_precision=0,
-        residual_block_mode=0,
+        residual_block_mode=1,
         is_consistent_topk=False,
     )
     metadata = prepared_metadata
