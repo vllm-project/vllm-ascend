@@ -16,6 +16,12 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_
 
 VOCAB_SIZE = 4096
 
+
+def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
+    """Convert unconditional acceptance rates to conditional rates, c_i = p_i / p_{i-1}."""
+    return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
+
+
 pytest.importorskip("triton")
 if not (hasattr(torch, "npu") and torch.npu.is_available()):
     pytest.skip("NPU required for MRV2 rejection sampler tests", allow_module_level=True)
