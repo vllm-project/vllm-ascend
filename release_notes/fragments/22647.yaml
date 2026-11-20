@@ -1,0 +1,6 @@
+pr: 22647
+entries:
+  - category: feature
+    text: >-
+      Kimi K3.1 uses CANN QSFA V2 on Ascend 950 for compatible FP8 KV-cache
+      configurations when the CANN operator is available.
