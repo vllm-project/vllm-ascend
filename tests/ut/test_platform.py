@@ -1043,8 +1043,7 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
 
-    @patch("vllm_ascend.platform.vllm_version_is", return_value=False)
-    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self, _mock_version):
+    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self):
         for name, value in (
             ("prefill_cudagraph_capture_token_sizes", [1, 3, 7]),
             ("max_prefill_cudagraph_capture_tokens", 7),
