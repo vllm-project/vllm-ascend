@@ -219,7 +219,9 @@ _metrics_utils_mod.create_metric_per_engine = lambda metric, labelvalues: {
 }
 
 _events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
-_events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
+_events_mod.KVCacheEvent = type(  # type: ignore[attr-defined]
+    "KVCacheEvent", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}
+)
 _events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})  # type: ignore[attr-defined]
 
 

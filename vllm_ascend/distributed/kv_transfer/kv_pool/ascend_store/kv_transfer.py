@@ -4,11 +4,11 @@ import ctypes
 import queue
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cpu_events import CPUBlockStoreReport
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -60,7 +61,7 @@ class KVTransferThread(threading.Thread):
         self.finished_requests: set[str] = set()
         self.failed_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
-        self.kv_events: list[BlockStored] = []
+        self.kv_events: list[KVCacheEvent] = []
         self._fatal_error: BaseException | None = None
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
@@ -383,11 +384,11 @@ class KVTransferThread(threading.Thread):
         exists_states = self.lookup(keys)
         return [index for index, exists in enumerate(exists_states) if not exists]
 
-    def update_kv_event(self, event: list[BlockStored]) -> None:
+    def update_kv_event(self, event: Sequence[KVCacheEvent]) -> None:
         with self.kv_event_lock:
             self.kv_events.extend(event)
 
-    def get_kv_events(self) -> list[BlockStored]:
+    def get_kv_events(self) -> list[KVCacheEvent]:
         with self.kv_event_lock:
             events = self.kv_events.copy()
             self.kv_events.clear()
@@ -466,6 +467,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
+        required_store_keys: Callable[[str, int], frozenset[str]] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -481,6 +483,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_uses_align_state = group_uses_align_state or []
         self.sharded_mamba_group_ids = sharded_mamba_group_ids or set()
         self.enable_kv_event = enable_kv_event
+        self.required_store_keys = required_store_keys
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
@@ -760,6 +763,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len: int,
         stored_ranges: list[tuple[int, int]],
     ) -> list[BlockStored]:
+        return list(self._build_cpu_stored_events_by_start(req_meta, group_id, token_len, stored_ranges).values())
+
+    def _build_cpu_stored_events_by_start(
+        self,
+        req_meta: ReqMeta,
+        group_id: int,
+        token_len: int,
+        stored_ranges: list[tuple[int, int]],
+    ) -> dict[int, BlockStored]:
         """Build one event per complete grain covered by these stored ranges.
 
         A grain is included only when one range covers it fully, so a TP shard
@@ -769,7 +781,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         """
         group_block_size = self._get_block_size(group_id)
         if group_block_size <= 0 or token_len < group_block_size:
-            return []
+            return {}
         hash_block_size = getattr(self.token_database, "hash_block_size", group_block_size)
         try:
             grouped_hashes = get_block_hashes(
@@ -778,7 +790,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 hash_block_size,
             )
         except AssertionError:
-            return []
+            return {}
         all_hashes = [maybe_convert_block_hash(block_hash) for block_hash in grouped_hashes]
         num_blocks = min(token_len // group_block_size, len(all_hashes))
         stored_blocks = {
@@ -789,7 +801,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 min(end // group_block_size, num_blocks),
             )
         }
-        stored_events: list[BlockStored] = []
+        stored_events: dict[int, BlockStored] = {}
         for block_idx in sorted(stored_blocks):
             start = block_idx * group_block_size
             end = start + group_block_size
@@ -801,8 +813,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 lora_id=None,
                 medium="cpu",
                 lora_name=None,
+                group_idx=group_id,
             )
-            stored_events.append(stored_event)
+            stored_events[start] = stored_event
             logger.debug("Built kv cache event '%s'", stored_event)
         return stored_events
 
@@ -812,18 +825,53 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_id: int,
         token_len: int,
         stored_ranges: list[tuple[int, int]],
+        stored_keys: dict[int, tuple[str, frozenset[str]]] | None = None,
+        newly_stored: bool = True,
     ) -> None:
         """Queue events for the complete grains in these stored ranges."""
         if not self.enable_kv_event or not stored_ranges:
             return
-        stored_events = self._build_cpu_stored_events(
+        stored_events = self._build_cpu_stored_events_by_start(
             req_meta,
             group_id,
             token_len,
             stored_ranges,
         )
-        if stored_events:
-            self.update_kv_event(stored_events)
+        if self.required_store_keys is None:
+            if newly_stored:
+                self.update_kv_event(list(stored_events.values()))
+            return
+        for start, event in stored_events.items():
+            if stored_keys is not None and start in stored_keys:
+                key, completed_keys = stored_keys[start]
+                self.record_cpu_store_event(req_meta, group_id, event, key, completed_keys, newly_stored)
+
+    def record_cpu_store_event(
+        self,
+        req_meta: ReqMeta,
+        group_id: int,
+        event: BlockStored,
+        key: str,
+        completed_keys: frozenset[str],
+        newly_stored: bool = True,
+    ) -> None:
+        if not completed_keys:
+            return
+        if self.required_store_keys is None:
+            if newly_stored:
+                self.update_kv_event([event])
+            return
+        self.update_kv_event(
+            [
+                CPUBlockStoreReport(
+                    event=event,
+                    request_id=req_meta.req_id,
+                    required_keys=self.required_store_keys(key, group_id),
+                    completed_keys=completed_keys,
+                    newly_stored=newly_stored,
+                )
+            ]
+        )
 
     def _tp_replicas(self, group_id: int) -> int:
         """Number of TP replicas used to distribute this group's block writes.
@@ -946,6 +994,25 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
             else:
                 missing_indices = self._get_missing_indices(keys, require_exists_check=self.enable_kv_event)
+            if self.enable_kv_event and self.required_store_keys is not None:
+                missing_set = set(missing_indices)
+                existing = [index for index in range(len(keys)) if index not in missing_set]
+                existing_keys: dict[int, tuple[str, frozenset[str]]] = {}
+                for index in existing:
+                    physical_keys = [keys[index]]
+                    if self.kv_role == "kv_consumer":
+                        physical_keys, _, _ = self._decode_adaptor_prefill_pp(
+                            physical_keys, [[]], [[]], kv_cache_group_id=group_id
+                        )
+                    existing_keys[starts[index]] = (keys[index], frozenset(physical_keys))
+                self._record_cpu_store_events(
+                    req_meta,
+                    group_id,
+                    token_len,
+                    [(starts[index], ends[index]) for index in existing],
+                    existing_keys,
+                    newly_stored=False,
+                )
             if not missing_indices:
                 continue
             starts = [starts[index] for index in missing_indices]
@@ -1030,22 +1097,36 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
                     return False
-                if not all(put_result):
-                    # PP expansion keeps each logical key's physical keys
-                    # contiguous. Publish only fully stored logical blocks.
-                    physical_keys_per_logical = len(put_result) // logical_key_count
-                    successful_ranges = [
-                        stored_range
-                        for index, stored_range in enumerate(stored_ranges)
-                        if all(put_result[index * physical_keys_per_logical : (index + 1) * physical_keys_per_logical])
-                    ]
-                    self._record_cpu_store_events(req_meta, group_id, token_len, successful_ranges)
-                    logger.error("KV store backend partially failed to put request %s", req_id)
-                    return False
+                results = put_result
             elif put_result is False:
                 logger.error("KV store backend failed to put request %s", req_id)
                 return False
-            self._record_cpu_store_events(req_meta, group_id, token_len, stored_ranges)
+            else:
+                results = [True] * len(keys) if self.enable_kv_event else []
+            if self.enable_kv_event:
+                # PP expands each logical key into contiguous physical keys.
+                physical_keys_per_logical = len(keys) // logical_key_count
+                completed_keys: dict[int, tuple[str, frozenset[str]]] = {}
+                successful_ranges = []
+                for index, stored_range in enumerate(stored_ranges):
+                    begin = index * physical_keys_per_logical
+                    end = begin + physical_keys_per_logical
+                    completed_keys[stored_range[0]] = (
+                        prepared_keys[index],
+                        frozenset(key for key, succeeded in zip(keys[begin:end], results[begin:end]) if succeeded),
+                    )
+                    if all(results[begin:end]):
+                        successful_ranges.append(stored_range)
+                self._record_cpu_store_events(
+                    req_meta,
+                    group_id,
+                    token_len,
+                    stored_ranges if self.required_store_keys is not None else successful_ranges,
+                    completed_keys,
+                )
+            if not all(results):
+                logger.error("KV store backend partially failed to put request %s", req_id)
+                return False
         return True
 
 

@@ -82,6 +82,26 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
+### Blockwise CPU KV events
+
+With KV cache events enabled and `use_layerwise=false`, AscendStore publishes a
+CPU `BlockStored` event only after all physical keys for that cache-group block
+have been confirmed stored. A writer that saves a complete block can publish
+independently; TP, DCP, PP and KVPP partitions must collectively complete the
+block. Existing keys can complete a partially new block, while lookup hits alone
+do not generate new store publications. Events identify the cache group with
+`group_idx`.
+
+Completion reports can arrive in different scheduling steps. Duplicate reports
+from replicas do not count as additional partitions. Tracking is scoped to a
+request and the block's exact physical keys, and cache reset clears it. To bound
+scheduler memory, the tracker retains at most 4,096 block records for 60 seconds
+from the first report, including recent publications used for deduplication.
+Expired or capacity-evicted incomplete records are discarded without publishing;
+very late reports may therefore miss a notification. This is an event stream,
+not an authoritative inventory: consumers must still handle cache eviction and
+load misses. A different request can report a block that has been stored again.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
