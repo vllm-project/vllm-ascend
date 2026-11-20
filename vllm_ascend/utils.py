@@ -1180,14 +1180,14 @@ def get_mrv2_padding_plan(
     )
 
     finegrained_config = finegrained_tp_config or additional_config.get("finegrained_tp_config") or {}
-    get_finegrained_size = (
-        finegrained_config.get
-        if isinstance(finegrained_config, dict)
-        else lambda name, default=1: getattr(finegrained_config, name, default)
-    )
+    if isinstance(finegrained_config, dict):
+        oproj_tp_size = finegrained_config.get("oproj_tensor_parallel_size", 1)
+        mlp_tp_size = finegrained_config.get("mlp_tensor_parallel_size", 1)
+    else:
+        oproj_tp_size = getattr(finegrained_config, "oproj_tensor_parallel_size", 1)
+        mlp_tp_size = getattr(finegrained_config, "mlp_tensor_parallel_size", 1)
     requires_uniform_token_rows = getattr(parallel_config, "data_parallel_size", 1) > 1 and (
-        get_finegrained_size("oproj_tensor_parallel_size", 1) > 1
-        or get_finegrained_size("mlp_tensor_parallel_size", 1) > 1
+        oproj_tp_size > 1 or mlp_tp_size > 1
     )
     return MRV2PaddingPlan(
         token_alignment=tp_size if tp_size > 1 and needs_alignment else 1,
