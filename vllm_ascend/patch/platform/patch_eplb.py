@@ -915,14 +915,19 @@ def _patch_async_move_to_workspace() -> None:
             _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
         return
 
-    if getattr(base_state._move_to_workspace, _PATCH_MARKER, False):
+    original_move = base_state._move_to_workspace
+    if getattr(original_move, _PATCH_MARKER, False):
         return
 
-    class AscendEplbModelState(base_state):
-        # Ascend attaches routing and transfer bookkeeping to each model.
-        _move_to_workspace = _wrap_move_to_workspace(base_state._move_to_workspace, model_state_parameter="self")
-
-    _eplb_state.EplbState.model_state_cls = AscendEplbModelState
+    # Preserve the model-state base selected by the installed vLLM.
+    _eplb_state.EplbState.model_state_cls = type(
+        "AscendEplbModelState",
+        (base_state,),
+        {
+            "__module__": __name__,
+            "_move_to_workspace": _wrap_move_to_workspace(original_move, model_state_parameter="self"),
+        },
+    )
 
 
 if not hasattr(Platform, "check_and_update_eplb_config"):
