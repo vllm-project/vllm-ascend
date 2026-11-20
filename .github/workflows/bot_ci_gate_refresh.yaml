@@ -108,13 +108,15 @@ jobs:
           python3 .github/workflows/scripts/refresh_ci_gate.py
 
       - name: Package gate result
-        # Only this job's own failures (no CI run yet, rerun API error) need
-        # a PR comment; a successful retrigger hands the verdict back to the
-        # re-run pull_request run, whose own packaging step feeds the comment
-        # bot.
-        if: ${{ failure() }}
+        # Only this job's own outcomes that the re-run pull_request run will
+        # not relay (rerun API error, or the expected "no CI run yet" notice
+        # from a no-op exit 0) need a PR comment; a successful retrigger
+        # hands the verdict back to the re-run pull_request run, whose own
+        # packaging step feeds the comment bot.
+        if: ${{ !cancelled() && (failure() || steps.rerun.outputs.needs_comment == 'true') }}
         env:
           CHECK_OUTCOME: ${{ steps.rerun.outcome }}
+          GATE_VERDICT: ${{ steps.rerun.outputs.gate_verdict }}
         run: |
           python3 - <<'PY'
           import json
@@ -129,8 +131,15 @@ jobs:
                   reason = f.read().strip()
           except OSError:
               reason = ""
+          # "notice" marks the expected no-CI-run-yet flow: expected flow,
+          # not a malfunction, so the run stays green and only the comment
+          # carries the fix. Everything else keeps the real job outcome.
+          if os.environ["GATE_VERDICT"] == "no-ci":
+              conclusion = "notice"
+          else:
+              conclusion = os.environ["CHECK_OUTCOME"]
           result = {
-              "conclusion": os.environ["CHECK_OUTCOME"],
+              "conclusion": conclusion,
               "reason": reason,
               "pr": int(os.environ["PR_NUMBER"]),
               "head_sha": os.environ["HEAD_SHA"],
@@ -142,7 +151,7 @@ jobs:
       - name: Upload gate result for the comment bot
         # Same artifact contract as the ci-gate job: bot_ci_gate_comment.yml
         # (workflow_run, base repo context) posts it to the PR.
-        if: ${{ failure() }}
+        if: ${{ !cancelled() && (failure() || steps.rerun.outputs.needs_comment == 'true') }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-gate-result-${{ github.run_id }}
