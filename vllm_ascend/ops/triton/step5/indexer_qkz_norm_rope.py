@@ -24,7 +24,7 @@ Numerical contract:
 - index_q is stored as float8_e4m3fn: its only consumer (the fused indexer
   scoring, ``indexer_score_topk``) wants fp8, so the quantization rides
   along with the norm+rope store instead of a separate cast at the scoring
-  entry (bf16 inputs of the non-fused fallback are quantized there). The
+  entry. The
   store rounds through the input precision first (bf16 -> e4m3), which
   reproduces the unfused pipeline's bits up to one e4m3 ULP.
 - index_k / index_z keep the input dtype (Z is a bit-exact passthrough).
@@ -125,13 +125,13 @@ def _norm_rope_tile_npu_chunk(
         (ROWS_PER_PROGRAM * CH, BLOCK_R),
     )
 
-    sum_sq = tl.sum(values * values, axis=1)
     if LAYERNORM:
         mean = tl.sum(values, axis=1) / head_dim
-        variance = sum_sq / head_dim - mean * mean
+        centered = values - mean[:, None]
+        variance = tl.sum(centered * centered, axis=1) / head_dim
     else:
         mean = tl.zeros((ROWS_PER_PROGRAM * CH,), dtype=tl.float32)
-        variance = sum_sq / head_dim
+        variance = tl.sum(values * values, axis=1) / head_dim
     rstd = tl.rsqrt(variance + eps)
     result_tail = (values - mean[:, None]) * rstd[:, None] * (w_hd + weight_bias)
     if LAYERNORM:

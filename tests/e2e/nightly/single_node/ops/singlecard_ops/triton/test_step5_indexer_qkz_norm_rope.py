@@ -385,3 +385,64 @@ def test_fused_indexer_norm_rope_full_rope():
     _assert_close(q_out, q_ref8, rtol=FP8_RTOL, atol=FP8_ATOL, max_abs_err=FP8_MAX_ABS_ERR, name="Q")
     _assert_close(k_out, k_ref, rtol=BF16_RTOL, atol=BF16_ATOL, max_abs_err=BF16_MAX_ABS_ERR, name="K")
     assert torch.equal(z_ref, z_out), "Z passthrough mismatch"
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A5,
+    reason="Requires Ascend A5",
+)
+def test_fused_indexer_norm_rope_k_layernorm_large_mean():
+    """K LayerNorm must use centered variance for a large-mean, small-spread row."""
+    device = "npu"
+    num_tokens, num_q_heads, num_k_heads = 8, 4, 1
+    q_len = num_q_heads * HEAD_DIM
+    k_len = num_k_heads * HEAD_DIM
+    torch.manual_seed(19)
+    x_cat = torch.randn(num_tokens, q_len + 2 * k_len, device=device, dtype=torch.bfloat16)
+    index_q, index_k, index_z = x_cat.split([q_len, k_len, k_len], dim=-1)
+    index_k.copy_(128.0 + 0.1 * torch.randn_like(index_k))
+    q_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
+    k_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
+    k_bias = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
+    positions = torch.randint(0, 4096, (num_tokens,), device=device, dtype=torch.int32)
+    cos_sin_cache = _build_cos_sin_cache(4096, ROTARY_DIM // 2, THETA, device)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+
+    q_ref, k_ref, z_ref = _reference_indexer_norm_rope(
+        index_q,
+        index_k,
+        index_z,
+        q_weight,
+        k_weight,
+        k_bias,
+        cos,
+        sin,
+        positions,
+        head_dim=HEAD_DIM,
+        num_q_heads=num_q_heads,
+        num_k_heads=num_k_heads,
+        rotary_dim=ROTARY_DIM,
+        eps=EPS,
+        q_norm_weight_bias=1.0,
+    )
+    q_out, k_out, z_out = fused_indexer_qkz_norm_rope(
+        index_q,
+        index_k,
+        index_z,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        positions,
+        k_bias,
+        head_dim=HEAD_DIM,
+        num_q_heads=num_q_heads,
+        num_k_heads=num_k_heads,
+        rotary_dim=ROTARY_DIM,
+        eps=EPS,
+        q_norm_weight_bias=1.0,
+    )
+
+    q_ref8 = q_ref.to(torch.float8_e4m3fn)
+    _assert_close(q_out, q_ref8, rtol=FP8_RTOL, atol=FP8_ATOL, max_abs_err=FP8_MAX_ABS_ERR, name="Q")
+    _assert_close(k_out, k_ref, rtol=BF16_RTOL, atol=BF16_ATOL, max_abs_err=BF16_MAX_ABS_ERR, name="K")
+    assert torch.equal(z_ref, z_out), "Z passthrough mismatch"
