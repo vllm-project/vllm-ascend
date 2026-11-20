@@ -185,31 +185,36 @@ def test_transfer_block_shape_rejects_invalid_packed_head_major_gqa(shape, step,
 
 @pytest.mark.parametrize("spare", [0, 64, 256])
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("num_blocks", [1, 4])
 @pytest.mark.parametrize(
     ("page_stride", "k_offset", "scale_offset", "scale_len", "merged"),
     [
         pytest.param(40, 0, 32, 8, True, id="full-page"),
-        pytest.param(64, 0, 32, 8, False, id="trailing-padding"),
-        pytest.param(64, 16, 48, 8, False, id="shared-page-subregion"),
+        pytest.param(64, 0, 32, 8, True, id="trailing-padding"),
+        pytest.param(64, 16, 48, 8, True, id="shared-page-subregion"),
         pytest.param(64, 0, 40, 24, False, id="interior-gap"),
-        pytest.param(64, 0, 16, 32, False, id="overlap-hides-gap"),
+        pytest.param(64, 0, 16, 32, True, id="overlapping-partial-page"),
         pytest.param(64, 0, 24, 40, True, id="overlapping-full-page"),
+        pytest.param(64, 0, 32, 40, False, id="span-exceeds-stride"),
+        pytest.param(64, 0, 32, 0, False, id="empty-view"),
     ],
 )
-def test_register_kv_caches_merges_only_full_pages(
-    monkeypatch, spare, reverse, page_stride, k_offset, scale_offset, scale_len, merged
+def test_register_kv_caches_merges_contiguous_spans(
+    monkeypatch, spare, reverse, num_blocks, page_stride, k_offset, scale_offset, scale_len, merged
 ) -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
     # The same tensor views must publish the same number of descriptors even
     # when one peer's backing storage has spare capacity after the last block.
-    required = 3 * page_stride + max(k_offset + 32, scale_offset + scale_len)
+    required = (num_blocks - 1) * page_stride + max(k_offset + 32, scale_offset + scale_len)
     raw_cache = torch.empty(required + spare, dtype=torch.float16)
-    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(page_stride, 1), storage_offset=k_offset)
-    scale_cache = torch.as_strided(raw_cache, size=(4, scale_len), stride=(page_stride, 1), storage_offset=scale_offset)
+    k_cache = torch.as_strided(raw_cache, size=(num_blocks, 32), stride=(page_stride, 1), storage_offset=k_offset)
+    scale_cache = torch.as_strided(
+        raw_cache, size=(num_blocks, scale_len), stride=(page_stride, 1), storage_offset=scale_offset
+    )
     caches = [scale_cache, k_cache] if reverse else [k_cache, scale_cache]
     page_bytes = page_stride * raw_cache.element_size()
     config = KVCacheConfig(
-        num_blocks=4,
+        num_blocks=num_blocks,
         kv_cache_tensors=[
             make_kv_cache_tensor(
                 size=raw_cache.nbytes,
@@ -247,9 +252,11 @@ def test_register_kv_caches_merges_only_full_pages(
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
     if merged:
-        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+        span_start = min(k_offset, scale_offset)
+        span_len = max(k_offset + 32, scale_offset + scale_len) - span_start
+        assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr() + span_start * raw_cache.element_size()]]
         assert metadata.block_strides == [[page_bytes]]
-        assert metadata.block_lens == [[page_bytes]]
+        assert metadata.block_lens == [[span_len * raw_cache.element_size()]]
         assert metadata.block_shapes == [[(max(32, scale_len),)]]
         assert metadata.block_size_scales == [[1]]
     else:
@@ -272,30 +279,34 @@ def test_shared_page_rejects_noncontiguous_blocks() -> None:
     assert worker._get_shared_page_metadata(caches) is None
 
 
-def test_shared_page_handles_mixed_dtype_views() -> None:
-    raw_cache = torch.empty(4 * 64, dtype=torch.uint8)
+@pytest.mark.parametrize("scale_len", [2, 4])
+def test_shared_page_handles_mixed_dtype_views(scale_len) -> None:
+    block_len = 48 + scale_len * 4
+    raw_cache = torch.empty(3 * 64 + block_len, dtype=torch.uint8)
     k_cache = raw_cache.as_strided((4, 48), (64, 1))
-    scale_cache = raw_cache.view(torch.float32).as_strided((4, 4), (16, 1), 12)
+    scale_cache = raw_cache.view(torch.float32).as_strided((4, scale_len), (16, 1), 12)
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.num_blocks = 4
 
-    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, (48,), 1)
+    assert worker._get_shared_page_metadata((k_cache, scale_cache)) == (raw_cache.data_ptr(), 64, block_len, (48,), 1)
 
 
-def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch) -> None:
+@pytest.mark.parametrize("padding", [0, 64])
+def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(monkeypatch, padding) -> None:
     spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.float16)
-    raw_cache = torch.empty(4 * 128 * 576, dtype=torch.float16)
     slot_elems = 128 * 576
+    page_stride = slot_elems + padding
+    raw_cache = torch.empty(3 * page_stride + slot_elems, dtype=torch.float16)
     nope_cache = torch.as_strided(
         raw_cache,
         size=(4, 128, 1, 512),
-        stride=(slot_elems, 512, 512, 1),
+        stride=(page_stride, 512, 512, 1),
         storage_offset=0,
     )
     rope_cache = torch.as_strided(
         raw_cache,
         size=(4, 128, 1, 64),
-        stride=(slot_elems, 64, 64, 1),
+        stride=(page_stride, 64, 64, 1),
         storage_offset=128 * 512,
     )
     config = KVCacheConfig(
@@ -305,7 +316,7 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
                 size=raw_cache.nbytes,
                 layers=["layer.0"],
                 layer_stride=raw_cache.nbytes,
-                block_stride=slot_elems * raw_cache.element_size(),
+                block_stride=page_stride * raw_cache.element_size(),
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
@@ -329,7 +340,7 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
     assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
-    assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
+    assert metadata.block_strides == [[page_stride * raw_cache.element_size()]]
     assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_shapes == [[(slot_elems,)]]
     assert metadata.indexer_replication_sizes == [0]

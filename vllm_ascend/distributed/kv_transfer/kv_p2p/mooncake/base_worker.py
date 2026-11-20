@@ -414,14 +414,15 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
     def _get_shared_page_metadata(
         self,
         caches: tuple[torch.Tensor, ...],
-    ) -> tuple[int, int, tuple[int, ...], int] | None:
-        """Describe views packed into one physical page allocation.
+    ) -> tuple[int, int, int, tuple[int, ...], int] | None:
+        """Describe a contiguous span of views within each physical page.
 
         Sharing a storage alone is insufficient: conventional planar K/V
         views can share one allocation while their first blocks are many pages
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
-        Their contiguous block spans must cover that entire stride.
+        Their block spans must form one contiguous range within that stride,
+        but need not cover trailing padding or other shared-page components.
         """
         if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
@@ -440,8 +441,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
         # Storage capacity does not prove that this layer owns a whole page:
         # its views may occupy only a subregion of a larger shared allocation.
-        # Merge only internally contiguous blocks whose union covers the full
-        # stride. Overlapping aliases are allowed, but holes and padding are not.
+        # Merge only internally contiguous blocks whose union has no holes.
+        # Transfer the covered bytes, not unused space up to the next block.
+        # Overlapping aliases are allowed.
         if any(block_len == 0 or not cache[0].is_contiguous() for cache, block_len in zip(caches, block_lens)):
             return None
         block_ranges = sorted(
@@ -453,13 +455,12 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             if start > covered_end or end > page_stride:
                 return None
             covered_end = max(covered_end, end)
-        if covered_end != page_stride:
-            return None
 
         storage = caches[0].untyped_storage()
         storage_base_addr = storage.data_ptr()
         storage_end_addr = storage_base_addr + storage.nbytes()
-        if page_base_addr < storage_base_addr or page_base_addr + num_tensor_blocks * page_stride > storage_end_addr:
+        transfer_end_addr = page_base_addr + (num_tensor_blocks - 1) * page_stride + covered_end
+        if page_base_addr < storage_base_addr or transfer_end_addr > storage_end_addr:
             return None
 
         selected_cache = max(
@@ -469,6 +470,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         return (
             page_base_addr,
             page_stride,
+            covered_end,
             tuple(selected_cache.shape[1:]),
             num_tensor_blocks // self.num_blocks,
         )
@@ -573,21 +575,22 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
                     # MooncakeV2 is layout-agnostic: it only needs the raw
                     # block's base address, length, and stride.  Publish the
-                    # complete physical slot as a flat byte descriptor instead
+                    # covered physical span as a flat descriptor instead
                     # of the larger NoPE view's semantic shape.
-                    page_base_addr, page_stride, _, block_size_scale = shared_page_metadata
+                    page_base_addr, page_stride, block_len, _, block_size_scale = shared_page_metadata
                     element_size = caches[0].element_size()
                     shared_page_metadata = (
                         page_base_addr,
                         page_stride,
-                        (page_stride // element_size,),
+                        block_len,
+                        (block_len // element_size,),
                         block_size_scale,
                     )
                 if shared_page_metadata is not None:
-                    page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
+                    page_base_addr, page_stride, block_len, block_shape, block_size_scale = shared_page_metadata
                     base_addrs.append(page_base_addr)
                     block_strides.append(page_stride)
-                    block_lens.append(page_stride)
+                    block_lens.append(block_len)
                     block_shapes.append(block_shape)
                     block_size_scales.append(block_size_scale)
                 else:
