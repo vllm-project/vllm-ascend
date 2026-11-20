@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file sparse_flash_attention_common.h
+ * \file sparse_flash_attention_vllm_common.h
  * \brief
  */
 
-#ifndef SPARSE_FLASH_ATTENTION_COMMON_H
-#define SPARSE_FLASH_ATTENTION_COMMON_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_COMMON_H
+#define SPARSE_FLASH_ATTENTION_VLLM_COMMON_H
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
@@ -199,4 +199,4 @@ struct MSplitInfo {
     uint32_t vecDealM = 0U;
 };
 
-#endif // SPARSE_FLASH_ATTENTION_COMMON_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_COMMON_H

@@ -9,14 +9,14 @@
  */
 
 /*!
- * \file sparse_flash_attention_service_vector_mla.h
+ * \file sparse_flash_attention_vllm_service_vector_mla.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
-#define SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
+#define SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
 
 #include "util_regbase.h"
-#include "sparse_flash_attention_common_arch35.h"
+#include "sparse_flash_attention_vllm_common_arch35.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
@@ -74,7 +74,7 @@ public:
 
     // ==================== Functions ======================
     __aicore__ inline SFAVectorService() {};
-    __aicore__ inline void InitVecBlock(TPipe *pipe, const SparseFlashAttentionTilingDataMla *__restrict tiling,
+    __aicore__ inline void InitVecBlock(TPipe *pipe, const SparseFlashAttentionVllmTilingDataMla *__restrict tiling,
                                         CVSharedParams &sharedParams, int32_t aicIdx, uint8_t subBlockIdx,
                                         __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths)
     {
@@ -145,7 +145,7 @@ private:
     __aicore__ inline void InitSinksBuffer(ConstInfo &constInfo);
 
     TPipe *tPipe;
-    const SparseFlashAttentionTilingDataMla *__restrict tilingData;
+    const SparseFlashAttentionVllmTilingDataMla *__restrict tilingData;
 
     GlobalTensor<OUTPUT_T> attentionOutGm;
     GlobalTensor<KV_T> keyGm;
@@ -865,7 +865,7 @@ public:
                                             __gm__ uint8_t *keyRope, __gm__ uint8_t *sparseIndices,
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *softmaxMax,
                                             __gm__ uint8_t *softmaxSum) {}
-    __aicore__ inline void InitVecBlock(TPipe *pipe, const SparseFlashAttentionTilingDataMla *__restrict tiling,
+    __aicore__ inline void InitVecBlock(TPipe *pipe, const SparseFlashAttentionVllmTilingDataMla *__restrict tiling,
         CVSharedParams &sharedParams, int32_t aicIdx, uint8_t subBlockIdx, __gm__ uint8_t *actualSeqLengthsQ,
         __gm__ uint8_t *actualSeqLengths) {};
     __aicore__ inline void InitLocalBuffer(TPipe *pipe, ConstInfo &constInfo) {}
@@ -878,4 +878,4 @@ public:
         ConstInfo &constInfo) {}
 };
 }
-#endif // SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
+#endif // SPARSE_FLASH_ATTENTION_VLLM_SERVICE_VECTOR_MLA_H
