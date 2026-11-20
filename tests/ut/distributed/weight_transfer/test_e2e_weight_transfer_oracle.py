@@ -27,6 +27,7 @@ caching contract are pinned here.
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -269,8 +270,8 @@ def test_four_draft_cases_select_the_actual_speculative_method(speculative_case,
         lane = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=True))
         assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
         assert lane == reference
-        assert json.loads(lane["--hf-overrides"]) == speculative_case.target.hf_overrides
-        spec = json.loads(lane["--speculative-config"])
+        assert json.loads(cast(str, lane["--hf-overrides"])) == speculative_case.target.hf_overrides
+        spec = json.loads(cast(str, lane["--speculative-config"]))
         assert spec["method"] == speculative_case.method
         assert spec["method"] != "draft_model"
         assert spec["draft_sample_method"] == speculative_case.draft_sample_method
