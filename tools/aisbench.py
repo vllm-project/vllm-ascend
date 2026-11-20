@@ -172,8 +172,13 @@ class AisbenchRunner:
                 self.verify_mode = aisbench_config.get("verify_mode", "ge")
                 if self.verify_mode == "range":
                     self._accuracy_verify()
-                else:
+                elif self.verify_mode == "ge":
                     self._accuracy_verify_ge()
+                else:
+                    raise ValueError(
+                        f"Invalid verify_mode: {self.verify_mode}. "
+                        "Expected 'ge' or 'range'."
+                    )
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold")
                 self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
