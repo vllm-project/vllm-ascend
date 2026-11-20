@@ -1196,9 +1196,7 @@ def test_resolve_union_tiles_and_fallbacks(label, cols, hot, rows, topk, residen
         # announced by swap_counts belongs to the contract.
         sh_cpu, sd_cpu = sh.cpu(), sd.cpu()
         for row, length in enumerate(want_sc.tolist()):
-            torch.testing.assert_close(
-                sh_cpu[row, :length], want_sh[row, :length], msg=f"{label}: swap_host row {row}"
-            )
+            torch.testing.assert_close(sh_cpu[row, :length], want_sh[row, :length], msg=f"{label}: swap_host row {row}")
             torch.testing.assert_close(
                 sd_cpu[row, :length], want_sd[row, :length], msg=f"{label}: swap_device row {row}"
             )
