@@ -97,8 +97,21 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
         scheduler._merge_metadata_by_pp_rank({0: first, 1: replace(first, dcp_sharded=[True, True])})
 
 
+@pytest.fixture(scope="module")
+def dcp_rank_function():
+    path = SOURCE / "utils.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "worker_rank_to_dcp_rank"
+    )
+    module = ast.Module(body=[function], type_ignores=[])
+    scope = {}
+    exec(compile(module, str(path), "exec"), scope)
+    return scope[function.name]
+
+
 @pytest.fixture
-def worker():
+def worker(dcp_rank_function):
     cls = load_class(
         "pull_worker.py",
         "MooncakePullRecvingThread",
@@ -112,6 +125,7 @@ def worker():
             "_expand_block_ids",
             "_select_remote_tp_rank",
         },
+        dependencies={"worker_rank_to_dcp_rank": dcp_rank_function},
     )
     worker = cls()
     worker.tp_size = 4
