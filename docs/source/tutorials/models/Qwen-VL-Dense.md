@@ -204,7 +204,7 @@ Run docker container to start the vLLM server on single-NPU:
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
       --host 0.0.0.0 \
@@ -230,7 +230,7 @@ Run docker container to start the vLLM server on single-NPU:
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --host 0.0.0.0 \
