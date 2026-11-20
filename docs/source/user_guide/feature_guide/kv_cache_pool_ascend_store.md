@@ -82,13 +82,6 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
-Memcache layerwise saves skip recycled sliding-window slots when allocating keys
-and building full-block transfers. If a cache group holds private state that
-requires local replay, GVA lookup checks the SWA window at the
-aligned resume point. For a 2048-token prompt and 128-token transfer pages, the
-latest candidate is 1920. If its window is incomplete, lookup falls back to an
-earlier complete checkpoint or a miss.
-
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
