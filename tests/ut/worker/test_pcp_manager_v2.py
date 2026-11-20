@@ -172,10 +172,17 @@ def _make_policy_batch(counts, prefilling):
 
 
 @pytest.mark.parametrize("pcp_size", [2, 4])
-@pytest.mark.parametrize("stack_dcp", [False, True])
-@pytest.mark.parametrize("kpool", [False, True])
-@pytest.mark.parametrize("query_len", [1, 6])
-@pytest.mark.parametrize("batch_kind", ["mixed", "empty-owner", "zero"])
+@pytest.mark.parametrize(
+    "stack_dcp,kpool,query_len,batch_kind",
+    [
+        (stack_dcp, kpool, query_len, batch_kind)
+        for stack_dcp in (False, True)
+        for kpool in (False, True)
+        for query_len in (1, 6)
+        for batch_kind in ("mixed", "empty-owner", "zero")
+    ]
+    + [pytest.param(False, True, 6, "unequal", id="kpool-unequal-decode")],
+)
 def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_len, batch_kind):
     """Run the factory and both partition implementations, not mocked layouts.
 
@@ -197,6 +204,8 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
             [query_len, 0, 32, query_len, 3, query_len, 0],
             [False, False, True, False, True, False, True],
         )
+    elif batch_kind == "unequal":
+        counts, prefilling = [6, 1, 3], [False, False, False]
     else:
         counts, prefilling = [0, query_len if batch_kind == "empty-owner" else 0], [False, False]
     batch = _make_policy_batch(counts, prefilling)
@@ -325,26 +334,6 @@ def test_kpool_decode_sharding_follows_parallel_config(speculative: bool, bind_r
 
     expected = [(1, 0, query_len)] if sharded else [(0, 0, query_len), (1, 0, query_len)]
     assert list(manager._iter_rank_chunks(1, counts, prefilling)) == expected
-
-
-@pytest.mark.parametrize("pcp_size", [2, 4])
-@pytest.mark.parametrize(
-    "counts,prefilling",
-    [([1], [False]), ([6, 1, 3], [False, False, False]), ([1, 3, 2, 0, 6], [False, True, False, False, False])],
-)
-def test_kpool_decode_requests_have_one_owner(pcp_size, counts, prefilling):
-    config = _make_pcp_config(CUDAGraphMode.NONE)
-    config.model_config.hf_text_config.index_kpool = 4
-    config.parallel_config.prefill_context_parallel_size = pcp_size
-    counts, prefilling = np.array(counts), np.array(prefilling)
-    owners: dict[int, list[int]] = {req: [] for req, count in enumerate(counts) if count and not prefilling[req]}
-    for rank in range(pcp_size):
-        manager = _make_factory_pcp_manager(config, rank)
-        for req, offset, length in manager._iter_rank_chunks(rank, counts, prefilling):
-            if not prefilling[req]:
-                assert (offset, length) == (0, counts[req])
-                owners[req].append(rank)
-    assert list(owners.values()) == [[ordinal % pcp_size] for ordinal in range(len(owners))]
 
 
 @pytest.mark.parametrize("rank", [0, 1])

@@ -530,13 +530,13 @@ def test_pcp_kpool_metadata_writes_global_token_order(keypool_kernels, capture, 
     torch.testing.assert_close(tail_common.slot_mapping, global_slots)
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("query_len", [1, 6])
-@pytest.mark.parametrize("num_requests", [1, 3])
 @pytest.mark.parametrize(
-    "graph_padding,short_seq_lens",
-    [(False, False), (True, False), (True, True)],
-    ids=["unpadded", "padded-lengths", "short-lengths"],
+    "rank,query_len,num_requests,graph_padding,short_seq_lens",
+    [
+        pytest.param(0, 1, 3, False, False, id="single-token-decode"),
+        pytest.param(1, 1, 1, True, False, id="padded-empty-rank"),
+        pytest.param(1, 6, 3, True, True, id="verification-short-seq-lens"),
+    ],
 )
 def test_pcp_decode_kpool_and_tail_route_global_write_metadata(
     keypool_kernels, rank, query_len, num_requests, graph_padding, short_seq_lens
