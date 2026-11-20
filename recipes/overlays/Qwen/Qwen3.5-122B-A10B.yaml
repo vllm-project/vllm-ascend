@@ -1,4 +1,4 @@
-# Source: https://github.com/vllm-project/vllm/blob/9b088c6667cbb9cce3eaa5ad937548aad36e8e7e/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
+# Source: https://github.com/vllm-project/vllm/blob/8586ccbcf58e69ecb69e370dd2fa69fb739f9b0c/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
 # Ascend lane extracted from a measured vLLM-Ascend deployment (hardware-scoped overrides only).
 meta:
   hardware:
