@@ -173,7 +173,7 @@ python3 -m vllm.entrypoints.openai.api_server \
             "kv_connector": "PreemptOffloadConnector",
             "kv_role": "kv_consumer",
             "kv_connector_extra_config": {
-              "cpu_bytes_to_use_per_rank": 17179869184,
+              "cpu_bytes_to_use_per_rank": 17179869184
             }
           }
         ]
@@ -301,7 +301,7 @@ of CPU and GPU KV blocks.
 
 Look for logs similar to:
 
-```text
+```output
 Recompute preemption offload enabled for request ...
 Created preempt offload state for request ...
 Prepared preempt offload H2D load for request ...

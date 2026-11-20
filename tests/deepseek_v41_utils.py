@@ -319,7 +319,7 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    specs = {n: g.kv_cache_spec.kv_cache_specs[n] for g in config.kv_cache_groups for n in g.layer_names}
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)

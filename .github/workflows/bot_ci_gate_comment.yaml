@@ -61,6 +61,12 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Download gate result artifact
+        # May legitimately not exist: a "CI Gate Refresh" run that concluded
+        # success without re-running anything (comment-only or non-owner
+        # review, already-green run, CI still in flight) ships no artifact.
+        # Tolerate the miss here so the step below can skip gracefully; a
+        # hard failure here turned every such no-op into a red bot run.
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
@@ -91,7 +97,12 @@ jobs:
           import os
           import sys
           import urllib.request
-          from datetime import datetime, timezone
+          from datetime import datetime, timedelta, timezone
+
+          # Timestamps in the comment are shown in UTC+8: the maintainers
+          # reading this comment sit in that timezone, and a wall-clock
+          # time beats UTC for "was this just now or this morning?".
+          CN_TZ = timezone(timedelta(hours=8))
 
           # The gate result artifact is missing when the run was cancelled
           # before packaging; nothing to comment in that case.
@@ -189,7 +200,7 @@ jobs:
                   # nothing at all. The marker and head SHA stay in the
                   # body so the next failure on this commit updates the
                   # same comment back to the failure state.
-                  resolved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                  resolved_at = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M UTC+8")
                   resolved = (
                       f"{marker}\n"
                       f"*Last updated: {resolved_at} for commit "
@@ -217,7 +228,7 @@ jobs:
           # silent and sink down the timeline), so the reader needs to see
           # at a glance whether it describes the current head or a stale
           # verdict from an older push.
-          updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          updated_at = datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M UTC+8")
           freshness = (
               f"*Last updated: {updated_at} for commit "
               f"`{(head_sha or '')[:7]}`.*"
