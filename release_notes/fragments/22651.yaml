@@ -1,0 +1,6 @@
+pr: 22651
+entries:
+  - category: feature
+    text: AscendStore now supports the upstream vLLM v1 repair policy for external KV load failures: with kv_load_failure_policy="repair" and VLLM_KV_CACHE_LAYOUT=HND (or LBHNC), a failed load no longer fails or fully recomputes the request - only the failed block range is repaired in a dedicated step. TP-only, blockwise transfers, single KV cache group; unsupported configurations are refused at startup and fall back safely.
+  - category: config
+    text: New kv_connector_extra_config key evidence_certification controls the content-verification claim of the repair evidence. Mooncake defaults to "content" (content-addressed keys under the store-trust assumption; set "none" to opt out); memcache and yuanrong are always forced to "none" because they provide no service-side write-once guarantee, so on those backends "repair" safely behaves as the recompute fallback. "sha256" is rejected.

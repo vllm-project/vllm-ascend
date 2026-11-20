@@ -82,6 +82,47 @@ pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`
 To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
 on the same instances that previously exported the environment variable.
 
+### KV Load Failure Repair (kv_load_failure_policy="repair")
+
+When an external KV load fails, vLLM can handle the failure with `kv_load_failure_policy`:
+`fail` (default) fails the request, `recompute` reschedules it to recompute the affected
+blocks, and `repair` (the upstream vLLM v1 policy, supported by AscendStore from this
+release) asks the scheduler to repair only the failed block range in a dedicated repair
+step instead of discarding or fully recomputing the request. AscendStore now produces
+the structured failure reports and per-rank transfer attestations this policy requires.
+
+**Requirements and supported scope**
+
+| Requirement | Detail |
+| :--- | :--- |
+| Policy | `kv_load_failure_policy="repair"` in the KV transfer configuration. |
+| Backend | Blockwise transfer only: `use_layerwise` is not supported with `repair`. |
+| Speculative decoding | EAGLE/MTP speculative decoding is not supported with `repair`. |
+| Layout | The engine must run with `VLLM_KV_CACHE_LAYOUT=HND` (or `LBHNC`). With the default layout, repairs are refused at engine start (the layout-capability gate that performs this refusal ships as a companion change; deploy the two together) and every failed load falls back to recompute. |
+| Parallelism | Single KV cache group, TP-only (PP/DP/CP/DCP = 1). |
+
+**Content verification per backend (`evidence_certification`)**
+
+The repair policy never reuses unverified external KV. What a store can honestly verify
+about loaded content depends on the backend, and the connector reports it as the
+certification level:
+
+| Backend | Certification | Consequence under `repair` |
+| :--- | :--- | :--- |
+| Mooncake (default) | `content` by default - the store object keys are content-addressed and its object model guarantees atomic whole-object writes, so a successful read returns the bytes bound to that key. | Repair benefits are available: the healthy prefix before the failure is kept and only the failed range is repaired. |
+| Memcache / Yuanrong | Forced to `none` - the pool storage keys address tokens and model identity but not the full content determinants (dtype, quantization), and neither backend documents a binding the connector could verify against, so the connector cannot claim content verification. | Behaves as a safe recompute fallback: a failed load is rescheduled to recompute, with no repair benefit. The policy is still safe to configure. |
+
+`evidence_certification` is a `kv_connector_extra_config` key (not an engine argument).
+`content` (default for Mooncake) or `none` are accepted; `sha256` is rejected. On
+Mooncake, deployments that do not trust the store key-to-data binding can set
+`evidence_certification="none"`, which also selects the safe recompute fallback.
+Payload-digest verification is not implemented on any backend today.
+
+**Operational consequence**: choose `kv_load_failure_policy="repair"` together with a
+content-certifiable backend (Mooncake under the store-trust assumption). On backends
+certified `none`, the policy degenerates to the recompute fallback - requests always
+recover safely, but no repair saving is realized.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples

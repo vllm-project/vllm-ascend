@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.evidence import AscendStoreAttemptEvidence
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -1003,6 +1004,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        evidence_buffer: Any | None = None,
+        evidence_num_layers: int = 0,
+        evidence_certification: str = "none",
     ):
         super().__init__(
             m_store,
@@ -1018,6 +1022,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        # The hole-repair evidence hand-off buffer (None disables the
+        # evidence path; the load handler then behaves exactly as before).
+        self._evidence_buffer = evidence_buffer
+        # The evidence accounting facts, passed EXPLICITLY by the worker
+        # (never read through self.worker: this thread receives a worker
+        # ONLY on the tp_mismatch path, which the evidence gate refuses,
+        # so an evidence-active thread ALWAYS runs with worker=None).
+        self._evidence_num_layers = evidence_num_layers
+        self._evidence_certification = evidence_certification
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1029,6 +1042,25 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 return
 
             token_len = load_spec.token_len
+            # Per-attempt evidence bookkeeping. The transfer identity is
+            # captured ONCE here, from the load spec the scheduler-role
+            # connector built when the attempt was scheduled -- never
+            # re-read at emission time, so a delayed old attempt can never
+            # inherit a newer attempt's identity.
+            evidence = None
+            if self._evidence_buffer is not None and load_spec.transfer_generation is not None:
+                # The accounting facts come from the thread's EXPLICIT
+                # constructor parameters, never from self.worker (which is
+                # None in every evidence-active deployment).
+                evidence = AscendStoreAttemptEvidence(
+                    req_id=req_id,
+                    transfer_generation=load_spec.transfer_generation,
+                    num_layers=self._evidence_num_layers,
+                    block_size=self._get_block_size(0),
+                    restored_extent=min(load_spec.pool_hit_tokens, load_spec.kvpool_cached_tokens),
+                    certification_mode=self._evidence_certification,
+                )
+                self._evidence_buffer.start_attempt(evidence)
             if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
                 group_block_size = self._get_block_size(0)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
@@ -1047,6 +1079,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
+            logical_id_list: list[int] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
@@ -1067,6 +1100,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     chunk_filter=chunk_filter,
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
+                    if evidence is not None and group_id == 0:
+                        # Evidence counts single-group (block, layer) cells:
+                        # one cell per expected block, layers folded.
+                        logical = start // group_block_size
+                        if logical < len(block_ids):
+                            evidence.note_expected_block(logical)
+                            evidence.block_ids[logical] = block_ids[logical]
                     addr, size, block_id = self._prepare_value(
                         start,
                         end,
@@ -1078,7 +1118,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                    logical_id_list.append(start // group_block_size)
             if not key_list:
+                if evidence is not None:
+                    # Nothing to load for this rank: a terminal but VACUOUS
+                    # attempt (empty expected set). The scheduler's
+                    # completeness gate refuses to count a vacuous
+                    # attestation, so the delivery fails closed -- never a
+                    # non-terminal entry left parked in the buffer.
+                    evidence.finalize()
                 self.set_finished_request(req_id)
                 return
             key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
@@ -1087,6 +1135,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             block_id_list_c = (
                 block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
             )
+            shift = self.tp_rank % len(logical_id_list)
+            logical_id_list_c = logical_id_list[shift:] + logical_id_list[:shift]
             logger.debug(
                 "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 req_id,
@@ -1103,6 +1153,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
+            if evidence is not None:
+                # The structured evidence channel owns load failures when the
+                # evidence path is active: the flat request-level and
+                # per-block channels would race the repair admission (the
+                # scheduler's conflict rules dissolve any plan they touch),
+                # and the evidence gates already fail the delivery closed on
+                # every unrepresentable shape. Terminality precedes the
+                # finished signal, so the drained pass observes a final
+                # accounting.
+                if ret is None or len(ret) != len(block_id_list_c):
+                    evidence.note_blocks_failed(sorted(evidence.expected_blocks))
+                else:
+                    for logical, code in zip(logical_id_list_c, ret):
+                        evidence.note_block_outcome(logical, code == 0)
+                evidence.finalize()
+                self.set_finished_request(req_id)
+                return
             if isinstance(self.m_store, MemcacheBackend) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
@@ -1151,6 +1218,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self.set_finished_request(req_id)
         finally:
             self.request_queue.task_done()
+
+    def _handle_request_exception(self, req_meta: Any):
+        """Drop a crashed async attempt's evidence before the thread dies.
+
+        The identity-matched drop only: an identity-blind drop could destroy
+        a NEWER attempt's registered evidence (an availability loss -- the
+        delivery would fail closed with the terminal attestation lost), and
+        a crashed no-identity handler must never destroy a REGISTERED
+        attempt's evidence. The request itself parks, exactly as before
+        (the missing attestation then fails the delivery closed at the
+        scheduler).
+        """
+        if self._evidence_buffer is not None and isinstance(req_meta, ReqMeta):
+            self._evidence_buffer.drop_if_identity(
+                req_meta.req_id,
+                getattr(getattr(req_meta, "load_spec", None), "transfer_generation", None),
+            )
 
 
 def record_failed_blocks(
