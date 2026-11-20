@@ -14,8 +14,11 @@
 | 三处 var-annotated | 已存在（`metadata.py:57`、`test_cache_prefix_config.py:84`、`test_cache_prefix.py:297`）；定向 mypy 3.12/3.11/3.10 均 0 error、0 var-annotated |
 | UT | 真实配置 **5 passed（无需 shim）**；回归组 **264 passed**；layerwise/hybrid **34 passed** |
 | `format.sh ci` | 除 gitleaks 钩子外全部 Passed；等价 gitleaks 范围扫描 `352168ead..HEAD`（7 commits）**no leaks** |
-| E2E（普通/layerwise） | **被 Mooncake 集群故障阻塞**（master HA/oplog 未选出主），与 `-pr` 代码无关，见第 6 节 |
-| A/B/C 对比（native/Mooncake/UCM） | 方法已记录（见第 7 节）；UCM 未安装、Mooncake 当前不可用，尚未执行 |
+| NPU E2E：普通路径 | **通过**（T1 同前缀命中、T2 异前缀隔离 + writer 正向对照） |
+| NPU E2E：layerwise | **通过**（LW-T1 同前缀 range 加载、LW-T2 异前缀隔离 + writer 正向 range 对照） |
+| NPU E2E：cache_prefix=auto | **通过**（两端同身份解析同一 `auto-*` 前缀；跨实例命中） |
+
+> 本轮 NPU E2E 范围按需求限定为：**普通路径、layerwise、`cache_prefix=auto`** 三个场景。
 
 ## 2. 环境
 
@@ -26,14 +29,14 @@
 | vllm-ascend | `0.1.dev6820+gf940a0874` |
 | Python / torch / torch_npu / transformers | 3.12.16 / 2.10.0+cpu / 2.10.0.post7 / 5.19.0 |
 | CANN/driver | 25.5.1 |
-| 硬件 | A2 单机 8× Ascend 910B3 |
-| Mooncake | HA master（`mooncake-master-0/1`）+ 3× etcd；当前故障，见第 6 节 |
+| 硬件 | A2 单机 8× Ascend 910B3（E2E 使用 4 卡：A=NPU0,1 / B=NPU2,3） |
+| Mooncake | HA master（`mooncake-master-0/1`）+ 3× etcd；测试时 leader 已 `serving` |
 
 说明：vLLM `pyproject` 中 `torch==2.14.0` 属于 **build-system.requires**，用 `--no-deps --no-build-isolation` 跳过；Ascend 实际运行用 torch 2.10 + torch_npu 2.10。
 
 ## 3. 类型检查（var-annotated）
 
-修复仍在 `bfe8c9e81` 之后的版本中；定向 mypy（`--follow-imports skip --check-untyped-defs`，`MYPYPATH` 指向 vLLM 源码）：
+定向 mypy（`--follow-imports skip --check-untyped-defs`，`MYPYPATH` 指向 vLLM 源码）：
 
 | 目标版本 | exit | var-annotated | error |
 |---|---|---|---|
@@ -47,11 +50,11 @@
 
 | 组 | 结果 |
 |---|---|
-| 真实配置 `test_cache_prefix_config.py` | **5 passed（无需 connector 注册 shim）** —— `bb22a21b1 test(kvpool): make cache prefix config tests portable across CI versions` 已使其可直接跑 |
+| 真实配置 `test_cache_prefix_config.py` | **5 passed（无需 connector 注册 shim）** —— `bb22a21b1` 已使其可直接跑 |
 | 回归组 `test_cache_prefix.py, test_mooncake_pipeline.py, test_backend.py, test_layerwise_keys.py, test_metadata.py` | **264 passed** |
 | `test_mooncake_layerwise.py, test_mooncake_hybrid.py` | **34 passed** |
 
-注意：`-pr` 分支移除了 `test_cache_prefix_probe.py`、`test_cache_prefix_pair.py` 两个单测文件（相对 `...-12` 分支），故回归命令按 `-pr` 实际布局调整；探针脚本 `tests/e2e/common/kv_pool/cache_prefix_probe.py` 仍在。
+注意：`-pr` 分支移除了 `test_cache_prefix_probe.py`、`test_cache_prefix_pair.py` 两个单测文件（相对 `...-12` 分支）。因此 E2E 使用的客户端探针 `tests/e2e/common/kv_pool/cache_prefix_probe.py` 在 `-pr` 上也不存在，本次从上一提交 `7f75916c5` 提取同一脚本到 `/workspace/cache_prefix_probe.py` 使用（纯客户端脚本，语义一致）。
 
 ## 5. CI
 
@@ -60,48 +63,46 @@
 - gitleaks 钩子：仓库脚本下载的 OBS aarch64 二进制运行即 `fatal error: lfstack.push`（环境/二进制崩溃）。
 
 ### 5.2 等价 gitleaks 扫描
-用源码编译的 gitleaks v8.28（Go 1.27.4 + aliyun GOPROXY）：
+源码编译 gitleaks v8.28（Go 1.27.4 + aliyun GOPROXY）：
 `gitleaks git --config .gitleaks.toml --redact --log-opts "352168ead..HEAD" .`
 结果：**7 commits scanned，~46.56 KB，no leaks found，exit 0**。
 
-## 6. E2E 阻塞：Mooncake master HA/oplog 故障（与代码无关）
+## 6. NPU E2E（普通路径 / layerwise / auto）
 
-启动普通路径（Qwen 8195/8196）时引擎初始化失败，根因：
+探针：`cache_prefix_probe.py`（writer 存活成对；bulk 以 `external_hits + ascend_store_load_get_keys` 为加载证据；layerwise 以实时日志 `[KVPOOL_RANGE_DEBUG]` 的 range 字节为加载证据，须等于请求字节）。两端 `kv_both`、`--no-enable-prefix-caching`。
 
-```
-etcd_helper.cpp: key=mooncake-store/mooncake-ha-prod/master_view, error=key not found in etcd
-mooncake_backend.py: Initialize mooncake failed. ret=-600, metadata_server=P2PHANDSHAKE
-RuntimeError: Engine core initialization failed ... Failed core proc(s): {}
-```
+### 6.1 普通路径（use_layerwise:false）
+| 用例 | 配置 | 证据 | 结果 |
+|---|---|---|---|
+| T1 同前缀共享 | 两端 `cache_prefix=model-v1` | writer miss(`hits=0`)；reader `external_hits=1535, bulk_get_keys=24, local_hits=0`，输出一致 | passed |
+| T2 异前缀隔离 | A=`model-v1`, B=`model-v2` | writer A `external_hits=1535, bulk_get_keys=24`（正向对照）；reader B `external_hits=0, bulk_get_keys=0`，输出一致 | passed（重跑后） |
 
-`mooncake-master-0/1` 均在反复报：
+产物：`pr-bulk-hit.json`、`pr-bulk-isolation.json`。
 
-```
-OpLogApplier: recovered from sequence_id=0, expected_sequence_id set to=1
-standby_state_machine: SYNCING -> FAILED (event: FATAL_ERROR)
-Failed to promote standby for serve: INCOMPLETE_OPLOG_CATCH_UP, retrying in 1s
-```
+### 6.2 layerwise（use_layerwise:true + kv_pool_range_debug:true）
+| 用例 | 配置 | 证据 | 结果 |
+|---|---|---|---|
+| LW-T1 同前缀 range 加载 | 两端 `cache_prefix=model-v1-layerwise` | writer miss；reader `external_hits=1535, local_hits=0, range_load_bytes=150994944`，输出一致 | passed |
+| LW-T2 异前缀隔离 | A=`model-v1-layerwise`, B=`model-v2-layerwise` | writer A `external_hits=1535, range_load_bytes=150994944`（正向 range 对照）；reader B `external_hits=0, range_load_bytes=0` | passed（重跑后） |
 
-即两个 master 都无法完成 oplog 追平、无法选出主，故 etcd 无 `master_view`，客户端无法初始化 Mooncake store。已尝试 `kubectl rollout restart statefulset`（StatefulSet 为 OnDelete，未真正重建）与**删除 master pod 触发重建**，重建后仍 `INCOMPLETE_OPLOG_CATCH_UP`——属 oplog 基线/快照状态问题，非进程问题。
+产物：`pr-lw-hit.json`、`pr-lw-isolation.json`。
 
-影响：普通路径 T1/T2 与 layerwise LW-T1/LW-T2 无法在本轮完成（需要可用的 Mooncake store 才能产生外部命中与 range 加载证据）。
+### 6.3 cache_prefix=auto
+- 两端 `cache_prefix=auto` 且 **同一构建身份** `VLLM_BUILD_COMMIT=cache-prefix-test-c410`。
+- 解析结果：A、B（含 scheduler/worker）均为 **同一前缀** `auto-2fd4deada40df53a3fd653babab25baebc52ad87ae9bf643b09e3d98b345da64`。
+| 用例 | 证据 | 结果 |
+|---|---|---|
+| auto 同身份跨实例共享 | writer miss；reader `external_hits=1535, bulk_get_keys=24, local_hits=0`，输出一致 | passed |
 
-恢复选项（需确认后执行，含破坏性）：
-1. 清空该 cluster 的 etcd oplog/快照状态（如 `mooncake-store/mooncake-ha-prod` 相关 key）并清理 `/data1/mooncake_snapshots` 后重启 master，建立全新空集群（会丢弃已有缓存对象/集群状态）；
-2. 由你修复/回滚 master 的 oplog 相关部署（本次更改前状态）后我再复跑；
-3. 若允许，我也可以禁用 oplog 相关开关做一次临时验证（非生产语义）。
+产物：`pr-auto-hit.json`。
 
-## 7. A/B/C 对比方法（native / Mooncake / UCM）— 待执行
+### 6.4 过程观察
+- T2 / LW-T2 首轮 writer 均瞬时 miss（池中对象在 reader 重启的数分钟内被淘汰，原因未定），该次请求即重算并重新写入；随后重跑即在 `--writer-expect hit` 下取得有效正向对照（bulk 用 GET 指标、layerwise 用 range 字节）。与既有“数分钟后不能命中”的观察一致。
 
-按你的口径：**2k、8k 两种长度各构造 100 条用例；先跑一轮冷填充（A），再分别测试 offload 到 CPU（B）与 offload 到 SSD（C）**；对 native、Mooncake、UCM 三种 offloading 各跑同一 workload 做横向对比。
+## 7. 产物（容器 `/workspace/`）
+- 安装/CI：`reinstall_pr.log`、`format_ci_pr.log`
+- mypy：`mypy_pr_3.10.log`、`mypy_pr_3.11.log`、`mypy_pr_3.12.log`
+- E2E：`pr-bulk-hit.json`、`pr-bulk-isolation.json`、`pr-lw-hit.json`、`pr-lw-isolation.json`、`pr-auto-hit.json`、`cache_prefix_probe.py`（自 `7f75916c5` 提取）
+- 脚本：`qwen3_30B_A3B_mix.sh`、`qwen3_30B_A3B_mix2.sh`、`kill_port.py`
 
-- native：vLLM-Ascend 内置 `OffloadingConnector`（`CPUOffloadingSpec`/`TieringOffloadingSpec`，见 `kv_cache_cpu_offload.md`）。其 A/B/C 基线脚本/结果不在本容器（需你提供或指定路径以 1:1 复刻）。
-- Mooncake：`AscendStoreConnector` + Mooncake store。**当前 Mooncake store 不可用（第 6 节）**，需先恢复。
-- UCM：外部 KV 存储（`ucm_deployment.md`）。仓库有 `ucm_connector` 代码，但**本环境未安装 UCM 库，集群无 UCM 服务/Store**；需提供 UCM 安装产物与后端（本地 SSD/NFS/3FS）后才能跑。
-
-需要的输入：native 的 A/B/C 脚本与结果模板（模型、prompt 集、并发、`max_model_len`、指标口径）；UCM 的安装与存储后端；以及 Mooncake 集群恢复。
-
-## 8. 产物（容器 `/workspace/`）
-- `reinstall_pr.log`、`format_ci_pr.log`
-- `mypy_pr_3.10.log`、`mypy_pr_3.11.log`、`mypy_pr_3.12.log`
-- 说明：vLLM 源码已切到 `c410543d`；vllm-ascend 为 `0.1.dev6820+gf940a0874`；工作树代码干净。
+复验时状态：A(8195)/B(8196) 运行中、`kv_both`、`cache_prefix=auto`+`VLLM_BUILD_COMMIT=cache-prefix-test-c410`，`/health` 均 200。
