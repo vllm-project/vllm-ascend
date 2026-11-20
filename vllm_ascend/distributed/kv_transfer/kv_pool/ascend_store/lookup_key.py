@@ -51,7 +51,7 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
 class LookupKeyClient:
     def __init__(self, vllm_config: VllmConfig):
         self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder()
+        self.decoder = MsgpackDecoder(tuple[int, tuple[TailKeyBoundary, ...]])
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -93,10 +93,8 @@ class LookupKeyClient:
             self.close()
             return StoreLookupResult(0)
 
-        if resp == [RESP_ERR]:
-            raise ValueError("AscendStore lookup failed on server")
         hit_length, boundaries = self.decoder.decode(resp)
-        return StoreLookupResult(hit_length, tuple(TailKeyBoundary(*boundary) for boundary in boundaries))
+        return StoreLookupResult(hit_length, boundaries)
 
     def reset(self) -> bool:
         """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""

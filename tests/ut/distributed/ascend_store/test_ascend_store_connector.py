@@ -97,6 +97,7 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 class TestLookupKeyServer(unittest.TestCase):
     def test_structured_response_and_reset(self):
+        from msgspec import ValidationError
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
@@ -137,7 +138,7 @@ class TestLookupKeyServer(unittest.TestCase):
                 socket.recv_multipart.return_value = response
                 self.assertEqual(client.lookup(48, [b"hash"], [0, 1]), result)
                 socket.recv_multipart.return_value = [b"\x00"]
-                with self.assertRaisesRegex(ValueError, "lookup failed on server"):
+                with self.assertRaises(ValidationError):
                     client.lookup(48, [b"hash"])
                 client.close()
 
