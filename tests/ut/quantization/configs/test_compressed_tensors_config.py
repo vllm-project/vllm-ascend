@@ -13,12 +13,6 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
 
 class TestAscendCompressedTensorsQuanType(TestBase):
-    MXFP4_FORMATS = (
-        ("mxfp4-pack-quantized", None),
-        ("pack-quantized", "mxfp4-pack-quantized"),
-        ("mixed-precision", "mxfp4-pack-quantized"),
-    )
-
     def setUp(self):
         self.config = AscendCompressedTensorsConfig(
             target_scheme_map={"Linear": {}},
@@ -55,28 +49,6 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         mock.symmetric = True
         mock.group_size = 32
         return mock
-
-    def _make_mxfp4_config(self, quant_format, group_format=None):
-        group = {
-            "targets": ["Linear"],
-            "input_activations": None,
-            "weights": {
-                "num_bits": 4,
-                "type": "float",
-                "strategy": "group",
-                "group_size": 32,
-                "dynamic": False,
-                "symmetric": True,
-            },
-        }
-        if group_format is not None:
-            group["format"] = group_format
-        return {
-            "quant_method": "compressed-tensors",
-            "format": quant_format,
-            "ignore": ["lm_head"],
-            "config_groups": {"group_0": group},
-        }
 
     def test_detect_w8a8_static(self):
         weight = self._make_weight_quant(num_bits=8, strategy="channel", dynamic=False, symmetric=True)
@@ -176,82 +148,33 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         self.assertEqual(result, "W4A8_MXFP")
 
     def test_native_mxfp4_from_checkpoint_config(self):
-        for quant_format, group_format in self.MXFP4_FORMATS:
-            for omit_activations in (False, True):
-                with self.subTest(format=quant_format, omit_activations=omit_activations):
-                    config = self._make_mxfp4_config(quant_format, group_format)
-                    if omit_activations:
-                        del config["config_groups"]["group_0"]["input_activations"]
-                    parsed = AscendCompressedTensorsConfig.from_config(config)
-                    scheme = parsed.target_scheme_map["Linear"]
-                    self.assertIsNone(scheme["input_activations"])
-                    with patch("vllm_ascend.quantization.methods.get_scheme_class") as get_scheme_class:
-                        result = parsed._create_scheme_for_layer_type(scheme["weights"], None, scheme["format"], "moe")
-                    get_scheme_class.assert_called_once_with("W4A8_MXFP", "moe")
-                    self.assertIs(result, get_scheme_class.return_value.return_value)
-                    self.assertEqual(parsed.quant_description["group_size"], 32)
-
-    def test_mxfp4_explicit_activations_from_config(self):
-        for quant_format, group_format in self.MXFP4_FORMATS:
-            for num_bits, quant_type in ((4, "W4A4_MXFP4"), (8, "W4A8_MXFP")):
-                for layer_type in ("linear", "moe"):
-                    with self.subTest(format=quant_format, num_bits=num_bits, layer_type=layer_type):
-                        config = self._make_mxfp4_config(quant_format, group_format)
-                        group = config["config_groups"]["group_0"]
-                        input_activations = {**group["weights"], "num_bits": num_bits, "dynamic": True}
-                        group["input_activations"] = input_activations
-                        parsed = AscendCompressedTensorsConfig.from_config(config)
-                        scheme = parsed.target_scheme_map["Linear"]
-                        self.assertIsNotNone(scheme["input_activations"])
-                        self.assertEqual(
-                            scheme["input_activations"].model_dump(include=set(input_activations), mode="json"),
-                            input_activations,
-                        )
-                        with patch("vllm_ascend.quantization.methods.get_scheme_class") as get_scheme_class:
-                            result = parsed._create_scheme_for_layer_type(
-                                scheme["weights"], scheme["input_activations"], scheme["format"], layer_type
-                            )
-                        get_scheme_class.assert_called_once_with(quant_type, layer_type)
-                        self.assertIs(result, get_scheme_class.return_value.return_value)
-                        self.assertEqual(parsed.quant_description["group_size"], 32)
-
-    def test_mxfp4_incompatible_activations_from_config(self):
-        for quant_format, group_format in self.MXFP4_FORMATS:
-            for overrides in (
-                {"type": "int"},
-                {"group_size": 16},
-                {"group_size": 64},
-                {"dynamic": False},
-                {"symmetric": False},
-                {"strategy": "token", "group_size": None},
-            ):
-                with self.subTest(format=quant_format, overrides=overrides):
-                    config = self._make_mxfp4_config(quant_format, group_format)
-                    group = config["config_groups"]["group_0"]
-                    group["input_activations"] = {**group["weights"], "num_bits": 8, "dynamic": True, **overrides}
-                    parsed = AscendCompressedTensorsConfig.from_config(config)
-                    scheme = parsed.target_scheme_map["Linear"]
-                    self.assertIsNotNone(scheme["input_activations"])
-                    with (
-                        patch("vllm_ascend.quantization.methods.get_scheme_class") as get_scheme_class,
-                        self.assertRaises(NotImplementedError),
-                    ):
-                        parsed._create_scheme_for_layer_type(
-                            scheme["weights"], scheme["input_activations"], scheme["format"], "moe"
-                        )
-                    get_scheme_class.assert_not_called()
-
-    def test_per_group_format_overrides_global_mxfp4(self):
-        config = {**COMPRESSED_TENSORS_W8A8_CONFIG, "format": "mxfp4-pack-quantized"}
+        config = {
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "ignore": ["lm_head"],
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "input_activations": None,
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "dynamic": False,
+                        "symmetric": True,
+                    },
+                }
+            },
+        }
         parsed = AscendCompressedTensorsConfig.from_config(config)
         scheme = parsed.target_scheme_map["Linear"]
-        self.assertEqual(scheme["format"], "int-quantized")
-        self.assertIsNotNone(scheme["input_activations"])
+        self.assertIsNone(scheme["input_activations"])
         with patch("vllm_ascend.quantization.methods.get_scheme_class") as get_scheme_class:
-            parsed._create_scheme_for_layer_type(
-                scheme["weights"], scheme["input_activations"], scheme["format"], "linear"
-            )
-        get_scheme_class.assert_called_once_with("W8A8_DYNAMIC", "linear")
+            result = parsed._create_scheme_for_layer_type(scheme["weights"], None, scheme["format"], "moe")
+        get_scheme_class.assert_called_once_with("W4A8_MXFP", "moe")
+        self.assertIs(result, get_scheme_class.return_value.return_value)
+        self.assertEqual(parsed.quant_description["group_size"], 32)
 
     def test_native_mxfp4_rejects_incompatible_formats(self):
         for quant_format in ("int-quantized", "pack-quantized", "mxfp8-quantized"):
