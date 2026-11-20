@@ -194,10 +194,15 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
 
 @pytest.fixture
 def cpu_manager_resources(monkeypatch):
-    # Only replace CUDA resources; manager construction and budget selection run unchanged.
-    monkeypatch.setattr(torch.cuda, "Stream", Mock())
-    monkeypatch.setattr(torch.cuda, "Event", Mock())
-    monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    # Replace only device resources so the real manager and budget logic still run.
+    if vllm_version_is("0.33.0"):
+        monkeypatch.setattr(torch.cuda, "Stream", Mock())
+        monkeypatch.setattr(torch.cuda, "Event", Mock())
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+    else:
+        monkeypatch.setattr(adaptive, "new_d2h_stream", Mock())
+        monkeypatch.setattr(torch, "Event", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_stream", Mock())
     monkeypatch.setattr(adaptive, "stream", lambda *args: nullcontext())
     monkeypatch.setattr(adaptive, "CpuGpuBuffer", partial(adaptive.CpuGpuBuffer, pin_memory=False))
 
