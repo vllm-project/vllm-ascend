@@ -28,6 +28,18 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * platform/patch_kv_cache_layout.py:
+#   Target: attention.backends.utils.resolve_kv_cache_layout and EngineCore's
+#           imported reference.
+#   Why: GLM-5.3-Flash + DFlash2 uses the Ascend GLM planner's separate physical
+#        pools; the generic shared-backing DCP check wrongly rejects HND/LBHNC.
+#   How: For explicit NHD/HND/LBNHC/LBHNC with method=dflash, exclude GLM-owned
+#        specs only from generic layout validation. Backend checks and the
+#        real grouping, allocation, DCP flags and memory accounting stay intact.
+#   Related PR: None; the upstream resolver has no platform placement hook.
+#   Future plan: Remove when layout resolution delegates physical-packing
+#                constraints to the platform KVCacheConfigBuilder.
+# --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
 #   Why: AIV mapping alone does not enable DMA to pageable Host storage.
