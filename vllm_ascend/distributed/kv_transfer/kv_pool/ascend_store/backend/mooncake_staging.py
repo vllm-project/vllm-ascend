@@ -33,6 +33,8 @@ class _HostStaging:
 
 
 class MooncakeHostStaging:
+    """Stage Host transfers in DDR and pass device buffers directly to the Store SDK."""
+
     def __init__(self, store: Any) -> None:
         self.store = store
         self._host_ranges: dict[int, int] = {}

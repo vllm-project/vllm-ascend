@@ -1316,8 +1316,8 @@ class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
             if not key_list:
                 self.set_finished_request(req_id)
                 return
-            # Mixed GETs rotate within each memory kind and return codes in input
-            # order. Ordinary GETs rotate the whole batch, including block IDs.
+            # With explicit memory locations, rotate keys within each group and restore input order.
+            # Otherwise rotate the whole batch together with its block IDs.
             rotation = self.tp_rank % len(key_list)
             if memory_locations is None and rotation:
                 key_list = key_list[rotation:] + key_list[:rotation]

@@ -36,7 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
-    HiSparseStoreViews,
+    HiSparseTransferLayout,
     build_pool_key_namespace,
     has_hisparse_cache_layout,
     plan_hisparse_store_views,
@@ -627,7 +627,7 @@ class BaseKVPoolWorker(ABC):
         group_block_strides: list[int] = []
         group_cache_entry_segments: list[tuple[int, int]] = []
         layer_names_by_physical: dict[int, list[str]] = {}
-        num_blocks = self._host_block_count(layer_names[0]) if layer_names else None
+        num_blocks = self._get_host_num_blocks(layer_names[0]) if layer_names else None
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
             phys = self._global_to_local_layer.get(phys, phys)
@@ -719,11 +719,11 @@ class BaseKVPoolWorker(ABC):
                 result[name] = caches[:num_states]
         return result
 
-    _transfer_layout: HiSparseStoreViews | None = None
+    _transfer_layout: HiSparseTransferLayout | None = None
 
-    def _host_block_count(self, name: str) -> int | None:
+    def _get_host_num_blocks(self, name: str) -> int | None:
         layout = self._transfer_layout
-        return layout.block_count(name) if layout is not None else None
+        return layout.get_host_num_blocks(name) if layout is not None else None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         if self.use_recoverssm:
@@ -761,7 +761,7 @@ class BaseKVPoolWorker(ABC):
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
         self.block_stride = []
-        num_blocks = self._host_block_count(first_name)
+        num_blocks = self._get_host_num_blocks(first_name)
         for cache in first_kv_cache_tuple:
             block_len, block_stride, _, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
             logger.info("block_shape: %s", cache.shape[1:])
@@ -799,7 +799,7 @@ class BaseKVPoolWorker(ABC):
         registered_regions: dict[int, tuple[int, int]] = {}
         registration_caches = {**kv_caches, **auxiliary_caches} if auxiliary_caches else kv_caches
         for layer_name, cache_or_caches in registration_caches.items():
-            num_blocks = self._host_block_count(layer_name)
+            num_blocks = self._get_host_num_blocks(layer_name)
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
                 _, _, region_len, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
@@ -867,7 +867,7 @@ class BaseKVPoolWorker(ABC):
                 self.sub_size_bytes,
             )
 
-        # Residency and alignment are registration metadata, independent of the backend.
+        # Host/device memory location and alignment are registration metadata shared by all backends.
         buffers = (
             self._transfer_layout.buffer_descriptors(registered_regions)
             if self._transfer_layout is not None
