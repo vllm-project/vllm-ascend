@@ -32,17 +32,17 @@ def apply_patch() -> None:
     )
     AnthropicMessagesRequest.model_rebuild(force=True)
 
-    original = AnthropicServingMessages._build_base_request.__func__
+    original = AnthropicServingMessages.__dict__["_build_base_request"].__func__
 
     @classmethod
     @wraps(original)
     def build_base_request(cls, anthropic_request, openai_messages):
         request = original(cls, anthropic_request, openai_messages)
         if isinstance(anthropic_request, AnthropicMessagesRequest):
-            request.min_tokens = anthropic_request.min_tokens
+            request.min_tokens = anthropic_request.min_tokens  # type: ignore[attr-defined]
         return request
 
-    AnthropicServingMessages._build_base_request = build_base_request
+    AnthropicServingMessages._build_base_request = build_base_request  # type: ignore[method-assign]
 
 
 apply_patch()
