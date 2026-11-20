@@ -499,6 +499,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([5, 3], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 5, 8], dtype=np.int32))
     assert result.num_tokens == 8
+    assert manager._min_local_num_tokens == 8
     expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
     assert torch.equal(result.input_ids[:8], torch.tensor([0, 1, 2, 3, 4, 15, 16, 17], dtype=torch.int32))

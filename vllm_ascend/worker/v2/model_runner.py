@@ -1686,7 +1686,9 @@ def graph_manager_wrapper(model_runner):
     ):
         query_shapes = decode_query_len if vllm_version_is("0.33.0") else decode_query_lens
         assert query_shapes is not None
-        return ModelAclGraphManager(
+        get_manager_cls = getattr(model_runner.model_state, "get_graph_manager_cls", None)
+        manager_cls = get_manager_cls() if get_manager_cls is not None else ModelAclGraphManager
+        return manager_cls(
             vllm_config,
             device,
             cudagraph_mode,
