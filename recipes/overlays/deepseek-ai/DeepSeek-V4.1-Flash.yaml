@@ -21,6 +21,9 @@ hardware_notes:
   ascend_950dt:
     title: Docker setup for Ascend 950DT
     body: >-
+      Use the vLLM Ascend `v0.32.0rc1-a5` image shown in the Docker tab.
+      The Install header displays the model's general minimum vLLM version.
+
       Before running the Prefill and Decode commands, add the UMMU and UBURMA
       devices, the urma_admin bind mount, and the model directory mount as
       shown in the tutorial. Use the same mounted checkpoint path in both
