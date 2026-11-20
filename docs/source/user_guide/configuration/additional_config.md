@@ -377,6 +377,43 @@ An example of additional configuration is as follows:
 }
 ```
 
+### Node-local Engram sharing on Ascend A5
+
+Independently launched DeepSeek-V4.1-Flash instances on one A5 host can share a
+single copy of the MXFP8 Engram codes and E8M0 scales. Enable CPU offload and
+DP shared memory in Engram config. This mode requires TP1/PP1, lazy
+safetensors loading, and sleep mode disabled. DP shared memory requires
+DP or PCP greater than one and is incompatible with elastic expert parallelism.
+
+| Additional configuration key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `engram_node_shared_endpoint` | String or null | `null` | Absolute path to the owner's Unix socket. Setting the path enables node-local sharing. |
+| `engram_node_shared_generation` | String or null | `null` | Generation identifier for the shared table. It must match the owner's generation when sharing is enabled. |
+| `engram_node_shared_timeout` | Integer | `1800` | Maximum time in seconds to wait for the owner when attaching to a table. |
+
+Start the owner with the local checkpoint directory and a socket inside a
+private directory owned by the serving user.
+
+```bash
+install -d -m 700 /path/to/private-engram-dir
+python -m vllm_ascend.models.deepseek_v41.engram.node_shared serve \
+    --model /path/to/checkpoint \
+    --endpoint /path/to/private-engram-dir/owner.sock \
+    --generation run-1
+```
+
+Point each serving instance at the same checkpoint, socket, and generation.
+
+```bash
+vllm serve /path/to/checkpoint \
+    --data-parallel-size 2 \
+    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+    --additional-config '{"engram_node_shared_endpoint":"/path/to/private-engram-dir/owner.sock","engram_node_shared_generation":"run-1"}'
+```
+
+Shut down consumers before draining the owner. Graceful worker shutdown
+synchronizes outstanding device reads and releases the table leases.
+
 ### KV pipeline parallelism (KVPP)
 
 Set `enable_kvpp: true` in `--additional-config` to distribute persistent KV-cache layers across TP and PCP ranks within the same DP replica and PP stage. The group size is TP × PCP: TP4 + PCP2 uses eight ranks, and TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
