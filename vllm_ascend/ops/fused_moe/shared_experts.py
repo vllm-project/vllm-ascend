@@ -207,17 +207,14 @@ class AscendSharedExperts:
             self._megamoe_shared_fusion_platform = "A3/INT8"
         # Checks the ROUTED experts' quant type: the shared fusion stacks on
         # top of the routed MegaMoe path, which must support the scenario
-        # first. The operator's A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP
-        # (its A2/A3 ones are A16W16 / A8W8-INT / A8W4-INT), so all three MXFP
-        # types pass. The shared expert's own quant type is resolved
-        # per-linear in _collect_megamoe_shared_weight and may differ from
-        # this one (mixed quantization).
+        # first. The A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP, so all three
+        # MXFP types pass. On arch22 the fused shared payload is implemented for
+        # the A8W8-INT routed path only; the other INT layouts keep the separate
+        # shared forward. The shared expert's own quant type is resolved
+        # per-linear in _collect_megamoe_shared_weight and must be W8A8 as well
+        # (see the check there).
         supported_quant_types = (
-            (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP)
-            if supports_mxfp_fusion
-            # A2/A3 INT8 fusion stacks on the W8A8 routed MegaMoe path;
-            # other routed INT layouts keep the separate shared forward.
-            else (QuantType.W8A8,)
+            (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP) if supports_mxfp_fusion else (QuantType.W8A8,)
         )
         if self.quant_type not in supported_quant_types:
             # Only MXFP8 and MXFP4 are implemented. Their shared weights
@@ -443,16 +440,23 @@ class AscendSharedExperts:
             return
         # Resolve the shared expert's own quant type. The packed weight bytes
         # alone cannot tell an A4 from an A8 shared activation, so prefer the
-        # type declared by the shared linear's quant method (this is what
-        # mixed-quantization checkpoints rely on: W4A8MXFP shared under
-        # W8A8MXFP routed runs the shared GMM in A8W4-FP mode). Fall back to
-        # the weight-dtype heuristic when the method declares nothing.
+        # type declared by the shared linear's quant method (mixed-quantization
+        # checkpoints rely on it: W4A8MXFP shared under W8A8MXFP routed runs the
+        # shared GMM in A8W4-FP mode). Fall back to the weight-dtype heuristic
+        # when the method declares nothing.
         shared_quant_type = getattr(getattr(linear, "quant_method", None), "quant_type", QuantType.NONE)
         if is_int8:
-            # A2/A3 INT8: honour the shared linear's declared quant type
-            # (W8A8 vs W4A8 selects the operator weight descriptor); fall
-            # back to W8A8 only when the method declares nothing usable.
-            if shared_quant_type not in (QuantType.W8A8, QuantType.W4A8):
+            # The A3 INT8 shared payload is validated for W8A8 only. A W4A8
+            # shared linear materializes int32 packed weights and is rejected by
+            # the dtype check above, so a declared W4A8 here is a mis-declared
+            # checkpoint: keep the separate shared forward.
+            if shared_quant_type == QuantType.W4A8:
+                self._disable_megamoe_shared_fusion(
+                    "shared quant type W4A8 is not supported by the A3 INT8 shared payload (W8A8 only)"
+                )
+                return
+            if shared_quant_type != QuantType.W8A8:
+                # Undeclared: an int8 buffer with no quant type is the W8A8 path.
                 shared_quant_type = QuantType.W8A8
         elif shared_quant_type in (QuantType.W4A4MXFP, QuantType.W4A8MXFP):
             if not packed_fp4:
@@ -520,14 +524,13 @@ class AscendSharedExperts:
                 # INT8 weights are already (in, out) and must never be transposed
                 # (the operator requires shared_weight2 = (I, H)).
                 weight = weight.transpose(0, 1).contiguous()
-            raw_scale = linear.weight_scale.data
-            if raw_scale.dim() == 1:
-                # W8A8 dynamic linears keep a flattened per-channel scale [out];
-                # MegaMoe takes the per-channel axis last (routed INT8 experts
-                # pass [num_experts, out, 1], the shared expert is its [out, 1]).
-                scale = raw_scale.reshape(-1, 1).contiguous()
-            else:
-                scale = raw_scale.transpose(0, 1).contiguous()
+                # MXFP scales follow the transposed weight; the INT8 scale is
+                # rebuilt from the flattened per-channel buffer further down.
+                raw_scale = linear.weight_scale.data
+                if raw_scale.dim() == 1:
+                    scale = raw_scale.reshape(-1, 1).contiguous()
+                else:
+                    scale = raw_scale.transpose(0, 1).contiguous()
         finally:
             torch.npu.config.allow_internal_format = True
         if tuple(weight.shape) != expected_weight_shape:
@@ -570,6 +573,18 @@ class AscendSharedExperts:
                 .to(torch.int64)
                 .view(torch.uint64)
             )
+            # The arch22 epilogue reads one scale per output channel. A
+            # per-group W8A8 checkpoint would flatten to out * groups values and
+            # be silently misread, so reject anything but the exact length.
+            expected_scale_len = (
+                2 * self.moe_config.intermediate_size_per_partition if slot == "w1" else self.moe_config.hidden_dim
+            )
+            if scale.numel() != expected_scale_len:
+                self._disable_megamoe_shared_fusion(
+                    f"shared-expert scale length {scale.numel()} does not match the "
+                    f"per-output-channel contract {expected_scale_len}"
+                )
+                return
             logger.info_once(
                 "A3 MegaMoe INT8 shared payload: orientation=(in,out) "
                 "weight=%s dtype=%s format=FRACTAL_NZ scale=%s dtype=uint64",
