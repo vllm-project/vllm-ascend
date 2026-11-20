@@ -24,7 +24,7 @@ This guide is based on **vLLM-Ascend 0.30.0**, which introduces experimental sup
 
 ## 2 Supported Features {#2-supported-features}
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md#generative-models_1) for the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md#generative-models) for the model's supported feature matrix.
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration.
 

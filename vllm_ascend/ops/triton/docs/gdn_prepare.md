@@ -2,7 +2,7 @@
 
 ## Description
 
-- **Location**: [`v2/mamba/gdn_prepare.py`](../v2/mamba/gdn_prepare.py).
+- **Location**: [`mamba/gdn_prepare.py`](../mamba/gdn_prepare.py).
   `prepare_gdn` is the Python entry point for the private
   `_prepare_gdn_kernel` Triton kernel.
 - **Function**: Build aligned-cache GDN metadata and clear the shared
