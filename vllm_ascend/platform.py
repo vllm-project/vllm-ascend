@@ -39,7 +39,6 @@ from vllm_ascend.ascend_config import (
     init_ascend_config,
     is_draft_config_context,
 )
-from vllm_ascend.attention.fa3_selection import MINIMAX_M3_ARCHITECTURES
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -90,6 +89,12 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
 _V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
@@ -839,7 +844,7 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
     # the source-of-truth HF architectures here because this hook runs early.
     hf_config = getattr(model_config, "hf_config", None)
     architectures = getattr(hf_config, "architectures", None) or ()
-    if not MINIMAX_M3_ARCHITECTURES.intersection(architectures):
+    if not _MINIMAX_M3_ARCHITECTURES.intersection(architectures):
         return
 
     text_config = getattr(model_config, "hf_text_config", None)
@@ -1768,7 +1773,7 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> b
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
-        supported_target_architectures = MINIMAX_M3_ARCHITECTURES | {"GlmMoeDsaForCausalLM"}
+        supported_target_architectures = _MINIMAX_M3_ARCHITECTURES | {"GlmMoeDsaForCausalLM"}
         return (
             model_tag == "dspark_head"
             and not supported_target_architectures.isdisjoint(target.hf_config.architectures or ())
