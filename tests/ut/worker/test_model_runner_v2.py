@@ -33,7 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import MRV2PaddingPlan, vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -54,6 +54,7 @@ def _make_runner(*args, **kwargs):
     )
     runner.max_num_tokens = 16
     runner.max_num_reqs = 16
+    runner.logical_max_num_reqs = runner.max_num_reqs
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
@@ -67,6 +68,7 @@ def _make_runner(*args, **kwargs):
     runner.execute_model_state = None
     runner.dcp_size = 1
     runner.use_pp = False
+    runner.pcp_manager = None
     runner.is_last_pp_rank = False
     runner.is_pooling_model = False
     # Dump contract from the production initializer; helpers no-op on None.
@@ -75,7 +77,7 @@ def _make_runner(*args, **kwargs):
     runner.attn_groups = []
     runner._target_uses_flashmla = False
     runner.adaptive_verification = None
-    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
+    runner.input_buffers = SimpleNamespace(dummy_num_tokens=None, dummy_num_reqs=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
@@ -86,6 +88,7 @@ def _make_runner(*args, **kwargs):
     runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())  # type: ignore[assignment]
     # Set by NPUModelRunner.__init__ on real instances.
     runner._finegrained_tp_requires_graph = False
+    runner.input_padding_plan = MRV2PaddingPlan()
     # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
     # these tests focus on buffer refresh / upstream passthrough only.
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
@@ -518,11 +521,13 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the whole descriptor through the retained
-    # PCPManager API (vLLM #57980), also retained in v0.33.0.
-    assert len(padding_assignments) == 2
+    # graph descriptor, applies the runner-owned token alignment outside PCP,
+    # and forwards the whole descriptor through the retained PCPManager API
+    # (vLLM #57980), also retained in v0.33.0.
+    assert len(padding_assignments) == 3
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
     assert ast.unparse(padding_assignments[1].value) == "global_graph_num_reqs * batch_desc.uniform_token_count"
+    assert ast.unparse(padding_assignments[2].value) == "self.input_padding_plan.align_tokens(num_tokens_after_padding)"
 
     assert len(partition_calls) == 1
     partition_call = partition_calls[0]
@@ -1164,7 +1169,18 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 )
 def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            enable_eplb=False,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            use_sequence_parallel_moe=False,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_scheduled_tokens=None,
+            max_num_seqs=2,
+            max_num_active_seqs=None,
+        ),
         speculative_config=None,
         offload_config=OffloadConfig(
             offload_backend=offload_backend,
@@ -1172,6 +1188,7 @@ def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_asc
         ),
     )
     ascend_config = SimpleNamespace(
+        enable_shared_expert_dp=False,
         finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
         dump_config_path=None,
     )
@@ -1240,10 +1257,25 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         monkeypatch.setenv("HCCL_BUFFSIZE", env_buffer_size)
 
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1),
+        parallel_config=SimpleNamespace(
+            enable_eplb=False,
+            pipeline_parallel_size=2 if use_pp else 1,
+            tensor_parallel_size=1,
+            use_sequence_parallel_moe=False,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_scheduled_tokens=None,
+            max_num_seqs=2,
+            max_num_active_seqs=None,
+        ),
         offload_config=OffloadConfig(),
     )
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
+    ascend_config = SimpleNamespace(
+        enable_shared_expert_dp=False,
+        eplb_config=SimpleNamespace(load_collection_phase="all"),
+        dump_config_path=None,
+    )
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
     ascend_config.finegrained_tp_config = SimpleNamespace(
@@ -1339,10 +1371,25 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 @pytest.mark.parametrize("method", ["mtp", "ngram", "ngram_gpu"])
 def test_init_spec_pp_full_graph_and_speculator(method):
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2),
+        parallel_config=SimpleNamespace(
+            enable_eplb=True,
+            pipeline_parallel_size=2,
+            tensor_parallel_size=1,
+            use_sequence_parallel_moe=False,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_scheduled_tokens=None,
+            max_num_seqs=2,
+            max_num_active_seqs=None,
+        ),
         offload_config=OffloadConfig(),
     )
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
+    ascend_config = SimpleNamespace(
+        enable_shared_expert_dp=False,
+        eplb_config=SimpleNamespace(load_collection_phase="decode"),
+        dump_config_path=None,
+    )
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
     ascend_config.finegrained_tp_config = SimpleNamespace(
@@ -1487,7 +1534,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     create_kvpp.assert_called_once()
     assert runner.kvpp == "kvpp"
     assert runner.model_state.kvpp_runtime == "kvpp"
-    runner.pcp_manager.set_runner_state.assert_called_once_with(runner.vllm_config, seen["cfg"], runner.input_buffers)
+    runner.pcp_manager.set_runner_state.assert_called_once_with(
+        runner.vllm_config,
+        seen["cfg"],
+        runner.input_buffers,
+        runner.input_padding_plan,
+    )
     runner.pcp_manager.set_speculator.assert_not_called()
     assert runner.model_state.pcp_manager is runner.pcp_manager
 

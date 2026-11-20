@@ -45,6 +45,58 @@ def test_validate_v2_model_runner_accepts_a_supported_config():
     mrv2_utils._validate_v2_model_runner(config)
 
 
+def test_decode_query_limits_are_stable_across_config_revalidation():
+    upstream = MagicMock(return_value={6: 1})
+    config = SimpleNamespace(additional_config={}, uniform_decode_query_len=6)
+
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 6, upstream) == {6: 1}
+    upstream.assert_called_once_with(config, 6)
+
+    config.additional_config[mrv2_utils.MRV2_DECODE_QUERY_LIMITS_KEY] = {"6": 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 6, upstream) == {6: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 1, upstream) == {6: 1}
+    assert upstream.call_count == 2
+
+
+def test_draft_decode_sizes_are_stable_across_config_revalidation():
+    upstream = MagicMock(return_value=[1, 2])
+    config = SimpleNamespace(additional_config={})
+
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [
+        1,
+        2,
+    ]
+    upstream.assert_called_once_with(config)
+
+    config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = [4]
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [4]
+    upstream.assert_called_once_with(config)
+
+    config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = []
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == []
+    upstream.assert_called_once_with(config)
+
+
+def test_varlen_decode_sizes_are_stable_per_query_len():
+    upstream = MagicMock(side_effect=lambda _config, query_len: [query_len])
+    config = SimpleNamespace(additional_config={})
+
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [6]
+    upstream.assert_called_once_with(config, 6)
+
+    config.additional_config[mrv2_utils.MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = {
+        "6": [8, 16],
+        1: [],
+    }
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [
+        8,
+        16,
+    ]
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 1, upstream) == []
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 7, upstream) == [7]
+    assert upstream.call_count == 2
+
+
 def test_explicit_v1_request_is_rejected(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
@@ -68,6 +120,17 @@ def test_apply_config_patch_is_wired(monkeypatch):
 
     original_property = VllmConfig.use_v2_model_runner
     original_validate = getattr(VllmConfig, "_validate_v2_model_runner", None)
+    original_resolver = getattr(VllmConfig, "get_decode_cudagraph_query_lens", None)
+    original_draft_resolver = getattr(
+        VllmConfig,
+        "get_draft_decode_cudagraph_request_sizes",
+        None,
+    )
+    original_varlen_resolver = getattr(
+        VllmConfig,
+        "get_varlen_decode_cudagraph_token_sizes",
+        None,
+    )
 
     mrv2_utils.apply_v2_model_runner_config_patch()
     assert isinstance(VllmConfig.use_v2_model_runner, property)
@@ -76,11 +139,66 @@ def test_apply_config_patch_is_wired(monkeypatch):
         # Ascend owns this hook so the GPU-only Triton precondition does not
         # reject configs built in environments without Triton.
         assert VllmConfig._validate_v2_model_runner is mrv2_utils._validate_v2_model_runner
+    if original_resolver is not None:
+        resolver = VllmConfig.get_decode_cudagraph_query_lens
+        assert resolver._vllm_ascend_mrv2_limits is True
+        expected_upstream = getattr(
+            original_resolver,
+            "_vllm_ascend_upstream",
+            original_resolver,
+        )
+        assert resolver._vllm_ascend_upstream is expected_upstream
+    if original_draft_resolver is not None:
+        draft_resolver = VllmConfig.get_draft_decode_cudagraph_request_sizes
+        assert draft_resolver._vllm_ascend_mrv2_draft_sizes is True
+        expected_upstream = getattr(
+            original_draft_resolver,
+            "_vllm_ascend_upstream",
+            original_draft_resolver,
+        )
+        assert draft_resolver._vllm_ascend_upstream is expected_upstream
+    if original_varlen_resolver is not None:
+        varlen_resolver = VllmConfig.get_varlen_decode_cudagraph_token_sizes
+        assert varlen_resolver._vllm_ascend_mrv2_varlen_sizes is True
+        expected_upstream = getattr(
+            original_varlen_resolver,
+            "_vllm_ascend_upstream",
+            original_varlen_resolver,
+        )
+        assert varlen_resolver._vllm_ascend_upstream is expected_upstream
 
     # Re-applying is harmless.
+    patched_resolver = getattr(VllmConfig, "get_decode_cudagraph_query_lens", None)
+    patched_draft_resolver = getattr(
+        VllmConfig,
+        "get_draft_decode_cudagraph_request_sizes",
+        None,
+    )
+    patched_varlen_resolver = getattr(
+        VllmConfig,
+        "get_varlen_decode_cudagraph_token_sizes",
+        None,
+    )
     mrv2_utils.apply_v2_model_runner_config_patch()
+    assert getattr(VllmConfig, "get_decode_cudagraph_query_lens", None) is patched_resolver
+    assert getattr(VllmConfig, "get_draft_decode_cudagraph_request_sizes", None) is patched_draft_resolver
+    assert getattr(VllmConfig, "get_varlen_decode_cudagraph_token_sizes", None) is patched_varlen_resolver
 
     # Restore the upstream class state so later tests are unaffected.
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
     if original_validate is not None:
         monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+    if original_resolver is not None:
+        monkeypatch.setattr(VllmConfig, "get_decode_cudagraph_query_lens", original_resolver)
+    if original_draft_resolver is not None:
+        monkeypatch.setattr(
+            VllmConfig,
+            "get_draft_decode_cudagraph_request_sizes",
+            original_draft_resolver,
+        )
+    if original_varlen_resolver is not None:
+        monkeypatch.setattr(
+            VllmConfig,
+            "get_varlen_decode_cudagraph_token_sizes",
+            original_varlen_resolver,
+        )

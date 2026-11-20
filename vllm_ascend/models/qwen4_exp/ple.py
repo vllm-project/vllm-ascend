@@ -334,6 +334,7 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
         original = Qwen4ExpPLELayer._short_conv

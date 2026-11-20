@@ -1,5 +1,16 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
@@ -41,7 +52,9 @@ upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
 
-# Scope the graph-safe internal-format override to the upstream PLE custom op.
+# PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
+# internal formats are enabled. Scope the graph-safe option override to the
+# upstream PLE custom op instead of changing it globally for the worker.
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
@@ -64,6 +77,9 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # With max_num_seqs=1 the PLE query-start buffer has a static length of
+        # two. Marking that length dynamic makes TorchDynamo reject the static
+        # specialization used by PLE during FULL_DECODE_ONLY graph capture.
         dynamic_arg_dims = getattr(self, "_dynamic_arg_dims", None)
         if dynamic_arg_dims is not None:
             self._dynamic_arg_dims = {
@@ -111,8 +127,8 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
-        # PLE has a private dense bank; only GDN's complete conv+SSM state
-        # shares QSA pages.
+        # vLLM uses these specs to align attention pages. PLE has a private
+        # dense bank; only GDN's complete conv+SSM state shares QSA pages.
         return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
 
     @staticmethod

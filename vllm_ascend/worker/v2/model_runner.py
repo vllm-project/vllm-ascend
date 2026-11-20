@@ -111,8 +111,8 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
+    ensure_mrv2_physical_batch_capacity,
     get_mrv2_padding_plan,
-    get_mrv2_physical_batch_capacity,
     get_pcp_profile_num_tokens,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
@@ -192,11 +192,10 @@ class NPUModelRunner(GPUModelRunner):
             enable_shared_expert_dp=self.ascend_config.enable_shared_expert_dp,
             finegrained_tp_config=self.ascend_config.finegrained_tp_config,
         )
-        self.logical_max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.logical_max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        physical_max_num_tokens, physical_max_num_reqs = get_mrv2_physical_batch_capacity(
-            vllm_config, self.input_padding_plan
-        )
+        scheduler_config = vllm_config.scheduler_config
+        self.logical_max_num_reqs = scheduler_config.max_num_active_seqs or scheduler_config.max_num_seqs
+        if self.input_padding_plan.token_alignment > 1:
+            ensure_mrv2_physical_batch_capacity(vllm_config, self.input_padding_plan)
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -208,25 +207,18 @@ class NPUModelRunner(GPUModelRunner):
         parallel_config = vllm_config.parallel_config
 
         spec_pp_support = resolve_spec_pp_support(vllm_config)
-        scheduler_config = vllm_config.scheduler_config
-        scheduler_config.max_num_batched_tokens = physical_max_num_tokens
-        scheduler_config.max_num_seqs = physical_max_num_reqs
-        try:
-            # Parent-owned target, draft, PCP and PP buffers must all see the
-            # same physical capacity.  Restore scheduler limits immediately:
-            # the scheduler continues to own the original logical budget.
-            set_potential_max_tokens(vllm_config)
-            with torch_cuda_wrapper():
-                super().__init__(vllm_config, device)
-                offload_config = vllm_config.offload_config
-                # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
-                # support ACL Graph capture. These copies can currently invoke ACLop,
-                # which torch_npu rejects during capture.
-                if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
-                    set_offloader(create_offloader(offload_config))
-        finally:
-            scheduler_config.max_num_batched_tokens = self.logical_max_num_tokens
-            scheduler_config.max_num_seqs = self.logical_max_num_reqs
+        # Parent-owned target, draft, PCP and PP buffers all use the physical
+        # capacity. Scheduler admission remains bounded by the logical fields
+        # max_num_scheduled_tokens and max_num_active_seqs.
+        set_potential_max_tokens(vllm_config)
+        with torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
+            offload_config = vllm_config.offload_config
+            # FIXME: Enable NZ weight prefetch in graph mode once ND-to-NZ copies
+            # support ACL Graph capture. These copies can currently invoke ACLop,
+            # which torch_npu rejects during capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group

@@ -1987,6 +1987,12 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
 
     runtime_boot = build_runtime_config_from_additional(additional_config)
 
+    from vllm_ascend.mrv2_utils import (
+        MRV2_DECODE_QUERY_LIMITS_KEY,
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    )
+
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
@@ -1996,6 +2002,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Platform-derived physical graph gears. They survive config transport
         # but are not a user-facing AscendConfig option.
         "_mrv2_padding_graph_gears",
+        MRV2_DECODE_QUERY_LIMITS_KEY,
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
         # backend selector; Ascend supports only the triton value (FLA kernels
         # run via triton-ascend), and the triton default applies either way

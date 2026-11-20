@@ -44,7 +44,6 @@ def runner(buffers):
     runner.max_num_reqs = 16
     runner.max_num_tokens = 64
     runner.logical_max_num_reqs = 16
-    runner.logical_max_num_tokens = 64
     runner.input_padding_plan = MRV2PaddingPlan()
     runner.speculator = None
     runner.eplb = Mock()

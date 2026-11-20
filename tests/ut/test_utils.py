@@ -314,6 +314,24 @@ class TestUtils(TestBase):
         self.assertEqual(plan.common_request_alignment((2, 4)), 4)
         self.assertEqual(plan.align_requests(3, query_len=2), 4)
         self.assertEqual(plan.align_batch_tokens(6, num_reqs=3, uniform_query_len=2), 8)
+        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=None), 4)
+        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=20), 0)
+        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=24), 4)
+        # A one-token draft graph still needs a complete TP-aligned request
+        # tier.  A smaller graph cap must select eager execution instead of
+        # admitting a partial four-rank shard.
+        self.assertEqual(plan.limit_aligned_requests(1, query_len=1, max_tokens=3), 0)
+        self.assertEqual(plan.align_query_limits({4: 1, 6: 1}), {4: 4, 6: 4})
+
+        composite_plan = utils.MRV2PaddingPlan(token_alignment=12)
+        self.assertEqual(
+            composite_plan.align_query_limits({4: 1, 6: 1}),
+            {4: 6, 6: 6},
+        )
+        self.assertEqual(
+            composite_plan.align_query_limits({4: 1, 6: 1}, max_tokens=30),
+            {4: 6, 6: 0},
+        )
 
     def test_mrv2_padding_plan_keeps_pcp_separate_from_tp_alignment(self):
         config = SimpleNamespace(
@@ -364,27 +382,55 @@ class TestUtils(TestBase):
         config = SimpleNamespace(
             uniform_decode_query_len=4,
             get_decode_cudagraph_query_lens=resolver,
+            scheduler_config=SimpleNamespace(max_num_seqs=16),
         )
 
-        self.assertEqual(utils.get_mrv2_decode_query_lens(config), (3, 5))
-        resolver.assert_called_once_with(4)
+        self.assertEqual(utils.get_mrv2_decode_query_limits(config), {3: 8, 5: 16})
+        self.assertEqual(resolver.call_args_list, [mock.call(4)])
 
     def test_mrv2_decode_query_lens_supports_v033_config(self):
-        config = SimpleNamespace(uniform_decode_query_len=4)
+        config = SimpleNamespace(
+            uniform_decode_query_len=4,
+            scheduler_config=SimpleNamespace(max_num_seqs=7),
+        )
 
-        self.assertEqual(utils.get_mrv2_decode_query_lens(config), (4,))
+        self.assertEqual(utils.get_mrv2_decode_query_limits(config), {4: 7})
+
+    def test_mrv2_decode_query_lens_derives_v033_dynamic_tiers(self):
+        speculative_config = SimpleNamespace(
+            num_speculative_tokens_per_batch_size=[(1, 2, 5), (3, 8, 2)],
+            uses_dynamic_speculative_decoding=lambda: True,
+        )
+        config = SimpleNamespace(
+            uniform_decode_query_len=6,
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=8,
+                max_num_active_seqs=None,
+            ),
+            speculative_config=speculative_config,
+            num_speculative_tokens=5,
+        )
+
+        self.assertEqual(utils.get_mrv2_decode_query_limits(config), {6: 2, 3: 8})
 
     def test_mrv2_physical_capacity_does_not_mutate_scheduler_limits(self):
-        scheduler_config = SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=3)
+        scheduler_config = SimpleNamespace(
+            max_num_batched_tokens=5,
+            max_num_scheduled_tokens=None,
+            max_num_seqs=3,
+            max_num_active_seqs=None,
+        )
         config = SimpleNamespace(
             scheduler_config=scheduler_config,
+            model_config=SimpleNamespace(enforce_eager=False),
             compilation_config=SimpleNamespace(
                 cudagraph_capture_sizes=[8],
                 prefill_cudagraph_capture_token_sizes=[8],
                 decode_cudagraph_capture_request_sizes=[4],
+                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
             ),
             uniform_decode_query_len=2,
-            get_decode_cudagraph_query_lens=lambda _query_len: [2],
+            get_decode_cudagraph_query_lens=lambda _query_len: {2: 3},
         )
 
         capacity = utils.get_mrv2_physical_batch_capacity(
@@ -402,16 +448,129 @@ class TestUtils(TestBase):
         config.compilation_config.prefill_cudagraph_capture_token_sizes = []
         config.compilation_config.decode_cudagraph_capture_request_sizes = []
         config.uniform_decode_query_len = 6
-        config.get_decode_cudagraph_query_lens = lambda _query_len: [6]
+        config.get_decode_cudagraph_query_lens = lambda _query_len: {6: 1}
 
         capacity = utils.get_mrv2_physical_batch_capacity(
             config,
             utils.MRV2PaddingPlan(token_alignment=8),
         )
 
-        self.assertEqual(capacity, (24, 1))
+        self.assertEqual(capacity, (24, 4))
         self.assertEqual(scheduler_config.max_num_batched_tokens, 10)
         self.assertEqual(scheduler_config.max_num_seqs, 1)
+
+        config.compilation_config.cudagraph_mode = SimpleNamespace(has_full_cudagraphs=lambda: True)
+        with mock.patch.object(utils, "vllm_version_is", return_value=True):
+            capacity = utils.get_mrv2_physical_batch_capacity(
+                config,
+                utils.MRV2PaddingPlan(token_alignment=8),
+            )
+
+        self.assertEqual(capacity, (24, 4))
+
+        config.model_config.enforce_eager = True
+        with mock.patch.object(utils, "vllm_version_is", return_value=True):
+            capacity = utils.get_mrv2_physical_batch_capacity(
+                config,
+                utils.MRV2PaddingPlan(token_alignment=8),
+            )
+
+        self.assertEqual(capacity, (24, 4))
+
+    def test_mrv2_physical_capacity_uses_common_query_grid(self):
+        config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_batched_tokens=64,
+                max_num_scheduled_tokens=None,
+                max_num_seqs=1,
+                max_num_active_seqs=None,
+            ),
+            model_config=SimpleNamespace(enforce_eager=False),
+            compilation_config=SimpleNamespace(
+                cudagraph_capture_sizes=[],
+                prefill_cudagraph_capture_token_sizes=[],
+                decode_cudagraph_capture_request_sizes=[],
+                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            ),
+            uniform_decode_query_len=6,
+            get_decode_cudagraph_query_lens=lambda _query_len: {4: 1, 6: 1},
+        )
+
+        capacity = utils.get_mrv2_physical_batch_capacity(
+            config,
+            utils.MRV2PaddingPlan(token_alignment=12),
+        )
+
+        # The split graph API shares one request grid across both query
+        # lengths, so capacity follows their common request alignment (6), not
+        # the larger individual alignment (3).
+        self.assertEqual(capacity, (72, 6))
+
+    def test_ensure_mrv2_physical_capacity_preserves_logical_budget(self):
+        scheduler_config = SimpleNamespace(
+            max_num_batched_tokens=5,
+            max_num_scheduled_tokens=None,
+            max_num_seqs=1,
+            max_num_active_seqs=None,
+        )
+        config = SimpleNamespace(
+            scheduler_config=scheduler_config,
+            compilation_config=SimpleNamespace(
+                cudagraph_capture_sizes=[8],
+                prefill_cudagraph_capture_token_sizes=[8],
+                decode_cudagraph_capture_request_sizes=[4],
+                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            ),
+            uniform_decode_query_len=1,
+            get_decode_cudagraph_query_lens=lambda _query_len: {1: 1},
+        )
+
+        capacity = utils.ensure_mrv2_physical_batch_capacity(
+            config,
+            utils.MRV2PaddingPlan(token_alignment=4),
+        )
+
+        self.assertEqual(capacity, (8, 4))
+        self.assertEqual(scheduler_config.max_num_batched_tokens, 8)
+        self.assertEqual(scheduler_config.max_num_scheduled_tokens, 5)
+        self.assertEqual(scheduler_config.max_num_seqs, 4)
+        self.assertEqual(scheduler_config.max_num_active_seqs, 1)
+        self.assertEqual(
+            utils.ensure_mrv2_physical_batch_capacity(
+                config,
+                utils.MRV2PaddingPlan(token_alignment=4),
+            ),
+            (8, 4),
+        )
+
+    def test_mrv2_physical_capacity_includes_adaptive_varlen_gears(self):
+        from vllm_ascend.mrv2_utils import MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY
+
+        config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_batched_tokens=5,
+                max_num_scheduled_tokens=None,
+                max_num_seqs=1,
+                max_num_active_seqs=None,
+            ),
+            model_config=SimpleNamespace(enforce_eager=False),
+            compilation_config=SimpleNamespace(
+                cudagraph_capture_sizes=[],
+                prefill_cudagraph_capture_token_sizes=[],
+                decode_cudagraph_capture_request_sizes=[],
+                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
+            ),
+            uniform_decode_query_len=1,
+            get_decode_cudagraph_query_lens=lambda _query_len: {1: 1},
+            additional_config={MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {1: [8, 12]}},
+        )
+
+        capacity = utils.get_mrv2_physical_batch_capacity(
+            config,
+            utils.MRV2PaddingPlan(token_alignment=4),
+        )
+
+        self.assertEqual(capacity, (12, 4))
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)

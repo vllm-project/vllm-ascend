@@ -23,6 +23,7 @@ import functools
 import json
 import math
 import os
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
@@ -1148,11 +1149,49 @@ class MRV2PaddingPlan:
             raise ValueError(f"query_len must be positive, got {query_len}")
         return self.token_alignment // math.gcd(self.token_alignment, query_len)
 
-    def common_request_alignment(self, query_lens: tuple[int, ...] | list[int]) -> int:
+    def common_request_alignment(self, query_lens: Iterable[int]) -> int:
         return math.lcm(1, *(self.request_alignment(query_len) for query_len in query_lens))
 
     def align_requests(self, num_reqs: int, query_len: int) -> int:
         return align_num_tokens_to_tp(num_reqs, self.request_alignment(query_len))
+
+    def limit_aligned_requests(
+        self,
+        num_reqs: int,
+        query_len: int,
+        max_tokens: int | None,
+    ) -> int:
+        """Clamp an aligned request tier without creating partial TP shards."""
+        aligned_reqs = self.align_requests(num_reqs, query_len)
+        if max_tokens is None:
+            return aligned_reqs
+        request_alignment = self.request_alignment(query_len)
+        capped_reqs = max_tokens // query_len
+        capped_reqs = capped_reqs // request_alignment * request_alignment
+        return min(aligned_reqs, capped_reqs)
+
+    def align_query_limits(
+        self,
+        query_limits: Mapping[int, int],
+        max_tokens: int | None = None,
+    ) -> dict[int, int]:
+        """Align every query tier to one request grid shared by the runner.
+
+        Main's split graph API uses one request-count grid for all query
+        lengths.  The grid must therefore use the least common multiple of
+        their per-query request alignments, not merely align each tier in
+        isolation.
+        """
+        alignment = self.common_request_alignment(query_limits)
+        aligned_limits: dict[int, int] = {}
+        for query_len, max_reqs in query_limits.items():
+            aligned_reqs = align_num_tokens_to_tp(max_reqs, alignment)
+            if max_tokens is not None:
+                capped_reqs = max_tokens // query_len
+                capped_reqs = capped_reqs // alignment * alignment
+                aligned_reqs = min(aligned_reqs, capped_reqs)
+            aligned_limits[query_len] = aligned_reqs
+        return aligned_limits
 
     def align_batch_tokens(self, num_tokens: int, num_reqs: int, uniform_query_len: int | None) -> int:
         """Align one worker-local batch without mixing token/request axes."""
@@ -1202,14 +1241,50 @@ def align_num_tokens_to_tp(num_tokens: int, alignment: int) -> int:
     return (num_tokens + alignment - 1) // alignment * alignment
 
 
-def get_mrv2_decode_query_lens(vllm_config: VllmConfig) -> tuple[int, ...]:
-    """Return decode query lengths across the supported vLLM config ABIs."""
+def get_mrv2_decode_query_limits(vllm_config: VllmConfig) -> dict[int, int]:
+    """Return decode query lengths and their logical request limits.
+
+    vLLM main exposes a mapping because dynamic speculative decoding can use a
+    different request limit for each query length. vLLM v0.33 has no tier
+    resolver, so it falls back to the uniform decode width below.
+    """
     uniform_query_len = vllm_config.uniform_decode_query_len
     resolve_query_lens = getattr(vllm_config, "get_decode_cudagraph_query_lens", None)
-    if not callable(resolve_query_lens):
-        # vLLM v0.33 has one uniform decode width and no tier resolver.
-        return (uniform_query_len,)
-    return tuple(resolve_query_lens(uniform_query_len))
+    scheduler_config = vllm_config.scheduler_config
+    max_num_reqs = getattr(scheduler_config, "max_num_active_seqs", None) or scheduler_config.max_num_seqs
+    if callable(resolve_query_lens):
+        resolved = resolve_query_lens(uniform_query_len)
+        limits = {int(query_len): int(limit) for query_len, limit in resolved.items()}
+        if limits:
+            return limits
+
+    # vLLM v0.33 has no public query-tier resolver, but its graph manager
+    # still expands dynamic speculative decoding into every scheduled query
+    # length. Rebuild the same widest-request mapping used by its config so
+    # graph normalization can validate the actual FULL descriptors.
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    uses_dynamic = getattr(speculative_config, "uses_dynamic_speculative_decoding", None)
+    if speculative_config is not None and callable(uses_dynamic) and uses_dynamic():
+        schedule = speculative_config.num_speculative_tokens_per_batch_size
+        try:
+            from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+
+            dense_schedule = build_dynamic_sd_schedule_lookup(
+                schedule,
+                vllm_max_batch_size=max_num_reqs,
+                vllm_num_speculative_tokens=vllm_config.num_speculative_tokens,
+            )
+        except ValueError:
+            pass
+        else:
+            widest_batch: dict[int, int] = {}
+            for batch_size, num_spec in enumerate(dense_schedule[1:], start=1):
+                widest_batch[num_spec + 1] = batch_size
+            if widest_batch:
+                return widest_batch
+
+    # Static vLLM v0.33 decode has one uniform width.
+    return {uniform_query_len: max_num_reqs}
 
 
 def get_mrv2_physical_batch_capacity(
@@ -1218,27 +1293,44 @@ def get_mrv2_physical_batch_capacity(
 ) -> tuple[int, int]:
     """Return runner-local physical token/request buffer capacities.
 
-    Scheduler limits remain logical.  This only accounts for padding rows and
-    requests that an already-normalized graph gear may materialize in runner
-    buffers.
+    The caller may store these in the physical scheduler fields while keeping
+    scheduler admission in max_num_scheduled_tokens/max_num_active_seqs. This
+    accounts for padding rows and requests materialized by normalized gears.
     """
     plan = padding_plan or get_mrv2_padding_plan(vllm_config)
     scheduler_config = vllm_config.scheduler_config
-    max_tokens = plan.align_tokens(scheduler_config.max_num_batched_tokens)
-    max_reqs = scheduler_config.max_num_seqs
+    logical_max_tokens = scheduler_config.max_num_scheduled_tokens or scheduler_config.max_num_batched_tokens
+    logical_max_reqs = scheduler_config.max_num_active_seqs or scheduler_config.max_num_seqs
+    max_tokens = plan.align_tokens(logical_max_tokens)
+    max_reqs = logical_max_reqs
     compilation_config = vllm_config.compilation_config
 
     # Eager uniform decode also pads by complete requests.  Its physical token
     # extent can exceed a plain token-axis round-up when query_len and TP are
     # not divisors of one another (for example, TP=8 and query_len=6).
-    query_lens = get_mrv2_decode_query_lens(vllm_config)
-    for query_len in query_lens:
+    query_limits = get_mrv2_decode_query_limits(vllm_config)
+    common_request_alignment = plan.common_request_alignment(query_limits)
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    legacy_full_graph = bool(
+        vllm_version_is("0.33.0")
+        and not getattr(model_config, "enforce_eager", False)
+        and cudagraph_mode is not None
+        and cudagraph_mode.has_full_cudagraphs()
+    )
+    for query_len, tier_max_reqs in query_limits.items():
         logical_reqs = min(
-            scheduler_config.max_num_seqs,
-            scheduler_config.max_num_batched_tokens // query_len,
+            tier_max_reqs,
+            logical_max_reqs,
+            logical_max_tokens // query_len,
         )
         if logical_reqs:
-            physical_reqs = plan.align_requests(logical_reqs, query_len)
+            physical_reqs = align_num_tokens_to_tp(
+                logical_reqs,
+                common_request_alignment,
+            )
+            if legacy_full_graph or physical_reqs > logical_reqs:
+                max_reqs = max(max_reqs, physical_reqs)
             max_tokens = max(max_tokens, physical_reqs * query_len)
 
     token_sizes: list[int] = []
@@ -1252,10 +1344,59 @@ def get_mrv2_physical_batch_capacity(
     decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None) or []
     if decode_sizes:
         max_reqs = max(max_reqs, max(decode_sizes))
-        decode_token_sizes = [max(decode_sizes) * query_len for query_len in query_lens]
+        decode_token_sizes = [
+            min(max(decode_sizes), tier_max_reqs) * query_len for query_len, tier_max_reqs in query_limits.items()
+        ]
         if decode_token_sizes:
             max_tokens = max(max_tokens, max(decode_token_sizes))
+
+    # Main uses a separate q=1 graph manager for single-module MTP/EAGLE
+    # draft steps. Platform normalization stores its physical request grid in
+    # the config so capacity sizing and both graph managers share one layout.
+    from vllm_ascend.mrv2_utils import (
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    )
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    draft_sizes = additional_config.get(MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY, ())
+    if draft_sizes:
+        max_draft_reqs = max(int(size) for size in draft_sizes)
+        max_reqs = max(max_reqs, max_draft_reqs)
+        max_tokens = max(max_tokens, max_draft_reqs)
+    varlen_sizes_by_query = additional_config.get(MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY, {})
+    if isinstance(varlen_sizes_by_query, Mapping):
+        varlen_sizes = [int(size) for sizes in varlen_sizes_by_query.values() for size in sizes]
+        if varlen_sizes:
+            max_tokens = max(max_tokens, max(varlen_sizes))
     return max_tokens, max_reqs
+
+
+def ensure_mrv2_physical_batch_capacity(
+    vllm_config: VllmConfig,
+    padding_plan: MRV2PaddingPlan | None = None,
+) -> tuple[int, int]:
+    """Keep scheduler admission logical while sizing runner/graph capacity.
+
+    Upstream defines ``max_num_batched_tokens`` and ``max_num_seqs`` as the
+    physical runner/graph capacities. Their ``max_num_scheduled_tokens`` and
+    ``max_num_active_seqs`` counterparts preserve the user-visible scheduling
+    limits when padding requires larger physical buffers or graph gears.
+    """
+    scheduler_config = vllm_config.scheduler_config
+    physical_tokens, physical_reqs = get_mrv2_physical_batch_capacity(
+        vllm_config,
+        padding_plan,
+    )
+    if physical_tokens > scheduler_config.max_num_batched_tokens:
+        if scheduler_config.max_num_scheduled_tokens is None:
+            scheduler_config.max_num_scheduled_tokens = scheduler_config.max_num_batched_tokens
+        scheduler_config.max_num_batched_tokens = physical_tokens
+    if physical_reqs > scheduler_config.max_num_seqs:
+        if scheduler_config.max_num_active_seqs is None:
+            scheduler_config.max_num_active_seqs = scheduler_config.max_num_seqs
+        scheduler_config.max_num_seqs = physical_reqs
+    return physical_tokens, physical_reqs
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
