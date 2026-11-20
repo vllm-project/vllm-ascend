@@ -32,7 +32,10 @@ SPEC_REUSE_RULES = MappingProxyType(
 
 def get_spec_reuse_rules(vllm_config: VllmConfig) -> SpecReuseRules | None:
     text_config = getattr(vllm_config.model_config, "hf_text_config", None)
-    path = SPEC_REUSE_RULES.get(getattr(text_config, "model_type", None))
+    model_type = getattr(text_config, "model_type", None)
+    if not isinstance(model_type, str):
+        return None
+    path = SPEC_REUSE_RULES.get(model_type)
     return resolve_obj_by_qualname(path) if path is not None else None
 
 
@@ -177,7 +180,7 @@ class LayerwiseCachePlanner:
                     slot_bytes = max(cache_view_sizes[entry_name] for entry_name in slot_entry_names)
                     backing_bytes = slot_offset + slot_bytes
         save_dependencies_by_layer = defaultdict(set)
-        rotated_entry_names = set()
+        rotated_entry_names: set[str] = set()
         for block_stride, candidate_entry_names in reusable_entries_by_stride.items():
             # Each pack holds at most one entry per cache group.
             # Start a new pack if the next entry's group is already in the current pack.
@@ -226,15 +229,15 @@ class LayerwiseCachePlanner:
                 else:
                     slot_index = slot_count
                     slot_count += 1
-                slot_entry_names = entries_by_slot.get(slot_index)
-                if slot_entry_names is None:
+                rotation_slot_entries = entries_by_slot.get(slot_index)
+                if rotation_slot_entries is None:
                     slot_offset = round_up(backing_bytes, slot_alignment)
-                    slot_entry_names = entries_by_slot[slot_index] = []
-                    slot_layouts.append((slot_offset, block_stride, slot_entry_names))
+                    rotation_slot_entries = entries_by_slot[slot_index] = []
+                    slot_layouts.append((slot_offset, block_stride, rotation_slot_entries))
                     backing_bytes = slot_offset + slot_bytes
                 last_entry_by_group = slot_last_entries.setdefault(slot_index, {})
                 for group_id, (layer, entry_name) in pack.items():
-                    slot_entry_names.append(entry_name)
+                    rotation_slot_entries.append(entry_name)
                     previous_entry = last_entry_by_group.get(group_id)
                     if previous_entry is not None:
                         # This group already used the slot. The current layer must wait

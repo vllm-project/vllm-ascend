@@ -199,6 +199,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                         else:
                             pages[block_idx] = key
                     if partial_key is not None:
+                        assert partial_block_index is not None
                         pages[partial_block_index] = partial_key
                 if not save_owner:
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
