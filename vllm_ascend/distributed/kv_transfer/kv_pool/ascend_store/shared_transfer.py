@@ -604,14 +604,15 @@ class SharedPoolTransfer:
                         or not slot.contains(plan.block_id, address, size)
                     ):
                         unsafe.add(owner)
-        eligible = set(self._prefetch_groups)
         order = self._prefetch_order or self._prefetch_groups
         groups = tuple((bundle, bundle & pending) for bundle in order)
-        if not any(owners and bundle in eligible and bundle.isdisjoint(unsafe) for bundle, owners in groups):
+        prefetchable = {bundle for bundle in self._prefetch_groups if bundle.isdisjoint(unsafe)}
+        first_async = next((i for i, (bundle, owners) in enumerate(groups) if owners and bundle in prefetchable), None)
+        if first_async is None:
             return
         # Prepare each physical layer's ranges before it enters the receive queue.
         for session in sessions:
-            self.io.prepare_layer_reads(session, tuple(bundle for bundle, _ in groups))
+            self.io.prepare_layer_reads(session, order)
         if self._receiver is None:
             worker = self.worker
             self._receiver = KVCacheStoreLayerRecvingThread(
@@ -646,16 +647,13 @@ class SharedPoolTransfer:
         self._prefetch_work = groups
         self._prefetch_pending = pending
         self._prefetch_sync = {
-            index
-            for index, (bundle, owners) in enumerate(groups)
-            if owners and (bundle not in eligible or not bundle.isdisjoint(unsafe))
+            index for index, (bundle, owners) in enumerate(groups) if owners and bundle not in prefetchable
         }
         self._prefetch_position = {owner: index for index, (bundle, _) in enumerate(groups) for owner in bundle}
         self._prefetch_next = 0
-        first = next(index for index, (_, owners) in enumerate(groups) if owners and index not in self._prefetch_sync)
         self._prefetch_tasks = tuple(
             StoreLayerLoadTask(
-                index, ready if index == first else None, self.io, sessions, bundle, self._prefetch_copy_lock
+                index, ready if index == first_async else None, self.io, sessions, bundle, self._prefetch_copy_lock
             )
             for index, (bundle, _) in enumerate(groups)
         )

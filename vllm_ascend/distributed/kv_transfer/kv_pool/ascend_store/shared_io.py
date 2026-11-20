@@ -148,20 +148,18 @@ class MemcacheStoreLayoutIO:
                 # keep the first lease until their last local consumer finishes.
                 results = self.backend.batch_add_lease(fresh, self.lease_ttl_ms) if fresh else []
                 gvas = []
-                if len(results) == len(fresh):
-                    # Failed AddLease entries acquired no lease. Removing
-                    # them is an SDK error, not cleanup, and would poison the
-                    # client's pending-release set after an ordinary miss.
-                    failed = {key for key, result in zip(fresh, results, strict=True) if result != 0}
-                    if failed:
-                        session.plans = tuple(plan for plan in plans if plan.key not in failed)
-                        for key in failed:
-                            del self._references[key]
-                            del self._deadlines[key]
                 if len(results) != len(fresh):
                     raise RuntimeError("MemCache returned an incomplete read lease response")
-                if statuses := {result for result in results if result != 0}:
-                    raise MemCacheReadLeaseError(statuses)
+                # Failed AddLease entries acquired no lease. Removing
+                # them is an SDK error, not cleanup, and would poison the
+                # client's pending-release set after an ordinary miss.
+                failed = {key: status for key, status in zip(fresh, results, strict=True) if status != 0}
+                if failed:
+                    session.plans = tuple(plan for plan in plans if plan.key not in failed)
+                    for key in failed:
+                        del self._references[key]
+                        del self._deadlines[key]
+                    raise MemCacheReadLeaseError(set(failed.values()))
             if not writing and keys:
                 infos = self.backend.batch_get_key_info(keys, for_load=True)
                 if len(infos) != len(plans) or any(
@@ -318,14 +316,8 @@ class MemcacheStoreLayoutIO:
             # a returned cleanup failure is diagnostic, not a transfer failure.
             # Let backend TTL reclaim leftover leases. Do not retry old keys
             # after a new session may have acquired a lease for the same key.
-            keys = sorted(self._pending_release)
-            result = self.backend.batch_remove_lease(keys)
-            if result != 0:
-                logger.error(
-                    "Shared pool lease cleanup returned %s for %d keys; backend TTL will reclaim leases",
-                    result,
-                    len(keys),
-                )
+            keys = tuple(self._pending_release)
+            self.release_keys(keys)
             self._pending_release.difference_update(keys)
             for key in keys:
                 del self._deadlines[key]
