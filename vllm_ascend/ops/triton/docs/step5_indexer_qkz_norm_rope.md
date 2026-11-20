@@ -16,8 +16,7 @@
   `float8_e4m3fn`: its only consumer (the fused indexer scoring,
   `indexer_score_topk` via `indexer_region_score`) wants fp8, so the
   quantization rides along with the norm+RoPE store instead of a separate
-  cast at the scoring entry (bf16 inputs of the non-fused fallback are
-  quantized there). The wrapper is a plain Python call into the Triton
+  cast at the scoring entry. The wrapper is a plain Python call into the Triton
   kernel; Step5 currently runs with `do_not_compile`. Once the outer
   `step5_sparse_attention_forward` custom op from #22342 is in place, that
   op provides the torch.compile boundary.
@@ -67,10 +66,9 @@
   for this operator (it uses the Triton-Ascend CANN `extension`
   slice/compile-hint intrinsics and `num_vectorcore`), matching the other
   Step5 operators. Eager and ACLGraph decode capture both work (the
-  wrapper allocates outputs and derives the grid from shapes only). Layers
-  with a non-partial indexer RoPE geometry (`sparse_indexer_rope_dim` 0 or
-  >= `proxy_dim`) keep the eager chain (the caller's
-  `use_fused_indexer_norm_rope` guard).
+  wrapper allocates outputs and derives the grid from shapes only). The
+  fused path handles the configuration's allowed even `rotary_dim` values
+  up to `proxy_dim`; there is no eager fallback.
 
 ## Parameters
 

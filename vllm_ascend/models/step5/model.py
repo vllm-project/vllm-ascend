@@ -333,16 +333,6 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             eps=rms_norm_eps,
         )
 
-        # Fused indexer Q/K norm+RoPE (+ Z passthrough) in one Triton kernel.
-        # It reads the strided split_indexer views in place and quantizes
-        # index_q to e4m3 at the store, which the fused indexer scoring
-        # consumes directly. Active for the production partial-RoPE geometry
-        # only (0 < sparse_indexer_rope_dim < proxy_dim).
-        indexer_rope_dim = int(self.sparse_indexer_rotary_emb.rotary_dim)
-        self.use_fused_indexer_norm_rope = (
-            0 < indexer_rope_dim < proxy_dim and indexer_rope_dim % 2 == 0
-        )
-
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
         self.kv_cache_torch_dtype = _kv_cache_torch_dtype(cache_config, vllm_config)
@@ -414,21 +404,6 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
         )
 
-    def _apply_sparse_indexer_rope(
-        self,
-        positions: torch.Tensor,
-        index_q: torch.Tensor,
-        index_k: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        proxy_dim = int(index_q.shape[-1])
-        positions = positions.reshape(-1).to(device=index_q.device, dtype=torch.long)
-        q_shape = tuple(index_q.shape)
-        k_shape = tuple(index_k.shape)
-        q = index_q.reshape(q_shape[0], -1, proxy_dim)
-        k = index_k.reshape(k_shape[0], -1, proxy_dim)
-        q, k = self.sparse_indexer_rotary_emb(positions, q, k)
-        return q.reshape(q_shape), k.reshape(k_shape)
-
     def _finish_indexer(
         self,
         positions: torch.Tensor,
@@ -439,10 +414,9 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Indexer norm+rope and head scores, all local shapes.
 
-        Returns index_q [t, groups, heads_per_group, proxy] (float8_e4m3fn
-        on the fused path -- the kernel quantizes at the store and the
-        scoring op consumes it directly; bf16 on the non-fused fallback),
-        index_k [t, 1, proxy], index_z [t, 1, proxy],
+        Returns index_q [t, groups, heads_per_group, proxy] (float8_e4m3fn;
+        the kernel quantizes at the store and the scoring op consumes it
+        directly), index_k [t, 1, proxy], index_z [t, 1, proxy],
         weights [t, groups, heads_per_group] fp32.
         """
         num_tokens = int(hidden_states.shape[0])
@@ -453,46 +427,32 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         num_index_k_heads = int(index_k.shape[-1]) // proxy_dim
         heads_per_group = num_index_q_heads // self.num_kv_heads
 
-        if self.use_fused_indexer_norm_rope:
-            # One kernel for the whole indexer chain: per-head RMSNorm on
-            # index_q, per-head LayerNorm on index_k, NeoX RoPE on both and
-            # the Z passthrough, reading the strided split_indexer views in
-            # place (no materializing copy on any of the three inputs) and
-            # quantizing index_q to e4m3 at the store.
-            index_q, index_k, index_z = fused_indexer_qkz_norm_rope(
-                index_q,
-                index_k,
-                index_z,
-                self.sparse_indexer_q_norm.weight,
-                self.sparse_indexer_k_norm.weight,
-                self.sparse_indexer_rotary_emb.cos_sin_cache,
-                positions,
-                k_norm_bias=self.sparse_indexer_k_norm.bias,
-                head_dim=proxy_dim,
-                num_q_heads=num_index_q_heads,
-                num_k_heads=num_index_k_heads,
-                rotary_dim=self.sparse_indexer_rotary_emb.rotary_dim,
-                eps=self.sparse_indexer_q_norm.variance_epsilon,
-                q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
-            )
-            index_q = index_q.reshape(
-                num_tokens, self.num_kv_heads, heads_per_group, proxy_dim
-            )
-            index_k = index_k.reshape(num_tokens, num_index_k_heads, proxy_dim)
-            index_z = index_z.reshape(num_tokens, num_index_k_heads, proxy_dim)
-        else:
-            index_k = self.sparse_indexer_k_norm(index_k.contiguous())
-            index_q = index_q.view(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim).contiguous()
-            index_q = self.sparse_indexer_q_norm(index_q)
-            index_k = index_k.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
-            index_q, index_k = self._apply_sparse_indexer_rope(
-                positions,
-                index_q.reshape(num_tokens, -1, proxy_dim),
-                index_k,
-            )
-            index_q = index_q.reshape(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim)
-            index_z = index_z.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
-
+        # One kernel for the whole indexer chain: per-head RMSNorm on
+        # index_q, per-head LayerNorm on index_k, NeoX RoPE on both and
+        # the Z passthrough, reading the strided split_indexer views in
+        # place (no materializing copy on any of the three inputs) and
+        # quantizing index_q to e4m3 at the store.
+        index_q, index_k, index_z = fused_indexer_qkz_norm_rope(
+            index_q,
+            index_k,
+            index_z,
+            self.sparse_indexer_q_norm.weight,
+            self.sparse_indexer_k_norm.weight,
+            self.sparse_indexer_rotary_emb.cos_sin_cache,
+            positions,
+            k_norm_bias=self.sparse_indexer_k_norm.bias,
+            head_dim=proxy_dim,
+            num_q_heads=num_index_q_heads,
+            num_k_heads=num_index_k_heads,
+            rotary_dim=self.sparse_indexer_rotary_emb.rotary_dim,
+            eps=self.sparse_indexer_q_norm.variance_epsilon,
+            q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
+        )
+        index_q = index_q.reshape(
+            num_tokens, self.num_kv_heads, heads_per_group, proxy_dim
+        )
+        index_k = index_k.reshape(num_tokens, num_index_k_heads, proxy_dim)
+        index_z = index_z.reshape(num_tokens, num_index_k_heads, proxy_dim)
         weights = weights.to(dtype=torch.float32)
         weights = weights.view(num_tokens, self.num_kv_heads, heads_per_group)
         weights = weights * (float(heads_per_group) ** -0.5)
