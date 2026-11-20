@@ -490,7 +490,7 @@ for a BF16 draft.
 !!! warning
 
     When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
-    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, or LoRA.
     Commercial use is restricted.
 
 - Offline inference
@@ -900,8 +900,9 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1;
-PCP Decode consumers and colocated PCP execution are not supported.
+Prefill producers and supports joint TP × PCP head sharding. The KDA head count
+must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
+are not supported.
 Stochastic rounding must be disabled.
 
 For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
@@ -948,6 +949,43 @@ layerwise hybrid pooling, the
     tokens; evaluate model accuracy and performance for your workload before use.
 
 Removing `--use-replayssm` selects the native KDA path.
+
+## Experimental Kimi K3 and K3.1 KDA RecoverSSM
+
+Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
+decoding. It keeps one recurrent checkpoint per request and writes compact,
+request-indexed verification records, then reconstructs the accepted state
+after sampling. RecoverSSM is disabled by default.
+
+Add the following options to your existing Kimi serving command, replacing the
+path with a compatible DSpark draft model. Keep the parallelism, quantization,
+KV-cache dtype and memory settings appropriate for the model and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
+```
+
+Requirements:
+
+- Adaptive verification and stochastic rounding are unsupported.
+
+For experimental prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
+Both sides must use the same integration version, model and weights,
+TP size, prefix-caching configuration, speculative method and window, and
+persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
+the connector does not validate the peer's convolution layout or all other peer
+settings.
+
+!!! warning
+
+    This feature is experimental. An A5 P/D functional test with PP4/TP8 on
+    Prefill and DP4/TP8/DCP8 on Decode passed with PCP=1, using an experimental
+    image with modified parallelism checks. This does not establish correctness
+    for the unmodified PR, PCP greater than 1, or other parallel configurations.
+    End-to-end P/D output equivalence remains unverified, including when prefix
+    caching is enabled.
 
 ## Synthetic Rejection Sampling
 

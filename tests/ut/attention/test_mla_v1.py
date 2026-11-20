@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.compilation import backends
 from vllm.compilation.backends import set_model_tag
-from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, SchedulerConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -32,6 +32,19 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, Asce
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+
+
+def test_mla_block_table_uses_actual_native_padding_default():
+    speculative = object.__new__(SpeculativeConfig)
+    if vllm_version_is("0.33.0"):
+        speculative.disable_padded_drafter_batch = False
+    builder = object.__new__(AscendMLAMetadataBuilder)
+    builder.speculative_config = speculative
+    builder.graph_pad_size = 8
+    builder.num_decodes = 2
+    metadata = SimpleNamespace(num_reqs=4)
+    assert builder.get_block_table_size(metadata, 0) == 4
+    assert builder.get_block_table_size(metadata, 1) == 2
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
@@ -187,7 +200,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
             dtype=torch.bfloat16,
             hf_config=SimpleNamespace(model_type="deepseek_v3"),
         ),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
     )
@@ -1107,7 +1120,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         common_metadata.num_reqs = 4
         common_metadata.num_actual_tokens = 5
         common_metadata.max_query_len = 5
-        common_metadata.context_parallel_metadata = None
         common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
         common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
         common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
@@ -1116,7 +1128,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
-        metadata = builder.build(0, common_metadata)
+        # Preserve this original MRv1 unpadded-layout contract on both lanes;
+        # main's actual native default is exercised separately above.
+        with patch("vllm_ascend.attention.mla_v1.vllm_version_is", return_value=True):
+            metadata = builder.build(0, common_metadata)
         self.assertFalse(metadata.causal)
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
@@ -1737,6 +1752,13 @@ class TestAscendMLAImpl(TestBase):
         vllm_config.cache_config = MagicMock()
         vllm_config.cache_config.cache_dtype = "float16"
         init_ascend_config(vllm_config)
+
+        # is_dcp_enabled() in vllm_ascend.attention.utils reads the global
+        # vLLM config, which is not set on fresh xdist workers, so mock it
+        # like TestAscendMLABackend does.
+        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=vllm_config)
+        self.utils_patcher.start()
+        self.addCleanup(self.utils_patcher.stop)
 
         num_heads = 256
         head_size = 1024

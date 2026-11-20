@@ -29,6 +29,44 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_vmm_allocation_failure_disables_vmm_for_later_layers(monkeypatch):
+    group = SimpleNamespace(_engram_local_vmm_available=True)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *_args, **_kwargs: device("cpu"))
+    vmm = Mock(side_effect=embedding_mod.EngramSharedInitError("all ranks cleaned up"))
+    registered = Mock(side_effect=lambda *_args: SimpleNamespace(tensor=object()))
+    monkeypatch.setattr(embedding_mod, "LocalSharedVmmBuffer", vmm)
+    monkeypatch.setattr(embedding_mod, "SharedUvaBuffer", registered)
+
+    def layer(local_vmm):
+        table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+        torch.nn.Module.__init__(table)
+        table.part_num_embeddings, table.dim, table.block_size = 8, 64, 32
+        table.storage_dtype, table.scale_dtype = torch.int8, torch.float32
+        table.cpu_offload, table.local_vmm = True, local_vmm
+        table._shared_group, table._shared_pool_spec = group, (None, None, None)
+        table._scales_uva = None
+        return table
+
+    first = layer(True)
+    first._allocate_weights()
+    assert not first.local_vmm and group._engram_local_vmm_available is False
+    second = layer(embedding_mod.local_vmm_available(group))
+    second._allocate_weights()
+    assert not second.local_vmm
+    assert vmm.call_count == 1 and registered.call_count == 4
+
+
+def test_remote_host_offload_close_retires_reader():
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    reader = Mock()
+    table._remote_reader = reader
+    table.close_host_offload()
+    reader.close.assert_called_once_with()
+
+
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("dp", [1, 2])
 @pytest.mark.parametrize("tokens", [0, 3])
@@ -118,12 +156,14 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
     lib = Library()
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
     shape = (size // torch.empty((), dtype=dtype).element_size(),)
+    owner = torch.nn.Module()
     if failure:
         message = "NULL pointer" if failure == "null" else "failed: rc=1"
         with pytest.raises(RuntimeError, match=message):
-            npu.HostUvaBuffer(shape, dtype, "cpu")
+            npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
     else:
-        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
+        buffer = npu.HostUvaBuffer(shape, dtype, "cpu", "_codes_uva", owner)
+        assert buffer.tensor is not None
         assert buffer.tensor.data_ptr() == lib.registered
         assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
         buffer.tensor.fill_(17)
@@ -137,9 +177,10 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
         assert lib.registered is lib.unregistered is lib.freed is None
         assert lib.free_count == lib.unregister_count == 0
     else:
-        assert lib.unregistered == lib.registered
+        assert lib.unregistered == (None if failure == "register" else lib.registered)
         assert lib.freed == lib.original
-        assert lib.free_count == lib.unregister_count == 1
+        assert lib.free_count == 1
+        assert lib.unregister_count == int(failure != "register")
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -150,6 +191,37 @@ def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
     monkeypatch.setattr(parallel, "get_engram_dp_size", lambda: 2)
     assert resolve_dp_shared_memory(True)
     assert not resolve_dp_shared_memory(False)
+
+
+@pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float32), (torch.float8_e4m3fn, torch.uint8)])
+def test_remote_embedding_accepts_quantized_rows_without_allocating_table(monkeypatch, dtype, scale_dtype):
+    group = SimpleNamespace(world_size=2, cpu_group=object())
+    monkeypatch.setattr(embedding_mod, "in_the_same_node_as", lambda group: [True, True])
+    monkeypatch.setattr(embedding_mod, "get_tp_group", lambda: SimpleNamespace(cpu_group=object()))
+    monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda: group)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upstream_engram, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_device=lambda: 0), raising=False)
+    device = torch.device
+    monkeypatch.setattr(torch, "device", lambda *args, **kwargs: device("cpu"))
+    table = embedding_mod.AscendParallelEngramEmbedding(
+        8, 64, (4, 4), 0, cpu_offload=True, dp_shared_memory=True, storage_dtype=dtype, remote_reader=object()
+    )
+    assert table.weight.device.type == table.weight_scale_inv.device.type == "meta"
+    assert table.weight.dtype == dtype and table.weight_scale_inv.dtype == scale_dtype
+
+    with pytest.raises(ValueError, match="Remote Engram requires"):
+        embedding_mod.AscendParallelEngramEmbedding(
+            8,
+            64,
+            (4, 4),
+            0,
+            cpu_offload=True,
+            dp_shared_memory=True,
+            storage_dtype=torch.bfloat16,
+            remote_reader=object(),
+        )
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -384,7 +456,8 @@ def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_ra
 
     def create(rank):
         group = SimpleNamespace(cpu_group=None, rank_in_group=rank, world_size=2)
-        return npu.SharedUvaBuffer((8, 32), torch.int8, "cpu", group)
+        owner = torch.nn.Module()
+        return npu.SharedUvaBuffer((8, 32), torch.int8, "cpu", group, "shared", owner)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         leader, follower = list(pool.map(create, (0, 1)))
@@ -406,13 +479,13 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    table.embed_gathered = lambda ids, count: ids[:count]
+    setattr(table, "embed_gathered", lambda ids, count: ids[:count])  # noqa: B010 - instance stub
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
-    table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
+    setattr(table, "embed_gathered", lambda gathered, count: gathered[count : 2 * count])  # noqa: B010
     assert table.forward(ids).tolist() == [[7, 8]]
     assert calls == [True, False]
 

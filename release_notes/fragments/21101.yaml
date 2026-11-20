@@ -1,0 +1,13 @@
+pr: 21101
+entries:
+  - category: performance
+    text: >-
+      Native CPU KV-cache offloading with `TieringOffloadingSpec` supports
+      pinned shared memory for direct batched CPU-NPU transfers on supported
+      Ascend runtimes (set `pin_shared_mmap` to `true` in
+      `kv_connector_extra_config`; default: `false`) and reduces repeated
+      startup pre-faulting through upstream worker barriers, segmented shared
+      files and disjoint MLA population shards on supported vLLM versions.
+      User-reported GLM-5.2 validation showed a 6.8% reduction in mean time to
+      first token (TTFT), from 209,937 ms to 195,638 ms, compared with pinning
+      disabled.

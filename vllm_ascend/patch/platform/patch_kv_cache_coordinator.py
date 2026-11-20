@@ -28,6 +28,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -194,12 +195,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        # Upstream KVCacheCoordinator.__init__ exposes the per-group resolved
-        # block sizes; SimpleCPUOffloadScheduler reads them. This subclass
-        # builds the managers itself instead of calling super().__init__, so
-        # mirror the attribute here.
-        self.group_block_sizes = tuple(manager.block_size for manager in self.single_type_managers)
-
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
@@ -555,6 +550,12 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+        # Core owns HiSparse admission, HMA roles, eviction and prefix state.
+        # Remove this bypass when the Ascend coordinator factory patch retires.
+        return _orig_get_kv_cache_coordinator(
+            **{name: value for name, value in hybrid_kwargs.items() if name != "eagle_attn_layer_names"}
+        )
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)

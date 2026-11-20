@@ -1,9 +1,10 @@
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -35,6 +36,7 @@ from vllm_ascend.utils import (
     _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +50,27 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # MLA models keep the FIA-compatible component-major cache layout on A5.
 # N1 is the post-TP local head count, not the global model configuration.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
+
+
+RuntimeComponentShape = tuple[int, int, int, int]
+KVCacheRuntimeShapes = tuple[RuntimeComponentShape, ...]
+
+
+def combine_cache_components(data: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Recover a packed-page alias from adjacent data and scale components.
+
+    The alias preserves [all data | all scales] packing; its logical rows do
+    not imply token-interleaved metadata. Both inputs must share this page ABI.
+    """
+    if (
+        data.untyped_storage().data_ptr() != scales.untyped_storage().data_ptr()
+        or scales.data_ptr() - data.data_ptr() != prod(data.shape[1:]) * data.element_size()
+        or data.stride(0) * data.element_size() != scales.stride(0) * scales.element_size()
+    ):
+        raise ValueError("Combined cache views require adjacent components in the same physical pages.")
+    shape = (*data.shape[:-1], data.shape[-1] + scales.shape[-1] * scales.element_size() // data.element_size())
+    inner = tuple(prod(shape[dim + 1 :]) for dim in range(1, len(shape)))
+    return torch.as_strided(data, shape, (data.stride(0), *inner), storage_offset=data.storage_offset())
 
 
 def supports_strided_mla_cache(
@@ -325,18 +348,6 @@ def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata
 
 
 @dataclass
-class AscendDCPMetadata:
-    """Per-batch metadata required by decode context parallelism."""
-
-    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
-    query_lens_cpu: torch.Tensor = None
-    max_query_len: int = 0
-    dcp_mtp_attn_mask: torch.Tensor = None
-    draft_cp_seq_len: torch.Tensor | None = None
-    draft_base_seq_lens: torch.Tensor | None = None
-
-
-@dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -377,10 +388,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Decode Context Parallelism (DCP) operations.
-    context_parallel_metadata: AscendDCPMetadata | None = None
     # Per-request / per-token request identity used by the Sparse KV offload
-    # resident LRU (adler32-hashed request ids and token->request mapping).
+    # resident LRU (request incarnation owners and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
@@ -441,7 +450,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -507,8 +515,6 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
-    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -531,10 +537,7 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    dcp_metadata = common_attn_metadata.context_parallel_metadata
-    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
-    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
+    max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -554,8 +557,7 @@ def split_decodes_and_prefills(
     ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 
@@ -589,6 +591,27 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def _kv_layer_transfer_connectors(
+    connector: Any,
+    layer: Any,
+    *,
+    for_save: bool = False,
+) -> Iterator[Any]:
+    """Route model boundaries only to children that understand their layout."""
+    if getattr(layer, "kv_transfer_cache_names", None) is None:
+        yield connector
+        return
+    accepts_boundary = (not for_save and getattr(connector, "supports_composite_kv_loads", False) is True) or (
+        for_save and getattr(connector, "supports_composite_kv_saves", False) is True
+    )
+    if accepts_boundary:
+        if connector.has_connector_metadata():
+            yield connector
+        return
+    for child in getattr(connector, "sub_connectors", ()):
+        yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -600,7 +623,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.wait_for_layer_load(layer_name)
+    for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
+        layer_connector.wait_for_layer_load(layer_name)
 
 
 def maybe_save_kv_layer_to_connector(
@@ -617,7 +641,10 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+    for layer_connector in _kv_layer_transfer_connectors(
+        connector, forward_context.no_compile_layers.get(layer_name), for_save=True
+    ):
+        layer_connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 def notify_kv_cache_written(layer_name: str = ""):
@@ -714,10 +741,16 @@ def _select_seq_lens(
 
     if isinstance(kv_cache_spec, CrossAttentionSpec):
         seq_lens = common_attn_metadata.seq_lens
-    if speculative_config is not None and speculative_config.parallel_drafting:
+    if speculative_config is not None:
+        # vLLM #63373 moved this capability off the deprecated legacy field.
+        parallel_drafting = (
+            speculative_config.parallel_drafting
+            if vllm_version_is("0.33.0")
+            else speculative_config.speculator_config.parallel_drafting
+        )
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
+        if parallel_drafting and not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
 

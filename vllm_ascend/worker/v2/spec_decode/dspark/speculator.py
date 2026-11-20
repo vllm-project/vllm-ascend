@@ -22,12 +22,11 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -47,6 +46,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     draft_metadata_request_count,
     prepare_dflash_inputs_factory,
@@ -54,7 +54,6 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
-    disable_profiling_chunk_for_draft,
 )
 
 
@@ -91,11 +90,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.attn_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     def load_draft_model(
@@ -103,8 +98,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -396,13 +390,24 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Match FULL-graph query lengths to the padded request count."""
+        """Match padded Q lengths and align KV rows only for the FIA backend."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
+        for layer_name, metadata in attn_metadata.items():
             if getattr(metadata, "external_flashmla", None) is not None:
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # Backend subclasses can use different metadata contracts (e.g.
+            # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
+            if self.attn_backends[layer_name] is not AscendAttentionBackend:
+                continue
+            # The builder may append a synthetic request for the padded Q tail.
+            # Uniform Q already covers that tail, so discard its extra KV row.
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens_list[:num_reqs_padded]
+            decode_metadata.seq_lens = decode_metadata.seq_lens[:num_reqs_padded]
+            decode_metadata.seq_lens_cpu = decode_metadata.seq_lens_cpu[:num_reqs_padded]
+            if decode_metadata.block_tables is not None:
+                decode_metadata.block_tables = decode_metadata.block_tables[:num_reqs_padded]
         return attn_metadata
 
     def propose(
@@ -482,14 +487,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
-            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
-            # Older vLLM lacks that runner hook; keep its token/logit contract
-            # here until both supported lanes provide PCPManager.sync_drafts.
-            pcp_group = get_pcp_group()
-            pcp_group.broadcast(draft_tokens, src=0)
-            if self.draft_logits is not None:
-                logits = self.draft_logits[input_batch.idx_mapping]
-                pcp_group.broadcast(logits, src=0)
-                self.draft_logits[input_batch.idx_mapping] = logits
+        # vLLM 0.33.0 needs this call; newer runners synchronize after
+        # propose(). Never communicate during dummy runs.
+        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
+            assert isinstance(self.pcp_manager, AscendPCPManager)
+            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens
