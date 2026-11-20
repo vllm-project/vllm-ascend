@@ -113,9 +113,11 @@ def make_chat_warmup_fn(chat_url: str, model: str) -> Callable[[], None]:
             timeout=120,
         )
         if not response.ok:
+            # TODO: temporary smoke diagnostics, remove before merging
             logger.warning(
-                "Spec-decode warmup request returned HTTP %s; the acceptance sampling window may not be primed",
+                "Spec-decode warmup request returned HTTP %s; body: %s",
                 response.status_code,
+                response.text[:1000],
             )
 
     return warmup_fn
