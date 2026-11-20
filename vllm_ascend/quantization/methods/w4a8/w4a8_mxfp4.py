@@ -177,7 +177,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.dynamic_eplb = False
         self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
 
     @staticmethod
