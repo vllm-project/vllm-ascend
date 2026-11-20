@@ -328,14 +328,8 @@ def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
-    from vllm.models.qwen4_exp.common.ngram_embedding import (
-        Qwen4ExpPLEEmbeddingMethod,
-        Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    )
 
-    from vllm_ascend.quantization.configs.modelslim_config import (
-        AscendModelSlimConfig,
-    )
+    from vllm_ascend.models.qwen4_exp.ple_quant import patch_modelslim_ple
 
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
@@ -347,29 +341,7 @@ def patch_upstream_ple_short_conv() -> None:
         setattr(Qwen4ExpPLELayer, original_attr, original)
         Qwen4ExpPLELayer._short_conv = _wrap_ple_short_conv(original)
 
-    quant_attr = "_ascend_original_from_quant_config"
-    if not hasattr(Qwen4ExpPLEEmbeddingMethod, quant_attr):
-        original_from_quant_config = Qwen4ExpPLEEmbeddingMethod.from_quant_config
-        setattr(
-            Qwen4ExpPLEEmbeddingMethod,
-            quant_attr,
-            original_from_quant_config,
-        )
-
-        def from_quant_config(
-            quant_config: Any,
-            prefix: str,
-            embedding_dtype: str | None = None,
-        ) -> Qwen4ExpPLEEmbeddingMethod:
-            if isinstance(quant_config, AscendModelSlimConfig):
-                return Qwen4ExpPLEUnquantizedEmbeddingMethod()
-            return original_from_quant_config(
-                quant_config,
-                prefix,
-                embedding_dtype,
-            )
-
-        Qwen4ExpPLEEmbeddingMethod.from_quant_config = staticmethod(from_quant_config)
+    patch_modelslim_ple()
 
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 

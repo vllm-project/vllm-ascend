@@ -504,7 +504,7 @@ jobs:
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install 'mooncake-transfer-engine-npu===0.3.14rc3'
+          uv pip install 'mooncake-transfer-engine-npu===0.3.14'
           # Reinstall triton-ascend last so its files win over upstream triton in the shared triton/ dir.
           uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -520,7 +520,7 @@ jobs:
         run: |
           set -euo pipefail
           # Match the exact mirror pin used by selected/upstream A3 tests.
-          uv pip install --no-deps flash-linear-attention-npu-a3===26.9.1
+          uv pip install --no-deps flash-linear-attention-npu-a3===26.10.0+feature
           # Fail the job here rather than letting the flow rediscover a
           # missing kernel op as an "adaptation failure" hours later.
           python3 -c "import fla_npu.ops.ascendc"

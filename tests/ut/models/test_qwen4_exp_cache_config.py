@@ -156,8 +156,9 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         specs[f"{source}.indexer.compressed_key_cache"] = compressed
         specs[f"{source}.indexer.raw_key_cache"] = raw
         specs[f"{source}.attn"] = main
-    for index in range(36):
-        specs[f"model.layers.{index}.linear_attn"] = gdn
+    for index in range(48):
+        if index % 4 != 3:
+            specs[f"model.layers.{index}.linear_attn"] = gdn
     specs["model.ple"] = ple
     assert len(specs) == 76
     return specs
@@ -616,7 +617,9 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     merged = _merge_mamba_state_groups(groups, 13)
 
     gdn_merged = [g for g in merged if is_gdn_group(g)]
-    assert [len(group.layer_names) for group in gdn_merged] == [13, 13, 10]
+    assert [group.layer_names for group in gdn_merged] == [
+        [f"model.layers.{index}.linear_attn" for index in range(offset, 48, 4)] for offset in range(3)
+    ]
     # PLE (single-shape MambaSpec) keeps its own group.
     ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
     assert len(ple_groups) == 1
@@ -671,7 +674,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     assert config is not None
     gdn_names = {name for group in gdn_merged for name in group.layer_names}
     descriptors = [tensor for tensor in config.kv_cache_tensors if set(tensor.layers) & gdn_names]
-    assert [len(tensor.layers) for tensor in descriptors] == [13, 13, 10]
+    assert [tensor.layers for tensor in descriptors] == [group.layer_names for group in gdn_merged]
     for tensor in descriptors:
         assert tensor.offset + (len(tensor.layers) - 1) * tensor.layer_stride + region.size <= tensor.size
 

@@ -59,7 +59,7 @@ def test_layerwise_plan_shares_each_physical_slot(reuse, indexer_c8):
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=connector,
-        model_config=SimpleNamespace(get_num_layers=lambda _: 4),
+        model_config=SimpleNamespace(get_num_layers=lambda _: 4, hf_config=SimpleNamespace()),
         parallel_config=None,
     )
     original_tensors = list(config.kv_cache_tensors)

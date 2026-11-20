@@ -160,11 +160,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
             raise ValueError("Ascend HiSparse does not support TurboQuant")
         if self.enable_sparse_sfa_c8:
             if (
-                self.c8_cache_dtype != torch.float8_e4m3fn
+                self.c8_cache_dtype not in (torch.int8, torch.float8_e4m3fn)
                 or (self.kv_lora_rank, self.qk_rope_head_dim) != (512, 64)
                 or self.sfa_qsfa_tile_size != 128
             ):
-                raise ValueError("HiSparse C8 requires native E4M3FN NoPE512/RoPE64 with FP32 scales")
+                raise ValueError("HiSparse C8 requires native INT8/E4M3FN NoPE512/RoPE64 with FP32 scales")
         parallel = self.vllm_config.parallel_config
         if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
             raise ValueError("Ascend HiSparse does not support context parallelism")
@@ -201,13 +201,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Reuse SFA's supported quantization/weight preparation. The HiSparse
         # handle supplies the final Resident cache and current write mapping.
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
+            from vllm_ascend.quantization.methods import (
+                AscendW8A8DynamicLinearMethod,
+                AscendW8A8MXFP8DynamicLinearMethod,
+            )
 
             # Native Prolog ties its C8 payload dtype to the weight scheme.
-            # INT8 weights cannot write this bridge's E4M3FN cache; retain the
-            # existing native projection/quantizer path for that combination.
+            # Match the native INT8 or FP8 cache to its projection
+            # scheme; other combinations retain SFA's separate quantizer.
             method = self._get_layer_quant_method(self.fused_qkv_a_proj)
-            if type(method) is AscendW8A8MXFP8DynamicLinearMethod:
+            if (self.c8_cache_dtype == torch.int8 and type(method) is AscendW8A8DynamicLinearMethod) or (
+                self.c8_cache_dtype == torch.float8_e4m3fn and type(method) is AscendW8A8MXFP8DynamicLinearMethod
+            ):
                 return super()._fused_preprocess_type()
         return None
 

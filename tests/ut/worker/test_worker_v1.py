@@ -89,6 +89,7 @@ class TestNPUWorker(TestBase):
         self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
+        self.parallel_config_mock.enable_fault_tolerance = False
 
         self.vllm_config_mock = MagicMock(spec=VllmConfig)
         self.vllm_config_mock.cache_config = self.cache_config_mock
@@ -104,6 +105,8 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.kernel_config.ir_op_priority = MagicMock()
         self.vllm_config_mock.kernel_config.ir_op_priority.set_default = MagicMock()
         self.vllm_config_mock.profiler_config = MagicMock()
+        self.vllm_config_mock.profiler_config.profiler = None
+        self.vllm_config_mock.use_v2_model_runner = False
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None
@@ -875,12 +878,16 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.5
 
             # Test _init_device
-            with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
+            with (
+                patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint,
+                patch("vllm_ascend.worker.worker.set_random_seed") as seed,
+            ):
                 result = worker._init_device()
 
             # Both calls must use the mapped visible ordinal, not local_rank.
             mock_set_device.assert_called_once_with(torch.device("npu:1"))
             setup_endpoint.assert_called_once_with(1, worker.vllm_config.kv_transfer_config)
+            seed.assert_called_once_with(42)
             self.assertEqual(worker.local_rank, 0)
 
             mock_init_dist_env.assert_called_once()
@@ -1152,6 +1159,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
+            mock_model_runner.decode_query_len = mock_uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
@@ -2406,7 +2414,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
 
-        worker.finish_weight_update()
+        with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
+            worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
         worker.model_runner.reset_lora_state.assert_called_once_with()

@@ -156,7 +156,7 @@ class HostUvaBufferCleanupError(RuntimeError):
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
-    def __init__(self, shape, dtype, device):
+    def __init__(self, shape, dtype, device, buffer_name, module):
         self.lib = _host_library()
         self._registered = False
         self.ptrs = None
@@ -193,6 +193,13 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as initialization_error:
             try:
                 self.close()
@@ -201,6 +208,7 @@ class HostUvaBuffer:
                 # this allocation on the exception rather than lose the only
                 # handle capable of retrying unregister/free.
                 raise HostUvaBufferCleanupError(self, initialization_error, cleanup_error) from cleanup_error
+            raise
             raise
 
     def close(self):
@@ -292,7 +300,7 @@ class SharedUvaBuffer:
     mapping with CANN. The leader unlinks it after all ranks have attached.
     """
 
-    def __init__(self, shape, dtype, device, group):
+    def __init__(self, shape, dtype, device, group, buffer_name, module):
         self.lib = _host_library()
         self.group = group
         rows = int(shape[0])
@@ -349,6 +357,9 @@ class SharedUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Registered here for the same reason as in HostUvaBuffer.__init__:
+            # a level-2 wake restores ``named_buffers()`` only.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"
 

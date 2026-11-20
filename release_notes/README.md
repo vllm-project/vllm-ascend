@@ -13,6 +13,8 @@ fresh and accurate context instead of re-investigating dozens of old commits.
 One root principle: **can the user of the released artifact (wheel or Docker image) notice
 the change?** If you cannot complete a sentence like "Users can now ...", "Users no longer
 need to ...", or "Users should be aware that ...", your PR does not need a fragment.
+"The code is cleaner", "it prepares X", and "it fixed a test" are not user sentences —
+they describe the diff, not a difference users can observe.
 
 Note that the decision does not depend on the type or the size of the PR, but on whether
 users can observe the difference. A `refactor MoE` PR that also fixes a user-reported crash
@@ -27,8 +29,9 @@ needs a fragment; a pure code move does not.
 | Changes to user-facing APIs, parameters, or configuration | an env var that now takes effect in more cases, a field added to API responses |
 | Breaking changes, deprecations, default behavior changes | a feature switch enabled by default, a renamed argument |
 | Dependency and toolchain updates | CANN, torch_npu, triton-ascend, vLLM alignment |
-| Measurable or clearly described performance improvements | FLA NPU backend, fewer H2D syncs |
+| Performance improvements (the entry must state the scenario and the effect) | FLA NPU backend, fewer H2D syncs |
 | Fixes for user-reported bugs or issues affecting correctness and stability | hangs, OOM, wrong outputs |
+| New or substantially expanded guides for brand-new scenarios (category `documentation`) | a new model deployment guide |
 
 When an API or configuration change breaks existing usage, use `breaking`; when it adds a
 new capability, use `feature`.
@@ -46,11 +49,18 @@ A fragment costs a few lines of YAML and captures the context you have right now
 entry is almost impossible to recover at release time, while an extra entry can simply be
 dropped or merged by the release manager. The cost is asymmetric: prefer writing.
 
+Scope note: "in doubt" means genuinely unsure whether users can observe the change. If you
+know the change is internal, the decision is already made — do not write a fragment, and do
+not write one whose only content is the implementation.
+
 ## Fragment format
 
 Copy `TEMPLATE.yaml` to `fragments/<PR number>.yaml` (for example `fragments/18123.yaml`) and
 fill in the entries. Prefer one file per PR, with as many entries as needed inside. If a PR
-genuinely needs a second file, name it `fragments/<PR number>-<slug>.yaml`.
+genuinely needs a second file, name it `fragments/<PR number>-<slug>.yaml`. Split unrelated
+changes into separate entries: each entry is categorized independently, and the release
+manager may drop or merge entries at assembly time. If the PR's user-visible scope grows or
+changes during review, update the fragment in the same PR.
 
 ```yaml
 pr: 18123
@@ -70,18 +80,108 @@ Field rules:
 - `entries` (required): one or more entries
 - `category` (required): `feature`, `hardware`, `performance`, `dependency`, `breaking`,
   `config`, `documentation`, `bugfix`, or `other`
-- `text` (required): one or two English sentences from the user's point of view. Do not
-  append the PR link; the release tooling adds it automatically
-- `highlight` (optional): `true` marks the entry as a candidate for the Highlights section
+- `text` (required): one to three short English sentences written for users of the released
+  artifact, not for reviewers — what changed for them and what they must do. Do not append
+  the PR link; the release tooling adds it automatically. See
+  [Writing the text](#writing-the-text) for the quality bar and per-category requirements.
+- `highlight` (optional): `true` marks the entry as a candidate for the Highlights section.
+  Use it sparingly — only for entries with the widest user impact (new model or hardware
+  support, headline features); when in doubt, leave it unset
 - `model` and `hardware` (optional): metadata used when building the hardware support matrix
 
 The `text` is raw material for the release notes, not the final copy: the release manager may
-merge, split, or polish entries while assembling the release.
+merge, split, or polish entries while assembling the release. But raw material still has a
+quality bar — vague fragments force the release manager to re-investigate the PR, which is
+exactly what fragments exist to avoid.
+
+## Writing the text
+
+Write every entry for a reader who never sees the diff — a user deciding whether to upgrade
+and whether the release matters for their deployment. A good entry answers three questions:
+
+1. What changed for me?
+2. Do I need to do anything (upgrade, set a flag, migrate)?
+3. Is this relevant to my workload?
+
+If only someone who read the diff can understand the entry, rewrite it from the user's side.
+
+### Voice
+
+- English, one to three short sentences, from the user's point of view ("Added ...",
+  "Users can now ...", "Fixed ..."), not "We ..." or a commit log line.
+- Name user-facing switches exactly: environment variables, `additional_config` keys, CLI
+  flags, metric names. These are the user's interface; exact names make entries greppable
+  and save a docs hunt. State defaults and escape hatches when behavior changes.
+- Avoid implementation narration: file paths, class and function names, internal
+  codenames, kernel-level mechanics. Mention a mechanism only when the user can act on it
+  or it defines the boundary of the effect.
+- No unquantified hype. "Significantly faster" says nothing; state the effect or the
+  concrete mechanism instead. Never invent numbers.
+
+### Per-category requirements
+
+- `feature`: what the user can do now, how to enable it (exact switch), and whether it is
+  on by default.
+- `breaking`: what stops working; old behavior vs new behavior; the exact migration step;
+  and what happens if the user does nothing (fails at startup, silently ignored, different
+  output). See `fragments/20097.yaml` for a worked example.
+- `config`: the exact name, the default value, and what it changes for the user.
+- `performance`: the scenario — model, workload, hardware, and any switch required to get
+  the improvement — and the effect. With a benchmark, give the metric, the magnitude, and
+  the conditions the number depends on (e.g. "decode throughput +15% on A3 at TP4, 2K/4K
+  input/output"); without one, describe precisely what is eliminated or reduced per step
+  (e.g. "removes the per-step H2D sync that blocked AsyncScheduler"). Never invent
+  numbers: run the benchmark or stay qualitative.
+- `bugfix`: the symptom the user saw (hang, OOM, wrong output, stuck metric), the
+  conditions that trigger it, and the affected models or features. Explain the root cause
+  only if it helps the user recognize the bug. See `fragments/20207.yaml`.
+- `dependency`: what moved from which version to which, and what the user must do (e.g.
+  use the new release image).
+- `documentation`: what the docs now cover, so users can find the guide.
+- `hardware`: which products are newly supported, for which models and workloads, and any
+  limitations or known gaps.
+- `other`: avoid when any other category fits. If used, say plainly what the user notices.
+
+Security fixes always need a fragment: state the impact and that users must upgrade.
+
+### Examples
+
+Weak → better pairs, reworded from real entries in this repository:
+
+Performance entry that narrates the implementation instead of the outcome:
+
+> Weak: `Reduced QLI sorting and merge work with an adaptive Top-K accumulator width, and batched candidate vector operations with AscendC Level-0 repeats on Ascend A3.`
+>
+> Better: `Improved DeepSeek V4.1 sparse-attention indexing performance on A3 long-context decode: redundant Top-K sorting and candidate vector work per step are reduced.` (Add the measured delta if the PR has a benchmark.)
+
+Bugfix entry that names the internal mechanism instead of the symptom:
+
+> Weak: `Fixed explicit and startup-plan KV-cache budgets bypassing multi-group allocation scaling.`
+>
+> Better: `Fixed KV-cache allocations that could exceed the configured memory budget in multi-group setups, which could cause unexpected OOM at startup or during memory replanning.`
+
+Feature entry with a vague scope:
+
+> Weak: `Enabled FlashMLA for GLM DSpark MLA drafts on supported hardware.`
+>
+> Better: `Enabled FlashMLA for GLM DSpark MLA drafts on A3, avoiding a sequence-length copy to the CPU on every drafting step.` (Name the hardware explicitly, or put it in the `hardware` field — "supported hardware" is not actionable.)
+
+### Reviewer checklist
+
+Reviewers confirm fragments together with the code, checking the same bar:
+
+- Can a reader without the diff understand what changed and what to do?
+- Performance entries: scenario and effect both present?
+- Breaking/config entries: exact switch name and migration step present?
+- Category correct? A behavior switch that is now on by default is `breaking`, not
+  `feature`; a tuning knob shipped with its default changed is `config` (state the old
+  default) or `breaking`.
 
 ## Review and release
 
-- Reviewers confirm whether the fragment decision and wording are right, the same way they
-  review any other part of the PR. There is no CI gate for fragments; the rules above are
+- Reviewers confirm whether the fragment is needed and whether the wording meets the bar
+  in [Writing the text](#writing-the-text) (see the reviewer checklist there), the same way
+  they review any other part of the PR. There is no CI gate for fragments; the rules are
   enforced by review.
 - At release time the release manager runs the aggregation script, reviews the audit list of
   code changes without fragments, and archives the consumed fragments into

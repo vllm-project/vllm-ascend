@@ -1,0 +1,9 @@
+pr: 22187
+entries:
+  - category: performance
+    text: >-
+      Reduced temporary workspace for DeepSeek V4.1 hyper-connections on Ascend
+      A3 by replacing the 208 MiB minimum allocation with a size based on the
+      input. No configuration changes are needed.
+    model: deepseek-v4.1
+    hardware: [A3]

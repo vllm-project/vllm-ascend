@@ -221,8 +221,18 @@ Unlike `/rerun`, which only retries jobs that already failed inside an existing 
 `/run` starts a fresh run against the current head commit. The test scope follows the
 labels the PR currently carries (`ready-precise`, `ready-a5`,
 `main2main`); without any of them only `pre-commit` and `cpu-ut` run, which is the
-same scope a push used to get. If a run for the same commit is already queued or in
-progress, `/run` is a no-op.
+same scope a push used to get.
+
+`/run` only ever starts one gate run per commit. The verdict comes from the newest
+completed E2E run on the head commit:
+
+- If an E2E run for the head commit is already queued or in progress, `/run` is a no-op.
+- If that newest run **passed**, `/run` refuses to start another one — the commit is
+  already verified, so push a new commit if the code changed.
+- If that newest run **finished without passing**, `/run` refuses as well and points
+  to `/rerun`, which retries only the failed jobs on that same commit and is much
+  cheaper than the full matrix. A `cancelled` run is not treated as a verdict on the
+  code, so such a commit can still be tested with `/run`.
 
 `/run` requests tests, so the CODEOWNERS approval gate is not evaluated in its
 runs; it is evaluated when reviews are submitted instead.

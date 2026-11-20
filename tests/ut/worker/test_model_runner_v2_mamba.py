@@ -11,6 +11,7 @@ import torch
 import vllm.v1.worker.gpu.cp_utils as _cp_utils
 from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -44,6 +45,19 @@ if not hasattr(_cp_utils, "prepare_dcp_local_seq_lens") and hasattr(_cp_utils, "
     _cp_utils.prepare_dcp_local_seq_lens = (
         lambda dcp_local_seq_lens, seq_lens, num_reqs, dcp_size, dcp_rank, cp_interleave: None
     )
+
+
+class _FakeAttentionBackend:
+    uses_descriptor_cache_view = False
+
+    @staticmethod
+    def customize_spec(spec):
+        return spec
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(spec):
+        # These layout tests use arbitrary block sizes without kernel alignment.
+        return [MultipleOf(1)]
 
 
 def _mock_vllm_config():
@@ -771,7 +785,9 @@ def test_glm_kpool_pcp_advances_mamba_align_state_once_per_global_request(mock_k
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
     spec = _mamba_spec()
@@ -813,7 +829,9 @@ def test_mamba_cache_reshape_uses_page_strided_state_tensors(_mock_config):
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
+    return_value=SimpleNamespace(
+        kv_transfer_config=None, additional_config={}, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    ),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     attention_spec = FullAttentionSpec(
@@ -1042,7 +1060,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
             return attention_spec
 
         def get_attn_backend(self):
-            return SimpleNamespace(uses_descriptor_cache_view=False)
+            return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1098,7 +1116,7 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
             return self.spec
 
         def get_attn_backend(self):
-            return SimpleNamespace(uses_descriptor_cache_view=False)
+            return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
@@ -1159,13 +1177,12 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
         name: SimpleNamespace(
             is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
-            get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
+            get_attn_backend=lambda: _FakeAttentionBackend,
         )
         for name, spec in original_specs.items()
     }
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: layers)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _config: False)
     specs = get_kv_cache_spec(config)

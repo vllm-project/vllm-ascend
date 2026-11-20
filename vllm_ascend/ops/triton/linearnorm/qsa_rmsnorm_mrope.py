@@ -3,6 +3,25 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+def _validate_rope_positions(
+    positions: torch.Tensor,
+    cache: torch.Tensor,
+    tensor: torch.Tensor,
+    rope_dim: int,
+) -> None:
+    """Check the direct-gather ABI using metadata only (safe during capture)."""
+    if positions.ndim not in (1, 2) or (positions.ndim == 2 and positions.shape[0] != 3):
+        raise ValueError("QSA positions must have one or three axes")
+    if positions.shape[-1] != tensor.shape[0] or positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("QSA positions must be integer positions for every token")
+    if cache.ndim != 2 or cache.shape[0] == 0 or cache.shape[1] != rope_dim or cache.stride(1) != 1:
+        raise ValueError("QSA rotary cache must have nonempty, contiguous rotary rows")
+    if tensor.dtype != torch.bfloat16 or cache.dtype != tensor.dtype:
+        raise ValueError("QSA direct rotary gathering requires a BF16 cache and input")
+    if positions.device != tensor.device or cache.device != tensor.device:
+        raise ValueError("QSA positions, rotary cache and input must share a device")
+
+
 @triton.jit
 def _qsa_rmsnorm_mrope_kernel(
     input_ptr,
@@ -23,6 +42,11 @@ def _qsa_rmsnorm_mrope_kernel(
     rope_dim: tl.constexpr,
     has_mrope: tl.constexpr,
     block_dim: tl.constexpr,
+    positions_ptr=None,
+    POSITION_STRIDE_AXIS: tl.constexpr = 0,
+    POSITION_STRIDE_TOKEN: tl.constexpr = 0,
+    CACHE_ROWS: tl.constexpr = 0,
+    GATHER_CACHE: tl.constexpr = False,
 ):
     token_id = tl.program_id(0)
     head_id = tl.program_id(1)
@@ -37,7 +61,23 @@ def _qsa_rmsnorm_mrope_kernel(
 
     half_rope_dim: tl.constexpr = rope_dim // 2
     rotary_offsets = tl.arange(0, half_rope_dim)
-    if has_mrope:
+    if GATHER_CACHE:
+        if has_mrope:
+            # Pair indices cycle through t/h/w (0/1/2); each section count
+            # becomes an interleaved index cutoff after multiplying by 3.
+            h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
+            w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
+            axis = tl.where(h_mask, 1, tl.where(w_mask, 2, 0))
+            position = tl.load(positions_ptr + axis * POSITION_STRIDE_AXIS + token_id * POSITION_STRIDE_TOKEN)
+        else:
+            # Keep the shared position scalar: an all-zero axis vector creates
+            # a repeated-address gather unsupported by Triton Ascend lowering.
+            position = tl.load(positions_ptr + token_id * POSITION_STRIDE_TOKEN)
+        position = tl.minimum(tl.maximum(position, 0), CACHE_ROWS - 1)
+        cache_row = cos_sin_ptr + position.to(tl.int64) * cos_sin_stride_token
+        cos = tl.load(cache_row + rotary_offsets).to(tl.float32)
+        sin = tl.load(cache_row + rotary_offsets + half_rope_dim).to(tl.float32)
+    elif has_mrope:
         h_mask = (rotary_offsets % 3 == 1) & (rotary_offsets < mrope_section_h * 3)
         w_mask = (rotary_offsets % 3 == 2) & (rotary_offsets < mrope_section_w * 3)
         cache_row = cos_sin_ptr + token_id * cos_sin_stride_token
@@ -80,7 +120,9 @@ def triton_qsa_rmsnorm_mrope(
     eps: float,
     mrope_section: list[int],
     rope_dim: int,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Normalize and rotate, using a full cache when positions are supplied."""
     if tensor.ndim != 3:
         raise ValueError("QSA norm+RoPE input must be [tokens, heads, head_dim]")
     if tensor.dtype != torch.bfloat16 or weight.dtype != tensor.dtype:
@@ -91,12 +133,14 @@ def triton_qsa_rmsnorm_mrope(
         raise ValueError("QSA norm+RoPE received an invalid rotary cache view")
     if rope_dim <= 0 or rope_dim > tensor.shape[-1] or rope_dim % 2:
         raise ValueError("QSA norm+RoPE requires an even rotary width")
-    if cos_sin.shape[-2] != tensor.shape[0]:
+    if positions is None and cos_sin.shape[-2] != tensor.shape[0]:
         raise ValueError("QSA norm+RoPE token and rotary rows must match")
 
-    has_mrope = cos_sin.ndim == 3
+    if positions is not None:
+        _validate_rope_positions(positions, cos_sin, tensor, rope_dim)
+    has_mrope = cos_sin.ndim == 3 if positions is None else positions.ndim == 2
     if has_mrope:
-        if cos_sin.shape[0] != 3 or len(mrope_section) != 3:
+        if (positions is None and cos_sin.shape[0] != 3) or len(mrope_section) != 3:
             raise ValueError("QSA MRoPE requires three position axes and sections")
         cos_sin_stride_axis = cos_sin.stride(0)
     else:
@@ -125,6 +169,11 @@ def triton_qsa_rmsnorm_mrope(
         rope_dim=rope_dim,
         has_mrope=has_mrope,
         block_dim=triton.next_power_of_2(head_dim),
+        positions_ptr=positions,
+        POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+        POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
+        CACHE_ROWS=cos_sin.shape[0],
+        GATHER_CACHE=positions is not None,
         num_warps=1,
         num_stages=1,
     )
@@ -138,6 +187,7 @@ def triton_qsa_rmsnorm_mrope_fake(
     eps: float,
     mrope_section: list[int],
     rope_dim: int,
+    positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(tensor)
 

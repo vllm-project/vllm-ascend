@@ -677,7 +677,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
             valid_send_rows = c2_metadata.send_valid_mask & (c2_metadata.send_token_indices < hidden_states.shape[0])
             send_kv_scores.masked_fill_(~valid_send_rows[:, None], 0)
         gathered_kv_scores = get_pcp_group().all_gather(send_kv_scores, dim=0)
-        ring_state = compressor.state_cache.kv_cache[0].squeeze(-2)
+        ring_state = compressor.state_cache.kv_cache.squeeze(-2)
         if hidden_states.shape[0]:
             local_state_metadata = local_metadata.compressor.state
             if local_state_metadata.c2_metadata_group_id is not None:

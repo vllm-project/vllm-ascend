@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from importlib.util import find_spec
 from typing import Any
 
@@ -12,6 +12,7 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -43,11 +44,13 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale
+from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.utils import (
     _round_up,
     enable_sfa_dcp_replicated_indexer,
@@ -126,6 +129,35 @@ class AscendSFAIndexerMetadata:
     # V2's deferred producer fills this before the first indexer consumes it.
     qli_metadata: torch.Tensor | None = None
     qli_metadata_group_id: int | None = None
+
+
+class AscendSFAIndexerCache(DeepseekV32IndexerCache):
+    """Cache owner whose storage spec is supplied by its indexer backend."""
+
+    align_kv_cache_with_mamba = False
+
+    def __init__(self, source: nn.Module, spec: AscendSFAIndexerCacheSpec, backend_cls: type[AttentionBackend]) -> None:
+        nn.Module.__init__(self)
+        self.prefix = source.prefix
+        self.kv_cache = source.kv_cache
+        self.cache_config = source.cache_config
+        self.head_dim = source.head_dim
+        self.dtype = spec.dtype
+        self.cache_spec = spec
+        # Metadata discovery must use the same backend as the indexer impl,
+        # including after the model construction config context has exited.
+        self.backend_cls = backend_cls
+        self.cache_enabled = True
+        get_current_vllm_config().compilation_config.static_forward_context[self.prefix] = self
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
+        if not self.cache_enabled:
+            return None
+        # mypy --follow-imports skip cannot see the upstream dataclass fields.
+        return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)  # type: ignore[call-arg]
+
+    def get_attn_backend(self):
+        return self.backend_cls
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -249,6 +281,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             self.c4_k_cache_dtype, self.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
             self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
 
+        vllm_config = get_current_vllm_config()
+        spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
+        # TODO: Make upstream DeepseekV32IndexerCache a PluggableLayer so the
+        # Ascend cache layer can be selected directly and create its backend,
+        # instead of the backend replacing an already-created cache layer.
+        self.k_cache = AscendSFAIndexerCache(self.k_cache, spec, backend_cls=type(self))
+        vllm_indexer.k_cache = self.k_cache
+
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa", "kimi_k31"]
@@ -301,6 +341,59 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     @property
     def enable_sparse_li_quant(self) -> bool:
         return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
+    def _build_cache_spec(self, source: AttentionSpec, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec:
+        """Describe the data/scale format selected once in backend initialization."""
+        if self.enable_sparse_li_c4:
+            # Two 4-bit values per byte, with one scale per 32 values.
+            head_size = self.head_dim // 2
+            dtype = self.c4_k_cache_dtype
+            scale_dim = self.head_dim // 32
+            scale_dtype = self.c4_k_scale_cache_dtype
+        elif self.enable_sparse_li_c8:
+            head_size = self.head_dim
+            dtype = self.c8_k_cache_dtype
+            scale_dim = 1
+            scale_dtype = self.c8_k_scale_cache_dtype
+        else:
+            head_size = self.head_dim
+            dtype = vllm_config.model_config.dtype
+            scale_dim = 0
+            scale_dtype = torch.int8  # Unused when there is no scale component.
+
+        cache_dtype_str = vllm_config.cache_config.cache_dtype
+        if not self.enable_sparse_li_quant:
+            # TurboQuant describes the main cache, not the unquantized indexer.
+            if cache_dtype_str == TURBOQUANT_CACHE_DTYPE:
+                cache_dtype_str = None
+            else:
+                cache_dtype_str = "auto"
+
+        indexer_replicas = 1
+        if enable_sfa_dcp_replicated_indexer(vllm_config) and not enable_sfa_dcp_sharded_indexer(vllm_config):
+            indexer_replicas = vllm_config.parallel_config.decode_context_parallel_size
+
+        return self.customize_spec(
+            source,
+            head_size=head_size,
+            dtype=dtype,
+            cache_dtype_str=cache_dtype_str,
+            scale_dim=scale_dim,
+            scale_dtype=scale_dtype,
+            cache_sparse_li_c4=self.enable_sparse_li_c4,
+            cache_sparse_li_c8=self.enable_sparse_li_c8,
+            sfa_dcp_replicated_indexer_size=indexer_replicas,
+        )
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec, **overrides: Any) -> AscendSFAIndexerCacheSpec:
+        """Preserve source metadata and apply the owner's resolved storage format."""
+        # The collector calls this hook again without per-layer overrides.
+        if isinstance(spec, AscendSFAIndexerCacheSpec) and not overrides:
+            return spec
+        spec_fields = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        spec_fields.update(overrides)
+        return AscendSFAIndexerCacheSpec(**spec_fields)
 
     def process_weights_after_loading(self) -> None:
         if not self.enable_sparse_li_quant:
