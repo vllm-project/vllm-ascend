@@ -36,7 +36,11 @@ from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEWeights,
+    build_fused_experts_input,
+    shared_moe_weight_kwargs,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.eplb import use_allgather_eplb
@@ -185,7 +189,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.use_mega_moe:
+        use_mega_moe = bool(_EXTRA_CTX.use_mega_moe)
+        if use_mega_moe:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
             w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
             w1_scale = None
@@ -211,6 +216,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale=w2_scale,
             w1_scale_bias=w1_scale_bias,
             w2_scale_bias=w2_scale_bias,
+            **shared_moe_weight_kwargs(layer, use_mega_moe=use_mega_moe),
         )
 
     def get_mlp_weights(self, layer):

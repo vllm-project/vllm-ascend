@@ -1132,10 +1132,10 @@ class AscendConfig:
             )
 
     def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
-        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+        """Reject ``enable_fused_mc2=3`` on unsupported hardware and latent-MoE models.
 
-        The shared expert is fused into the routed A5 MegaMoe operator, so this
-        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        The shared expert is fused into the routed MegaMoe operator on profiles
+        supporting ``CANN_MEGAMOE_SHARED_EXPERT_FUSION`` (A3 and A5) and assumes
         the shared expert and routed experts share the residual width. Latent-MoE
         models (e.g. Kimi K3) project the residual stream before the routed FFN and
         expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
@@ -1148,7 +1148,7 @@ class AscendConfig:
         hardware_profile = get_current_hardware_profile()
         if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
             raise NotImplementedError(
-                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A3 and A5; "
                 "the current hardware profile does not support it. "
                 "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )

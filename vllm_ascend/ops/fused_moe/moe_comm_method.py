@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 from vllm.logger import logger
@@ -298,6 +298,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
+            self._mega_moe_symm_buffers: dict[tuple[int, torch.dtype | None], Any] = {}
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # TODO(ZT-AIA): Different CANN versions accept a different set of
             # shared-expert kwargs, so snapshot the installed signature and drop
@@ -340,19 +341,35 @@ class FusedMC2CommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
+    def _iter_mega_moe_symm_buffers(self) -> list[Any]:
+        """Return every unique initialized MegaMoe symmetric buffer on this communicator."""
+        buffers: list[Any] = []
+        seen_ids: set[int] = set()
+        cache = getattr(self, "_mega_moe_symm_buffers", None)
+        if isinstance(cache, dict):
+            for buf in cache.values():
+                if buf is not None and id(buf) not in seen_ids:
+                    seen_ids.add(id(buf))
+                    buffers.append(buf)
+        primary = getattr(self, "mega_moe_symm_buffer", None)
+        if primary is not None and id(primary) not in seen_ids:
+            buffers.append(primary)
+        return buffers
+
     def prepare_hccl_teardown(self) -> bool:
         """Invalidate the MegaMoe context before its MC2 group is destroyed."""
-        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
-        if symm_buffer is None:
+        buffers = self._iter_mega_moe_symm_buffers()
+        if not buffers:
             return True
 
-        context_manager = getattr(symm_buffer, "_ctx_manager", None)
-        update_group = getattr(context_manager, "update_group", None)
-        if not callable(update_group):
-            raise RuntimeError(
-                "The installed cann_ops_transformer MegaMoe context manager "
-                "does not expose update_group(); refusing to tear down its HCCL group."
-            )
+        for symm_buffer in buffers:
+            context_manager = getattr(symm_buffer, "_ctx_manager", None)
+            update_group = getattr(context_manager, "update_group", None)
+            if not callable(update_group):
+                raise RuntimeError(
+                    "The installed cann_ops_transformer MegaMoe context manager "
+                    "does not expose update_group(); refusing to tear down its HCCL group."
+                )
 
         self._mega_moe_hccl_state_stale = True
         logger.info("Marked MegaMoe HCCL runtime context stale before MC2 group teardown.")
@@ -360,25 +377,27 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def refresh_hccl_runtime_state(self) -> bool:
         """Rebind a stale MegaMoe context to the restored MC2 communicator."""
-        symm_buffer = getattr(self, "mega_moe_symm_buffer", None)
-        if symm_buffer is None or not self._mega_moe_hccl_state_stale:
+        buffers = self._iter_mega_moe_symm_buffers()
+        if not buffers or not self._mega_moe_hccl_state_stale:
             return True
 
         device_group = get_mc2_group().device_group
         local_rank = torch.distributed.get_rank(group=device_group)
         backend = device_group._get_backend(torch.device("npu"))
         group_name = backend.get_hccl_comm_name(local_rank)
-        context_manager = symm_buffer._ctx_manager
+        ep_world_size = torch.distributed.get_world_size(group=device_group)
 
-        # The context tensor was created under inference mode during model
-        # initialization. CANN updates it in place, so preserve that mode here.
+        # Context tensors were created under inference mode during model
+        # initialization. CANN updates them in place, so preserve that mode here.
         with torch.inference_mode():
-            context_manager.update_group(group_name, symm_buffer.context)
-        symm_buffer.group = device_group
-        symm_buffer.rank_id = local_rank
-        symm_buffer.group_name = group_name
-        symm_buffer.ep_world_size = torch.distributed.get_world_size(group=device_group)
-        symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
+            for symm_buffer in buffers:
+                context_manager = symm_buffer._ctx_manager
+                context_manager.update_group(group_name, symm_buffer.context)
+                symm_buffer.group = device_group
+                symm_buffer.rank_id = local_rank
+                symm_buffer.group_name = group_name
+                symm_buffer.ep_world_size = ep_world_size
+                symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
         torch.distributed.barrier(
             group=device_group,
             device_ids=[torch.npu.current_device()],
@@ -387,7 +406,7 @@ class FusedMC2CommImpl(MoECommMethod):
         logger.info(
             "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
             local_rank,
-            symm_buffer.ep_world_size,
+            ep_world_size,
         )
         return True
 
@@ -524,20 +543,38 @@ class FusedMC2CommImpl(MoECommMethod):
             fused_experts_input.quant.quant_type
         )
 
-        if self.mega_moe_symm_buffer is None:
-            self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
-                dispatch_quant_mode,
-                dispatch_quant_out_dtype,
-                is_decode_only_node=is_decode_only_node,
-            )
+        # Cache symmetric buffers per (dispatch_quant_mode, dispatch_quant_out_dtype)
+        # so models with heterogeneous per-layer routing quantization (e.g., BF16
+        # dense layers mixed with W4A8/W8A8 layers of identical shape) never share
+        # an under-sized CCL receive buffer. Homogeneous models allocate exactly one.
+        symm_key = (dispatch_quant_mode, dispatch_quant_out_dtype)
+        symm_cache = getattr(self, "_mega_moe_symm_buffers", None)
+        primary = getattr(self, "mega_moe_symm_buffer", None)
+        if primary is not None and not symm_cache:
+            # Backward compatibility for callers/tests that pre-seed
+            # self.mega_moe_symm_buffer directly without populating the cache.
+            symm_buffer = primary
+            symm_buffer.dispatch_quant_mode = dispatch_quant_mode
+            symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
         else:
-            self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
-            self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
+            if symm_cache is None:
+                symm_cache = {}
+                self._mega_moe_symm_buffers = symm_cache
+            symm_buffer = symm_cache.get(symm_key)
+            if symm_buffer is None:
+                symm_buffer = self._init_mega_moe_symm_buffer(
+                    dispatch_quant_mode,
+                    dispatch_quant_out_dtype,
+                    is_decode_only_node=is_decode_only_node,
+                )
+                symm_cache[symm_key] = symm_buffer
+        self.mega_moe_symm_buffer = symm_buffer
 
+        is_mxfp = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
         x_active_mask = None
         # Ascend 950 (A5) MegaMoe only support a null x_active_mask, and it
         # must be passed as None. But on A2/A3 it must be valid.
-        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        if is_mxfp:
             x_active_mask = None
         else:
             if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
@@ -561,7 +598,7 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
+        # Shared experts fused into the MegaMoe operator (A3 and A5): their
         # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
         # so no Dispatch/Combine traffic is involved. The caller skips the
         # separate shared-expert forward when this payload is present.
@@ -569,40 +606,63 @@ class FusedMC2CommImpl(MoECommMethod):
         # Live payload installed by AscendMoERunner; its fields are filled in
         # when the shared linears finish loading.
         shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+        supported_kwargs = getattr(self, "_mega_moe_supported_kwargs", None)
+        if supported_kwargs is None:
+            import inspect as _inspect
+
+            supported_kwargs = frozenset(_inspect.signature(self.mega_moe).parameters)
+            self._mega_moe_supported_kwargs = supported_kwargs
+
+        shared_weight_type = getattr(shared_fusion, "weight_type", None)
+        shared_quant_out_dtype = getattr(shared_fusion, "quant_out_dtype", None)
         if weights.shared_w1 is not None:
-            # The shared expert may be quantized differently from the routed
-            # experts (W4A4C8: MXFP4 routed + MXFP8 shared). The quant settings
-            # below live in the same payload as the fused shared weights, so no
-            # fallback mirroring of the routed activation dtype is needed here.
+            is_homogeneous_a3_bf16 = (
+                not is_mxfp
+                and weight_type is None
+                and weights.shared_w1[0].dtype == torch.bfloat16
+                and weights.shared_w1_scale is None
+            )
+            if not is_mxfp and not is_homogeneous_a3_bf16 and shared_weight_type is None:
+                raise ValueError(
+                    "MegaMoe shared-expert fusion on A3 requires an explicit shared weight_type "
+                    "in MegamoeSharedExpertFusion."
+                )
             shared_kwargs = dict(
                 shared_l1_weights=weights.shared_w1,
                 shared_l2_weights=weights.shared_w2,
                 shared_l1_weights_sf=weights.shared_w1_scale,
                 shared_l2_weights_sf=weights.shared_w2_scale,
-                shared_expert_quant_out_dtype=getattr(shared_fusion, "quant_out_dtype", None),
+                shared_expert_quant_out_dtype=shared_quant_out_dtype,
             )
-            # Mixed quantization: declare the shared weight dtype explicitly,
-            # otherwise the operator inherits the routed weight type for the
-            # shared descriptors and resolves the wrong shared GMM mode.
-            shared_weight_type = getattr(shared_fusion, "weight_type", None)
-            if shared_weight_type is not None and shared_weight_type != weight_type:
+            if shared_weight_type is not None:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
-        # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /
-        # shared-weight-type knobs; dropping them is safe on such builds
-        # because the operator infers the shared GMM mode from the shared
-        # weight dtypes themselves.
-        # TODO(ZT-AIA): This ABI filter is retired together with
-        # _mega_moe_supported_kwargs once all CANN builds accept the knobs
-        # (expected by end of November 2026).
-        dropped = [k for k in shared_kwargs if k not in self._mega_moe_supported_kwargs]
+
+        dropped = [k for k in shared_kwargs if k not in supported_kwargs]
         if dropped:
-            # warning_once caches on *args (must be hashable); format up front.
+            same_carrier_mixed = (
+                weights.shared_w1 is not None
+                and shared_weight_type != weight_type
+                and weights.shared_w1[0].dtype == weight1[0].dtype
+            )
+            required = {"shared_l1_weights", "shared_l2_weights"}
+            if weights.shared_w1_scale is not None:
+                required |= {"shared_l1_weights_sf", "shared_l2_weights_sf"}
+            if shared_weight_type != weight_type and (not is_mxfp or same_carrier_mixed):
+                required |= {"shared_weight1_type", "shared_weight2_type"}
+            if is_mxfp and shared_quant_out_dtype not in (None, dispatch_quant_out_dtype):
+                required.add("shared_expert_quant_out_dtype")
+            if missing := sorted(required & set(dropped)):
+                raise ValueError(
+                    f"Installed CANN mega_moe operator does not support required shared-expert kwargs "
+                    f"{missing} for (routed weight_type={weight_type}, shared weight_type={shared_weight_type}). "
+                    "Upgrade cann_ops_transformer or set enable_fused_mc2=2."
+                )
             logger.warning_once(
                 "CANN MegaMoe op does not accept shared-expert knobs %s; skipping them.",
                 ",".join(sorted(dropped)),
             )
-            shared_kwargs = {k: v for k, v in shared_kwargs.items() if k in self._mega_moe_supported_kwargs}
+            shared_kwargs = {k: v for k, v in shared_kwargs.items() if k in supported_kwargs}
 
         topk_weights = fused_experts_input.topk_weights.to(torch.float32)
         if weights.shared_w1 is not None:
@@ -621,23 +681,42 @@ class FusedMC2CommImpl(MoECommMethod):
                 routed_scaling_factor = getattr(layer, "routed_scaling_factor", None)
             if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
                 topk_weights = topk_weights * routed_scaling_factor
-        out, expert_tokens = self.mega_moe(
-            fused_experts_input.hidden_states,
-            fused_experts_input.topk_ids.to(torch.int32),
-            topk_weights,
-            weight1,
-            weight2,
-            self.mega_moe_symm_buffer,
-            l1_weights_sf=weight_scales1,
-            l2_weights_sf=weight_scales2,
-            l1_bias=l1_bias,
-            l2_bias=l2_bias,
-            x_active_mask=x_active_mask,
-            weight1_type=weight_type,
-            weight2_type=weight_type,
-            **shared_kwargs,
-            **activation_kwargs,
-        )
+
+        # A3 arch22 tiling rejects combine_comm_mode != 0 whenever shared experts
+        # are passed or routed quant is not W4A8; temporarily force 0 only when
+        # the symmetric buffer was allocated with a non-zero mode.
+        symm_buffer = self.mega_moe_symm_buffer
+        saved_combine_comm_mode: int | None = None
+        if not is_mxfp and symm_buffer is not None:
+            sym_mode = getattr(symm_buffer, "combine_comm_mode", None)
+            if (
+                isinstance(sym_mode, int)
+                and sym_mode != 0
+                and (weights.shared_w1 is not None or fused_experts_input.quant.quant_type != QuantType.W4A8)
+            ):
+                saved_combine_comm_mode = sym_mode
+                symm_buffer.combine_comm_mode = 0
+        try:
+            out, expert_tokens = self.mega_moe(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids.to(torch.int32),
+                topk_weights,
+                weight1,
+                weight2,
+                symm_buffer,
+                l1_weights_sf=weight_scales1,
+                l2_weights_sf=weight_scales2,
+                l1_bias=l1_bias,
+                l2_bias=l2_bias,
+                x_active_mask=x_active_mask,
+                weight1_type=weight_type,
+                weight2_type=weight_type,
+                **shared_kwargs,
+                **activation_kwargs,
+            )
+        finally:
+            if saved_combine_comm_mode is not None and symm_buffer is not None:
+                symm_buffer.combine_comm_mode = saved_combine_comm_mode
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh

@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn.functional as F
@@ -34,7 +35,11 @@ from vllm.model_executor.layers.activation import (
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_draft_vllm_config, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    is_draft_vllm_config,
+    use_cann_megamoe,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
@@ -47,7 +52,12 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
+from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_ND,
+    ACL_FORMAT_FRACTAL_NZ,
+    npu_stream_switch,
+    shared_experts_calculation_stream,
+)
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
@@ -55,6 +65,228 @@ MXFP8_ACTIVATION_GROUP_SIZE = 32
 # SwiGLU halves the input width; MX scales are stored in pairs of groups.
 SWIGLU_MX_INPUT_ALIGNMENT = 4 * MXFP8_ACTIVATION_GROUP_SIZE
 SWIGLU_MX_QUANT_MODE = 2
+
+# CANN Arch22 tiling dimension contracts (mega_moe_tiling_arch22.cpp).
+_A3_MIN_HIDDEN_DIM = 1024
+_A3_MAX_HIDDEN_DIM = 8192
+_A3_HIDDEN_DIM_ALIGN = 512
+_A3_MIN_SHARED_INTER_DIM = 512
+_A3_SHARED_INTER_DIM_ALIGN = 256
+
+
+def _is_npu_runtime_available() -> bool:
+    """Return True when an NPU runtime is available for device-residency checks."""
+    is_avail = getattr(getattr(torch, "npu", None), "is_available", None)
+    try:
+        return bool(is_avail()) if callable(is_avail) else False
+    except Exception:
+        return False
+
+
+def _has_generic_cpu_weight_offload(vllm_config: Any) -> bool:
+    """Return True when generic CPU weight offload (UVA or prefetch) is active."""
+    offload = getattr(vllm_config, "offload_config", None)
+    if offload is None:
+        return False
+    return any(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        for v in (
+            getattr(getattr(offload, "uva", None), "cpu_offload_gb", 0),
+            getattr(getattr(offload, "prefetch", None), "offload_group_size", 0),
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class AscendMegaMoESharedSpec:
+    """Physical storage contract of a shared-expert linear quantization scheme."""
+
+    carrier_dtype: torch.dtype
+    post_load_transposed: bool
+    k_pack_factor: int = 1
+    scale_kind: str = "none"
+    requires_symmetric_zero_offset: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AscendMegaMoEFormat:
+    """MegaMoe layout contract for a ``(routed_quant_type, shared_quant_type)`` pair."""
+
+    requires_mxfp_capability: bool
+    kernel_transposed: bool
+    w1_acl_format: int
+    w2_acl_format: int
+    w2_mxfp4_c0_32_cast: bool = False
+    allow_independent_shared_intermediate: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedSharedLinear:
+    """Per-slot staging record so w1/w2 validation & TP collectives run in deterministic order."""
+
+    ok: bool
+    reason: str = ""
+    linear: torch.nn.Module | None = None
+    shared_quant_type: QuantType | None = None
+    spec: AscendMegaMoESharedSpec | None = None
+    fmt: AscendMegaMoEFormat | None = None
+    shard_tp_size: int = 1
+    local_in_packed: int = 0
+    local_out_dim: int = 0
+    in_packed: int = 0
+    out_dim: int = 0
+    local_scale_fp32: torch.Tensor | None = None
+
+
+_ASCEND_MEGAMOE_SHARED_SPECS: dict[QuantType, AscendMegaMoESharedSpec] = {
+    QuantType.NONE: AscendMegaMoESharedSpec(torch.bfloat16, post_load_transposed=False),
+    QuantType.W8A8: AscendMegaMoESharedSpec(
+        torch.int8,
+        post_load_transposed=True,
+        scale_kind="int64_low32",
+        requires_symmetric_zero_offset=True,
+    ),
+    QuantType.W8A8MXFP: AscendMegaMoESharedSpec(
+        torch.float8_e4m3fn,
+        post_load_transposed=True,
+        scale_kind="mxfp_e8m0",
+    ),
+    QuantType.W4A8MXFP: AscendMegaMoESharedSpec(
+        torch.uint8,
+        post_load_transposed=True,
+        k_pack_factor=2,
+        scale_kind="mxfp_e8m0",
+    ),
+    QuantType.W4A4MXFP: AscendMegaMoESharedSpec(
+        torch.uint8,
+        post_load_transposed=True,
+        k_pack_factor=2,
+        scale_kind="mxfp_e8m0",
+    ),
+}
+
+_ASCEND_MEGAMOE_FORMATS: dict[tuple[QuantType, QuantType], AscendMegaMoEFormat] = {
+    # Ascend A3 (arch22): (in, out) storage; (W4A8|W8A8, W8A8) in FRACTAL_NZ and (NONE, NONE) BF16 in ND.
+    **{
+        (routed_qt, QuantType.W8A8): AscendMegaMoEFormat(
+            requires_mxfp_capability=False,
+            kernel_transposed=True,
+            w1_acl_format=ACL_FORMAT_FRACTAL_NZ,
+            w2_acl_format=ACL_FORMAT_FRACTAL_NZ,
+            allow_independent_shared_intermediate=True,
+        )
+        for routed_qt in (QuantType.W4A8, QuantType.W8A8)
+    },
+    (QuantType.NONE, QuantType.NONE): AscendMegaMoEFormat(
+        requires_mxfp_capability=False,
+        kernel_transposed=True,
+        w1_acl_format=ACL_FORMAT_FRACTAL_ND,
+        w2_acl_format=ACL_FORMAT_FRACTAL_ND,
+        allow_independent_shared_intermediate=True,
+    ),
+    # Ascend A5 (arch35): (out, in) storage; MXFP8 in ND, packed MXFP4 in FRACTAL_NZ / FRACTAL_NZ_C0_32.
+    **{
+        (routed_qt, shared_qt): AscendMegaMoEFormat(
+            requires_mxfp_capability=True,
+            kernel_transposed=False,
+            w1_acl_format=(
+                ACL_FORMAT_FRACTAL_NZ
+                if shared_qt in (QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+                else ACL_FORMAT_FRACTAL_ND
+            ),
+            w2_acl_format=(
+                ACL_FORMAT_FRACTAL_NZ
+                if shared_qt in (QuantType.W4A4MXFP, QuantType.W4A8MXFP)
+                else ACL_FORMAT_FRACTAL_ND
+            ),
+            w2_mxfp4_c0_32_cast=shared_qt in (QuantType.W4A4MXFP, QuantType.W4A8MXFP),
+        )
+        for routed_qt in (QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP)
+        for shared_qt in (QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP)
+    },
+}
+
+_CARRIER_DTYPE_QUANT_MAP: dict[tuple[torch.dtype, bool], QuantType] = {
+    (torch.bfloat16, False): QuantType.NONE,
+    (torch.int8, True): QuantType.W8A8,
+    (torch.uint8, True): QuantType.W4A4MXFP,
+    (torch.float8_e4m3fn, True): QuantType.W8A8MXFP,
+}
+
+
+def _get_allow_internal_format() -> bool:
+    """Read the active ``ALLOW_INTERNAL_FORMAT`` option across ``torch_npu`` builds."""
+    get_option = getattr(getattr(torch_npu, "_C", None), "_npu_getOption", None)
+    if callable(get_option):
+        try:
+            raw = get_option("ALLOW_INTERNAL_FORMAT")
+        except Exception:
+            raw = None
+        if isinstance(raw, (bytes, str)):
+            decoded = (raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw).strip().lower()
+            if decoded:
+                return decoded in ("enable", "1", "true")
+        elif isinstance(raw, (bool, int)):
+            return bool(raw)
+    npu_cfg = getattr(getattr(torch, "npu", None), "config", None)
+    try:
+        flag = getattr(npu_cfg, "allow_internal_format", None) if npu_cfg is not None else None
+    except Exception:
+        flag = None
+    return bool(flag) if isinstance(flag, (bool, int)) else True
+
+
+def _set_allow_internal_format(enabled: bool) -> None:
+    """Set ``ALLOW_INTERNAL_FORMAT`` without gating on ``hasattr`` (``_npuConfig`` is write-only)."""
+    from types import ModuleType
+
+    flag = bool(enabled)
+    npu_cfg = getattr(getattr(torch, "npu", None), "config", None)
+    if npu_cfg is not None and not isinstance(npu_cfg, ModuleType):
+        try:
+            npu_cfg.allow_internal_format = flag
+            return
+        except (AttributeError, TypeError):
+            pass
+    set_option = getattr(getattr(torch_npu, "_C", None), "_npu_setOption", None)
+    if callable(set_option):
+        set_option({"ALLOW_INTERNAL_FORMAT": "enable" if flag else "disable"})
+
+
+@contextmanager
+def _preserve_allow_internal_format():
+    prev_flag = _get_allow_internal_format()
+    try:
+        yield
+    finally:
+        _set_allow_internal_format(prev_flag)
+
+
+def _get_tensor_acl_format(tensor: torch.Tensor) -> int | None:
+    if getattr(tensor, "device", None) is None or tensor.device.type != "npu":
+        return None
+    get_fmt = getattr(torch_npu, "get_npu_format", None)
+    try:
+        return int(get_fmt(tensor)) if callable(get_fmt) else None
+    except Exception:
+        return None
+
+
+def _resolve_shared_linear_quant_type(linear: torch.nn.Module) -> QuantType | None:
+    """Resolve the dynamic quantization scheme of a shared-expert linear layer."""
+    if hasattr(linear, "input_scale") or hasattr(linear, "aclnn_input_scale"):
+        return None
+    linear_method = getattr(linear, "quant_method", None)
+    for candidate in (getattr(linear_method, "quant_method", linear_method), linear_method):
+        declared = getattr(candidate, "quant_type", None)
+        if isinstance(declared, QuantType) and declared != QuantType.NONE:
+            return declared
+    weight = getattr(linear, "weight", None)
+    weight_data = getattr(weight, "data", weight)
+    if not isinstance(weight_data, torch.Tensor):
+        return None
+    has_scale = hasattr(linear, "weight_scale") or hasattr(linear, "weight_scale_fp32")
+    return _CARRIER_DTYPE_QUANT_MAP.get((weight_data.dtype, has_scale))
 
 
 class SharedExpertParallelMode(Enum):
@@ -143,11 +375,14 @@ class AscendSharedExperts:
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
 
-        # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
-        # setup below proves the configuration is supported, then armed once
-        # both shared linears have been processed into the MegaMoe layout.
+        # Shared-expert fusion into the CANN MegaMoe operator (A3 and A5):
+        # disabled until the setup below proves the configuration is supported,
+        # then armed once both shared linears have been processed into the
+        # MegaMoe layout.
         self.megamoe_shared_weights_ready = False
         self._megamoe_shared_fusion_disabled = False
+        self._megamoe_tp_gather_shards = False
+        self._megamoe_local_slot_staging: dict[str, _StagedSharedLinear] = {}
         self._megamoe_shared_parts: dict[str, torch.Tensor] = {}
         self._megamoe_shared_quant_type = QuantType.NONE
         # Handed out by megamoe_shared_fusion() and filled in place once the
@@ -172,16 +407,14 @@ class AscendSharedExperts:
         self._setup_megamoe_shared_fusion()
 
     def _setup_megamoe_shared_fusion(self) -> None:
-        """Fuse the shared expert into the A5 MegaMoe operator when supported.
+        """Fuse the shared expert into the CANN MegaMoe operator when supported.
 
         When active, each shared linear's ``process_weights_after_loading`` is
-        wrapped to rebuild the weight into the MegaMoe layout; the rebuilt
-        payload is exposed through ``megamoe_shared_fusion()`` and installed on
-        the routed-expert layer by ``AscendMoERunner``, then forwarded to the
-        operator as ``shared_l1_weights``/``shared_l2_weights``. The runner
-        then skips the separate shared-expert forward whenever the step
-        dispatches to MegaMoe. Any unsupported configuration keeps the
-        standalone shared-expert execution unchanged.
+        wrapped to rebuild or zero-copy alias the weight into the declarative
+        ``AscendMegaMoEFormat`` layout; the payload is exposed through
+        ``megamoe_shared_fusion()`` and installed on the routed-expert layer by
+        ``AscendMoERunner``, then forwarded to the operator on FUSED_MC2 steps.
+        Any unsupported configuration keeps standalone shared-expert execution.
         """
         vllm_config = get_current_vllm_config()
         if is_draft_vllm_config(vllm_config) or not use_cann_megamoe(vllm_config):
@@ -190,28 +423,46 @@ class AscendSharedExperts:
         # MegaMoe operator; =2 keeps the separate shared-expert forward.
         if not get_ascend_config().megamoe_shared_expert_fusion:
             return
-        if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+        if _has_generic_cpu_weight_offload(vllm_config):
+            self._disable_megamoe_shared_fusion(
+                "CPU weight offload (--cpu-offload-gb / prefetch offload) is incompatible "
+                "with MegaMoe shared-expert fusion"
+            )
             return
-        # Checks the ROUTED experts' quant type: the shared fusion stacks on
-        # top of the routed MegaMoe path, which must support the scenario
-        # first. The operator's A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP
-        # (its A2/A3 ones are A16W16 / A8W8-INT / A8W4-INT), so all three MXFP
-        # types pass. The shared expert's own quant type is resolved
-        # per-linear in _collect_megamoe_shared_weight and may differ from
-        # this one (mixed quantization).
-        if self.quant_type not in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):
-            # Only MXFP8 and MXFP4 are implemented. Their shared weights
-            # rebuild cheaply from the post-processed linear buffers: MXFP8
-            # needs an (out, in) transpose, packed MXFP4 additionally needs the
-            # same FRACTAL_NZ (w1) / FRACTAL_NZ_C0_32 (w2) rebuild as the
-            # routed experts.
+        if self.in_dtype is not None and self.in_dtype != torch.bfloat16:
+            self._disable_megamoe_shared_fusion(
+                f"MegaMoe shared-expert fusion requires bfloat16 activations, got {self.in_dtype}"
+            )
+            return
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            return
+        supports_mxfp = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        routed_supported = any(
+            routed_qt == self.quant_type and fmt.requires_mxfp_capability == supports_mxfp
+            for (routed_qt, _), fmt in _ASCEND_MEGAMOE_FORMATS.items()
+        )
+        if not routed_supported:
             logger.info_once(
-                "MegaMoe shared-expert fusion is not implemented for quant type %s; "
+                "MegaMoe shared-expert fusion is not implemented for routed quant type %s on this hardware; "
                 "keeping the separate shared-expert forward.",
                 self.quant_type,
             )
             self._megamoe_shared_fusion_disabled = True
             return
+        if not supports_mxfp:
+            hidden_dim = self.moe_config.hidden_dim
+            if (
+                hidden_dim < _A3_MIN_HIDDEN_DIM
+                or hidden_dim > _A3_MAX_HIDDEN_DIM
+                or hidden_dim % _A3_HIDDEN_DIM_ALIGN != 0
+            ):
+                self._disable_megamoe_shared_fusion(
+                    f"A3 MegaMoe shared-expert fusion requires hidden_dim in "
+                    f"[{_A3_MIN_HIDDEN_DIM}, {_A3_MAX_HIDDEN_DIM}] aligned to "
+                    f"{_A3_HIDDEN_DIM_ALIGN}, got {hidden_dim}"
+                )
+                return
         # Output gating (e.g. Qwen3-Next expert_gate) happens outside the
         # operator and cannot be fused.
         if getattr(self.layer, "expert_gate", None) is not None:
@@ -253,19 +504,31 @@ class AscendSharedExperts:
             )
             return
         # The operator accumulates the shared-expert output into the local
-        # token accumulator with no cross-rank reduction, so fusion is only
-        # correct when every rank holds the full shared weights. That holds
-        # when the physical TP group is trivial (weights are inherently full)
-        # or when enable_shared_expert_dp replicates them; sharded layouts —
-        # plain TP, or SP without SEDP — rely on split/gather reductions that
-        # the fused operator does not reproduce. Fall back to the separate
-        # shared-expert forward.
-        if self.moe_config.tp_group.world_size > 1 and not self.weights_replicated:
-            self._disable_megamoe_shared_fusion(
-                "shared-expert weights are sharded across the TP group; set "
-                "enable_shared_expert_dp=true to enable MegaMoe shared-expert fusion"
-            )
-            return
+        # token accumulator with no cross-rank reduction, so MegaMoe needs full
+        # shared weights on every rank. When enable_shared_expert_dp=true (or
+        # tp_size == 1), weights are already full. On Ascend A3 under
+        # TP-sharded shared weights (both TENSOR_PARALLEL and non-transform
+        # SEQUENCE_PARALLEL_ONLY with enable_shared_expert_dp=false), we
+        # assemble full weights once at post-load time via TP all_gather into
+        # _megamoe_shared_parts while keeping the original 1/TP linear shards
+        # intact for ALLTOALL/MC2 fallback execution.
+        tp_world_size = self.moe_config.tp_group.world_size
+        if tp_world_size > 1 and not self.weights_replicated:
+            if supports_mxfp:
+                self._disable_megamoe_shared_fusion(
+                    "shared-expert weights are sharded across the TP group; set "
+                    "enable_shared_expert_dp=true to enable MegaMoe shared-expert fusion"
+                )
+                return
+            if getattr(self.layer.gate_up_proj, "gather_output", False) or getattr(
+                self.layer.down_proj, "reduce_results", False
+            ):
+                self._disable_megamoe_shared_fusion(
+                    "TP-sharded shared linears with internal gather_output/reduce_results "
+                    "cannot be combined with MegaMoe shared-expert fusion"
+                )
+                return
+            self._megamoe_tp_gather_shards = True
 
         for linear, slot in (
             (self.layer.gate_up_proj, "w1"),
@@ -366,126 +629,139 @@ class AscendSharedExperts:
         quant_method.process_weights_after_loading = wrapped_megamoe_collect  # type: ignore
 
     def _collect_megamoe_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
-        """Rebuild one shared linear into the A5 MegaMoe layout.
-
-        MegaMoe expects (out, in) tensors while the processed linear buffer is
-        (in, out) ND, so a transpose+contiguous materializes the correct ND
-        layout; the per-group scale becomes (n, k//2, 2), matching the routed
-        per-expert scale shape. Mixed-quantization models may quantize the
-        shared expert differently from the routed experts (e.g. W8A8MXFP
-        routed + W4A8MXFP shared), so the shared quant type is read off the
-        shared linear's own quant method; the weight layout follows the shared
-        weight dtype: MXFP8 stores one fp8 per element, packed MXFP4 (both the
-        W4A4MXFP and W4A8MXFP shared experts) stores two fp4 per uint8 byte.
-        Packed MXFP4 additionally applies the same format casts as the routed
-        experts in the W4A4 MoE method: w1 stays FRACTAL_NZ and w2 is rebuilt
-        as FRACTAL_NZ_C0_32 on an fp8 carrier, and the byte-stored E8M0 scales
-        are viewed with their semantic dtype.
-        """
+        """Validate and stage one shared linear according to ``AscendMegaMoESharedSpec`` & ``AscendMegaMoEFormat``."""
         if self._megamoe_shared_fusion_disabled:
             return
+
+        tp_gather_mode = bool(getattr(self, "_megamoe_tp_gather_shards", False))
+        staging = self._megamoe_local_slot_staging
+
+        def _reject_slot(reason: str) -> None:
+            if tp_gather_mode:
+                staging[slot] = _StagedSharedLinear(ok=False, reason=reason, linear=linear)
+                self._publish_megamoe_shared_fusion()
+            else:
+                self._disable_megamoe_shared_fusion(reason)
+
         padding = getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))
         if any(padding):
-            self._disable_megamoe_shared_fusion(
-                f"padded shared-expert weights {padding} do not match the routed "
-                "intermediate size required by the MegaMoe layout"
+            _reject_slot(f"padded shared-expert weights {padding} are unsupported by MegaMoe fusion")
+            return
+
+        raw_weight = linear.weight.data
+        if _is_npu_runtime_available() and raw_weight.device.type != "npu":
+            _reject_slot(f"shared-expert {slot} weight resides on {raw_weight.device.type} instead of npu")
+            return
+        if raw_weight.ndim != 2:
+            _reject_slot(f"shared-expert {slot} weight must be 2D, got {tuple(raw_weight.shape)}")
+            return
+
+        shared_quant_type = _resolve_shared_linear_quant_type(linear)
+        spec = _ASCEND_MEGAMOE_SHARED_SPECS.get(shared_quant_type) if shared_quant_type is not None else None
+        fmt = _ASCEND_MEGAMOE_FORMATS.get((self.quant_type, shared_quant_type)) if shared_quant_type else None
+        supports_mxfp = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP)
+        if spec is None or fmt is None or fmt.requires_mxfp_capability != supports_mxfp:
+            _reject_slot(
+                f"(routed={self.quant_type}, shared={shared_quant_type}) is not registered "
+                "for MegaMoe shared-expert fusion on the current hardware profile"
             )
             return
-        weight_dtype = linear.weight.data.dtype
-        if weight_dtype == torch.uint8:
-            # Packed MXFP4 shared expert: two logical K values per byte.
-            packed_fp4 = True
-        elif weight_dtype == torch.float8_e4m3fn:
-            packed_fp4 = False
-        else:
-            self._disable_megamoe_shared_fusion(
-                f"shared-expert weight dtype {weight_dtype} is not "
-                "supported by MegaMoe fusion (expected MXFP8 fp8_e4m3fn or packed "
-                "MXFP4 uint8); keeping the separate shared-expert forward."
-            )
+        if raw_weight.dtype != spec.carrier_dtype:
+            _reject_slot(f"shared {slot} expects carrier {spec.carrier_dtype}, got {raw_weight.dtype}")
             return
-        # Resolve the shared expert's own quant type. The packed weight bytes
-        # alone cannot tell an A4 from an A8 shared activation, so prefer the
-        # type declared by the shared linear's quant method (this is what
-        # mixed-quantization checkpoints rely on: W4A8MXFP shared under
-        # W8A8MXFP routed runs the shared GMM in A8W4-FP mode). Fall back to
-        # the weight-dtype heuristic when the method declares nothing.
-        shared_quant_type = getattr(getattr(linear, "quant_method", None), "quant_type", QuantType.NONE)
-        if shared_quant_type in (QuantType.W4A4MXFP, QuantType.W4A8MXFP):
-            if not packed_fp4:
-                self._disable_megamoe_shared_fusion(
-                    f"shared quant type {shared_quant_type} expects packed MXFP4 "
-                    f"weights but the shared linear holds {weight_dtype}"
-                )
+
+        tp_world_size = self.moe_config.tp_group.world_size
+        linear_tp_size = int(getattr(linear, "tp_size", tp_world_size))
+        if tp_gather_mode and linear_tp_size not in (1, tp_world_size):
+            _reject_slot(f"shared-expert {slot} tp_size={linear_tp_size} != expected TP size {tp_world_size}")
+            return
+        shard_tp_size = tp_world_size if tp_gather_mode and linear_tp_size > 1 else 1
+
+        local_in_packed, local_out_dim = (
+            (int(raw_weight.shape[0]), int(raw_weight.shape[1]))
+            if spec.post_load_transposed
+            else (int(raw_weight.shape[1]), int(raw_weight.shape[0]))
+        )
+        if shard_tp_size > 1 and slot == "w1":
+            output_sizes = getattr(linear, "output_sizes", None)
+            if local_out_dim % 2 != 0 or (
+                isinstance(output_sizes, (list, tuple))
+                and (len(output_sizes) != 2 or output_sizes[0] != output_sizes[1])
+            ):
+                _reject_slot(f"TP-sharded shared gate_up_proj requires equal gate/up partitions, got {output_sizes}")
                 return
-        elif shared_quant_type == QuantType.W8A8MXFP:
-            if packed_fp4:
-                self._disable_megamoe_shared_fusion(
-                    "shared quant type W8A8MXFP expects MXFP8 weights but the shared linear holds packed MXFP4"
-                )
-                return
+            in_packed, out_dim = local_in_packed, local_out_dim * shard_tp_size
+        elif shard_tp_size > 1:
+            in_packed, out_dim = local_in_packed * shard_tp_size, local_out_dim
         else:
-            shared_quant_type = QuantType.W4A4MXFP if packed_fp4 else QuantType.W8A8MXFP
-        self._megamoe_shared_quant_type = shared_quant_type
-        if packed_fp4:
-            # Packed FP4 stores two logical K values per byte.
-            expected_weight_shape = (
-                (
-                    2 * self.moe_config.intermediate_size_per_partition,
-                    self.moe_config.hidden_dim // 2,
-                )
-                if slot == "w1"
-                else (
-                    self.moe_config.hidden_dim,
-                    self.moe_config.intermediate_size_per_partition // 2,
-                )
+            in_packed, out_dim = local_in_packed, local_out_dim
+
+        if slot == "w1":
+            min_gu, align_gu = 2 * _A3_MIN_SHARED_INTER_DIM, 2 * _A3_SHARED_INTER_DIM_ALIGN
+            expected_in = self.moe_config.hidden_dim // spec.k_pack_factor
+            shape_ok = in_packed == expected_in and (
+                (out_dim >= min_gu and out_dim % align_gu == 0)
+                if fmt.allow_independent_shared_intermediate
+                else out_dim == 2 * self.moe_config.intermediate_size_per_partition
             )
         else:
-            expected_weight_shape = (
-                (
-                    2 * self.moe_config.intermediate_size_per_partition,
-                    self.moe_config.hidden_dim,
-                )
-                if slot == "w1"
-                else (
-                    self.moe_config.hidden_dim,
-                    self.moe_config.intermediate_size_per_partition,
-                )
+            shared_inter = in_packed * spec.k_pack_factor
+            shape_ok = out_dim == self.moe_config.hidden_dim and (
+                (shared_inter >= _A3_MIN_SHARED_INTER_DIM and shared_inter % _A3_SHARED_INTER_DIM_ALIGN == 0)
+                if fmt.allow_independent_shared_intermediate
+                else in_packed == self.moe_config.intermediate_size_per_partition // spec.k_pack_factor
             )
-        try:
-            # Aclnn-only firmware cannot clone tensors that carry a FRACTAL_NZ
-            # internal format, so force the ND view before the transpose +
-            # contiguous materialization (2 == ACL_FORMAT_ND).
-            weight = torch_npu.npu_format_cast(linear.weight.data, 2)
-            weight = weight.transpose(0, 1).contiguous()
-            scale = linear.weight_scale.data.transpose(0, 1).contiguous()
-        finally:
-            torch.npu.config.allow_internal_format = True
-        if tuple(weight.shape) != expected_weight_shape:
-            self._disable_megamoe_shared_fusion(
-                f"shared-expert weight shape {tuple(weight.shape)} does not match the "
-                f"routed expert layout {expected_weight_shape}"
-            )
+        if not shape_ok:
+            _reject_slot(f"shared-expert {slot} logical dims (in={in_packed}, out={out_dim}) violate MegaMoe contract")
             return
-        if packed_fp4:
-            # Mirror the routed-expert weight rebuild: gate/up (w1) is cast to
-            # FRACTAL_NZ directly, down (w2) goes through the packed-FP4 →
-            # fp8-carrier FRACTAL_NZ_C0_32 conversion.
-            if slot == "w1":
-                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
-            else:
-                weight = torch_npu.npu_format_cast(
-                    weight,
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-        # Checkpoint E8M0 scales are stored as bytes; the MegaMoe A5 input
-        # check requires their semantic dtype for routed and shared experts
-        # alike (the storage is unchanged, only the dtype is reinterpreted).
-        scale = scale.view(torch.float8_e8m0fnu)
-        self._megamoe_shared_parts[slot] = weight
-        self._megamoe_shared_parts[slot + "_scale"] = scale
+
+        if spec.requires_symmetric_zero_offset:
+            offset_attr = getattr(linear, "weight_offset", None)
+            offset_data = getattr(offset_attr, "data", offset_attr)
+            if (
+                isinstance(offset_data, torch.Tensor)
+                and offset_data.numel() > 0
+                and bool((offset_data != 0).any().item())
+            ):
+                _reject_slot(f"shared-expert {slot} carries non-zero asymmetric weight_offset")
+                return
+
+        local_scale_fp32: torch.Tensor | None = None
+        if spec.scale_kind == "int64_low32":
+            scale_attr = getattr(linear, "weight_scale_fp32", getattr(linear, "weight_scale", None))
+            scale_raw = getattr(scale_attr, "data", scale_attr)
+            expected_len = local_out_dim if (shard_tp_size > 1 and slot == "w1") else out_dim
+            if not isinstance(scale_raw, torch.Tensor):
+                _reject_slot(f"shared-expert {slot} is missing weight_scale for {shared_quant_type}")
+                return
+            with _preserve_allow_internal_format():
+                _set_allow_internal_format(False)
+                local_scale_fp32 = scale_raw.detach().to(torch.float32).reshape(-1).contiguous()
+            if (
+                local_scale_fp32.numel() != expected_len
+                or not bool(torch.isfinite(local_scale_fp32).all().item())
+                or not bool((local_scale_fp32 > 0).all().item())
+            ):
+                _reject_slot(f"shared-expert {slot} weight_scale must be finite positive of length {expected_len}")
+                return
+        elif spec.scale_kind == "mxfp_e8m0":
+            if not isinstance(getattr(getattr(linear, "weight_scale", None), "data", None), torch.Tensor):
+                _reject_slot(f"shared-expert {slot} is missing MXFP weight_scale")
+                return
+
+        staging[slot] = _StagedSharedLinear(
+            ok=True,
+            linear=linear,
+            shared_quant_type=shared_quant_type,
+            spec=spec,
+            fmt=fmt,
+            shard_tp_size=shard_tp_size,
+            local_in_packed=local_in_packed,
+            local_out_dim=local_out_dim,
+            in_packed=in_packed,
+            out_dim=out_dim,
+            local_scale_fp32=local_scale_fp32,
+        )
         self._publish_megamoe_shared_fusion()
 
     def megamoe_shared_fusion(self) -> MegamoeSharedExpertFusion:
@@ -500,39 +776,162 @@ class AscendSharedExperts:
         return self._megamoe_shared_fusion
 
     def _publish_megamoe_shared_fusion(self) -> None:
-        """Fill the live payload once both shared linears are rebuilt.
-
-        Re-publishing keeps RL weight reloads pointing at the fresh tensors.
-        """
+        """Materialize ``w1`` and ``w2`` in deterministic order once both slots are staged."""
         if self._megamoe_shared_fusion_disabled:
             return
-        needed = ("w1", "w2", "w1_scale", "w2_scale")
-        if not all(name in self._megamoe_shared_parts for name in needed):
+        staging = self._megamoe_local_slot_staging
+        if "w1" not in staging or "w2" not in staging:
             return
-        weights = MegamoeSharedWeights(
+        s1, s2 = staging["w1"], staging["w2"]
+        staging.clear()
+
+        local_ok = bool(s1.ok and s2.ok)
+        reason = s1.reason or s2.reason
+        npu_runtime = _is_npu_runtime_available()
+        if local_ok:
+            assert s1.spec is not None and s2.spec is not None
+            if npu_runtime and (
+                s1.linear is None
+                or s2.linear is None
+                or s1.linear.weight.device.type != "npu"
+                or s2.linear.weight.device.type != "npu"
+            ):
+                local_ok, reason = False, "shared-expert weights are not resident on npu"
+            elif s1.shared_quant_type != s2.shared_quant_type:
+                local_ok = False
+                reason = f"shared quant types differ ({s1.shared_quant_type} vs {s2.shared_quant_type})"
+            elif s1.shard_tp_size != s2.shard_tp_size:
+                local_ok = False
+                reason = f"shared TP shard factors differ ({s1.shard_tp_size} vs {s2.shard_tp_size})"
+            elif s1.out_dim != 2 * (s2.in_packed * s2.spec.k_pack_factor):
+                local_ok = False
+                down_in = s2.in_packed * s2.spec.k_pack_factor
+                reason = f"shared gate_up out_dim ({s1.out_dim}) != 2 * down in_dim ({down_in})"
+
+        tp_group = self.moe_config.tp_group
+        if self._megamoe_tp_gather_shards:
+            dev = (
+                torch.device(f"npu:{torch.npu.current_device()}")
+                if npu_runtime
+                else getattr(getattr(s1.linear or s2.linear, "weight", None), "device", torch.device("cpu"))
+            )
+            status_t = torch.tensor([1 if local_ok else 0], dtype=torch.int32, device=dev)
+            if not bool((tp_group.all_gather(status_t, dim=0) == 1).all().item()):
+                self._disable_megamoe_shared_fusion(reason or "peer TP rank rejected shared-expert fusion")
+                return
+        elif not local_ok:
+            self._disable_megamoe_shared_fusion(reason)
+            return
+
+        assert s1.linear is not None and s2.linear is not None
+        assert s1.spec is not None and s1.fmt is not None and s1.shared_quant_type is not None
+        spec, fmt, shard_tp_size = s1.spec, s1.fmt, s1.shard_tp_size
+        self._megamoe_shared_quant_type = s1.shared_quant_type
+
+        with _preserve_allow_internal_format():
+            if spec.scale_kind == "int64_low32":
+                assert s1.local_scale_fp32 is not None and s2.local_scale_fp32 is not None
+                _set_allow_internal_format(False)
+                w1_s = (
+                    tp_group.all_gather(s1.local_scale_fp32, dim=0)
+                    .reshape(shard_tp_size, 2, s1.local_out_dim // 2)
+                    .permute(1, 0, 2)
+                    .reshape(s1.out_dim)
+                    .contiguous()
+                    if shard_tp_size > 1
+                    else s1.local_scale_fp32
+                )
+                for key, s_fp32 in (("w1_scale", w1_s), ("w2_scale", s2.local_scale_fp32)):
+                    # CANN Arch22 reads the low 32 bits of each ACL_UINT64 slot as IEEE-754 float32.
+                    packed = (s_fp32.view(torch.int32).to(torch.int64) & 0xFFFFFFFF).contiguous()
+                    self._megamoe_shared_parts[key] = packed
+
+            for slot_key, st, target_fmt in (("w1", s1, fmt.w1_acl_format), ("w2", s2, fmt.w2_acl_format)):
+                assert st.linear is not None
+                raw_w = st.linear.weight.data
+                if shard_tp_size > 1:
+                    _set_allow_internal_format(False)
+                    local_nd = torch_npu.npu_format_cast(raw_w, ACL_FORMAT_FRACTAL_ND)
+                    local_in_out = (
+                        local_nd.contiguous() if spec.post_load_transposed else local_nd.transpose(0, 1).contiguous()
+                    )
+                    if slot_key == "w1":
+                        gathered = tp_group.all_gather(local_in_out.transpose(0, 1).contiguous(), dim=0)
+                        full_out_in = (
+                            gathered.reshape(shard_tp_size, 2, st.local_out_dim // 2, st.local_in_packed)
+                            .permute(1, 0, 2, 3)
+                            .reshape(st.out_dim, st.local_in_packed)
+                        )
+                        w_nd = (
+                            full_out_in.transpose(0, 1).contiguous()
+                            if fmt.kernel_transposed
+                            else full_out_in.contiguous()
+                        )
+                    else:
+                        gathered = tp_group.all_gather(local_in_out, dim=0)
+                        w_nd = gathered.contiguous() if fmt.kernel_transposed else gathered.transpose(0, 1).contiguous()
+                    if target_fmt != ACL_FORMAT_FRACTAL_ND:
+                        _set_allow_internal_format(True)
+                        weight = torch_npu.npu_format_cast(w_nd, target_fmt)
+                    else:
+                        weight = w_nd
+                else:
+                    # Orientation is governed algebraically by (post_load_transposed != kernel_transposed),
+                    # avoiding shape heuristics on square matrices and reusing existing FRACTAL_NZ zero-copy.
+                    needs_t = spec.post_load_transposed != fmt.kernel_transposed
+                    needs_c0_32 = slot_key == "w2" and fmt.w2_mxfp4_c0_32_cast
+                    cur_fmt = _get_tensor_acl_format(raw_w)
+                    if not needs_t and not needs_c0_32:
+                        if target_fmt == ACL_FORMAT_FRACTAL_NZ and cur_fmt == ACL_FORMAT_FRACTAL_NZ:
+                            weight = raw_w.detach()
+                        elif target_fmt == ACL_FORMAT_FRACTAL_ND and cur_fmt in (None, 0, ACL_FORMAT_FRACTAL_ND):
+                            _set_allow_internal_format(False)
+                            weight = raw_w.detach().contiguous()
+                        else:
+                            _set_allow_internal_format(target_fmt != ACL_FORMAT_FRACTAL_ND)
+                            weight = torch_npu.npu_format_cast(raw_w.contiguous(), target_fmt)
+                    else:
+                        _set_allow_internal_format(False)
+                        w_nd = torch_npu.npu_format_cast(raw_w, ACL_FORMAT_FRACTAL_ND)
+                        w_nd = w_nd.transpose(0, 1).contiguous() if needs_t else w_nd.contiguous()
+                        if needs_c0_32:
+                            _set_allow_internal_format(True)
+                            weight = torch_npu.npu_format_cast(
+                                w_nd,
+                                ACL_FORMAT_FRACTAL_NZ,
+                                customize_dtype=torch.float8_e4m3fn,
+                                input_dtype=torch_npu.float4_e2m1fn_x2,
+                            )
+                        elif target_fmt != ACL_FORMAT_FRACTAL_ND:
+                            _set_allow_internal_format(True)
+                            weight = torch_npu.npu_format_cast(w_nd, target_fmt)
+                        else:
+                            weight = w_nd
+                self._megamoe_shared_parts[slot_key] = weight
+                if spec.scale_kind == "mxfp_e8m0":
+                    _set_allow_internal_format(False)
+                    self._megamoe_shared_parts[f"{slot_key}_scale"] = (
+                        st.linear.weight_scale.data.transpose(0, 1).contiguous().view(torch.float8_e8m0fnu)
+                    )
+
+        has_scale = spec.scale_kind != "none"
+        _, quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(self._megamoe_shared_quant_type)
+        fusion = self._megamoe_shared_fusion
+        fusion.weights = MegamoeSharedWeights(
             w1=[self._megamoe_shared_parts["w1"]],
             w2=[self._megamoe_shared_parts["w2"]],
-            w1_scale=[self._megamoe_shared_parts["w1_scale"]],
-            w2_scale=[self._megamoe_shared_parts["w2_scale"]],
+            w1_scale=[self._megamoe_shared_parts["w1_scale"]] if has_scale else None,
+            w2_scale=[self._megamoe_shared_parts["w2_scale"]] if has_scale else None,
         )
-        # Record the shared expert's own quant settings so the operator call
-        # can declare them explicitly. The routed and shared experts may
-        # differ (W4A4C8: MXFP4 routed + MXFP8 shared; W8A8 routed +
-        # W4A8MXFP shared): the shared GMM then runs in A4W4-FP / A8W4-FP /
-        # A8W8-FP mode against the routed experts' mode. Mixed quantization
-        # is only supported on the operator's MTE topology (topo_type=0);
-        # Layered topologies reject the mixed descriptors at call time.
-        # Values are the ACL dtype ints the MegaMoe wrapper accepts, matching
-        # _get_cann_mega_moe_quant_settings.
-        shared_quant_type = self._megamoe_shared_quant_type
-        _, shared_quant_out_dtype, shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(shared_quant_type)
-        fusion = self._megamoe_shared_fusion
-        fusion.weights = weights
-        fusion.quant_out_dtype = shared_quant_out_dtype
-        fusion.weight_type = shared_weight_type
+        fusion.quant_out_dtype = quant_out_dtype
+        fusion.weight_type = weight_type
         if not self.megamoe_shared_weights_ready:
             self.megamoe_shared_weights_ready = True
-            logger.info_once("Fused the shared expert into the A5 MegaMoe operator.")
+            logger.info_once(
+                "Armed MegaMoe shared-expert fusion (routed=%s, shared=%s).",
+                self.quant_type,
+                self._megamoe_shared_quant_type,
+            )
 
     def _disable_megamoe_shared_fusion(self, reason: str) -> None:
         if not self._megamoe_shared_fusion_disabled:
@@ -541,8 +940,14 @@ class AscendSharedExperts:
                 reason,
             )
         self._megamoe_shared_fusion_disabled = True
+        self.megamoe_shared_weights_ready = False
+        staging = getattr(self, "_megamoe_local_slot_staging", None)
+        if staging is not None:
+            staging.clear()
         self._megamoe_shared_parts.clear()
         self._megamoe_shared_fusion.weights = None
+        self._megamoe_shared_fusion.quant_out_dtype = None
+        self._megamoe_shared_fusion.weight_type = None
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context

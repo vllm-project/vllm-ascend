@@ -1,0 +1,12 @@
+pr: 22658
+entries:
+  - category: feature
+    text: >-
+      Enabled Ascend A3 MegaMoe shared-expert fusion
+      (`additional_config.enable_fused_mc2=3`, off by default) for `(W4A8, W8A8)`,
+      `(W8A8, W8A8)`, and BF16 MoE models across all parallel layouts (`TP=1`,
+      `TP`, `SEDP`, `SP+SEDP`, and `SP-only`) without requiring
+      `enable_shared_expert_dp=true`, improving 8x Ascend 910C
+      DeepSeek-V4.1-Flash decode TPOT by 5.2% to 13.1% across `C=1..64` when
+      paired with the updated CANN MegaMoe operator.
+    hardware: [A3]
