@@ -1,6 +1,0 @@
-pr: 22592
-entries:
-  - category: performance
-    text: Eager DeepSeek V4.1 attention on Ascend A5 can reuse temporary buffers sooner, reducing memory pressure.
-    model: deepseek-v4.1
-    hardware: [A5]
