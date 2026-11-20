@@ -10,7 +10,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.worker.v2.dspark_expert_pool import (
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import (
     CONTRIBUTOR,
     RESTRICTED,
     TOP_K,

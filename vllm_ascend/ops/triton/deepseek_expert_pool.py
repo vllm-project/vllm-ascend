@@ -6,7 +6,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.worker.v2.dspark_expert_pool import CONTRIBUTOR, RESTRICTED, TOP_K
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import CONTRIBUTOR, RESTRICTED, TOP_K
 
 
 @triton.jit

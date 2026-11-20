@@ -513,22 +513,6 @@ class DSparkExpertPoolConfig:
     protected_positions: int | None = None
     suffix_experts: int | None = None
 
-    def validate(self, vllm_config: VllmConfig) -> None:
-        if not self.enabled:
-            return
-
-        from vllm_ascend.worker.v2.dspark_expert_pool import TOP_K
-
-        spec = vllm_config.speculative_config
-        draft_tokens = spec.num_speculative_tokens if spec is not None and spec.method == "dspark" else None
-        if draft_tokens is None or draft_tokens <= 0:
-            raise ValueError("dspark_expert_pool requires DSpark with a positive number of speculative tokens")
-        verify_width = draft_tokens + 1
-        if self.protected_positions is None or not 1 <= self.protected_positions <= verify_width:
-            raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {verify_width}]")
-        if self.suffix_experts is None or not 0 <= self.suffix_experts <= TOP_K:
-            raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")
-
 
 @config(config=ConfigDict(frozen=True))
 class ExpertOffloadConfig:
@@ -542,8 +526,6 @@ class ExpertOffloadConfig:
     def _validate_capacity(self):
         if self.enabled and self.num_device_experts is None:
             raise ValueError("expert_offload_config.num_device_experts is required when enabled")
-        if self.dspark_expert_pool.enabled and not self.enabled:
-            raise ValueError("expert_offload_config.dspark_expert_pool requires enabled expert offload")
         return self
 
 
@@ -856,7 +838,6 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
-        self.expert_offload_config.dspark_expert_pool.validate(vc)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

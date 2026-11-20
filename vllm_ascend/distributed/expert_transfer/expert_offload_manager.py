@@ -16,7 +16,7 @@ from .expert_offload_utils import ExpertMapBuffer, ExpertWeightView, PreparedExp
 from .expert_weight_transfer import TorchExpertTransfer
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
+    from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 ACL_MEMCPY_DEVICE_TO_HOST = 2
@@ -405,7 +405,7 @@ class ExpertOffloadManager:
             return
 
         # Import only for enabled pools; router compatibility imports MoE code.
-        from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, supports_router
+        from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool, supports_router
 
         bindings = [
             binding

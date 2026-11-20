@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.dspark_expert_pool import (
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import (
     DSparkExpertPool,
     build_roles,
     verify_graph_eligible,

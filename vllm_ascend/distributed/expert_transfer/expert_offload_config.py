@@ -25,6 +25,9 @@ def validate_expert_offload_layer(expert_offload_config: ExpertOffloadConfig, nu
 def validate_expert_offload_config(
     expert_offload_config: ExpertOffloadConfig, vllm_config: VllmConfig, ascend_config: AscendConfig
 ) -> None:
+    pool_config = expert_offload_config.dspark_expert_pool
+    if pool_config.enabled and not expert_offload_config.enabled:
+        raise ValueError("expert_offload_config.dspark_expert_pool requires enabled expert offload")
     if not expert_offload_config.enabled:
         return
     if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
@@ -117,3 +120,21 @@ def validate_expert_offload_config(
         raise ValueError("expert offload does not coordinate dynamic EPLB with resident slots; disable dynamic EPLB")
     if ascend_config.rl_config.enabled:
         raise ValueError("expert offload cannot rebuild prepared host bytes and graphs during RL weight reloading")
+
+    if not pool_config.enabled:
+        return
+
+    from .dspark_expert_pool import TOP_K
+
+    draft_tokens = (
+        speculative_config.num_speculative_tokens
+        if speculative_config is not None and speculative_config.method == "dspark"
+        else None
+    )
+    if draft_tokens is None or draft_tokens <= 0:
+        raise ValueError("dspark_expert_pool requires DSpark with a positive number of speculative tokens")
+    verify_width = draft_tokens + 1
+    if pool_config.protected_positions is None or not 1 <= pool_config.protected_positions <= verify_width:
+        raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {verify_width}]")
+    if pool_config.suffix_experts is None or not 0 <= pool_config.suffix_experts <= TOP_K:
+        raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")

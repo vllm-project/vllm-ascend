@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm_ascend.worker.v2.dspark_expert_pool import verify_graph_eligible
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import verify_graph_eligible
 
 if TYPE_CHECKING:
+    from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
     from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-    from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 

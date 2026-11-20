@@ -15,13 +15,13 @@ import torch
 
 from vllm_ascend.ascend_config import ExpertOffloadConfig
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.distributed.expert_transfer.expert_offload_method import ExpertOffloadMoEMethod
 from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
 
 
 @pytest.fixture(autouse=True)

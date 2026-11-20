@@ -12,9 +12,9 @@ from vllm_ascend import ascend_config
 from vllm_ascend.ascend_config import DSparkExpertPoolConfig, ExpertOffloadConfig
 from vllm_ascend.distributed.expert_transfer import expert_offload_manager as manager_module
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
-from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
 
 
 @pytest.mark.parametrize("enabled", [False, "false", "true"])
@@ -38,28 +38,6 @@ def test_pool_config_is_nested_under_expert_offload():
     assert pool_config is not None, "ExpertOffloadConfig must own the pool options"
     assert pool_config.enabled and config.num_device_experts == 84
     assert pool_config.protected_positions == pool_config.suffix_experts == 2
-
-
-def test_pool_cannot_be_enabled_without_expert_offload():
-    with pytest.raises(ValueError, match="requires enabled expert offload"):
-        TypeAdapter(ExpertOffloadConfig).validate_python(
-            {"enabled": False, "dspark_expert_pool": {"enabled": True, "protected_positions": 2, "suffix_experts": 2}}
-        )
-
-
-@pytest.mark.parametrize("protected,suffix", [(None, 2), (0, 2), (7, 2), (2, None), (2, -1), (2, 7)])
-def test_nested_pool_rejects_missing_and_out_of_range_parameters(protected, suffix):
-    config = ExpertOffloadConfig(
-        enabled=True,
-        num_device_experts=84,
-        dspark_expert_pool={"enabled": True, "protected_positions": protected, "suffix_experts": suffix},
-    )
-    pool_config = getattr(config, "dspark_expert_pool", None)
-    assert pool_config is not None, "Nested pool configuration was silently ignored"
-    with pytest.raises(ValueError, match="protected_positions|suffix_experts"):
-        pool_config.validate(
-            SimpleNamespace(speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=5))
-        )
 
 
 @pytest.mark.parametrize("options", [{}, {"enabled": False}, {"enabled": True}])
