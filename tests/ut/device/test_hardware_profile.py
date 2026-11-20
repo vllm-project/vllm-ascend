@@ -55,6 +55,9 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+        HardwareCapability.NATIVE_INT8_SPARSE,
+        HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
@@ -92,6 +95,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,

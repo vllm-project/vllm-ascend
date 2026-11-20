@@ -1,6 +1,6 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_states/mamba_hybrid.py
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +23,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridAttnMetadata,
@@ -36,9 +35,13 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ops.gdn_attn_builder import AscendMegaKDAHostMetadataBuilder
+from vllm_ascend.ops.kimi_mega_kda import MegaKDAFirstVerifyTracker
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
@@ -62,6 +65,19 @@ class _LayerwiseMambaCopyState:
     pending_layers: set[str]
 
 
+@dataclass
+class AscendMegaKDAMambaHybridAttnMetadata(MambaHybridAttnMetadata):
+    """V2 request history survives align-mode physical block migration."""
+
+    mega_first_verify: torch.Tensor | None = None
+
+    def get_extra_attn_kwargs(self, attn_metadata_builder, num_reqs):
+        kwargs = super().get_extra_attn_kwargs(attn_metadata_builder, num_reqs)
+        if isinstance(attn_metadata_builder, AscendMegaKDAHostMetadataBuilder):
+            kwargs["mega_first_verify"] = self.mega_first_verify
+        return kwargs
+
+
 class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     """Mamba state with Ascend-specific attention metadata construction.
 
@@ -81,6 +97,60 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+        self._mega_request_tracker = None
+        additional_config = getattr(self.vllm_config, "additional_config", None) or {}
+        if additional_config.get("enable_mega_kda_replayssm", False):
+            # Request index zero is real; shift it past the reserved null row.
+            self._mega_request_tracker = MegaKDAFirstVerifyTracker(self.max_num_reqs + 1, self.device)
+
+    def add_request(self, req_index, new_req_data):
+        super().add_request(req_index, new_req_data)
+        tracker = getattr(self, "_mega_request_tracker", None)
+        if tracker is not None:
+            tracker.context[req_index + 1 : req_index + 2].fill_(-1)
+            tracker.first[req_index + 1 : req_index + 2].fill_(1)
+
+    def _with_mega_request_history(self, input_batch, metadata, for_capture):
+        tracker = getattr(self, "_mega_request_tracker", None)
+        replay_enabled = bool(
+            (getattr(self.vllm_config, "additional_config", None) or {}).get("enable_mega_kda_replayssm", False)
+        )
+        if (tracker is None and not replay_enabled) or for_capture:
+            return metadata
+        count = input_batch.num_reqs
+        device = input_batch.seq_lens.device
+        drafts = metadata.num_decode_draft_tokens_cpu
+        raw_indices = getattr(input_batch, "idx_mapping", None)
+        if raw_indices is None:
+            raw_indices = torch.arange(count, dtype=torch.int64, device=device)
+        else:
+            raw_indices = raw_indices[:count].to(torch.int64)
+        if getattr(input_batch, "is_dummy", False):
+            # Eager/PIECEWISE profiling and idle DP runs must not consume
+            # request history even when their dummy indices name live slots.
+            first = torch.zeros(count, dtype=torch.int32, device=device)
+        else:
+            query_lens = torch.diff(input_batch.query_start_loc[: count + 1])
+            if drafts is None:
+                spec_mask = torch.zeros(count, dtype=torch.bool, device=device)
+            else:
+                spec_mask_cpu = torch.empty(count, dtype=torch.bool, pin_memory=device.type == "npu")
+                torch.ge(drafts[:count], 0, out=spec_mask_cpu)
+                spec_mask = spec_mask_cpu.to(device=device, non_blocking=True)
+            is_prefilling_cpu = torch.empty(count, dtype=torch.bool, pin_memory=device.type == "npu")
+            is_prefilling_cpu.copy_(metadata.is_prefilling[:count])
+            first = tracker.update(
+                raw_indices + 1,
+                input_batch.seq_lens[:count] - query_lens,
+                is_prefilling_cpu.to(device=device, non_blocking=True),
+                spec_mask,
+            )
+        return AscendMegaKDAMambaHybridAttnMetadata(
+            is_prefilling=metadata.is_prefilling,
+            num_accepted_tokens=metadata.num_accepted_tokens,
+            num_decode_draft_tokens_cpu=drafts,
+            mega_first_verify=first,
+        )
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -89,7 +159,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``initialize_from_forward_context``)."""
         if self._layer_state_ranges is None:
             assert self._mamba_spec is not None
-            num_state_types = len(self.model.get_mamba_state_copy_func())
+            num_state_types = len(next(iter(self._mamba_state_copy_funcs.values())))
             ranges: dict[str, tuple[int, int]] = {}
             idx = 0
             for mamba_group_id in self._mamba_group_ids:
@@ -214,6 +284,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         """
         if not self._align_mode:
             return
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if pcp_manager is not None and (
+            model_uses_kpool_indexer(self.vllm_config.model_config)
+            or model_uses_kimi_kda(self.vllm_config.model_config)
+        ):
+            pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
+            input_batch = pcp_context.global_batch
+            block_tables = pcp_context.global_block_tables
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
@@ -290,30 +368,137 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     ) -> dict[str, Any]:
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        pcp_manager = getattr(self, "pcp_manager", None)
+        pcp_context = None
+        if (
+            pcp_manager is not None
+            and (
+                model_uses_kpool_indexer(self.vllm_config.model_config)
+                or model_uses_kimi_kda(self.vllm_config.model_config)
+            )
+            and pcp_manager.is_target_attn_groups(attn_groups)
+        ):
+            pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+
+        def build_metadata(**kwargs):
+            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+                # Recurrent state uses global request order; SFA keeps local queries.
+                local_groups = [
+                    [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
+                mamba_groups = [
+                    [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                ]
+                metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                    self,
+                    input_batch,
+                    cudagraph_mode,
+                    block_tables,
+                    slot_mappings,
+                    local_groups,
+                    kv_cache_config,
+                    for_capture,
+                    use_pcp_padding=True,
+                    pcp_context=pcp_context,
+                )
+                metadata.update(
+                    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                        self,
+                        pcp_context.global_batch,
+                        cudagraph_mode,
+                        pcp_context.global_block_tables,
+                        pcp_context.global_slot_mappings,
+                        mamba_groups,
+                        kv_cache_config,
+                        for_capture,
+                        use_pcp_padding=False,
+                        pcp_context=pcp_context,
+                    )
+                )
+                return metadata
+            return AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
+
+        device_metadata = getattr(self, "device_metadata", None)
+        if device_metadata is not None:
+            # Real, capture and idle batches share one producer lifecycle.
+            self.attn_metadata = device_metadata.run_build(
+                build_metadata,
+                attn_groups=attn_groups,
+                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+                for_cudagraph_capture=for_capture,
+            )
+        else:
+            self.attn_metadata = build_metadata()
+        return self.attn_metadata
+
+    def _build_attn_metadata_for_batch(
+        self,
+        input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool,
+        *,
+        use_pcp_padding: bool,
+        pcp_context: "AscendPCPAttentionContext | None" = None,
+    ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+            # PCP pads all ranks to the largest local token count. Attention
+            # metadata must describe the actual model-input tensor width.
+            num_tokens = input_batch.num_tokens_after_padding if use_pcp_padding else input_batch.num_tokens
 
+        # Keep recurrent queries logical while attention inputs include graph padding.
+        # TODO: Remove this dummy-padding special case once the common metadata
+        # path handles padded attention inputs separately from logical queries.
+        num_input_tokens = num_tokens
+        if cudagraph_mode == CUDAGraphMode.PIECEWISE and getattr(input_batch, "is_dummy", False):
+            num_input_tokens = input_batch.num_tokens_after_padding
+
+        is_prefilling_np = input_batch.is_prefilling_np[: input_batch.num_reqs]
+        if getattr(input_batch, "prefill_runs_as_decode_np", None) is not None:
+            # vLLM #58400 runs one-token prompt tails as decodes. Their
+            # placeholder drafts need rollback-capable decode metadata.
+            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np[: input_batch.num_reqs]
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
-        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(input_batch.is_prefilling_np)
+        is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
 
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
-            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[input_batch.idx_mapping]
+            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
+                input_batch.idx_mapping[: input_batch.num_reqs]
+            ]
 
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
-                is_decode = input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
+                is_decode = (
+                    input_batch.num_scheduled_tokens[: input_batch.num_reqs]
+                    == num_draft_tokens_per_req[: input_batch.num_reqs] + 1
+                )
+                spec_decode_mask = (num_draft_tokens_per_req[: input_batch.num_reqs] > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
                     spec_decode_mask,
-                    num_draft_tokens_per_req,
+                    num_draft_tokens_per_req[: input_batch.num_reqs],
                     -1,
                 )
                 if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
@@ -332,12 +517,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        self.attn_metadata = build_attn_metadata(
+        if getattr(self, "_mega_request_tracker", None) is not None and not for_capture:
+            model_specific_metadata = self._with_mega_request_history(input_batch, model_specific_metadata, for_capture)
+        return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
             num_actual_tokens=input_batch.num_tokens,
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
             max_query_len=input_batch.num_scheduled_tokens.max().item(),
@@ -352,6 +540,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
+            pcp_context=pcp_context,
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )
-        return self.attn_metadata

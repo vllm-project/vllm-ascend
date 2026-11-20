@@ -17,10 +17,11 @@ from vllm_ascend.worker.v2.pp_transport import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_partition_cache():
+def _clear_partition_cache(monkeypatch):
     """Drop a cached VLLM_PP_LAYER_PARTITION left by other test modules."""
     vllm_envs.__dict__.pop("VLLM_PP_LAYER_PARTITION", None)
     yield
+    monkeypatch.undo()
     vllm_envs.__dict__.pop("VLLM_PP_LAYER_PARTITION", None)
 
 
@@ -134,6 +135,7 @@ def _make_config(
         "KimiLinearForCausalLM",
         "KimiK3ForCausalLM",
         "KimiK3ForConditionalGeneration",
+        "KimiK31ForConditionalGeneration",
     ],
 )
 def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
@@ -148,8 +150,10 @@ def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
     "config",
     [
         _make_config("KimiLinearForCausalLM", pipeline_parallel_size=1),
+        _make_config("KimiK31ForConditionalGeneration", pipeline_parallel_size=1),
         _make_config("UnsupportedForPP"),
         _make_config("KimiLinearForCausalLM", method="eagle"),
+        _make_config("KimiK31ForConditionalGeneration", method="eagle"),
     ],
 )
 def test_kimi_k3_dspark_pp_support_stays_scoped(config):

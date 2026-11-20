@@ -13,15 +13,16 @@ from vllm.config import CUDAGraphMode
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.models import kimi_k3, kimi_k3_dspark
-from vllm_ascend.models.kimi_k3 import (
+from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
+from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
-from vllm_ascend.models.kimi_k3_dspark import (
+from vllm_ascend.models.kimi_k3.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
     AscendK3DSparkModel,
 )
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 
 
@@ -38,9 +39,10 @@ def test_kimi_kda_marks_only_mixed_qkv_for_gmm_layout(uses_mixed_projection):
     assert getattr(attention.in_proj_qkvgfab, "_single_group_gmm_nz", False) is uses_mixed_projection
 
 
-@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("capturing", [False, True])
 @pytest.mark.parametrize("nz_layout", [False, True])
-def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, nz_layout):
+def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, capturing, nz_layout):
     attention = kimi_k3.AscendKimiK3DeltaAttention.__new__(kimi_k3.AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     inner_method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
@@ -60,10 +62,11 @@ def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, nz_layout):
 
     with (
         patch(
-            "vllm_ascend.models.kimi_k3.get_forward_context",
+            "vllm_ascend.models.kimi_k3.kimi_k3.get_forward_context",
             return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
         ),
-        patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.torch.npu.is_current_stream_capturing", return_value=capturing),
         patch(
             "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_grouped_matmul", return_value=[output]
         ) as grouped,
@@ -72,7 +75,7 @@ def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, nz_layout):
         actual = attention._matmul_fused_qkv(qkv_input)
 
     torch.testing.assert_close(actual, output)
-    if runtime_mode == CUDAGraphMode.NONE:
+    if runtime_mode == CUDAGraphMode.NONE and not capturing:
         single_group.assert_called_once_with(layer, qkv_input)
         quant_method.apply.assert_not_called()
         kwargs = grouped.call_args.kwargs
@@ -86,13 +89,17 @@ def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, nz_layout):
         quant_method.apply.assert_called_once_with(layer, qkv_input, bias=None)
 
 
-@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("capturing", [False, True])
 @pytest.mark.parametrize("nz_layout", [False, True])
-def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, nz_layout):
+@pytest.mark.parametrize("prepared", [False, True])
+def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, capturing, nz_layout, prepared):
     layer = kimi_k3.AscendKimiK3RoutedLinear.__new__(kimi_k3.AscendKimiK3RoutedLinear)
     nn.Module.__init__(layer)
     method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
     x = torch.randn(4, 128, dtype=torch.bfloat16)
+    if prepared:
+        x = PreparedLinearInput(x.to(torch.float8_e4m3fn), torch.ones(4, 2, 2, dtype=torch.uint8), x.dtype)
     output = torch.randn(4, 192, dtype=torch.bfloat16)
     fallback_output = output.unsqueeze(0) if nz_layout else output
     quant_method = SimpleNamespace(quant_method=method, apply=MagicMock(return_value=fallback_output))
@@ -105,17 +112,18 @@ def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, nz_layout):
 
     with (
         patch(
-            "vllm_ascend.models.kimi_k3.get_forward_context",
+            "vllm_ascend.models.kimi_k3.kimi_k3.get_forward_context",
             return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
         ),
-        patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.torch.npu.is_current_stream_capturing", return_value=capturing),
         patch.object(AscendW8A8MXFP8DynamicLinearMethod, "apply_single_group_gmm", return_value=output) as grouped,
     ):
         actual = layer.forward(x)
 
     torch.testing.assert_close(actual[0], output)
     assert actual[1] is None
-    if runtime_mode == CUDAGraphMode.NONE:
+    if runtime_mode == CUDAGraphMode.NONE and not capturing:
         grouped.assert_called_once_with(layer, x)
         quant_method.apply.assert_not_called()
     else:
@@ -130,7 +138,7 @@ def test_kimi_routed_nz_fallback_preserves_batched_input_shape():
         _mxfp8_gmm_nz_layout=True,
         quant_method=SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output)),
     )
-    with patch("vllm_ascend.models.kimi_k3.is_forward_context_available", return_value=False):
+    with patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=False):
         actual = kimi_k3.AscendKimiK3RoutedLinear.apply_projection(layer, torch.randn(1, 4, 128))
     assert actual is output
 
@@ -203,7 +211,9 @@ def test_kimi_moe_leaves_routed_input_transform_to_runner():
     moe.experts.assert_called_once()
     call_kwargs = moe.experts.call_args.kwargs
     torch.testing.assert_close(call_kwargs["hidden_states"], hidden_states)
-    torch.testing.assert_close(call_kwargs["router_logits"], router_logits)
+    # The runtime MoE operation owns routing; the model passes a placeholder.
+    torch.testing.assert_close(call_kwargs["router_logits"], hidden_states)
+    moe.gate.assert_not_called()
     torch.testing.assert_close(result, output)
 
 
@@ -239,7 +249,7 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
     )
     model.layers = [SimpleNamespace(self_attn=attn)]
     monkeypatch.setattr(
-        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        "vllm_ascend.models.kimi_k3.kimi_k3_dspark.get_cos_and_sin_mla",
         lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
     )
 
@@ -292,7 +302,7 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
     model.layers = [SimpleNamespace(self_attn=attn)]
     context_states = torch.randn(4, 8)
     monkeypatch.setattr(
-        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        "vllm_ascend.models.kimi_k3.kimi_k3_dspark.get_cos_and_sin_mla",
         lambda positions: (torch.ones(4, 1, 1, 1), torch.zeros(4, 1, 1, 1)),
     )
 
@@ -408,6 +418,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
+        attn_res_block_size=None,
         is_moe=False,
         is_linear_attn=True,
         linear_attn_config={},
@@ -587,7 +598,9 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(attn_res_block_size=12)
+    model.attn_res_mode = "native"
     model.start_layer = 0
     model.end_layer = 1
     layer = RecordingLayer()
@@ -667,7 +680,9 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.do_not_compile = True
     model.config = SimpleNamespace(attn_res_block_size=1)
+    model.attn_res_mode = "native"
     model.start_layer = 0
     model.end_layer = 2
     model.layers = nn.ModuleList([RecordingLayer(0), RecordingLayer(1)])
@@ -840,3 +855,22 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         "context_proj.weight",
     ):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
+
+
+@pytest.mark.parametrize("order", [("kda", "c8"), ("c8", "kda"), ("kda", "c16")])
+def test_c8_metadata_binds_to_preceding_kda_only(order):
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    kda = kimi_k3.AscendKimiK3DeltaAttention.__new__(kimi_k3.AscendKimiK3DeltaAttention)
+    nn.Module.__init__(kda)
+    launch = MagicMock()
+    model.layers = [
+        SimpleNamespace(
+            self_attn=kda
+            if kind == "kda"
+            else SimpleNamespace(impl=SimpleNamespace(kimi_c8_mode=kind == "c8", _prelaunch_kimi_c8_metadata=launch))
+        )
+        for kind in order
+    ]
+    model._bind_c8_metadata_prelaunch()
+    assert getattr(kda, "_kimi_c8_metadata_prelaunch", None) is (launch if order == ("kda", "c8") else None)

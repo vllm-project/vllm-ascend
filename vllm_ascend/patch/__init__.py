@@ -1773,3 +1773,19 @@
 #       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
 #    Future Plan:
 #       Remove once the supported vLLM version includes upstream PR #63165.
+
+# ** File: platform/patch_kimi_k31_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
+#    Why:
+#       vLLM v0.32 lacks the kimi_k31 outer config and nested DSA schema.
+#    How:
+#       Register a K3-derived config that validates DSA layer indices and
+#       retains K3.1 identity when with_hf_config enters the text model.
+#       This runs during configuration; it adds no per-token work.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/20878
+#       This is a release backport; no separate upstream PR is required.
+#    Future Plan:
+#       Remove when the paired vLLM release supplies equivalent K3.1 config
+#       registration, validation and nested-model identity.

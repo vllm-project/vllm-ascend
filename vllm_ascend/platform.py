@@ -401,6 +401,25 @@ class NPUPlatform(Platform):
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
+        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
+            from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+
+            # Keep the upstream token/checkpoint block sizes. K3.1's packed
+            # main page includes RoPE and scale bytes that the generic MLA
+            # page calculation above does not account for.
+            # Recurrent states overlay this page; the indexer and draft keep
+            # their independently sized physical regions.
+            cache_config = vllm_config.cache_config
+            text_config = vllm_config.model_config.hf_text_config
+            if cache_config.cache_dtype in ("int8", "fp8"):
+                token_bytes = get_sfa_qsfa_packed_head_dim(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            elif cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE:
+                token_bytes = get_tq_fused_slot_bytes(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            else:
+                return
+            cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         super().update_block_size_for_backend(vllm_config)
@@ -583,6 +602,7 @@ class NPUPlatform(Platform):
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
+        from vllm_ascend.worker.v2.moe_utils import get_v2_moe_batch_state
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
         # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
@@ -634,16 +654,21 @@ class NPUPlatform(Platform):
 
         # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
         # to ensure consistent communication method across all DP ranks
+        moe_batch_state = get_v2_moe_batch_state(vllm_config)
+        v2_prefill_ready = moe_batch_state is not None and moe_batch_state.prefill_ready
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            batch_contains_decode=moe_batch_state.batch_contains_decode if moe_batch_state is not None else True,
+            aclgraph_runtime_mode=cudagraph_runtime_mode,
+            v2_prefill_ready=v2_prefill_ready,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
         mc2_mask = None
         padded_num_tokens = None
         if num_tokens is not None:
-            num_actual_tokens = num_tokens
+            num_actual_tokens = moe_batch_state.num_actual_tokens if v2_prefill_ready else num_tokens
             # NOTE: token num which need to pad to when mc2
             padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
             reserved_mc2_mask = get_mc2_mask()
@@ -1414,10 +1439,36 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     dcp_enabled = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
+    # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
+    # Mooncake pull path transfers kernel blocks and retains the DCP token
+    # interleave; changing that interleave after worker initialization would
+    # reinterpret the already allocated block tables.
+    interleave = parallel_config.cp_kv_cache_interleave_size
+    hybrid_kernel_interleave = (
+        getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
+        and vllm_config.use_v2_model_runner
+        and cache_config.cache_dtype == "fp8"
+        and vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and interleave > 0
+        and cache_config.block_size % interleave == 0
+    )
+    if dcp_enabled and hybrid_kernel_interleave:
+        from vllm.v1.worker.utils import select_common_block_size
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        if interleave % kernel_block_size:
+            raise ValueError(
+                "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
+                f"interleave={interleave}, kernel_block_size={kernel_block_size}"
+            )
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
         and dcp_enabled
+        and not hybrid_kernel_interleave
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -1425,7 +1476,12 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and dcp_enabled and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if (
+        use_sparse
+        and dcp_enabled
+        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+        and not hybrid_kernel_interleave
+    ):
         logger.warning_once(
             "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"

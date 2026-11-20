@@ -60,6 +60,7 @@ def scope():
         "MLAPO_CACHE_BLOCK_ALIGNMENT": 16,
         "MLAPO_MAX_CACHE_BLOCK_SIZE": 1024,
         "FLASHMLA_BLOCK_SIZE": 128,
+        "FLASHMLA_SUPPORTED_BLOCK_SIZES": tuple(range(128, 1025, 128)),
         "UnquantizedLinearMethod": NativeLinear,
         "AscendW8A8MXFP8DynamicLinearMethod": MXFP8Linear,
         "cdiv": lambda x, y: (x + y - 1) // y,

@@ -76,7 +76,8 @@ def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capac
 def test_tail_uses_one_full_precision_page(capacity):
     register_ascend_kv_cache_specs()
     spec = AscendIndexerKPoolTailSpec(
-        block_size=capacity,
+        block_size=4,
+        ring_capacity=capacity,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -123,6 +124,7 @@ def test_invalid_state_layout_is_rejected(dtype, block_size, sliding_window):
     with pytest.raises(ValueError):
         AscendIndexerKPoolTailSpec(
             block_size=block_size,
+            ring_capacity=block_size,
             sliding_window=sliding_window,
             compress_ratio=4,
             num_kv_heads=1,
@@ -141,6 +143,7 @@ def test_completed_pool_slots_preserve_logical_block_padding():
 def test_tail_manager_retains_one_private_block_until_free():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
+        ring_capacity=4,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -176,6 +179,7 @@ def test_tail_manager_retains_one_private_block_until_free():
 def test_tail_manager_prefix_hit_has_no_shared_blocks():
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
+        ring_capacity=4,
         sliding_window=4,
         compress_ratio=4,
         num_kv_heads=1,
@@ -508,7 +512,8 @@ def test_tail_inputs_pass_page_stride_and_isolate_step_buffers(width, dsa_cp, ke
     monkeypatch.setattr(backend_module, "enable_dsa_cp", lambda: dsa_cp)
     config, common = _config(), _common()
     spec = AscendIndexerKPoolTailSpec(
-        block_size=7,
+        block_size=4,
+        ring_capacity=7,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float32,

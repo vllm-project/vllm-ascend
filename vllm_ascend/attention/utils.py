@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
 from importlib.util import find_spec
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -37,13 +37,15 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
-# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
-# MLA models keep the FIA-compatible component-major cache layout on A5.
-# N1 is the post-TP local head count, not the global model configuration.
+# The paged FlashMLA cache is laid out for a fixed set of per-rank Q head-group
+# widths. Other MLA models keep the FIA-compatible component-major cache layout.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
@@ -89,32 +91,77 @@ def supports_strided_mla_cache(
 
 @lru_cache(maxsize=1)
 def _has_flashmla_module() -> bool:
-    """Whether the CANN ops-transformer distribution is discoverable."""
+    """Whether the default CANN ops-transformer package is discoverable."""
     return find_spec("cann_ops_transformer") is not None
 
 
 def get_flashmla_ops() -> tuple[Callable, Callable] | None:
-    """Find the two FlashMLA APIs in the active CANN operator package.
+    """Load the BF16/FP16 APIs exported by cann_ops_transformer.ops.
 
-    An absent package or API permits FIA selection before KV cache allocation.
-    Import failures inside an installed package remain errors rather than
-    silently selecting a different cache layout.
+    Import only after selecting the worker device. The default package owns
+    registration and entry-point overrides; do not require a separate custom
+    distribution or bypass its public exports with an unrelated dispatcher
+    handle. An absent package permits FIA selection before cache allocation.
+    An installed but incompatible package is an error.
     """
     if not _has_flashmla_module():
         return None
 
     try:
-        ops = import_module("cann_ops_transformer.ops")
+        namespace = import_module("cann_ops_transformer.ops")
     except ModuleNotFoundError as exc:
-        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+        if exc.name == "cann_ops_transformer":
             return None
         raise
 
-    attention_op = getattr(ops, "flash_mla", None)
-    metadata_op = getattr(ops, "flash_mla_metadata", None)
-    if callable(attention_op) and callable(metadata_op):
-        return attention_op, metadata_op
-    return None
+    required_args = {
+        "flash_mla": {
+            "block_table",
+            "cache_seqlens",
+            "cu_seqlens_q",
+            "seqused_q",
+            "attn_mask",
+            "metadata",
+            "head_dim_v",
+            "softmax_scale",
+            "mask_mode",
+            "max_seqlen_q",
+            "max_seqlen_kv",
+            "layout_q",
+            "layout_kv",
+            "layout_out",
+            "return_softmax_lse",
+        },
+        "flash_mla_metadata": {
+            "num_heads_q",
+            "num_heads_kv",
+            "cu_seqlens_q",
+            "seqused_q",
+            "max_seqlen_q",
+            "max_seqlen_kv",
+            "head_dim_qk",
+            "head_dim_v",
+            "mask_mode",
+            "layout_q",
+            "enable_dcp",
+            "cp_world",
+            "cp_rank",
+            "cp_kv_cache_interleave_size",
+            "casusal_seqlens_kv_global",
+        },
+    }
+    operators = []
+    for name, required in required_args.items():
+        packet = getattr(namespace, name, None)
+        operator = getattr(packet, "default", None)
+        schema = getattr(operator, "_schema", None)
+        if not callable(operator) or schema is None:
+            raise RuntimeError(f"cann_ops_transformer.ops must export the registered {name} operator")
+        missing = required - {argument.name for argument in schema.arguments}
+        if missing:
+            raise RuntimeError(f"cann_ops_transformer has an incompatible {name} schema; missing {sorted(missing)}")
+        operators.append(operator)
+    return operators[0], operators[1]
 
 
 class PreprocessType(enum.Enum):
@@ -383,6 +430,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Decode Context Parallelism (DCP) operations.
     context_parallel_metadata: AscendDCPMetadata | None = None
+    # Absent for non-PCP batches and replicated draft decoding.
+    pcp_context: "AscendPCPAttentionContext | None" = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
@@ -433,6 +482,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
             context_parallel_metadata=self.context_parallel_metadata,
+            pcp_context=self.pcp_context,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -457,6 +507,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
             req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
+            copy_sfa_restore_tails=self.copy_sfa_restore_tails,
             offload_dummy=self.offload_dummy,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
@@ -733,3 +784,20 @@ def merge_prefill_chunks(
     relative_lse, anchor = prepare_attention_update(lse_list, lse_anchor)
     output, lse = torch_npu.npu_attention_update(relative_lse, tuple(out_list), int(return_lse))
     return output, lse, anchor
+
+
+def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata", use_pcp: bool) -> bool:
+    """Return whether this step should use the PCP-sharded layout.
+
+    Under PCP, metadata built without a PCP context (e.g. a replicated draft
+    decode) runs replicated on every rank, so its slot mapping must not be
+    expanded to every rank's tokens.
+    """
+    if not use_pcp:
+        return False
+    if common_attn_metadata.pcp_context is None:
+        assert common_attn_metadata.slot_mapping.shape[0] <= common_attn_metadata.num_input_tokens, (
+            "PCP metadata without a PCP context must keep a rank-local slot mapping."
+        )
+        return False
+    return True

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import torch
 from typing_extensions import Self
@@ -130,6 +130,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
     num_heads: int = 1
+    # v0.32 has no upstream ownership field. Keep it on Ascend specs so
+    # paired K3.1 target/draft pages retain independent physical regions.
+    is_draft: bool = field(default=False, compare=False)
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -137,11 +140,44 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_sparse_sfa_turboquant: bool = False
+    # Kimi K3 static E4M3 PA_NZ cache contract.
+    static_fp8_pa_nz: bool = False
+    static_fp8_width: int = 576
+    # V2/draft table granularity. The FA physical block is self.block_size.
+    static_fp8_kernel_block_size: int = 128
+
+    @property
+    def static_fp8_page_bytes(self) -> int:
+        if not self.static_fp8_pa_nz:
+            raise ValueError("static_fp8_page_bytes requires static_fp8_pa_nz")
+        if (
+            self.static_fp8_width != 576
+            or self.static_fp8_kernel_block_size != 128
+            or self.num_kv_heads != 1
+            or self.dtype != torch.float8_e4m3fn
+            or self.tokens_per_state != 1
+            or self.scale_dim != 0
+        ):
+            raise ValueError("Kimi static FP8 PA_NZ requires one 576-wide E4M3 latent and a 128-token V2 table unit")
+        if self.block_size % self.static_fp8_kernel_block_size:
+            raise ValueError("cache block must contain whole static FP8 kernel blocks")
+        return self.block_size * self.static_fp8_width
+
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+
+    # AttentionGroup replaces block_size with the kernel size for builders.
+    # Keep the manager page size for DCP table expansion and address mapping.
+    block_table_block_size: int | None = None
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            super().copy_with_new_block_size(block_size),
+            block_table_block_size=self.block_table_block_size or self.block_size,
+        )
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
@@ -153,13 +189,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         """Whether this geometry can be exposed from one raw MLA backing."""
         return (
             get_kv_cache_compression_ratio(self) == 1
-            and self.model_version is None
+            and (self.model_version is None or self.static_fp8_pa_nz)
             and not self.indexes_kv_by_block_stride
             and not self.cache_sparse_sfa_c8
         )
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.static_fp8_pa_nz:
+            return self.static_fp8_page_bytes
         return (
             get_storage_block_size(self)
             * self.num_kv_heads
@@ -184,6 +222,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.static_fp8_pa_nz,
+                spec.static_fp8_width,
+                spec.static_fp8_kernel_block_size,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -208,8 +249,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+            static_fp8_pa_nz=first_spec.static_fp8_pa_nz,
+            static_fp8_width=first_spec.static_fp8_width,
+            static_fp8_kernel_block_size=first_spec.static_fp8_kernel_block_size,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            # A merged mixed group must remain in the target lookup. Per-layer
+            # draft ownership is retained by UniformTypeKVCacheSpecs where
+            # target and draft have distinct physical layouts.
+            is_draft=all(spec.is_draft for spec in specs),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -228,8 +276,14 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
 
     The scheduler should treat this as a full-attention-compatible cache so it
     can share block ids with the MLA cache in the same UniformType group. The
-    model runner still allocates it as an independent physical cache tensor.
+    indexer retains its own physical cache region, separate from the MLA cache.
     """
+
+    # v30 pool accounting has no model config argument. Preserve explicit
+    # planner ownership through worker projection and dataclass replacements.
+    is_paired_sfa: bool = field(default=False, compare=False)
+
+    is_draft: bool = field(default=False, compare=False)
 
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
@@ -238,6 +292,23 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     cache_dtype_str: str | None = None
     sfa_dcp_replicated_indexer_size: int = 1
 
+    block_table_block_size: int | None = None
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            super().copy_with_new_block_size(block_size),
+            block_table_block_size=self.block_table_block_size or self.block_size,
+        )
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        # The V2 layout planner derives strides from stored row bytes. Include
+        # replicated K/scale regions so its descriptors cover the full page;
+        # the indexer reshape still exposes component-major K/scale views.
+        return self.sfa_dcp_replicated_indexer_size * (
+            self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
+        )
+
     @property
     def page_size_bytes(self) -> int:
         return self.real_page_size_bytes
@@ -245,11 +316,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     @property
     def real_page_size_bytes(self) -> int:
         num_heads_per_page = self.block_size * self.num_kv_heads
-        return (
-            self.sfa_dcp_replicated_indexer_size
-            * num_heads_per_page
-            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
-        )
+        return num_heads_per_page * self.state_content_size_bytes
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -348,11 +415,14 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
-    ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
-    pool boundaries independently. The dedicated manager never slides or grows.
+    ``block_size`` is the logical pool size (``compress_ratio``), while
+    ``ring_capacity`` also retains speculative rows. The dedicated manager
+    owns one complete ring per request and never slides or grows it.
     """
 
     compress_ratio: int
+    ring_capacity: int
+    dcp_sharded: bool = False
     model_version: str = "glm5_next"
     cache_role: str = "indexer_tail"
     indexes_kv_by_block_stride: bool = True
@@ -366,9 +436,17 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
         return False
 
     @property
+    def storage_block_size(self) -> int:
+        return self.ring_capacity
+
+    def get_num_kernel_states(self, kernel_block_size: int) -> int:
+        # One logical pool block owns the whole ring, including lookahead.
+        return self.ring_capacity
+
+    @property
     def unpadded_page_size_bytes(self) -> int:
         # The tail stores a fixed K/gate pair; the parent handles page padding.
-        return 2 * self.block_size * self.head_size * get_dtype_size(self.dtype)
+        return 2 * self.ring_capacity * self.head_size * get_dtype_size(self.dtype)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -376,8 +454,10 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
             raise ValueError(f"Indexer K-pool tail must use FP32, got {self.dtype}.")
         if self.num_kv_heads != 1 or self.head_size <= 0:
             raise ValueError("Indexer K-pool tail requires one K/gate pair with positive head size.")
-        if self.compress_ratio <= 1 or self.block_size < self.compress_ratio:
+        if self.compress_ratio <= 1 or self.ring_capacity < self.compress_ratio:
             raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
+        if self.block_size != self.compress_ratio:
+            raise ValueError("Tail logical block size must equal the compression ratio.")
         if self.sliding_window != self.compress_ratio:
             raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
 
@@ -401,6 +481,7 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
             isinstance(spec, AscendIndexerKPoolTailSpec)
             and spec.block_size == self.block_size
             and spec.compress_ratio == self.compress_ratio
+            and spec.ring_capacity == self.ring_capacity
             for spec in kv_cache_specs.values()
         )
 

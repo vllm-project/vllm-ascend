@@ -373,7 +373,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
                 f"AscendIndexerKPoolTailSpec, got {type(kv_cache_spec).__name__}."
             )
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.block_size = kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.ring_capacity
         # Persistent rings are separate from temporary CANN state pages.
         self._max_num_metadata_reqs = max(
             vllm_config.scheduler_config.max_num_seqs, vllm_config.scheduler_config.max_num_batched_tokens
@@ -458,8 +458,9 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         return "ASCEND_INDEXER_KPOOL_TAIL"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # Ring capacity is independent of the pool size and SFA C128.
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        # Kernel selection uses the logical pool size. The builder addresses
+        # the entire physical ring through spec.ring_capacity.
         return [MultipleOf(1)]
 
     @staticmethod

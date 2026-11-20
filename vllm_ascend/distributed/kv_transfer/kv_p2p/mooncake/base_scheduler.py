@@ -25,6 +25,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
+    is_kimi_c8_config,
 )
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 
@@ -46,6 +47,7 @@ class MooncakeBaseConnectorScheduler:
         assert vllm_config.kv_transfer_config is not None
 
         self.vllm_config = vllm_config
+        self._kimi_c8_enabled = is_kimi_c8_config(vllm_config)
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if self.kv_transfer_config.is_kv_consumer == self.kv_transfer_config.is_kv_producer:
             raise ValueError(
@@ -134,8 +136,26 @@ class MooncakeBaseConnectorScheduler:
                 # state, not a prompt-aligned attention-block sequence.
                 transfer_block_ids.append(blocks)
             elif any(isinstance(spec, MambaSpec) for spec in group_specs):
-                if self.num_speculative_tokens > 0:
-                    transfer_block_ids.append(blocks[: -self.num_speculative_tokens])
+                mamba_spec = next(spec for spec in group_specs if isinstance(spec, MambaSpec))
+                if not getattr(self, "_kimi_c8_enabled", False):
+                    tail_blocks = mamba_spec.num_speculative_blocks
+                    transfer_block_ids.append(blocks[:-tail_blocks] if tail_blocks else blocks)
+                    continue
+                if mamba_spec.mamba_cache_mode == "align":
+                    # Aligned Mamba state is position-indexed and prefix-cacheable.
+                    # Publish exactly the state block containing the last P token;
+                    # the receiver must not infer it from the global draft-token
+                    # count or from the tail of an unhashed suffix.
+                    state_blocks = cdiv(prompt_len, block_size)
+                    if state_blocks <= 0 or state_blocks > len(blocks):
+                        raise RuntimeError(
+                            "Invalid aligned Mamba state block metadata: "
+                            f"prompt_len={prompt_len}, block_size={block_size}, "
+                            f"required_block_count={state_blocks}, available_block_count={len(blocks)}"
+                        )
+                    transfer_block_ids.append(blocks[state_blocks - 1 : state_blocks])
+                elif mamba_spec.num_speculative_blocks > 0:
+                    transfer_block_ids.append(blocks[: -mamba_spec.num_speculative_blocks])
                 else:
                     transfer_block_ids.append(blocks)
             else:

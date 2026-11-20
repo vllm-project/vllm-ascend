@@ -17,8 +17,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl, all_mla_use_flashmla
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
-from vllm_ascend.models import kimi_k3_dspark
-from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
+from vllm_ascend.models.kimi_k3.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph

@@ -9,6 +9,60 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+@pytest.mark.parametrize("norm_type", [0, 1])
+@pytest.mark.parametrize("renorm", [0, 1])
+def test_a5_moe_gating_top_k_ignores_overridden_torch_npu_alias(norm_type, renorm):
+    logits = torch.tensor([[0.1, 0.2, 0.3, 0.4]])
+    bias = torch.zeros(4)
+    weights = torch.tensor([[0.2, 0.3]])
+    ids = torch.tensor([[3, 2]], dtype=torch.int64)
+    auxiliary = torch.empty_like(logits)
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_moe_gating_top_k",
+            create=True,
+            side_effect=RuntimeError("recipes Hash alias must not be called"),
+        ) as recipes_alias,
+        mock.patch.object(
+            torch.ops.npu,
+            "npu_moe_gating_top_k",
+            create=True,
+            return_value=(weights, ids, auxiliary),
+        ) as native_topk,
+    ):
+        actual_weights, actual_ids, actual_auxiliary = A5DeviceAdaptor.moe_gating_top_k(
+            logits,
+            k=2,
+            k_group=1,
+            group_count=1,
+            group_select_mode=1,
+            renorm=renorm,
+            norm_type=norm_type,
+            out_flag=False,
+            routed_scaling_factor=2.0,
+            eps=1e-12,
+            bias_opt=bias,
+        )
+
+    recipes_alias.assert_not_called()
+    native_topk.assert_called_once_with(
+        logits,
+        k=2,
+        bias=bias,
+        k_group=1,
+        group_count=1,
+        group_select_mode=1,
+        renorm=0,
+        norm_type=norm_type,
+        routed_scaling_factor=2.0,
+        eps=1e-12,
+    )
+    expected_weights = torch.tensor([[0.4, 0.6]]) if norm_type == 0 and renorm == 1 else weights
+    torch.testing.assert_close(actual_weights, expected_weights)
+    torch.testing.assert_close(actual_ids, ids.to(torch.int32))
+    assert actual_auxiliary is auxiliary
+
+
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("shape", [(2, 8), (2, 3, 8), (2, 1, 3, 8)])
 @pytest.mark.parametrize("inverse", [False, True])

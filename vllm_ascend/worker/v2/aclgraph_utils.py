@@ -279,7 +279,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         try:
-            with communicator_switch():
+            with set_current_vllm_config(self.vllm_config), communicator_switch():
                 return super().capture(
                     model,
                     model_state,

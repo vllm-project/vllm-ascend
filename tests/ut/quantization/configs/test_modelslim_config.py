@@ -1035,7 +1035,9 @@ class TestQuantPrefixMapper(TestBase):
 
 
 class TestGetKvQuantDtype(TestBase):
-    def test_enable_fa_quant(self):
+    @patch("vllm_ascend.quantization.configs.modelslim_config.get_current_hardware_profile")
+    def test_enable_fa_quant(self, mock_profile):
+        mock_profile.return_value.supports.return_value = False
         config = AscendModelSlimConfig(
             {
                 "fa_quant_type": "C8",

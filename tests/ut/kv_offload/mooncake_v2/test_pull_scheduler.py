@@ -83,6 +83,50 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     return scheduler
 
 
+@pytest.mark.parametrize(
+    "compressed,mode,model_type,expected",
+    [
+        (False, "C8", "kimi_linear", True),
+        (False, "C16", "kimi_linear", True),
+        (True, "C8", "kimi_linear", True),
+        (False, "C8", "other", True),
+    ],
+)
+def test_stateful_handoff_preserves_penultimate_prompt_boundary(compressed, mode, model_type, expected):
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    scheduler.ascend_config.mla_cache_mode = mode
+    hf = SimpleNamespace(model_type=model_type)
+    if compressed:
+        hf.compress_ratios = [1, 4]
+    scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf, hf_text_config=hf))
+    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.need_truncate = scheduler._needs_prefill_token_truncation()
+    assert scheduler.need_truncate is expected
+    request = make_request(kv_transfer_params={"do_remote_decode": True})
+    scheduler.on_new_request(request)
+    assert request.num_prompt_tokens == (31 if expected else 32)
+    assert scheduler._state_prefill_token_count(32) == (31 if expected else 32)
+
+
+def test_remote_prefix_claim_cannot_exceed_producer_token_count():
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    request = make_request(kv_transfer_params={"do_remote_prefill": True, "remote_num_prompt_tokens": 29})
+    count, asynchronous = scheduler.get_num_new_matched_tokens(request, 16)
+    assert (count, asynchronous) == (13, True)
+    assert request.kv_transfer_params["num_computed_tokens"] == 16
+
+
+@pytest.mark.parametrize("remote_tokens", [-1, "29", 29.5])
+def test_remote_prefix_rejects_invalid_producer_token_count(remote_tokens):
+    scheduler = make_pull_scheduler()
+    scheduler._kimi_c8_enabled = True
+    request = make_request(kv_transfer_params={"do_remote_prefill": True, "remote_num_prompt_tokens": remote_tokens})
+    with pytest.raises(ValueError, match="non-negative integer"):
+        scheduler.get_num_new_matched_tokens(request, 0)
+
+
 def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     first = make_transfer_metadata(te_rpc_port=9000, local_ip="10.0.0.1", base_addrs=[[1000]])
     second = make_transfer_metadata(te_rpc_port=9001, local_ip="10.0.0.2", base_addrs=[[2000]])
@@ -412,7 +456,7 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -420,6 +464,26 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     )
 
     assert result == ([10, 11], [20, 21])
+
+
+def test_base_scheduler_normalizes_aligned_mamba_state_block() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler._kimi_c8_enabled = True
+    scheduler.pcp_size = 1
+    scheduler.dcp_size = 1
+    scheduler.num_speculative_tokens = 3
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [
+        [make_full_spec()],
+        [replace(make_mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=3)],
+    ]
+
+    result = scheduler._get_transfer_block_ids(
+        ([10, 11, 12], [20, 21, 22, 23, 24]),
+        prompt_len=33,
+    )
+
+    assert result == ([10, 11, 12], [22])
 
 
 def test_get_num_new_matched_tokens_records_local_prefix() -> None:
@@ -496,6 +560,129 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_request_id"] == "request-p"
     assert params["last_token_id"] == 123
     scheduler._sending_thread.add_delayed_request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
+def test_request_finished_before_allocation_releases_remote_blocks_once(status: RequestStatus) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="rejected-d",
+        prompt_token_ids=[0],
+        status=status,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20], [30, 31]),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+
+    # Includes the pre-aborted request submitted by AsyncLLM after an API 400.
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_recv_info
+
+
+def test_rejected_consumer_completes_producer_delayed_free_without_timeout() -> None:
+    producer = make_pull_scheduler()
+    producer._sending_thread = make_sending_thread()
+    request_p = make_request(
+        request_id="request-p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+    )
+    delay_free, params = producer.request_finished(request_p, ([10, 11],))
+    assert delay_free
+    assert "request-p" in producer._sending_thread.delayed_free_requests
+
+    consumer = make_pull_scheduler()
+    consumer._recving_thread = MagicMock()
+    consumer._recving_thread.add_request.side_effect = lambda host, port, req_id: (
+        producer._sending_thread._handle_finished_request(req_id)
+    )
+    request_d = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+    assert consumer.request_finished(request_d, ([],)) == (False, None)
+
+    # The actual producer completion path returns the held request to vLLM.
+    output = SimpleNamespace(finished_recving=set(), finished_sending=None)
+    producer.update_connector_output(output)
+    assert output.finished_sending == {"request-p"}
+    assert not producer._reqs_need_send
+    assert not producer._sending_thread.delayed_free_requests
+
+
+def test_cancel_after_allocation_waits_for_worker_completion() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
+    request.status = RequestStatus.FINISHED_ABORTED
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert "request-d" in scheduler._reqs_need_recv
+    assert "request-d" in scheduler._reqs_recv_info
+
+    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None, failed_recving=set())
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert not scheduler._reqs_recv_info
+
+
+def test_request_finished_after_zero_external_tokens_does_not_repeat_ack() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=0)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+
+
+@pytest.mark.parametrize("missing", ["remote_host", "remote_port", "remote_request_id"])
+def test_rejected_consumer_without_remote_address_does_not_send_done(missing: str) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([20],),
+        "remote_host": "10.0.0.1",
+        "remote_port": 6000,
+        "remote_request_id": "request-p",
+    }
+    del params[missing]
+    request = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -849,3 +1036,53 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_in_batch
     assert not scheduler._reqs_recv_info
+
+
+@pytest.mark.parametrize("sizes", [[0, 1, 8], [0, 0, 0]])
+def test_sending_thread_aligns_indexer_replication_sizes_by_layer(sizes) -> None:
+    first = replace(
+        make_transfer_metadata(layer_names=["layer.0", "layer.1", "layer.2"]),
+        indexer_replication_sizes=sizes,
+    )
+    second = replace(
+        make_transfer_metadata(layer_names=["layer.2", "layer.1", "layer.0"]),
+        indexer_replication_sizes=list(reversed(sizes)),
+    )
+    thread = make_sending_thread({0: first, 1: second}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == sizes
+
+
+@pytest.mark.parametrize("other_sizes", [[1], [8]])
+def test_sending_thread_rejects_inconsistent_indexer_replication_sizes(other_sizes) -> None:
+    first = replace(make_transfer_metadata(), indexer_replication_sizes=[0])
+    second = replace(make_transfer_metadata(), indexer_replication_sizes=other_sizes)
+    with pytest.raises(ValueError, match="indexer_replication_sizes"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)
+
+
+def test_sending_thread_merges_replication_for_split_layers() -> None:
+    workers: dict[int | tuple[int, ...], object] = {
+        rank: replace(
+            make_transfer_metadata(layer_names=[layer]),
+            indexer_replication_sizes=[0 if rank == 0 else 8],
+        )
+        for rank, layer in enumerate(["layer.0", "layer.1"])
+    }
+    thread = make_sending_thread(workers, tp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == [0, 8]
+
+
+def test_sending_thread_publishes_cp_interleave() -> None:
+    metadata = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    thread = make_sending_thread({0: metadata})
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].cp_kv_cache_interleave_size == 128
+
+
+def test_sending_thread_rejects_inconsistent_cp_interleave() -> None:
+    first = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    second = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=256)
+    with pytest.raises(ValueError, match="cp_kv_cache_interleave_size"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)

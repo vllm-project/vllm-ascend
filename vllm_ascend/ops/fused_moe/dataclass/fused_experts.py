@@ -66,6 +66,7 @@ class MoEFusedExpertsInput:
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
     lora_context: Any = None
+    shared_expert_schedule: Any = None
 
 
 def build_fused_experts_input(
@@ -104,6 +105,7 @@ def build_fused_experts_input(
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
+        shared_expert_schedule=getattr(layer, "_ascend_shared_schedule", None),
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         # These params will be deprecated after 310p refactoring.

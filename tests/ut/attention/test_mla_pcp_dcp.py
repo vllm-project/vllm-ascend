@@ -4,8 +4,65 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker import cp_utils
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+@pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
+def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
+    draft = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        cache_config=SimpleNamespace(cache_dtype="bfloat16"),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: draft)
+    monkeypatch.setattr(mla_v1, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0))
+    monkeypatch.setattr(mla_v1, "get_ascend_config", lambda: SimpleNamespace(enable_kv_nz=False))
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_: False)
+    monkeypatch.setattr(mla_v1, "enabling_mlapo", lambda *_: False)
+    monkeypatch.setattr(AscendMLAImpl, "_can_use_flashmla", lambda _: False)
+    impl = AscendMLAImpl(
+        num_heads=1,
+        head_size=16,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type=None,
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=8,
+        qk_nope_head_dim=8,
+        qk_rope_head_dim=2,
+        qk_head_dim=10,
+        v_head_dim=8,
+        rotary_emb=None,
+        q_proj=Mock(),
+        kv_b_proj=Mock(),
+        o_proj=Mock(),
+    )
+    target = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2, decode_context_parallel_size=1, cp_kv_cache_interleave_size=768
+        ),
+        speculative_config=object(),
+    )
+    monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": SimpleNamespace(impl=impl)})
+    if pcp > 1 or dcp > 1:
+        with pytest.raises(AssertionError, match="MTP with cp_kv_cache_interleave_size"):
+            cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    else:
+        cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    assert impl.use_pcp == (pcp > 1)
+    assert impl.use_dcp == (dcp > 1)
 
 
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 2), (4, 2), (2, 4)])
@@ -547,3 +604,60 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     assert result.padded_local_cu_seq_lens_lst == [[0, 3, 7], [0, 0, 2]]
     assert result.kv_rank_offsets == [[0, 14, 7, 21], [0, 4, 2, 6]]
     assert builder.num_prefills == 3 and builder.num_decodes == 0
+
+
+def test_dcp_c8_chunk_reader_matches_builder_local_metadata(chunk_metadata_on_cpu):
+    from vllm_ascend.attention.mla_v1 import _get_c8_prefill_chunk_lengths_and_starts
+
+    config = _chunk_config(block_size=1536, dcp_size=8, interleave=1536)
+    builder = _dcp_chunk_builder(config, [0, 131072, 12289], workspace_size=49152)
+    metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=3))
+    assert builder.num_chunks > 1 and metadata.starts_cpu is not None
+    for index in range(builder.num_chunks):
+        lengths, starts = _get_c8_prefill_chunk_lengths_and_starts(metadata, index)
+        assert lengths.tolist() == metadata.padded_local_chunk_seq_lens[index]
+        assert int(lengths.sum()) == metadata.seq_tot[index]
+        assert starts.device.type == "cpu"
+        torch.testing.assert_close(starts, metadata.starts[index])
+        assert starts.tolist() == [index * metadata.chunk_size] * 3
+    assert metadata.starts_cpu[1, 1] < builder.max_context_chunk
+    assert metadata.chunk_seq_lens[0, 1] > metadata.padded_local_chunk_seq_lens[0][1]
+
+
+@pytest.mark.parametrize("with_pcp", [False, True])
+@pytest.mark.parametrize("c8", [False, True])
+def test_single_fragment_copy_is_scoped_to_c8(with_pcp, c8):
+    from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin
+
+    impl = DCPImplMixin.__new__(DCPImplMixin)
+    impl._kimi_c8_enabled = c8
+    impl.dcp_size = 8
+    impl.pcp_group = SimpleNamespace(world_size=2 if with_pcp else 1)
+    impl.tp_group = SimpleNamespace(all_gather=Mock(side_effect=lambda q, dim: q))
+    impl._dcp_all_gather = Mock(side_effect=lambda q, dim: q)
+    query = torch.ones(2, 12, 576, dtype=torch.uint8 if c8 else torch.bfloat16)
+    with patch("vllm_ascend.attention.context_parallel.common_cp.torch.cat", wraps=torch.cat) as cat:
+        (actual,) = impl._dcp_all_gather_fragments(query, dim=1)
+    assert cat.call_count == (0 if c8 else 1)
+    assert (actual.data_ptr() == query.data_ptr()) == c8
+    selected = impl.tp_group.all_gather if with_pcp else impl._dcp_all_gather
+    selected.assert_called_once()
+    assert (selected.call_args.args[0] is query) == c8
+
+
+@pytest.mark.parametrize(
+    "c8,draft,block,expected",
+    [(False, False, 768, 768), (False, False, 1024, 1024), (True, True, 1664, 128), (True, False, 1664, 1664)],
+)
+def test_native_dcp_workspace_uses_draft_reader_geometry(c8, draft, block, expected):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl._kimi_c8_enabled = c8
+    impl.use_flashmla = not c8
+    impl.is_draft_cache = draft
+    impl.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=block))
+    impl.num_kv_heads, impl.kv_lora_rank, impl.qk_rope_head_dim, impl.dtype = 1, 512, 64, torch.bfloat16
+    nope, rope, indices = impl._allocate_dcp_current_kv_buffers(8, torch.device("cpu"))
+    assert nope.shape[1] == rope.shape[1] == expected
+    assert indices.tolist() == list(range(8))

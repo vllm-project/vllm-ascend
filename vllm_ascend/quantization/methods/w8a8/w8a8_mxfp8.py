@@ -192,11 +192,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             quantized_x, pertoken_scale = x
             output_dtype = torch.bfloat16
         else:
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                x,
-                dst_type=torch.float8_e4m3fn,
-                scale_alg=self.dynamic_mx_quant_scale_alg,
-            )
+            quantized_x, pertoken_scale = self._quantize_input(layer, x)
             output_dtype = x.dtype
 
         weight = layer.weight

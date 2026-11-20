@@ -1,6 +1,6 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/attn_utils.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/attn_utils.py
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -58,7 +57,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, is_kimi_c8_config
 from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
@@ -68,6 +67,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+from vllm_ascend.attention.kimi_c8_static import pa_nz_cache_view, validate_pa_nz_page_stride
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -107,6 +107,7 @@ from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.utils import (
@@ -164,8 +165,12 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
     return replace(kv_cache_config, kv_cache_groups=groups)
 
 
-def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -> None:
+def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], minimum_page_size: int = 0) -> None:
     """Align dense K/V segments before padding a shared Attention/Mamba pool."""
+    if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_specs.values()):
+        # Paired SFA has two physical page classes. Row byte ratios must never
+        # change the logical token ownership or checkpoint granularity.
+        return
     # MLA and compressed-cache subclasses manage their own storage layouts.
     attention_specs = {
         name: spec for name, spec in kv_cache_specs.items() if type(spec) in (FullAttentionSpec, SlidingWindowSpec)
@@ -207,9 +212,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer
+
     sfa_dcp_replicated_indexer_size = (
         vllm_config.parallel_config.decode_context_parallel_size
-        if enable_sfa_dcp_replicated_indexer(vllm_config)
+        if enable_sfa_dcp_replicated_indexer(vllm_config) and not enable_sfa_dcp_sharded_indexer(vllm_config)
         else 1
     )
     enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
@@ -231,6 +238,20 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         spec = attn_module.get_kv_cache_spec(vllm_config)
         if spec is None:
             continue
+        draft_prefixes = getattr(vllm_config, "_kimi_c8_draft_layer_prefixes", ())
+        layer_is_draft = any(layer_name == prefix or layer_name.startswith(prefix + ".") for prefix in draft_prefixes)
+        impl = getattr(attn_module, "impl", None)
+        layer_is_draft = (
+            layer_is_draft
+            or getattr(impl, "is_draft_cache", False) is True
+            or getattr(impl, "is_draft_model", False) is True
+        )
+
+        # v32 has no ownership field on upstream KVCacheSpec. Transfer the
+        # module's ownership to our MLA/indexer specs below instead.
+        is_draft = bool(getattr(attn_module, "is_draft_layer", False) or getattr(spec, "is_draft", False))
+        if is_draft and not (vllm_version_is("0.30.0") or vllm_version_is("0.32.0")):
+            spec = replace(spec, is_draft=True)
 
         if isinstance(spec, MambaSpec):
             # Keep Mamba groups after attention groups. Ascend graph parameter
@@ -239,9 +260,26 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
         if isinstance(attn_module, MLAAttention):
+            static_fp8_pa_nz = bool(
+                is_kimi_c8_config(vllm_config)
+                and not layer_is_draft
+                and (
+                    getattr(attn_module, "kimi_c8_static_fp8", False)
+                    or getattr(attn_module.impl, "kimi_c8_static_fp8", False)
+                )
+            )
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
-            if getattr(attn_module.impl, "fa_quant_layer", False):
+            if is_kimi_c8_config(vllm_config) and layer_is_draft:
+                # The draft may receive a target-derived spec. Its own
+                # dimensions and dtype define the cache, while the scheduler
+                # manager block remains compatible with DCP interleave.
+                head_size = attn_module.kv_lora_rank + attn_module.qk_rope_head_dim
+                dtype = attn_module.impl.dtype
+                cache_dtype_str = getattr(attn_module, "kv_cache_dtype", "auto")
+            elif static_fp8_pa_nz:
+                head_size, dtype, cache_dtype_str = 576, torch.float8_e4m3fn, None
+            elif getattr(attn_module.impl, "fa_quant_layer", False):
                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
             elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
@@ -286,11 +324,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
-                store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
+                static_fp8_pa_nz=static_fp8_pa_nz,
+                store_on_host=(
+                    not is_draft and enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled
+                ),
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                is_draft=is_draft,
                 **ratio_kwargs,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
@@ -328,6 +370,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_li_c4=cache_sparse_li_c4,
                 cache_sparse_li_c8=cache_sparse_li_c8,
                 sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
+                is_draft=is_draft,
             )
             continue
 
@@ -339,10 +382,41 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
     if mamba_specs:
+        if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
+            # K3.1 recurrent padding is settled by NPUPlatform before the
+            # layers construct their specs. Keep indexer/draft pages native.
+            kv_cache_spec.update(mamba_specs)
+            return kv_cache_spec
         _align_hybrid_attention_page_sizes(kv_cache_spec)
-        common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
+        c8_attention_specs = [
+            spec
+            for spec in kv_cache_spec.values()
+            if isinstance(spec, AscendMLAAttentionSpec) and spec.static_fp8_pa_nz
+        ]
+        if c8_attention_specs:
+            # Workers deserialize cache_config before the Kimi config hook
+            # runs, so the platform may still carry the bf16 mamba page here.
+            # Shrink it to the C8 payload page for this model.
+            c8_page = min(spec.page_size_bytes for spec in c8_attention_specs)
+            for name, spec in list(mamba_specs.items()):
+                if spec.real_page_size_bytes <= c8_page and spec.page_size_bytes > c8_page:
+                    mamba_specs[name] = replace(spec, page_size_padded=c8_page)
+        # Kimi C8: derive target/Mamba pages from their payloads. Draft keeps
+        # its own BF16 page within the per-layer mixed-page group.
+        page_pool = (
+            [*c8_attention_specs, *mamba_specs.values()]
+            if c8_attention_specs
+            else [*kv_cache_spec.values(), *mamba_specs.values()]
+        )
+        common_page_size = max(spec.page_size_bytes for spec in page_pool)
+        c8_page_alignments = [spec.static_fp8_kernel_block_size * spec.static_fp8_width for spec in c8_attention_specs]
+        if c8_page_alignments:
+            alignment = math.lcm(*c8_page_alignments)
+            common_page_size = _align_up(common_page_size, alignment)
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]
+            if c8_attention_specs and getattr(attn_layers[layer_name].impl, "is_draft_cache", False):
+                continue
             page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
             kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
         for layer_name, spec in mamba_specs.items():
@@ -525,6 +599,7 @@ def build_attn_metadata(
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
             is_prefilling=common_is_prefilling,
+            pcp_context=pcp_context,
             max_seq_len=max_seq_len,
             causal=group_causal,
             req_ids_tensor=req_ids_tensor,
@@ -965,6 +1040,9 @@ def _uses_single_raw_mla_cache(
         # PCP gathers and sharded-decode writes still use the legacy
         # preprocessing contract. Keep their allocation compatible with it.
         return False
+    if kv_cache_spec.static_fp8_pa_nz:
+        validate_pa_nz_page_stride(kv_cache_spec.block_size, kv_cache_spec.page_size_bytes)
+        return True
     if getattr(impl, "use_flashmla", False):
         # The external reader retains its fused-cache contract, including
         # DCP. Native FIA continues to follow the dependency's exclusions.
@@ -1153,26 +1231,15 @@ def _allocate_kv_cache(
         for layer_name, start, layer_size in dsv4_regions:
             kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
 
-    # vLLM #51718 changed every KVCacheTensor to describe a view into one
-    # common backing allocation. Hybrid groups overlay that backing from byte
-    # zero because a block ID belongs to only one group at a time. Allocate it
-    # once here; allocating tensor.size for every descriptor duplicates the
-    # full cache pool and can OOM before the second tensor is initialized.
+    # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model and not is_glm5_next:
-        tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
-        tensor_size = tensor_sizes.pop()
-        if vllm_config.kv_transfer_config is None:
-            hybrid_backing = torch.zeros(tensor_size, dtype=torch.int8, device=device)
-        else:
-            hybrid_backing = torch.zeros(
-                tensor_size + alignment,
-                dtype=torch.int8,
-                device=device,
-            )
-            hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
+    # Match the paired planner's model scope. Generic DeepSeek/GLM SFA groups
+    # also contain MLA and indexer specs, but retain independent allocations.
+    # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
+    hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
+    is_paired_sfa = getattr(hf_config, "model_type", None) == "kimi_k31"
+    if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model and not is_glm5_next:
+        hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
     layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
     layerwise_aliases: dict[str, str] = {}
@@ -1259,22 +1326,8 @@ def _allocate_kv_cache(
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
-                if (
-                    kv_cache_tensor.layer_stride != layer_size
-                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
-                ):
-                    raise ValueError(
-                        "Ascend hybrid KV cache requires contiguous per-layer "
-                        f"views, but {layer_name} has layer_stride="
-                        f"{kv_cache_tensor.layer_stride}, block_stride="
-                        f"{kv_cache_tensor.block_stride}, page_size="
-                        f"{layer_spec.page_size_bytes}."
-                    )
                 start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
-                end = start + layer_size
-                if end > hybrid_backing.numel():
-                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
-                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+                kv_cache_raw_tensors[layer_name] = hybrid_backing[start : start + layer_size]
             continue
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
@@ -1633,41 +1686,77 @@ def _reshape_kv_cache_v2(
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
                 raw_cache = kv_cache_raw_tensors[layer_name]
-                assert isinstance(raw_cache, tuple)
-
-                if group_spec.scale_dim:
-                    raw_k_tensor, raw_scale_tensor = raw_cache
-                    sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
+                if isinstance(raw_cache, torch.Tensor):
+                    sum_page_size_bytes = raw_cache.numel()
                 else:
-                    (raw_k_tensor,) = raw_cache
-                    raw_scale_tensor = None
-                    sum_page_size_bytes = raw_k_tensor.numel()
+                    assert isinstance(raw_cache, tuple)
+                    if group_spec.scale_dim:
+                        raw_k_tensor, raw_scale_tensor = raw_cache
+                        sum_page_size_bytes = raw_k_tensor.numel() + raw_scale_tensor.numel()
+                    else:
+                        (raw_k_tensor,) = raw_cache
+                        sum_page_size_bytes = raw_k_tensor.numel()
 
                 assert sum_page_size_bytes % group_spec.page_size_bytes == 0
                 num_blocks = sum_page_size_bytes // group_spec.page_size_bytes
                 assert num_blocks >= kv_cache_config.num_blocks
 
+                num_kernel_blocks = num_blocks * group_spec.block_size // kernel_block_size
+                assert group_spec.block_size % kernel_block_size == 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(
-                    num_blocks * group_spec.sfa_dcp_replicated_indexer_size,
-                    group_spec.block_size,
+                    num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                    kernel_block_size,
                     group_spec.num_kv_heads,
                     group_spec.head_size,
                 )
 
-                indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
-                if raw_scale_tensor is None:
-                    kv_caches[layer_name] = (indexer_k_cache,)
-                else:
+                if group_spec.scale_dim:
                     indexer_scale_cache_shape = group.backend.get_kv_cache_shape(
-                        num_blocks * group_spec.sfa_dcp_replicated_indexer_size,
-                        group_spec.block_size,
+                        num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                        kernel_block_size,
                         group_spec.num_kv_heads,
                         group_spec.scale_dim,
                     )
                     if group_spec.cache_sparse_li_c4:
                         indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1], group_spec.scale_dim // 2, 2)
-                    indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
+
+                if isinstance(raw_cache, torch.Tensor):
+                    if group_spec.scale_dim:
+                        # Keep each kernel block's K and scales in the same page.
+                        # Global K/scale planes disagree with overlaying attention
+                        # groups about where a scheduler block begins and ends.
+                        kernel_page_bytes = group_spec.page_size_bytes // (
+                            group_spec.sfa_dcp_replicated_indexer_size * (group_spec.block_size // kernel_block_size)
+                        )
+                        indexer_k_cache = make_page_strided_cache_view(
+                            raw_cache, kv_cache_shape, group_spec.dtype, kernel_page_bytes
+                        )
+                        key_bytes = (
+                            kernel_block_size
+                            * group_spec.num_kv_heads
+                            * group_spec.head_size
+                            * get_dtype_size(group_spec.dtype)
+                        )
+                        indexer_scale_cache = make_page_strided_cache_view(
+                            raw_cache,
+                            indexer_scale_cache_shape,
+                            group_spec.scale_dtype,
+                            kernel_page_bytes,
+                            offset_bytes=key_bytes,
+                        )
+                    else:
+                        indexer_k_cache = raw_cache.view(group_spec.dtype).view(kv_cache_shape)
+                else:
+                    indexer_k_cache = raw_k_tensor.view(group_spec.dtype).view(kv_cache_shape)
+                    if group_spec.scale_dim:
+                        indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(
+                            indexer_scale_cache_shape
+                        )
+
+                if group_spec.scale_dim:
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
+                else:
+                    kv_caches[layer_name] = (indexer_k_cache,)
 
                 continue
 
@@ -1783,7 +1872,35 @@ def _reshape_kv_cache_v2(
                 fused_dim = nope_dim + rope_dim
 
                 attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
+                if getattr(kv_cache_spec, "static_fp8_pa_nz", False):
+                    validate_pa_nz_page_stride(kv_cache_spec.block_size, kv_cache_spec.page_size_bytes)
+                    if kernel_block_size != kv_cache_spec.static_fp8_kernel_block_size:
+                        raise ValueError("Kimi static C8 cache requires the 128-token kernel block table")
+                    if not isinstance(single_raw_mla_cache, torch.Tensor):
+                        raise ValueError(f"Static Kimi C8 cache for {layer_name} requires raw backing")
+                    expected = kv_cache_config.num_blocks * kv_cache_spec.page_size_bytes
+                    if single_raw_mla_cache.nbytes < expected:
+                        raise ValueError(f"Static Kimi C8 cache for {layer_name} is smaller than its pages")
+                    kv_c8 = pa_nz_cache_view(
+                        single_raw_mla_cache.view(torch.uint8),
+                        kv_cache_config.num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.static_fp8_width,
+                        page_stride_bytes=kv_cache_spec.page_size_bytes,
+                    )
+                    attn_impl.kimi_c8_page_stride_bytes = kv_cache_spec.page_size_bytes
+                    attn_impl.kimi_c8_manager_block_size = kv_cache_spec.block_size
+                    kv_caches[layer_name] = (kv_c8,)
+                    continue
+
                 if attn_impl.use_flashmla:
+                    if kernel_block_size != kv_cache_spec.block_size and not getattr(
+                        attn_impl, "is_draft_cache", False
+                    ):
+                        raise ValueError(
+                            f"FlashMLA layer {layer_name} requires its native {kv_cache_spec.block_size}-token page, "
+                            f"but the KV group selected {kernel_block_size}. Check mixed attention backends."
+                        )
                     # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(
@@ -1834,7 +1951,9 @@ def _reshape_kv_cache_v2(
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                cache_dtype,
+                (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto")
+                if getattr(kv_cache_spec, "is_draft", False)
+                else cache_dtype,
             )
             packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (

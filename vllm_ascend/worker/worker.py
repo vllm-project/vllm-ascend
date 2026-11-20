@@ -613,6 +613,20 @@ class NPUWorker(WorkerBase):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
+
+        # The PD-decode worker releases the default-path ND KDA projections
+        # inside profile_run() (after its forward), so the measured peak
+        # activation keeps the weights-resident baseline. The profile result's
+        # weights snapshot was taken at load time, before that release: deduct
+        # the freed bytes so the KV cache pool reclaims them.
+        released_nd_weights = int(getattr(self.model_runner, "mega_kda_nd_released_bytes", 0) or 0)
+        if released_nd_weights:
+            profile_result.weights_memory -= released_nd_weights
+            self.model_runner.model_memory_usage -= released_nd_weights
+            logger.info(
+                "Released %.2f GiB of default-path ND KDA projections after profiling on this PD decode worker",
+                GiB(released_nd_weights),
+            )
         profile_result.non_kv_cache_memory = (
             profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
         )

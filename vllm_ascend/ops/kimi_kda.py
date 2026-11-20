@@ -1,44 +1,78 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend backend for the vLLM 0.27 Kimi K3 delta-attention layer.
+"""Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
-The projections, weight loading, and cache specification stay owned by
-upstream vLLM.  Only the CUDA-specific convolution and KDA execution is
-replaced here with the Ascend metadata builder and AscendC operators.
-"""
-
+from dataclasses import dataclass, replace
 from functools import wraps
+from typing import Any
 
 import torch
 import torch_npu
 from einops import rearrange
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from torch import nn
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture, is_breakable_cudagraph_enabled
+from vllm.distributed import divide, get_pcp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
+    UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMixedPrecisionConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
+    _make_decode_conv1d_weight_loader,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+from vllm_ascend.ascend_config import get_ascend_config, validate_additional_config_bool
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendMegaKDAHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.kda_parallel import (
+    KDAColumnParallelLinear,
+    KDAInputParallelLinear,
+    KDAMergedColumnParallelLinear,
+    KDARowParallelLinear,
+    get_kda_parallel_rank,
+    get_kda_parallel_size,
+)
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.kimi_mega_kda import (
+    MegaKDAWeights,
+    ensure_mega_kda_bf16,
+    ensure_mega_kda_nd,
+    load_commit_recurrent_kda_operator,
+    load_mega_kda_operator,
+    mega_kda_nz_operand,
+    run_commit_recurrent_kda,
+    run_mega_recurrent_kda,
+)
+from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
@@ -46,7 +80,79 @@ from vllm_ascend.utils import npu_stream_switch
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
+_MEGA_KDA_MAX_BATCH_MULTIPLIER = 32
+_MEGA_KDA_CACHE_ALIGNMENT_BYTES = 16
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
+_MEGA_KDA_COMMIT_STREAM: torch.npu.Stream | None = None
+
+
+def _is_pd_decode_worker(vllm_config) -> bool:
+    """Whether this worker receives requests through PD KV transfer."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return kv_transfer_config is not None and bool(getattr(kv_transfer_config, "is_kv_consumer", False))
+
+
+def _is_pd_prefill_worker(vllm_config) -> bool:
+    """Whether this worker only prefills and forwards through PD KV transfer."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    return kv_transfer_config is not None and bool(getattr(kv_transfer_config, "is_kv_producer", False))
+
+
+def release_mega_kda_nd_weights(model) -> int:
+    """Release the default-path ND KDA projections on PD decode workers.
+
+    Called after memory profiling so the profile forward still measures the
+    conservative peak activation with the ND weights resident. The caller
+    subtracts the returned byte count from its weights accounting so the
+    freed budget flows into the KV cache pool.
+    """
+    released = 0
+    for module in model.modules():
+        if (
+            isinstance(module, AscendKimiK3DeltaAttention)
+            and getattr(module, "_mega_weights", None) is not None
+            and getattr(module, "_mega_pd_decode_worker", False)
+            and not getattr(module, "_mega_nd_released", False)
+        ):
+            released += module._release_default_kda_weights()
+    return released
+
+
+def _ascend_kda_forward(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    beta_is_preprocessed: bool,
+) -> None:
+    # The upstream KDA constructor registers this layer in static_forward_context;
+    # each execution context exposes that model's layers through no_compile_layers.
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._kda_forward_impl(mixed_qkv, g1, g2, beta, core_attn_out, beta_is_preprocessed=beta_is_preprocessed)
+
+
+def _ascend_kda_forward_fake(
+    mixed_qkv: torch.Tensor,
+    g1: torch.Tensor,
+    g2: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    beta_is_preprocessed: bool,
+) -> None:
+    # The caller owns the output buffer; tracing must not read runtime metadata.
+    return None
+
+
+# Keep profile-run metadata=None outside Dynamo's no-guards graph.
+direct_register_custom_op(
+    op_name="ascend_kda_forward",
+    op_func=_ascend_kda_forward,
+    mutates_args=["core_attn_out"],
+    fake_impl=_ascend_kda_forward_fake,
+)
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
@@ -54,6 +160,23 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+def _mega_kda_commit_stream() -> torch.npu.Stream:
+    """Dedicated ReplaySSM commit stream, independent of the shared-expert stream.
+
+    The commit overlap is owned by enable_mega_kda_replayssm alone, so it must
+    not share a queue with the MoE shared-expert multistream: attention-phase
+    commit work and MLP-phase shared-expert work would otherwise serialize on
+    one stream and break both features' intended overlap windows. A dedicated
+    stream also keeps the commit operator's AIC quota selection (resolved from
+    the current stream) decoupled from any limits set on the shared-expert
+    stream.
+    """
+    global _MEGA_KDA_COMMIT_STREAM
+    if _MEGA_KDA_COMMIT_STREAM is None:
+        _MEGA_KDA_COMMIT_STREAM = torch_npu.npu.Stream()
+    return _MEGA_KDA_COMMIT_STREAM
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -67,15 +190,29 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
         tp_size: int,
         quant_config,
         prefix: str,
+        head_parallel: bool = False,
     ) -> None:
         projection_size = num_heads * head_dim
-        super().__init__(
-            input_size=hidden_size,
-            output_sizes=[num_heads, projection_size, projection_size],
-            bias=False,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+        if head_parallel:
+            self.output_sizes = [num_heads, projection_size, projection_size]
+            ColumnParallelLinear.__init__(
+                self,
+                hidden_size,
+                sum(self.output_sizes),
+                tp_rank=get_kda_parallel_rank(),
+                tp_size=tp_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        else:
+            super().__init__(
+                input_size=hidden_size,
+                output_sizes=[num_heads, projection_size, projection_size],
+                bias=False,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
         if self.tp_size != tp_size:
             raise ValueError(f"KDA fused BFG TP mismatch: layer={self.tp_size}, attention={tp_size}")
         local_projection_size = projection_size // tp_size
@@ -176,13 +313,189 @@ def _prepare_beta(
     return beta if is_preprocessed else beta.float().sigmoid()
 
 
+def _restore_token_rows(output: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """Restore graph padding rows after Mega emits only live verify rows."""
+    if output.shape[0] == num_tokens:
+        return output
+    restored = output.new_zeros((num_tokens, output.shape[-1]))
+    restored[: output.shape[0]].copy_(output)
+    return restored
+
+
+@dataclass(frozen=True)
+class _MegaKDAPlan:
+    batch: int
+    spec_len: int
+    conv_state_block_ids: torch.Tensor
+    conv_num_accepted_tokens: torch.Tensor
+    num_accepted_tokens: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _MegaKDAReplayPlan:
+    batch: int
+    state_indices: torch.Tensor
+    # Full graph-sized, contiguous state indices used by MegaKDA.  The commit
+    # launch only uses ``state_indices`` (the live prefix), while MegaKDA must
+    # retain graph padding rows so its batch shape stays unchanged.
+    mega_state_indices: torch.Tensor
+    accepted_tokens: torch.Tensor
+    replay_u: torch.Tensor
+    replay_k: torch.Tensor
+    replay_decay: torch.Tensor
+    commit_done: Any | None = None
+
+
+def _kimi_kda_with_output(
+    hidden_states: torch.Tensor, positions: torch.Tensor, output: torch.Tensor, layer_name: str
+) -> None:
+    # Keep runtime metadata and real cache pointers outside Dynamo/FakeTensor.
+    layer = get_forward_context().no_compile_layers[layer_name]
+    plan = layer._plan_mega_kda(hidden_states)
+    if plan is None:
+        output.copy_(layer._forward_default(hidden_states, positions))
+    else:
+        replay_plan = layer._prepare_mega_replayssm()
+        if replay_plan is None:
+            output.copy_(layer._forward_default(hidden_states, positions))
+        else:
+            layer._forward_mega_kda(hidden_states, positions, plan, output, replay_plan)
+
+
+def _kimi_kda_with_output_fake(
+    hidden_states: torch.Tensor, positions: torch.Tensor, output: torch.Tensor, layer_name: str
+) -> None:
+    return
+
+
+def _kimi_kda(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: str,
+    output_rows: int,
+    gather_input: bool = False,
+) -> torch.Tensor:
+    # Keep planning, events and metadata inside the existing opaque boundary.
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if gather_input:
+        # Validate the post-gather, post-trim shape before committing anything,
+        # including on fallback. The planner does not read hidden-state data.
+        plan = layer._plan_mega_kda(hidden_states, num_tokens=positions.shape[0])
+    else:
+        plan = layer._plan_mega_kda(hidden_states)
+    replay_plan = None
+    if plan is not None:
+        replay_plan = layer._prepare_mega_replayssm(commit_async=gather_input)
+    if gather_input:
+        hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+        if replay_plan is not None and replay_plan.commit_done is not None:
+            torch.npu.current_stream().wait_event(replay_plan.commit_done)
+    if plan is None:
+        return layer._forward_default(hidden_states, positions)
+    if replay_plan is None:
+        return layer._forward_default(hidden_states, positions)
+    return layer._execute_mega_kda(hidden_states, positions, plan, replay_plan)
+
+
+def _kimi_kda_fake(
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    layer_name: str,
+    output_rows: int,
+    gather_input: bool = False,
+) -> torch.Tensor:
+    return hidden_states.new_empty((output_rows, hidden_states.shape[-1]))
+
+
+direct_register_custom_op(
+    op_name="ascend_kimi_kda",
+    op_func=_kimi_kda,
+    mutates_args=[],
+    fake_impl=_kimi_kda_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+direct_register_custom_op(
+    op_name="ascend_kimi_kda_with_output",
+    op_func=_kimi_kda_with_output,
+    mutates_args=["output"],
+    fake_impl=_kimi_kda_with_output_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     """Kimi K3 KDA using AscendC prefill and recurrent kernels."""
 
     # Worker startup prepares this layer after KV-cache binding.
     _requires_kda_state_copy = True
+    use_contiguous_conv_indices = True
+
+    def get_kv_cache_spec(self, vllm_config):
+        spec = super().get_kv_cache_spec(vllm_config)
+        if spec is None or not self.use_mega_kda_replayssm:
+            return spec
+        producer = self._mega_pd_prefill_worker
+        consumer = self._mega_pd_decode_worker
+        if producer == consumer:
+            return spec
+        if consumer:
+            layers = vllm_config.compilation_config.static_forward_context.values()
+            if any(isinstance(layer, AscendKimiK3DeltaAttention) and layer._mega_weights is None for layer in layers):
+                return spec
+        return replace(spec, num_speculative_blocks=0)
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        if not self.use_mega_kda_replayssm:
+            return super().get_state_dtype()
+        # Build the canonical two-state KDA cache directly.  Upstream vLLM
+        # may enable its CUDA RecoverSSM records from speculative decoding;
+        # those records are unrelated to Ascend ReplaySSM and must not be
+        # mixed into the five-state MegaKDA cache ABI.
+        base = MambaStateDtypeCalculator.kda_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
+        return (*base, torch.float32, torch.float16, torch.float32)
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if not self.use_mega_kda_replayssm:
+            return super().get_state_shape()
+        base = MambaStateShapeCalculator.kda_state_shape(
+            self.tp_size,
+            self.num_heads,
+            self.head_dim,
+            conv_kernel_size=self.conv_size,
+            num_spec=self.num_spec,
+        )
+        record = (self.local_num_heads, self.num_spec + 1, self.head_dim)
+        return (*base, record, record, record)
 
     def __init__(self, config, vllm_config, prefix: str = "") -> None:
+        # Upstream asks for the backend during its constructor. Select a
+        # separate metadata group so Qwen/GLM and draft layers are untouched.
+        self.use_mega_kda_replayssm = validate_additional_config_bool(
+            (getattr(vllm_config, "additional_config", None) or {}).get("enable_mega_kda_replayssm", False),
+            "additional_config.enable_mega_kda_replayssm",
+        )
+        if self.use_mega_kda_replayssm and not bool(getattr(vllm_config, "use_v2_model_runner", False)):
+            raise ValueError("enable_mega_kda_replayssm requires VLLM_USE_V2_MODEL_RUNNER=1")
+        self._mega_operator = load_mega_kda_operator() if self.use_mega_kda_replayssm else None
+        self._commit_operator = load_commit_recurrent_kda_operator() if self.use_mega_kda_replayssm else None
+        # Commit multistream is owned by ReplaySSM alone and deliberately
+        # independent of multistream_overlap_shared_expert: the MoE switch
+        # keeps its own stream, and commit runs on _mega_kda_commit_stream().
+        self.overlap_mega_kda_commit = self.use_mega_kda_replayssm
+        # PD decode workers receive both KV and KDA state through the
+        # connector, so their default (prefill/recompute) KDA path is dead in
+        # steady state; the ND projections can be released after the NZ
+        # operands are built. PD prefill workers never run the MegaKDA
+        # verify/decode operator, so they skip the NZ operand build entirely.
+        self._mega_pd_decode_worker = _is_pd_decode_worker(vllm_config)
+        self._mega_pd_prefill_worker = _is_pd_prefill_worker(vllm_config)
+        self._mega_nd_released = False
         quant_config = getattr(vllm_config, "quant_config", None)
         uses_mixed_projection = bool(
             quant_config is not None
@@ -193,6 +506,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )(f"{prefix}.in_proj_qkvgfab")
         )
         super().__init__(config, vllm_config, prefix)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        self.pcp_size = getattr(parallel_config, "prefill_context_parallel_size", 1)
+        self.pcp_group = get_pcp_group() if self.pcp_size > 1 else None
+        self.pcp_rank = self.pcp_group.rank_in_group if self.pcp_group is not None else 0
+        merged_linear = MergedColumnParallelLinear
+        if self.pcp_size > 1:
+            self._init_pcp_projections(vllm_config, prefix)
+            merged_linear = KDAMergedColumnParallelLinear
+        # The upstream CUDA RecoverSSM path owns two different auxiliary
+        # records and is incompatible with Ascend's three ReplaySSM pages.
+        # Keep the parent layer on the ordinary KDA path for prefill/fallback;
+        # ReplaySSM is driven only by the MegaKDA + commit operators below.
+        if self.use_mega_kda_replayssm:
+            self.use_recoverssm = False
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         if uses_mixed_projection:
@@ -200,7 +527,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
             # in floating point. Split those precision groups so DynamicQuant
             # can overlap the composed BFG projection.
-            self.in_proj_qkvgfab = MergedColumnParallelLinear(
+            self.in_proj_qkvgfab = merged_linear(
                 self.hidden_size,
                 [self.projection_size] * 3,
                 bias=False,
@@ -215,6 +542,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 tp_size=self.tp_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_gfab",
+                head_parallel=self.pcp_size > 1,
             )
             self._fused_bfg_output_sizes = (
                 self.local_num_heads,
@@ -226,6 +554,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # the production checkpoint). Preserve the checkpoint contract used
         # by the validated v0.26 implementation.
         self.o_norm.eps = config.rms_norm_eps
+        self._mega_weights: MegaKDAWeights | None = None
+        self._mega_weight_signature: tuple | None = None
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # fla_npu causal_conv1d consumes an activation-dtype [W, 3C]
         # tensor. Materialize that kernel layout once after weight loading.
@@ -247,18 +577,241 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         def process_weights_and_pack(*args, **kwargs):
             result = original_process_weights(*args, **kwargs)
             self._pack_conv_weights()
+            self._mega_weights = None
+            self._mega_weight_signature = None
             return result
 
         self.conv1d.quant_method.process_weights_after_loading = process_weights_and_pack
 
+    def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
+        """Bind every KDA head parameter and cache to the same TP x PCP shard."""
+        self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
+        self.tp_rank = get_kda_parallel_rank()
+        self.local_num_heads = divide(self.num_heads, self.tp_size)
+        self.local_projection_size = divide(self.projection_size, self.tp_size)
+        local_output_size = 4 * self.local_projection_size + self.head_dim + self.local_num_heads
+        alignment = (
+            128
+            if isinstance(self.quant_config, ModelOptMixedPrecisionConfig)
+            and self.quant_config._resolve_quant_algo(f"{prefix}.in_proj_qkvgfab") == "FP8_PB_WO"
+            else 16
+        )
+        self.in_proj_padding = -local_output_size % alignment
+        output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
+        if self.in_proj_padding:
+            output_sizes.append(self.in_proj_padding * self.tp_size)
+        self.in_proj_qkvgfab = KDAInputParallelLinear(
+            self.hidden_size,
+            output_sizes,
+            self.tp_size,
+            padding_size=self.in_proj_padding,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.in_proj_qkvgfab",
+        )
+        self.f_b_proj = KDAColumnParallelLinear(
+            self.head_dim,
+            self.projection_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.f_b_proj",
+        )
+        self.dt_bias = nn.Parameter(torch.empty(self.local_projection_size, dtype=torch.float32))
+        self.dt_bias.weight_loader = self._head_weight_loader
+        self.A_log = nn.Parameter(torch.empty(self.local_num_heads, dtype=torch.float32))
+        self.A_log.weight_loader = self._head_weight_loader
+        self.conv1d = KDAColumnParallelLinear(
+            self.conv_size,
+            3 * self.projection_size,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.conv1d",
+        )
+        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        self.conv1d.weight.weight_loader = _make_decode_conv1d_weight_loader(
+            [self.projection_size] * 3,
+            self.tp_size,
+            self.tp_rank,
+            None,
+        )
+        self.o_proj = KDARowParallelLinear(
+            self.projection_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+    def _head_weight_loader(self, param, loaded_weight) -> None:
+        # A_log checkpoints may use [1, 1, H, 1] or [H].
+        loaded_weight = loaded_weight.reshape(-1)
+        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * param.numel(), param.numel()))
+
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNHostMetadataBackend
+        if self.use_mega_kda_replayssm:
+            return AscendMegaKDAHostMetadataBackend
+        return KimiKDAHostMetadataBackend
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.pcp_size > 1:
+            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+        output = self._forward_projections(hidden_states, positions)
+        if self.pcp_size > 1:
+            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+        return output
+
+    def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        if self.use_mega_kda_replayssm and self._mega_weights is not None:
+            custom_op = getattr(self.o_proj, "custom_op", None)
+            if custom_op is not None and type(custom_op) is not KimiOProjMMReduceScatterOp:
+                return self._forward_default(hidden_states, positions)
+            if torch.compiler.is_compiling():
+                if not is_breakable_cudagraph_enabled():
+                    rows = hidden_states.shape[0]
+                    if type(custom_op) is KimiOProjMMReduceScatterOp:
+                        rows = (rows + self.tp_size - 1) // self.tp_size
+                    return torch.ops.vllm.ascend_kimi_kda(hidden_states, positions, self.prefix, rows)
+                output = self._allocate_mega_output(hidden_states)
+                torch.ops.vllm.ascend_kimi_kda_with_output(hidden_states, positions, output, self.prefix)
+                return output
+            plan = self._plan_mega_kda(hidden_states)
+            if plan is not None:
+                replay_plan = None if torch.compiler.is_compiling() else self._prepare_mega_replayssm()
+                if replay_plan is None and not torch.compiler.is_compiling():
+                    return self._forward_default(hidden_states, positions)
+                if not is_breakable_cudagraph_enabled():
+                    return self._execute_mega_kda(hidden_states, positions, plan, replay_plan)
+                output = self._allocate_mega_output(hidden_states)
+                self._forward_mega_kda(hidden_states, positions, plan, output, replay_plan)
+                return output
+        return self._forward_default(hidden_states, positions)
+
+    def forward_with_all_gather(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Overlap ReplaySSM Commit with the Kimi SP input collective."""
+        if is_breakable_cudagraph_enabled():
+            # Preserve the existing breakable-segment output/buffer contract.
+            return self.forward(sp_all_gather(hidden_states)[: positions.shape[0]], positions)
+        rows = positions.shape[0]
+        if type(getattr(self.o_proj, "custom_op", None)) is KimiOProjMMReduceScatterOp:
+            rows = (rows + self.tp_size - 1) // self.tp_size
+        return torch.ops.vllm.ascend_kimi_kda(hidden_states, positions, self.prefix, rows, True)
+
+    def _allocate_mega_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        rows = hidden_states.shape[0]
+        if type(getattr(self.o_proj, "custom_op", None)) is KimiOProjMMReduceScatterOp:
+            rows = (rows + self.tp_size - 1) // self.tp_size
+        return hidden_states.new_empty((rows, self.hidden_size))
+
+    def _prepare_mega_replayssm(self, *, commit_async: bool = False) -> _MegaKDAReplayPlan | None:
+        """Prepare and commit the previous replay record for this layer."""
+        if not getattr(self, "use_mega_kda_replayssm", False):
+            return None
+        context = get_forward_context()
+        raw = context.attn_metadata
+        if not isinstance(raw, dict) or self.prefix not in raw:
+            return None
+        metadata = raw[self.prefix]
+        if not isinstance(metadata, GDNAttentionMetadata):
+            return None
+        if metadata.num_spec_decodes:
+            state_table = metadata.spec_state_indices_tensor
+            if state_table is None:
+                return None
+            state_indices = state_table[:, 0]
+        else:
+            state_indices = metadata.non_spec_state_indices_tensor
+            if state_indices is None:
+                return None
+        if state_indices is None:
+            return None
+        batch = int(state_indices.shape[0])
+        if batch <= 0 or len(self.kv_cache) != 5:
+            return None
+        # A FULL graph stages ``batch`` request rows and leaves padding rows at
+        # NULL_BLOCK_ID. The Commit operator accepts repeated state indices;
+        # keep those null rows intact and make only live request rows active.
+        live = metadata.num_spec_decodes if metadata.num_spec_decodes else batch
+
+        # Every KDA layer sees the same request metadata, but owns different
+        # checkpoint/replay pages.  Prepare the request-level inputs lazily on
+        # the first layer and reuse them for the remaining layers.  Keeping
+        # this in the runtime path is deliberate: metadata construction can
+        # precede connector/page migration and FULL-graph replay by an
+        # arbitrary amount of time.
+        cached = getattr(metadata, "_mega_replay_inputs", None)
+        if cached is None or cached[0] != batch or cached[1] != live:
+            full_state_indices = state_indices.to(torch.int32).contiguous()
+            commit_state_indices = full_state_indices[:live]
+            accepted = (
+                metadata.num_accepted_tokens[:live].to(torch.int32).contiguous()
+                if metadata.num_spec_decodes and metadata.num_accepted_tokens is not None
+                else torch.ones(live, dtype=torch.int32, device=full_state_indices.device)
+            )
+            # A request whose first Verify is this step has no record to fold:
+            # its checkpoint was just written by prefill (or by P/D transfer),
+            # and the page may still carry the previous occupant's records.
+            # Padding rows must not touch the shared null page either. Make
+            # those rows a commit no-op without changing MegaKDA's graph batch.
+            first = getattr(metadata, "mega_first_verify", None)
+            if metadata.num_spec_decodes and first is not None and first.numel() >= live:
+                skip = (first[:live] > 0) | (commit_state_indices <= NULL_BLOCK_ID)
+                accepted = torch.where(skip, torch.zeros_like(accepted), accepted)
+            cached = (batch, live, full_state_indices, commit_state_indices, accepted)
+            metadata._mega_replay_inputs = cached
+        _, _, full_state_indices, state_indices, accepted = cached
+        replay_u, replay_k, replay_decay = self.kv_cache[2:5]
+        # Connector/KV synchronization must precede Commit in align mode.
+        wait_for_kv_layer_from_connector(self.prefix)
+        # Publish metadata and any connector/align copies BEFORE AllGather.
+        # Only Commit moves to the auxiliary stream; all HCCL calls stay on
+        # their original stream, in the original order.
+        stream = _mega_kda_commit_stream() if commit_async else None
+        ready = torch.npu.current_stream().record_event() if commit_async else None
+        with npu_stream_switch(stream, enabled=commit_async):
+            if ready is not None:
+                stream.wait_event(ready)
+            run_commit_recurrent_kda(
+                self.kv_cache[1],
+                replay_u,
+                replay_k,
+                replay_decay,
+                accepted,
+                state_indices,
+                operator=self._commit_operator,
+            )
+            commit_done = stream.record_event() if commit_async else None
+        return _MegaKDAReplayPlan(
+            batch=live,
+            state_indices=state_indices,
+            mega_state_indices=full_state_indices,
+            accepted_tokens=accepted,
+            replay_u=replay_u,
+            replay_k=replay_k,
+            replay_decay=replay_decay,
+            commit_done=commit_done,
+        )
+
+    def _forward_default(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        if getattr(self, "_mega_nd_released", False):
+            # The ND projections were released after profiling on this PD
+            # decode worker. Any real prefill/recompute batch reaching here
+            # has no weights left to run on; fail loudly instead of silently
+            # producing garbage from empty tensors.
+            raise RuntimeError(
+                "The default KDA path (prefill/recompute/fallback) ran after its ND "
+                "projections were released on this PD decode worker. ReplaySSM "
+                "MegaKDA expects all decode/verify work on the MegaKDA operator; "
+                "prefill batches require the ND weights, which only remain on "
+                "non-PD-decode workers."
+            )
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
@@ -279,11 +832,387 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return self.o_proj(core_attn_out)[0]
         return super().forward(hidden_states, positions)
 
+    def _get_kda_forward_metadata(self):
+        # Both callers execute inside the runtime/custom-op boundary, never tracing.
+        raw = get_forward_context().attn_metadata
+        prelaunch = getattr(self, "_kimi_c8_metadata_prelaunch", None)
+        if prelaunch is not None and isinstance(raw, dict):
+            prelaunch(raw)
+        return raw
+
+    def _plan_mega_kda(self, hidden_states: torch.Tensor, *, num_tokens: int | None = None) -> _MegaKDAPlan | None:
+        """Resolve a supported decode/verify batch before touching state."""
+        if self._mega_weights is None or hidden_states.dtype != torch.bfloat16:
+            return None
+        raw = self._get_kda_forward_metadata()
+        if not isinstance(raw, dict) or self.prefix not in raw:
+            return None
+        metadata = raw[self.prefix]
+        if not isinstance(metadata, GDNAttentionMetadata) or metadata.num_prefills:
+            return None
+        if metadata.num_spec_decodes + metadata.num_decodes <= 0:
+            return None
+        if getattr(metadata, "mega_has_folded_prefills", True):
+            return None
+        custom_op = getattr(self.o_proj, "custom_op", None)
+        if custom_op is not None and type(custom_op) is not KimiOProjMMReduceScatterOp:
+            return None
+
+        is_spec = metadata.num_spec_decodes > 0
+        if is_spec and metadata.num_decodes:
+            return None
+        if is_spec:
+            spec_meta = metadata.spec_decode_metadata
+            state_indices = metadata.spec_state_indices_tensor
+            query_start_loc = None if spec_meta is None else spec_meta.spec_causal_conv1d.query_start_loc
+            accepted = metadata.num_accepted_tokens
+            if query_start_loc is None or state_indices is None or accepted is None:
+                return None
+        else:
+            query_start_loc = metadata.non_spec_query_start_loc
+            state_indices = metadata.non_spec_state_indices_tensor
+            if query_start_loc is None or state_indices is None:
+                return None
+            accepted = torch.ones(state_indices.shape[0], dtype=torch.int32, device=state_indices.device)
+
+        # FULL graphs use graph-sized stable state tables. Padding is a suffix
+        # of NULL_BLOCK_ID rows, exactly as in the source PR's runtime B/S ABI.
+        batch = query_start_loc.numel() - 1
+        num_tokens = hidden_states.shape[0] if num_tokens is None else num_tokens
+        if batch <= 0 or hidden_states.ndim != 2 or num_tokens % batch:
+            return None
+        if batch % self.tp_size != 0 or batch > self.tp_size * _MEGA_KDA_MAX_BATCH_MULTIPLIER:
+            return None
+        spec_len = num_tokens // batch
+        if spec_len != self.num_spec + 1:
+            return None
+        # V2 can schedule variable-length requests. An average S matching the
+        # binary width does not make such a batch rectangular (e.g. 7 + 9).
+        live_batch = metadata.num_spec_decodes if is_spec else metadata.num_decodes
+        query_lens = getattr(metadata, "mega_query_lens", ())
+        if live_batch > batch or len(query_lens) != live_batch or any(length != spec_len for length in query_lens):
+            return None
+        # Retain V2 ABI checks for projection width and paged state views.
+        if hidden_states.shape[-1] != self.hidden_size:
+            return None
+        if state_indices.ndim not in (1, 2) or state_indices.shape[0] != batch:
+            return None
+        if state_indices.ndim == 1 and spec_len != 1:
+            return None
+        if accepted.numel() < batch:
+            return None
+        if not self._mega_cache_supported(spec_len, batch):
+            logger.warning_once(
+                "MegaKDA requires BF16 Conv / FP32 recurrent caches with sufficient verify capacity "
+                "and a compatible dense, direct-stride Replay, or prepared V2 page layout; "
+                "using the existing KDA path for %s. Cache layouts: %s",
+                self.prefix,
+                [(tuple(state.shape), state.stride(), state.dtype) for state in self.kv_cache],
+            )
+            return None
+
+        accepted = accepted[:batch].to(torch.int32)
+        first_verify = getattr(metadata, "mega_first_verify", None)
+        if is_spec:
+            # V2 tracks request identity across physical block migration.
+            # Without this flag the first round could read the wrong Conv tail.
+            if first_verify is None or first_verify.numel() < batch:
+                return None
+            conv_accepted = getattr(metadata, "mega_conv_accepted_tokens", None)
+            if conv_accepted is None:
+                # Conv history uses the same one-based accepted-token count as
+                # the regular GDN speculative path.  In particular, the first
+                # Verify after prefill has no accepted draft prefix, but its
+                # neutral Conv count is still 1, so the history offset is 0.
+                # Do not substitute ``spec_len`` here: that points MegaKDA at
+                # the unused speculative tail of the wide Conv page.
+                conv_accepted = torch.where(
+                    first_verify[:batch] > 0,
+                    torch.ones_like(accepted),
+                    accepted,
+                )
+            elif conv_accepted.numel() < batch:
+                return None
+            else:
+                conv_accepted = conv_accepted[:batch]
+        else:
+            conv_accepted = accepted
+        if state_indices.ndim == 1:
+            conv_state_block_ids = state_indices[:batch]
+        else:
+            conv_state_block_ids = state_indices[:batch, 0]
+        return _MegaKDAPlan(
+            batch=batch,
+            spec_len=spec_len,
+            conv_state_block_ids=conv_state_block_ids,
+            conv_num_accepted_tokens=conv_accepted,
+            num_accepted_tokens=accepted,
+        )
+
+    def _mega_cache_supported(self, spec_len: int, batch: int = 1) -> bool:
+        """Validate the physical page-strided layout required by ReplaySSM."""
+        if len(self.kv_cache) != 5:
+            return False
+        conv, recurrent = self.kv_cache[:2]
+        shape_supported = (
+            conv.ndim == 3
+            and conv.shape[1] >= self.conv_size - 1 + spec_len - 1
+            and conv.shape[2] == 3 * self.local_projection_size
+            and conv.dtype == torch.bfloat16
+            and recurrent.ndim == 4
+            and recurrent.shape[1:] == (self.local_num_heads, self.head_dim, self.head_dim)
+            and recurrent.dtype == torch.float32
+            and conv.data_ptr() % _MEGA_KDA_CACHE_ALIGNMENT_BYTES == 0
+            and recurrent.data_ptr() % _MEGA_KDA_CACHE_ALIGNMENT_BYTES == 0
+        )
+        if not shape_supported:
+            return False
+        # Replay ABI reads the physical page-strided state tensors directly.
+        replay_supported = all(
+            state.ndim == 4
+            and state.shape[0] == conv.shape[0]
+            and state.shape[1:] == (self.local_num_heads, self.num_spec + 1, self.head_dim)
+            and state.dtype == dtype
+            and state.stride(-1) == 1
+            and all(stride > 0 for stride in state.stride())
+            for state, dtype in zip(self.kv_cache[2:5], (torch.float32, torch.float16, torch.float32))
+        )
+        return (
+            replay_supported
+            and conv.stride(-1) == 1
+            and recurrent.stride(-1) == 1
+            and all(stride > 0 for stride in (*conv.stride(), *recurrent.stride()))
+        )
+
+    def _build_mega_weights(self) -> MegaKDAWeights:
+        """Prepare the external operator operands once after weight loading."""
+        o_proj_weight = ensure_mega_kda_nd(self.o_proj.weight.detach())
+        o_norm_weight = self.o_norm.weight.detach()
+        if o_norm_weight.dtype != torch.float32:
+            o_norm_weight = o_norm_weight.to(torch.float32)
+        conv = ensure_mega_kda_bf16(ensure_mega_kda_nd(self.get_parameter(_PACKED_CONV_WEIGHT_NAME).detach()))
+        if self.uses_mixed_projection:
+            weight = ensure_mega_kda_nd(self.in_proj_qkvgfab.weight.detach())
+            fused = self.fused_bfg_proj
+            fused_weight = ensure_mega_kda_nd(fused.weight.detach())
+            output_dim = getattr(fused.weight, "output_dim", 0)
+            qkv_src = weight[: 3 * self.local_projection_size]
+            f_a_src = ensure_mega_kda_nd(fused.f_a_weight.detach())
+            f_b_src = ensure_mega_kda_nd(fused.f_b_weight.detach())
+            beta_src = fused_weight.narrow(output_dim, 0, self.local_num_heads)
+            gate_src = fused_weight.narrow(
+                output_dim,
+                self.local_num_heads + self.local_projection_size,
+                self.local_projection_size,
+            )
+        else:
+            weight = ensure_mega_kda_nd(self.in_proj_qkvgfab.weight.detach())
+            local_projection = self.local_projection_size
+            qkv_end = 3 * local_projection
+            gate_end = qkv_end + local_projection
+            f_a_end = gate_end + self.head_dim
+            qkv_src = weight[:qkv_end]
+            gate_src = weight[qkv_end:gate_end]
+            f_a_src = weight[gate_end:f_a_end]
+            beta_src = weight[f_a_end : f_a_end + self.local_num_heads]
+            f_b_src = ensure_mega_kda_nd(self.f_b_proj.weight.detach())
+        return MegaKDAWeights(
+            qkv=mega_kda_nz_operand(qkv_src),
+            f_a=mega_kda_nz_operand(f_a_src),
+            f_b=mega_kda_nz_operand(f_b_src),
+            beta=mega_kda_nz_operand(beta_src),
+            output_gate=mega_kda_nz_operand(gate_src),
+            o_norm=o_norm_weight,
+            o_proj=mega_kda_nz_operand(o_proj_weight),
+            conv=conv.view(self.conv_size, 3, self.local_num_heads, self.head_dim).permute(1, 2, 0, 3).contiguous(),
+        )
+
+    def _prepare_mega_weights(self) -> bool:
+        """Called by the model post-load hook after *all* quant finalizers."""
+        self._mega_weights = None
+        self._mega_weight_signature = None
+        self._mega_nd_released = False
+        if not self.use_mega_kda_replayssm:
+            return False
+        if getattr(self, "_mega_pd_prefill_worker", False):
+            # A PD prefill worker only runs prefill batches, which always take
+            # the default KDA path; building the NZ operands would double the
+            # projection footprint without ever being consumed.
+            logger.info_once("MegaKDA NZ operands skipped on the PD prefill worker for %s", self.prefix)
+            return False
+        layers = (self.in_proj_qkvgfab, self.o_proj)
+        layers += (self.fused_bfg_proj,) if self.uses_mixed_projection else (self.f_b_proj,)
+        if (
+            self.gate_lower_bound is None
+            or getattr(self.conv1d, "bias", None) is not None
+            or any(
+                not isinstance(layer.quant_method, UnquantizedLinearMethod)
+                or layer.weight.dtype != torch.bfloat16
+                or layer.weight.ndim != 2
+                or getattr(layer, "bias", None) is not None
+                for layer in layers
+            )
+        ):
+            logger.warning_once(
+                "MegaKDA requires bias-free, unquantized BF16 KDA projections and a bounded gate; "
+                "using the existing KDA path."
+            )
+            return False
+        if self.uses_mixed_projection and any(
+            weight.dtype != torch.bfloat16
+            for weight in (self.fused_bfg_proj.f_a_weight, self.fused_bfg_proj.f_b_weight)
+        ):
+            return False
+        self._mega_weights = self._build_mega_weights()
+        self._mega_weight_signature = self._current_mega_weight_signature()
+        logger.info_once("MegaKDA BF16/NZ operands prepared after loading for %s", self.prefix)
+        return True
+
+    def _release_default_kda_weights(self) -> int:
+        """Drop the ND projections superseded by the MegaKDA NZ operands.
+
+        Only valid on a PD decode worker: every request arrives with its KV
+        and KDA state already transferred, so decode and verify always run
+        through the MegaKDA operator and the default (prefill/recompute) KDA
+        path is dead. Releasing the ND originals keeps the NZ operand set the
+        single resident copy, restoring the pre-MegaKDA weight footprint.
+        Returns the number of device bytes freed.
+        """
+        released = 0
+        for param in self._released_mega_nd_params():
+            released += param.numel() * param.element_size()
+            param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+        if released:
+            self._mega_nd_released = True
+            logger.info_once(
+                "MegaKDA released the default-path ND projections on the PD decode worker for %s", self.prefix
+            )
+        return released
+
+    def _released_mega_nd_params(self) -> list:
+        params = [self.in_proj_qkvgfab.weight, self.o_proj.weight]
+        if self.uses_mixed_projection:
+            params.append(self.fused_bfg_proj.weight)
+            params.append(self.fused_bfg_proj.f_a_weight)
+            params.append(self.fused_bfg_proj.f_b_weight)
+        else:
+            params.append(self.f_b_proj.weight)
+        return params
+
+    def _current_mega_weight_signature(self) -> tuple:
+        weights = [
+            self.in_proj_qkvgfab.weight,
+            self.o_proj.weight,
+            self.o_norm.weight,
+            self.get_parameter(_PACKED_CONV_WEIGHT_NAME),
+            self.A_log,
+            self.dt_bias,
+        ]
+        if self.uses_mixed_projection:
+            weights.extend((self.fused_bfg_proj.weight, self.fused_bfg_proj.f_a_weight, self.fused_bfg_proj.f_b_weight))
+        else:
+            weights.append(self.f_b_proj.weight)
+        signature = []
+        for weight in weights:
+            try:
+                version = weight._version
+            except RuntimeError:
+                version = None  # Inference tensors have no version counter.
+            signature.append((weight.data_ptr(), tuple(weight.shape), weight.dtype, version))
+        return tuple(signature)
+
+    @eager_break_during_capture
+    def _forward_mega_kda(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        plan: _MegaKDAPlan,
+        output: torch.Tensor,
+        replay_plan: _MegaKDAReplayPlan | None = None,
+    ) -> None:
+        # Breakable graph replays need the same caller-owned output address.
+        output.copy_(self._execute_mega_kda(hidden_states, positions, plan, replay_plan))
+
+    def _execute_mega_kda(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        plan: _MegaKDAPlan,
+        replay_plan: _MegaKDAReplayPlan | None = None,
+    ) -> torch.Tensor:
+        # Released layers no longer hold the ND originals the signature reads;
+        # weights cannot change after the post-load hook in serving anyway.
+        if not getattr(self, "_mega_nd_released", False) and self._mega_weight_signature != (
+            self._current_mega_weight_signature()
+        ):
+            raise RuntimeError("MegaKDA weights changed; run the model process_weights_after_loading hook again")
+        conv_state, recurrent_state = self.kv_cache[:2]
+        if replay_plan is None:
+            raise RuntimeError("ReplaySSM MegaKDA requires a prepared replay plan")
+        required_conv_state_len = self.conv_size - 1 + plan.spec_len - 1
+        if (
+            conv_state.ndim != 3
+            or conv_state.shape[1] < required_conv_state_len
+            or conv_state.shape[2] != 3 * self.local_num_heads * self.head_dim
+            or recurrent_state.ndim != 4
+            or recurrent_state.shape[1:] != (self.local_num_heads, self.head_dim, self.head_dim)
+            or conv_state.dtype != torch.bfloat16
+            or recurrent_state.dtype != torch.float32
+        ):
+            raise RuntimeError(
+                "MegaKDA requires KDA cache shapes "
+                f"conv=[C,>={required_conv_state_len},{3 * self.local_num_heads * self.head_dim}] BF16 and "
+                f"recurrent=[R,{self.local_num_heads},{self.head_dim},{self.head_dim}] FP32; "
+                f"got conv={tuple(conv_state.shape)}/{conv_state.dtype}, "
+                f"recurrent={tuple(recurrent_state.shape)}/{recurrent_state.dtype}"
+            )
+        record_attention_compute_start()
+        # ReplaySSM preparation materializes the graph-sized state-index view
+        # once per forward step. Reusing it here avoids another per-layer
+        # contiguous conversion in ``run_mega_recurrent_kda`` while preserving
+        # the full graph batch (the commit plan only contains live rows).
+        conv_indices = replay_plan.mega_state_indices
+        output = run_mega_recurrent_kda(
+            hidden_states=hidden_states[: plan.batch * plan.spec_len].reshape(plan.batch, plan.spec_len, -1),
+            weights=self._mega_weights,
+            conv_state=conv_state,
+            recurrent_state=recurrent_state,
+            conv_state_block_ids=conv_indices,
+            conv_num_accepted_tokens=plan.conv_num_accepted_tokens,
+            num_accepted_tokens=plan.num_accepted_tokens,
+            a_log=self.A_log.detach().reshape(-1).contiguous(),
+            dt_bias=self.dt_bias.view(self.local_num_heads, self.head_dim),
+            scale=self.head_dim**-0.5,
+            gate_lower_bound=float(self.gate_lower_bound if self.gate_lower_bound is not None else -5.0),
+            o_norm_variance_epsilon=float(self.o_norm.eps),
+            operator=self._mega_operator,
+            replay_u=replay_plan.replay_u,
+            replay_k=replay_plan.replay_k,
+            replay_decay=replay_plan.replay_decay,
+        )
+        maybe_save_kv_layer_to_connector("", [])
+        # Restore token rows before the collective, so the custom OProj's
+        # shard contract remains identical to the original MM + RS path.
+        output = _restore_token_rows(output, hidden_states.size(0))
+        logger.info_once("mega_recurrent_kda executed: batch=%d, spec_len=%d", plan.batch, plan.spec_len)
+        custom_op = getattr(self.o_proj, "custom_op", None)
+        if type(custom_op) is KimiOProjMMReduceScatterOp:
+            return custom_op.reduce_projected_output(output)
+        if self.tp_size > 1 and self.o_proj.reduce_results:
+            output = tensor_model_parallel_all_reduce(output)
+        return output
+
     def _run_overlapped_qkv_bfg(
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fork BFG work to an auxiliary stream and join it back to main."""
+        if torch.compiler.is_compiling() and not get_ascend_config().ascend_compilation_config.enable_npugraph_ex:
+            fused_bfg = self._project_bfg(hidden_states)
+            quantized_qkv = self._quantize_fused_qkv(hidden_states)
+            mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
+            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
+            return mixed_qkv, beta, g1, g2
         main_stream = torch.npu.current_stream()
         bfg_stream = _kda_bfg_stream()
 
@@ -304,8 +1233,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         with npu_stream_switch(bfg_stream):
             # Stage 2: after both first-stage branches complete, overlap the
-            # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
-            # work. Split and reshape the F/output gates here as well so all
+            # QKV Cube matmul with beta's FP32 conversion, sigmoid and raw-gate
+            # packing. Split and reshape the F/output gates here as well so all
             # BFG output handling occurs after the QKV matmul is enqueued.
             bfg_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
@@ -333,16 +1262,29 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             dim=-1,
         )
         beta = beta.float().sigmoid().unsqueeze(0)
-        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        # Keep packing beside sigmoid on the auxiliary stream. This also
+        # copies graph padding and precedes any mixed-token index_select.
+        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim).contiguous()
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
 
     def _quantize_fused_qkv(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]:
         quant_method = self.in_proj_qkvgfab.quant_method
         inner_quant_method = getattr(quant_method, "quant_method", quant_method)
+        if (
+            type(inner_quant_method) is AscendW8A8DynamicLinearMethod
+            and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.ndim == 2
+            and get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
+        ):
+            # Prepare on main before the BFG completion wait. apply() consumes
+            # the INT8 tensor and per-token scales without quantizing again.
+            prepared = inner_quant_method.prepare_input_for_overlap(self.in_proj_qkvgfab, hidden_states)
+            if prepared is not None:
+                return prepared
         if (
             isinstance(
                 inner_quant_method,
@@ -368,7 +1310,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _matmul_fused_qkv(
         self,
-        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        qkv_input: torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         quant_method = self.in_proj_qkvgfab.quant_method
         if quant_method is None:
@@ -519,7 +1461,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         state_copy.scatter(recurrent_state, final_state, state_indices)
         return output
 
-    @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,
@@ -530,9 +1471,29 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         beta_is_preprocessed: bool = False,
     ) -> None:
+        torch.ops.vllm.ascend_kda_forward(
+            mixed_qkv,
+            g1,
+            g2,
+            beta,
+            core_attn_out,
+            self.prefix,
+            beta_is_preprocessed,
+        )
+
+    @eager_break_during_capture
+    def _kda_forward_impl(
+        self,
+        mixed_qkv: torch.Tensor,
+        g1: torch.Tensor,
+        g2: torch.Tensor,
+        beta: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        *,
+        beta_is_preprocessed: bool = False,
+    ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata_raw = self._get_kda_forward_metadata()
         if attn_metadata_raw is None:
             core_attn_out.zero_()
             return
@@ -559,7 +1520,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             is_preprocessed=beta_is_preprocessed,
         )
 
-        conv_state, recurrent_state = self.kv_cache
+        # ReplaySSM stores three record states after conv/checkpoint.
+        conv_state, recurrent_state = self.kv_cache[:2]
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
@@ -718,24 +1680,34 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             maybe_save_kv_layer_to_connector("", [])
             return
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
-        core_attn_out[:, :num_actual_tokens].zero_()
-        if core_spec is not None and core_non_spec is not None:
-            assert spec_token_indices is not None
-            assert non_spec_token_indices is not None
-            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
-        elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
-        elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
-
-        # Keep the registered norm's parameters while writing into the
-        # caller-owned attention output directly.
         norm_out = core_attn_out[:, :num_actual_tokens]
-        self.o_norm.forward_oot(norm_out, g2, out=norm_out)
-        core_attn_out[:, num_actual_tokens:].zero_()
+        single_core = core_spec if core_non_spec is None else core_non_spec if core_spec is None else None
+        if (
+            single_core is not None
+            and single_core.shape == norm_out.shape
+            and single_core.dtype == norm_out.dtype
+            and single_core.device == norm_out.device
+            and single_core.is_contiguous()
+        ):
+            # A single full-coverage branch is already in destination order.
+            # Read it directly; clearing/copying the destination would be wasted.
+            norm_input = single_core
+        else:
+            # FULL graphs can leave holes in mixed index sets. Preserve both
+            # zero-input norm semantics and the original copy/cast ordering.
+            norm_out.zero_()
+            if core_spec is not None and core_non_spec is not None:
+                assert spec_token_indices is not None
+                assert non_spec_token_indices is not None
+                assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
+                norm_out.index_copy_(1, spec_token_indices, core_spec)
+                norm_out.index_copy_(1, non_spec_token_indices, core_non_spec)
+            elif core_spec is not None:
+                norm_out.copy_(core_spec)
+            else:
+                norm_out.copy_(core_non_spec)
+            norm_input = norm_out
+
+        # The norm writes valid rows and zeroes graph padding in one launch.
+        self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
         maybe_save_kv_layer_to_connector("", [])

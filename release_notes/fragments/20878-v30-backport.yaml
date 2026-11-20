@@ -1,0 +1,6 @@
+pr: 20878
+entries:
+  - category: feature
+    text: Added an experimental Kimi K3.1 backport for vLLM 0.30 and Ascend 950DT, including DSA, paired hybrid caches, native operators, and an eager deployment recipe. Full-model hardware acceptance is required for the backported build.
+    model: kimi-k3.1-pro
+    hardware: [A5]

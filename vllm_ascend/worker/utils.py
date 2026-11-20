@@ -7,8 +7,15 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer, prepare_kernel_block_sizes, select_common_block_size
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -17,6 +24,8 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    *,
+    static_c8: bool = False,
 ) -> None:
     """Copy logical cache blocks for Ascend's segmented cache layout.
 
@@ -30,13 +39,20 @@ def copy_kv_cache_blocks_inplace(
     if not kv_cache_block_copies:
         return
 
+    if static_c8:
+        from vllm_ascend.attention.kimi_c8_static import pa_nz_storage_view
+
     cache_tensors: list[torch.Tensor] = []
     seen_tensors: set[int] = set()
     for entry in kv_caches:
         if entry is None:
             continue
         if isinstance(entry, torch.Tensor):
-            tensors = entry.unbind(0) if entry.ndim == 5 and entry.shape[0] == 2 else (entry,)
+            tensors = (
+                entry.unbind(0)
+                if entry.ndim == 5 and entry.shape[0] == 2 and not (static_c8 and entry.shape[1:3] == (1, 18))
+                else (entry,)
+            )
         else:
             tensors = entry
         for tensor in tensors:
@@ -46,10 +62,46 @@ def copy_kv_cache_blocks_inplace(
             if data_ptr in seen_tensors:
                 continue
             seen_tensors.add(data_ptr)
+            if static_c8 and tensor.ndim == 5 and tensor.shape[1:3] == (1, 18) and tensor.shape[-1] == 32:
+                tensor = pa_nz_storage_view(tensor)
             cache_tensors.append(tensor)
 
     if not cache_tensors:
         return
+
+    # A paired hybrid slot exposes a contiguous main-page view and strided
+    # recurrent component views of the same storage. Copying both can replay a
+    # cyclic copy over already-updated source bytes. Keep the enclosing view
+    # once; independent indexer key/scale planes still need their own copies.
+    contiguous_regions = [
+        (
+            i,
+            tensor.untyped_storage().data_ptr(),
+            tensor.data_ptr(),
+            tensor.data_ptr() + tensor.numel() * tensor.element_size(),
+        )
+        for i, tensor in enumerate(cache_tensors)
+        if tensor.is_contiguous()
+    ]
+    selected = []
+    for i, tensor in enumerate(cache_tensors):
+        storage = tensor.untyped_storage().data_ptr()
+        start = tensor.data_ptr()
+        span = (
+            1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+        ) * tensor.element_size()
+        end = start + span
+        enclosed = any(
+            storage == parent_storage
+            and parent_start <= start
+            and end <= parent_end
+            and (parent_end - parent_start > span or parent_index < i)
+            for parent_index, parent_storage, parent_start, parent_end in contiguous_regions
+            if parent_index != i
+        )
+        if not enclosed:
+            selected.append(tensor)
+    cache_tensors = selected
 
     device = cache_tensors[0].device
     for tensor in cache_tensors:
@@ -380,3 +432,71 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             BLOCK_SIZE=blk_size,
             GRID_SIZE=grid,
         )
+
+
+def _group_tensor_strides(
+    kv_cache_config: KVCacheConfig,
+    layer_names: Sequence[str],
+) -> list[tuple[int, int]]:
+    """``(layer_stride, block_stride)`` of every tensor holding ``layer_names``."""
+    return [
+        (tensor.layer_stride, tensor.block_stride)
+        for tensor in kv_cache_config.kv_cache_tensors
+        if not set(tensor.layers).isdisjoint(layer_names)
+    ]
+
+
+def prepare_ascend_kernel_block_sizes(
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+) -> list[int]:
+    """Upstream ``prepare_kernel_block_sizes`` with an alias-aware packing check.
+
+    vLLM #57169 refuses to split a cache group whose KV tensors are
+    block-outermost packed, detected as ``block_stride > layer_stride``. Ascend
+    layerwise reuse aliases several layers inside one physical slot, so those
+    tensors carry ``layer_stride == 0`` and trip that test although their pages
+    stay dense and contiguous. The group then keeps the manager block size,
+    leaving NoPE SFA addressing 256-token blocks while its backend, metadata
+    builder and block table all address 128-token kernel blocks. Re-split the
+    groups whose only evidence of packing is aliasing.
+
+    Args:
+        kv_cache_config: The KV cache configuration.
+        attn_groups: Attention groups indexed by KV cache group id.
+
+    Returns:
+        List of kernel block sizes for each cache group.
+    """
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    # Upstream drops only encoder-only groups, so this index tracks its output.
+    index = 0
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = next(iter(spec.kv_cache_specs.values()))
+        if isinstance(spec, EncoderOnlyAttentionSpec):
+            continue
+        if index >= len(kernel_block_sizes):
+            break
+        manager_block_size = group.kv_cache_spec.block_size
+        strides = _group_tensor_strides(kv_cache_config, group.layer_names)
+        block_outermost_packed = any(0 < layer_stride < block_stride for layer_stride, block_stride in strides)
+        aliases_layers = any(layer_stride == 0 and block_stride > 0 for layer_stride, block_stride in strides)
+        if (
+            spec.has_layer_views
+            and isinstance(spec, AttentionSpec)
+            and aliases_layers
+            and not block_outermost_packed
+            and kernel_block_sizes[index] == manager_block_size
+            and group_id < len(attn_groups)
+            and attn_groups[group_id]
+        ):
+            kernel_block_sizes[index] = select_common_block_size(
+                manager_block_size,
+                [attn_group.backend for attn_group in attn_groups[group_id]],
+                [attn_group.kv_cache_spec for attn_group in attn_groups[group_id]],
+            )
+        index += 1
+    return kernel_block_sizes

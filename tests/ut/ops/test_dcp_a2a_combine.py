@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -34,3 +35,60 @@ def test_deferred_exchange_skips_combine(monkeypatch, scatter_size):
     combine.assert_not_called()
     if scatter_size == 1:
         assert result is send
+
+
+@pytest.mark.parametrize("use_sfa_fast_exchange", [False, True])
+def test_sfa_exchange_does_not_replace_flashmla_combine(monkeypatch, use_sfa_fast_exchange):
+    """Keep cann's MLA pack/combine route unless the SFA caller opts in."""
+    partial = torch.empty(2, 16, 512, dtype=torch.bfloat16)
+    lse = torch.empty(2, 16, 1)
+    merged = torch.empty(2, 8, 512, dtype=torch.bfloat16)
+    pack = Mock(return_value=torch.empty(2, 8, 2, 516, dtype=torch.bfloat16))
+    combine = Mock(return_value=merged)
+    exchange = Mock(return_value=merged)
+    monkeypatch.setattr(dcp_a2a, "can_exchange", lambda *args: True)
+    monkeypatch.setattr(dcp_a2a, "pack_dcp_output_lse", pack)
+    monkeypatch.setattr(dcp_a2a, "fused_dcp_lse_combine", combine)
+    monkeypatch.setattr(dcp_a2a, "exchange", exchange)
+    monkeypatch.setattr(dcp_a2a.dist, "all_to_all_single", Mock())
+
+    result = dcp_a2a.dcp_a2a_fused_combine(partial, lse, 2, 1, object(), use_sfa_fast_exchange=use_sfa_fast_exchange)
+
+    assert result is merged
+    assert exchange.call_count == int(use_sfa_fast_exchange)
+    assert pack.call_count == combine.call_count == int(not use_sfa_fast_exchange)
+
+
+def _tensor(shape, dtype=torch.bfloat16):
+    from math import prod
+
+    strides = tuple(prod(shape[index + 1 :]) for index in range(len(shape)))
+    return SimpleNamespace(
+        ndim=len(shape),
+        shape=shape,
+        dtype=dtype,
+        device=SimpleNamespace(type="npu"),
+        is_contiguous=lambda: True,
+        stride=lambda: strides,
+    )
+
+
+@pytest.mark.parametrize("has_local", [False, True])
+@pytest.mark.parametrize("tokens,batched", [(8, False), (32, True), (40, True), (128, True)])
+def test_head_scatter_batch_dispatch_with_optional_local(monkeypatch, has_local, tokens, batched):
+    recv, output = _tensor((8, 12, tokens, 516)), _tensor((tokens, 12, 512))
+    local = _tensor((tokens, 12, 512)) if has_local else None
+    lse = _tensor((tokens, 12, 1), torch.float32) if has_local else None
+    batch, single = MagicMock(), MagicMock()
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", batch)
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_kernel", single)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: True)
+    monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
+    monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 56)
+    monkeypatch.setattr(dcp_a2a.triton, "next_power_of_2", lambda x: 1 << (x - 1).bit_length(), raising=False)
+    monkeypatch.setattr(dcp_a2a.torch, "empty", Mock(return_value=output))
+    assert dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse) is output
+    selected, unused = (batch, single) if batched else (single, batch)
+    selected.__getitem__.assert_called_once_with((56,))
+    unused.__getitem__.assert_not_called()
+    assert selected.__getitem__.return_value.call_args.kwargs["HAS_LOCAL"] is has_local
