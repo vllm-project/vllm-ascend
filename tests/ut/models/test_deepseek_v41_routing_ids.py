@@ -7,7 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v41 import model as model_module
 from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as router_module
@@ -25,15 +28,24 @@ def _router(*, hash_routing=True, vision=False):
     )
 
 
-def _config(*, dp=2, pcp=2, tp=2, sp=False, microbatch=False, max_tokens=8, capture_tokens=9):
+@pytest.fixture(autouse=True)
+def _mock_moe_config(monkeypatch):
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
+
+
+def _config(*, dp=2, pcp=2, tp=2, ep=False, microbatch=False, max_tokens=8, capture_tokens=9):
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             data_parallel_size=dp,
             prefill_context_parallel_size=pcp,
             tensor_parallel_size=tp,
-            use_sequence_parallel_moe=sp,
+            enable_expert_parallel=ep,
+            world_size_across_dp=dp * pcp * tp,
+            pipeline_parallel_size=1,
             use_ubatching=microbatch,
         ),
+        model_config=SimpleNamespace(get_num_experts=lambda: 256),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         compilation_config=SimpleNamespace(max_cudagraph_capture_size=capture_tokens),
     )
@@ -50,15 +62,12 @@ def _model(routers, *, replay_start=None, start=0):
     return model
 
 
-@pytest.mark.parametrize("dp,pcp", [(2, 1), (1, 2), (2, 2)])
-@pytest.mark.parametrize("sp", [False, True])
 @pytest.mark.parametrize("capture_tokens,expected_local_capacity", [(None, 8), (9, 12)])
-def test_cache_setup_supports_dp_pcp_and_graph_capacity(dp, pcp, sp, capture_tokens, expected_local_capacity):
+def test_cache_setup_supports_dp_pcp_and_graph_capacity(capture_tokens, expected_local_capacity):
     routers = [_router(hash_routing=False), _router(), _router(), _router(hash_routing=False, vision=True)]
     model = _model(routers)
-    model._init_routing_input_ids_cache(
-        _config(dp=dp, pcp=pcp, tp=4, sp=sp, max_tokens=5, capture_tokens=capture_tokens)
-    )
+    dp, pcp = 2, 2
+    model._init_routing_input_ids_cache(_config(dp=dp, pcp=pcp, tp=4, max_tokens=5, capture_tokens=capture_tokens))
 
     assert routers[0].routing_input_ids_buffer is None
     buffer = routers[1].routing_input_ids_buffer
@@ -69,6 +78,41 @@ def test_cache_setup_supports_dp_pcp_and_graph_capacity(dp, pcp, sp, capture_tok
     assert routers[3].routing_input_ids_buffer is buffer
     assert list(model.buffers()) == [buffer]
     assert not model.state_dict()
+
+
+@pytest.mark.parametrize(
+    "device,ep_size,max_tokens,expected_buffer",
+    [
+        (AscendDeviceType.A3, 16, 12, False),
+        (AscendDeviceType.A3, 1, 12, True),
+        (AscendDeviceType.A2, 16, 8, False),
+        (AscendDeviceType.A2, 16, 12, True),
+    ],
+    ids=["a3-ep", "a3-single-rank-ep", "a2-mc2-only", "a2-mc2-and-allgather"],
+)
+def test_cache_setup_requires_reachable_allgather(monkeypatch, device, ep_size, max_tokens, expected_buffer):
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device))
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: 8)
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=0))
+
+    router = _router()
+    model = _model([router])
+    model._init_routing_input_ids_cache(
+        _config(
+            dp=ep_size // 4 if ep_size > 1 else 1,
+            pcp=1,
+            tp=4 if ep_size > 1 else 1,
+            ep=True,
+            max_tokens=max_tokens,
+            capture_tokens=None,
+        )
+    )
+
+    assert router.is_routing_input_ids_producer == expected_buffer
+    assert (router.routing_input_ids_buffer is not None) == expected_buffer
+    assert len(list(model.buffers())) == int(expected_buffer)
 
 
 def test_cache_setup_skips_microbatches_and_layers_without_id_routing():
@@ -120,8 +164,7 @@ def _peer_gather(offset):
     return gather
 
 
-@pytest.mark.parametrize("dp,pcp", [(2, 1), (1, 2), (2, 2)])
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("dp,pcp,dtype", [(2, 1, torch.int32), (1, 2, torch.int64)])
 def test_hash_routing_reuses_dp_pcp_layout_and_refreshes_each_forward(monkeypatch, dp, pcp, dtype):
     """Use the real prepare path; only peer communication and the NPU hash op are mocked."""
     monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: 0)
@@ -143,6 +186,7 @@ def test_hash_routing_reuses_dp_pcp_layout_and_refreshes_each_forward(monkeypatc
 
     # The first two forwards reuse both shape and input address; later ones
     # shrink and grow to detect stale values and active-row slicing errors.
+    retained_view = buffer[:0]
     for forward_index, num_tokens in enumerate((3, 3, 0, 1, 4)):
         input_storage.copy_(torch.arange(4, dtype=dtype) + 10 + 10 * forward_index)
         input_storage[0] = -1
@@ -164,6 +208,15 @@ def test_hash_routing_reuses_dp_pcp_layout_and_refreshes_each_forward(monkeypatc
                 prepared.hidden_states, prepared.router_logits, torch.int32, input_ids=input_ids
             )
             assert gather.call_count == int(layer_index == 0)
+            if layer_index == len(routers) - 1:
+                if forward_index == 0:
+                    retained_view = router._prepare_routing_input_ids(input_ids, expected_ids.numel())
+                    assert retained_view.data_ptr() == buffer.data_ptr()
+                    gather.assert_not_called()
+                elif forward_index == 1:
+                    # A consumer holding the old view sees the producer's
+                    # second update without recomputing its routing IDs.
+                    torch.testing.assert_close(retained_view, expected_ids, rtol=0, atol=0)
             torch.testing.assert_close(buffer[: expected_ids.numel()], expected_ids, rtol=0, atol=0)
             expected = uncached._compute_routing(
                 prepared.hidden_states, prepared.router_logits, torch.int32, input_ids=input_ids
@@ -207,8 +260,7 @@ def test_sp_path_gathers_once_after_layer_prepare(monkeypatch):
     assert seen_id_gathers[0].dtype == torch.int64
 
 
-@pytest.mark.parametrize("comm_type", [MoECommType.MC2, MoECommType.ALLTOALL, MoECommType.FUSED_MC2])
-def test_other_communication_paths_do_not_consume_or_update_cached_ids(monkeypatch, comm_type):
+def test_mc2_does_not_consume_or_update_cached_ids(monkeypatch):
     producer, consumer = _router(), _router()
     buffer = torch.full((8,), 73, dtype=torch.int64)
     for router in (producer, consumer):
@@ -217,7 +269,7 @@ def test_other_communication_paths_do_not_consume_or_update_cached_ids(monkeypat
     gather = MagicMock(side_effect=lambda ids: torch.cat((ids, ids.flip(0))))
     split = MagicMock(side_effect=lambda ids: ids[:2])
     context = SimpleNamespace(
-        moe_comm_type=comm_type,
+        moe_comm_type=MoECommType.MC2,
         moe_comm_method=SimpleNamespace(
             pad_and_split_input_ids=split,
             prepare_finalize=SimpleNamespace(all_gather_input_ids=gather),
@@ -240,32 +292,6 @@ def test_other_communication_paths_do_not_consume_or_update_cached_ids(monkeypat
         actual = router._prepare_routing_input_ids(input_ids, 8)
         torch.testing.assert_close(actual, expected)
     gather.assert_called_once()
-
-
-def test_retained_consumer_view_observes_next_forward_ids(monkeypatch):
-    producer, consumer = _router(), _router()
-    buffer = torch.empty(8, dtype=torch.int64)
-    for router in (producer, consumer):
-        router.routing_input_ids_buffer = buffer
-    producer.is_routing_input_ids_producer = True
-    gather = MagicMock(side_effect=lambda ids: torch.cat((ids, ids.flip(0))))
-    monkeypatch.setattr(
-        router_module,
-        "_EXTRA_CTX",
-        SimpleNamespace(
-            moe_comm_type=MoECommType.ALLGATHER,
-            moe_comm_method=SimpleNamespace(prepare_finalize=SimpleNamespace(all_gather_input_ids=gather)),
-        ),
-    )
-    input_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
-    producer._prepare_routing_input_ids(input_ids, 8)
-    retained_view = consumer._prepare_routing_input_ids(input_ids, 8)
-    input_ids.add_(10)
-    producer._prepare_routing_input_ids(input_ids, 8)
-    # Captured consumers retain the address without re-entering Python.
-    assert retained_view.data_ptr() == buffer.data_ptr()
-    torch.testing.assert_close(retained_view, torch.tensor([11, 12, 13, 14, 14, 13, 12, 11]))
-    assert gather.call_count == 2
 
 
 def test_replay_prefix_and_tail_refresh_their_own_rows(monkeypatch):

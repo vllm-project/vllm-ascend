@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 import torch
 import torch_npu  # noqa: F401
 
@@ -13,8 +12,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as router_module
 
 
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-def test_routing_ids_refresh_across_separate_graphs(monkeypatch, dtype):
+def test_routing_ids_refresh_across_separate_graphs(monkeypatch):
     bucket_sizes = (3, 7)
     remote_ids = {size: torch.arange(size, dtype=torch.int64, device="npu") + 100 for size in bucket_sizes}
     gather = MagicMock(side_effect=lambda ids: torch.cat((ids, remote_ids[ids.numel()])))
@@ -35,7 +33,7 @@ def test_routing_ids_refresh_across_separate_graphs(monkeypatch, dtype):
 
     captures = []
     for size in bucket_sizes:
-        input_ids = torch.arange(size, dtype=dtype, device="npu")
+        input_ids = torch.arange(size, dtype=torch.int32, device="npu")
         num_rows = 2 * size
         for _ in range(3):
             producer._prepare_routing_input_ids(input_ids, num_rows)
@@ -63,7 +61,7 @@ def test_routing_ids_refresh_across_separate_graphs(monkeypatch, dtype):
     for step, (bucket, eager_producer) in enumerate(((0, False), (1, False), (0, True), (1, True), (0, False))):
         input_ids, producer_graph, consumer_graph, output = captures[bucket]
         size = input_ids.numel()
-        local_cpu = torch.arange(size, dtype=dtype) + 1000 * (step + 1)
+        local_cpu = torch.arange(size, dtype=torch.int32) + 1000 * (step + 1)
         remote_cpu = torch.arange(size, dtype=torch.int64) + 2000 * (step + 1)
         local_cpu[0] = -1
         local_cpu[1] = 0

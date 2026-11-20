@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -1191,12 +1192,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
         tp_size = parallel.tensor_parallel_size
-        max_rows = (
-            ((max_tokens + tp_size - 1) // tp_size)
-            * tp_size
-            * parallel.data_parallel_size
-            * parallel.prefill_context_parallel_size
-        )
+        max_padded_tokens = ((max_tokens + tp_size - 1) // tp_size) * tp_size
+        # If a policy can reach ALLGATHER, it still selects it as the token
+        # count increases. Check the largest supported padded batch.
+        if select_moe_comm_method(max_padded_tokens, vllm_config) != MoECommType.ALLGATHER:
+            return
+        max_rows = max_padded_tokens * parallel.data_parallel_size * parallel.prefill_context_parallel_size
         # The decoder replay tail may compact tokens and change cross-DP row
         # counts. Each segment therefore needs its own producer and storage.
         for start, end in (

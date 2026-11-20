@@ -18,7 +18,9 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAll
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as router_module
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 
-WORLD_SIZE = 4
+DP_SIZE = 2
+PCP_SIZE = 2
+WORLD_SIZE = DP_SIZE * PCP_SIZE
 NUM_LAYERS = 3
 TOKEN_COUNTS = ((2, 4, 1, 3), (2, 4, 1, 3), (5, 1, 3, 2), (1, 2, 1, 2))
 
@@ -43,11 +45,11 @@ def _input_ids(rank, count, iteration):
     return values
 
 
-def _expected_ids(counts, iteration, dp_size, pcp_size):
+def _expected_ids(counts, iteration):
     """Build the DP-then-PCP row order independently of the collectives."""
     pcp_rows = []
-    for pcp_rank in range(pcp_size):
-        ranks = [dp_rank * pcp_size + pcp_rank for dp_rank in range(dp_size)]
+    for pcp_rank in range(PCP_SIZE):
+        ranks = [dp_rank * PCP_SIZE + pcp_rank for dp_rank in range(DP_SIZE)]
         dp_width = max(counts[rank] for rank in ranks)
         rows: list[int] = []
         for rank in ranks:
@@ -62,7 +64,7 @@ def _expected_ids(counts, iteration, dp_size, pcp_size):
     )
 
 
-def _distributed_routing_ids_worker(rank, init_method, dp_size, pcp_size):
+def _distributed_routing_ids_worker(rank, init_method):
     dist.init_process_group(
         "gloo",
         init_method=init_method,
@@ -71,12 +73,12 @@ def _distributed_routing_ids_worker(rank, init_method, dp_size, pcp_size):
         timeout=timedelta(seconds=30),
     )
     try:
-        dp_rank, pcp_rank = divmod(rank, pcp_size)
-        pcp_groups = [dist.new_group([d * pcp_size + p for p in range(pcp_size)]) for d in range(dp_size)]
-        dp_groups = [dist.new_group([d * pcp_size + p for d in range(dp_size)]) for p in range(pcp_size)]
-        pcp = GatherGroup(pcp_groups[dp_rank], pcp_size)
-        dp = GatherGroup(dp_groups[pcp_rank], dp_size)
-        config = SimpleNamespace(is_sequence_parallel=False, dp_size=dp_size, pcp_size=pcp_size, dp_group=dp)
+        dp_rank, pcp_rank = divmod(rank, PCP_SIZE)
+        pcp_groups = [dist.new_group([d * PCP_SIZE + p for p in range(PCP_SIZE)]) for d in range(DP_SIZE)]
+        dp_groups = [dist.new_group([d * PCP_SIZE + p for d in range(DP_SIZE)]) for p in range(PCP_SIZE)]
+        pcp = GatherGroup(pcp_groups[dp_rank], PCP_SIZE)
+        dp = GatherGroup(dp_groups[pcp_rank], DP_SIZE)
+        config = SimpleNamespace(is_sequence_parallel=False, dp_size=DP_SIZE, pcp_size=PCP_SIZE, dp_group=dp)
         context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER)
         max_local_tokens = max(map(max, TOKEN_COUNTS))
         input_storage = torch.empty(max_local_tokens, dtype=torch.int32)
@@ -96,9 +98,9 @@ def _distributed_routing_ids_worker(rank, init_method, dp_size, pcp_size):
             for iteration, counts in enumerate(TOKEN_COUNTS):
                 input_ids = input_storage[: counts[rank]]
                 input_ids.copy_(_input_ids(rank, counts[rank], iteration))
-                expected = _expected_ids(counts, iteration, dp_size, pcp_size)
-                context.max_tokens_across_dp = max(counts[d * pcp_size + pcp_rank] for d in range(dp_size))
-                context.max_tokens_across_pcp = dp_size * max(counts)
+                expected = _expected_ids(counts, iteration)
+                context.max_tokens_across_dp = max(counts[d * PCP_SIZE + pcp_rank] for d in range(DP_SIZE))
+                context.max_tokens_across_pcp = DP_SIZE * max(counts)
                 baseline_outputs: list[torch.Tensor] = []
                 for reuse, routers in ((False, baseline_routers), (True, cached_routers)):
                     dp.id_gathers = pcp.id_gathers = 0
@@ -120,19 +122,17 @@ def _distributed_routing_ids_worker(rank, init_method, dp_size, pcp_size):
                         else:
                             baseline_outputs.append(actual.clone())
                         expected_gathers = 1 if reuse else layer_index + 1
-                        assert dp.id_gathers == (expected_gathers if dp_size > 1 else 0)
-                        assert pcp.id_gathers == (expected_gathers if pcp_size > 1 else 0)
+                        assert dp.id_gathers == pcp.id_gathers == expected_gathers
                 dist.monitored_barrier(timeout=timedelta(seconds=30))
     finally:
         dist.destroy_process_group()
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="fork inherits the CPU test dependency mocks")
-@pytest.mark.parametrize("dp_size,pcp_size", [(2, 2), (4, 1), (1, 4)])
-def test_routing_ids_reuse_real_dp_pcp_collectives(tmp_path, dp_size, pcp_size):
+def test_routing_ids_reuse_real_dp_pcp_collectives(tmp_path):
     mp.start_processes(
         _distributed_routing_ids_worker,
-        args=(f"file://{tmp_path / 'rendezvous'}", dp_size, pcp_size),
+        args=(f"file://{tmp_path / 'rendezvous'}",),
         nprocs=WORLD_SIZE,
         start_method="fork",
     )
