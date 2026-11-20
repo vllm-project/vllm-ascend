@@ -47,7 +47,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import enable_sp, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -65,6 +65,12 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+
+def _sp_dispatch_align_enabled() -> bool:
+    import os
+
+    return os.getenv("VLLM_ASCEND_SP_DISPATCH_ALIGN", "1").strip() != "0"
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):
@@ -131,6 +137,33 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=device,
+        )
+
+    def _build_uniform_batch_dp_sync(self, target_dp_sync_state, num_reqs, num_query_per_req=1):
+        """Align a reused target DP sync to a TP multiple under Ascend MoE SP.
+
+        Ascend SP shards the token axis across TP; the draft decode reuses the
+        target DP sync, so its ``num_tokens_across_dp`` must stay TP-divisible
+        to satisfy upstream's reuse assertion in ``dispatch_cg_and_sync_dp``.
+        """
+        sync_state, num_batch_tokens = super()._build_uniform_batch_dp_sync(
+            target_dp_sync_state, num_reqs, num_query_per_req
+        )
+        if not _sp_dispatch_align_enabled():
+            return sync_state, num_batch_tokens
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = getattr(parallel_config, "tensor_parallel_size", 1)
+        if not (enable_sp(self.vllm_config) and tp_size > 1):
+            return sync_state, num_batch_tokens
+        aligned = (num_batch_tokens + tp_size - 1) // tp_size * tp_size
+        if aligned == num_batch_tokens:
+            return sync_state, num_batch_tokens
+        return (
+            replace(
+                sync_state,
+                num_tokens_across_dp=torch.full_like(sync_state.num_tokens_across_dp, aligned),
+            ),
+            aligned,
         )
 
     def _init_dcp(self) -> None:
