@@ -92,7 +92,6 @@ def _norm_rope_tile_npu_chunk(
     token_start,
     stride_x_token,
     stride_out_token,
-    seg_base,
     head_off,
     w_hd,
     b_hd,
@@ -107,8 +106,7 @@ def _norm_rope_tile_npu_chunk(
     TOTAL_HEADS: tl.constexpr,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
-    SUBTRACT_MEAN: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
+    LAYERNORM: tl.constexpr,
     BLOCK_R: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
 ) -> None:
@@ -122,7 +120,7 @@ def _norm_rope_tile_npu_chunk(
     out_base = tok_abs * stride_out_token + head_off + head * head_dim
 
     x_bp = tl.make_block_ptr(
-        base=x_ptr + seg_base,
+        base=x_ptr,
         shape=(tokens, TOTAL_HEADS * head_dim),
         strides=(stride_x_token, 1),
         offsets=(token_start, head_off),
@@ -144,7 +142,7 @@ def _norm_rope_tile_npu_chunk(
     )
 
     sum_sq = tl.sum(values * values, axis=1)
-    if SUBTRACT_MEAN:
+    if LAYERNORM:
         mean = tl.sum(values, axis=1) / head_dim
         variance = sum_sq / head_dim - mean * mean
     else:
@@ -152,11 +150,11 @@ def _norm_rope_tile_npu_chunk(
         variance = sum_sq / head_dim
     rstd = tl.rsqrt(variance + eps)
     result_tail = (values - mean[:, None]) * rstd[:, None] * (w_hd + weight_bias)
-    if HAS_BIAS:
+    if LAYERNORM:
         result_tail = result_tail + b_hd
 
     if CH == 1:
-        xrow = tok_abs * stride_x_token + head_off + head * head_dim + seg_base
+        xrow = tok_abs * stride_x_token + head_off + head * head_dim
         real_raw = tl.load(
             x_ptr + xrow[:, None] + half[None, :],
             mask=row_ok[:, None] & half_ok[None, :], other=0.0).to(tl.float32)
@@ -168,7 +166,7 @@ def _norm_rope_tile_npu_chunk(
         imag_raw = extension.extract_slice(values, [0, rotary_dim], [ROWS_PER_PROGRAM * CH, BLOCK_R], [1, 1])
     real = (real_raw - mean[:, None]) * rstd[:, None] * (w_real + weight_bias)
     imaginary = (imag_raw - mean[:, None]) * rstd[:, None] * (w_imag + weight_bias)
-    if HAS_BIAS:
+    if LAYERNORM:
         real = real + b_real
         imaginary = imaginary + b_imag
     real = real.to(x_ptr.dtype.element_ty).to(tl.float32)
@@ -222,7 +220,6 @@ def _norm_rope_tile_npu(
     stride_x_token,
     stride_out_token,
     stride_cos,
-    seg_base,
     w_all,
     w_real,
     w_imag,
@@ -235,8 +232,7 @@ def _norm_rope_tile_npu(
     num_heads: tl.constexpr,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
-    SUBTRACT_MEAN: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
+    LAYERNORM: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_R: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
@@ -247,7 +243,7 @@ def _norm_rope_tile_npu(
     half = tl.arange(0, BLOCK_R)
     half_ok = half < rotary_dim
     w_hd = extension.extract_slice(tl.reshape(w_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
-    if HAS_BIAS:
+    if LAYERNORM:
         b_hd = extension.extract_slice(tl.reshape(b_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
     else:
         b_hd = tl.zeros((1, head_dim), dtype=tl.float32)
@@ -269,19 +265,19 @@ def _norm_rope_tile_npu(
     for c in tl.static_range(N_FULL):
         _norm_rope_tile_npu_chunk(
             x_ptr, out_ptr, cos_t, sin_t, token_start,
-            stride_x_token, stride_out_token, seg_base, c * H_CHUNK * head_dim,
+            stride_x_token, stride_out_token, c * H_CHUNK * head_dim,
             w_hd, b_hd, w_real, w_imag, b_real, b_imag, eps, weight_bias, tokens,
             CH=H_CHUNK, TOTAL_HEADS=num_heads, head_dim=head_dim, rotary_dim=rotary_dim,
-            SUBTRACT_MEAN=SUBTRACT_MEAN, HAS_BIAS=HAS_BIAS,
+            LAYERNORM=LAYERNORM,
             BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
         )
     if REM_HEADS > 0:
         _norm_rope_tile_npu_chunk(
             x_ptr, out_ptr, cos_t, sin_t, token_start,
-            stride_x_token, stride_out_token, seg_base, N_FULL * H_CHUNK * head_dim,
+            stride_x_token, stride_out_token, N_FULL * H_CHUNK * head_dim,
             w_hd, b_hd, w_real, w_imag, b_real, b_imag, eps, weight_bias, tokens,
             CH=REM_HEADS, TOTAL_HEADS=num_heads, head_dim=head_dim, rotary_dim=rotary_dim,
-            SUBTRACT_MEAN=SUBTRACT_MEAN, HAS_BIAS=HAS_BIAS,
+            LAYERNORM=LAYERNORM,
             BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
         )
 
@@ -306,7 +302,6 @@ def _indexer_qkz_norm_rope_kernel(
     out_k_ptr,
     out_z_ptr,
     q_weight_ptr,
-    q_bias_ptr,
     k_weight_ptr,
     k_bias_ptr,
     cos_sin_cache_ptr,
@@ -320,15 +315,10 @@ def _indexer_qkz_norm_rope_kernel(
     stride_cos,
     eps,
     weight_bias_q,
-    weight_bias_k,
     num_q_heads: tl.constexpr,
     num_k_heads: tl.constexpr,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
-    SUBTRACT_MEAN_Q: tl.constexpr,
-    HAS_BIAS_Q: tl.constexpr,
-    SUBTRACT_MEAN_K: tl.constexpr,
-    HAS_BIAS_K: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_R: tl.constexpr,
     ROWS_PER_PROGRAM_Q: tl.constexpr,
@@ -351,14 +341,9 @@ def _indexer_qkz_norm_rope_kernel(
     w_all_q = tl.load(q_weight_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
     w_real_q = tl.load(q_weight_ptr + half, mask=half_ok, other=0.0).to(tl.float32)
     w_imag_q = tl.load(q_weight_ptr + rotary_dim + half, mask=half_ok, other=0.0).to(tl.float32)
-    if HAS_BIAS_Q:
-        b_all_q = tl.load(q_bias_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
-        b_real_q = tl.load(q_bias_ptr + half, mask=half_ok, other=0.0).to(tl.float32)
-        b_imag_q = tl.load(q_bias_ptr + rotary_dim + half, mask=half_ok, other=0.0).to(tl.float32)
-    else:
-        b_all_q = tl.zeros((BLOCK_D,), dtype=tl.float32)
-        b_real_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
-        b_imag_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
+    b_all_q = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    b_real_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
+    b_imag_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
     num_q_tiles = (tokens + ROWS_PER_PROGRAM_Q - 1) // ROWS_PER_PROGRAM_Q
     for t in range(pid, num_q_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_Q
@@ -367,11 +352,11 @@ def _indexer_qkz_norm_rope_kernel(
         _norm_rope_tile_npu(
             x_q_ptr, out_q_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
-            stride_x_q, stride_out_q, stride_cos, 0,
+            stride_x_q, stride_out_q, stride_cos,
             w_all_q, w_real_q, w_imag_q, b_all_q, b_real_q, b_imag_q, eps, weight_bias_q,
             tokens,
             num_heads=num_q_heads, head_dim=head_dim, rotary_dim=rotary_dim,
-            SUBTRACT_MEAN=SUBTRACT_MEAN_Q, HAS_BIAS=HAS_BIAS_Q,
+            LAYERNORM=False,
             BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_Q,
             H_CHUNK=H_CHUNK_Q, N_FULL=N_FULL_Q, REM_HEADS=REM_Q,
         )
@@ -379,14 +364,9 @@ def _indexer_qkz_norm_rope_kernel(
     w_all_k = tl.load(k_weight_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
     w_real_k = tl.load(k_weight_ptr + half, mask=half_ok, other=0.0).to(tl.float32)
     w_imag_k = tl.load(k_weight_ptr + rotary_dim + half, mask=half_ok, other=0.0).to(tl.float32)
-    if HAS_BIAS_K:
-        b_all_k = tl.load(k_bias_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
-        b_real_k = tl.load(k_bias_ptr + half, mask=half_ok, other=0.0).to(tl.float32)
-        b_imag_k = tl.load(k_bias_ptr + rotary_dim + half, mask=half_ok, other=0.0).to(tl.float32)
-    else:
-        b_all_k = tl.zeros((BLOCK_D,), dtype=tl.float32)
-        b_real_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
-        b_imag_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
+    b_all_k = tl.load(k_bias_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
+    b_real_k = tl.load(k_bias_ptr + half, mask=half_ok, other=0.0).to(tl.float32)
+    b_imag_k = tl.load(k_bias_ptr + rotary_dim + half, mask=half_ok, other=0.0).to(tl.float32)
     num_k_tiles = (tokens + ROWS_PER_PROGRAM_KZ - 1) // ROWS_PER_PROGRAM_KZ
     for t in range(pid, num_k_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_KZ
@@ -395,11 +375,11 @@ def _indexer_qkz_norm_rope_kernel(
         _norm_rope_tile_npu(
             x_k_ptr, out_k_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
-            stride_x_k, stride_out_k, stride_cos, 0,
-            w_all_k, w_real_k, w_imag_k, b_all_k, b_real_k, b_imag_k, eps, weight_bias_k,
+            stride_x_k, stride_out_k, stride_cos,
+            w_all_k, w_real_k, w_imag_k, b_all_k, b_real_k, b_imag_k, eps, 0.0,
             tokens,
             num_heads=num_k_heads, head_dim=head_dim, rotary_dim=rotary_dim,
-            SUBTRACT_MEAN=SUBTRACT_MEAN_K, HAS_BIAS=HAS_BIAS_K,
+            LAYERNORM=True,
             BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_KZ,
             H_CHUNK=H_CHUNK_K, N_FULL=N_FULL_K, REM_HEADS=REM_K,
         )
@@ -499,9 +479,8 @@ def _fused_indexer_qkz_norm_rope_impl(
         out_k,
         out_z,
         q_norm_weight,
-        q_norm_weight,
         k_norm_weight,
-        k_norm_bias if k_norm_bias is not None else k_norm_weight,
+        k_norm_bias,
         cos_sin_cache,
         positions,
         tokens,
@@ -513,15 +492,10 @@ def _fused_indexer_qkz_norm_rope_impl(
         cos_sin_cache.stride(0),
         eps,
         q_norm_weight_bias,
-        0.0,
         num_q_heads=num_q_heads,
         num_k_heads=num_k_heads,
         head_dim=head_dim,
         rotary_dim=rotary_pairs,
-        SUBTRACT_MEAN_Q=False,
-        HAS_BIAS_Q=False,
-        SUBTRACT_MEAN_K=True,
-        HAS_BIAS_K=True,
         BLOCK_D=triton.next_power_of_2(head_dim),
         BLOCK_R=triton.next_power_of_2(rotary_pairs),
         H_CHUNK_Q=(hc_q := _pick_head_chunk(num_q_heads, head_dim)),
