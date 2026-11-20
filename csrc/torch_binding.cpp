@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include <dlfcn.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -55,7 +54,6 @@
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
-#include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/hisparse_resolve_residency/hisparse_resolve_residency_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
@@ -2177,92 +2175,6 @@ at::Tensor chunk_fwd_o_vllm(
     return o;
 }
 
-at::Tensor npu_sparse_attention_score_prefill(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &block_table,
-    const at::Tensor &k2q_row_ptr,
-    const at::Tensor &k2q_q_indices,
-    const at::Tensor &k2q_slot_indices,
-    int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise,
-    const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
-{
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-                                       "than 0, but shape[", i, "] is ", query.size(i));
-    }
-
-    at::ScalarType out_dtype = query.scalar_type();
-    if (query.scalar_type() == at::kFloat8_e4m3fn) {
-        out_dtype = at::kBFloat16;
-    }
-    at::Tensor output = at::empty(query.sizes(), query.options().dtype(out_dtype));
-    // MinimaxSparseAttentionSplitKv always exposes softmaxLse as its second
-    // ACLNN output. Prefill does not consume it, so keep the flag disabled and
-    // pass the empty FP32 placeholder required by the operator interface.
-    at::Tensor softmax_lse = at::empty({0}, query.options().dtype(at::kFloat));
-    bool softmax_lse_flag = false;
-    std::string input_layout = "TND";
-    char *input_layout_ptr = const_cast<char *>(input_layout.c_str());
-
-    EXEC_NPU_CMD(
-        aclnnMinimaxSparseAttentionSplitKv,
-        query,
-        key,
-        value,
-        block_table,
-        k2q_row_ptr,
-        k2q_q_indices,
-        k2q_slot_indices,
-        actual_seq_lengths,
-        actual_seq_lengths_kv,
-        num_key_value_heads,
-        scale_value,
-        block_size,
-        top_k,
-        inner_precise,
-        softmax_lse_flag,
-        input_layout_ptr,
-        output,
-        softmax_lse
-    );
-
-    return output;
-}
-
-bool is_minimax_sparse_attention_split_kv_available()
-{
-    static const bool is_available = []() {
-        auto run = GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKv");
-        auto workspace = GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKvGetWorkspaceSize");
-        if (run == nullptr || workspace == nullptr) {
-            return false;
-        }
-        Dl_info run_info{}, workspace_info{};
-        if (dladdr(run, &run_info) == 0 || dladdr(workspace, &workspace_info) == 0 ||
-            run_info.dli_fbase != workspace_info.dli_fbase) {
-            return false;
-        }
-        // The metadata-enabled experimental ABI adds metadataOptional to
-        // GetWorkspaceSize without renaming it. This binding uses the earlier
-        // signature. Reject that known incompatible ABI before invoking it.
-        // Inspect the selected provider, not a lower-priority vendor library.
-        if (workspace_info.dli_fname == nullptr) {
-            return false;
-        }
-        auto handle = dlopen(workspace_info.dli_fname, RTLD_LAZY | RTLD_LOCAL);
-        if (handle == nullptr) {
-            return false;
-        }
-        const bool has_metadata =
-            dlsym(handle, "aclnnMinimaxSparseAttentionSplitKvMetadataGetWorkspaceSize") != nullptr;
-        dlclose(handle);
-        return !has_metadata;
-    }();
-    return is_available;
-}
-
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -3105,29 +3017,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
-
-    // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
-    ops.def(
-        "npu_k2q_csr(Tensor q2k, Tensor cu_seqlens, Tensor cu_block_lens, "
-        "int order_method=0, int total_rows=-1, int max_kv=-1, int use_simt=0, "
-        "int q_global_offset=0) "
-        "-> (Tensor row_ptr, Tensor q_ind, Tensor slot)"
-    );
-    ops.impl("npu_k2q_csr", torch::kPrivateUse1, &vllm_ascend::npu_k2q_csr);
-
-    ops.def(
-        "npu_sparse_attention_score_prefill(Tensor query, Tensor key, Tensor value,"
-        "                           Tensor block_table,Tensor k2q_row_ptr,Tensor k2q_q_indices,Tensor k2q_slot_indices,"
-        "                           int num_key_value_heads, float scale_value,"
-        "                           int block_size, int top_k, int inner_precise, *,"
-        "                           Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None"
-        "                           ) -> Tensor "
-    );
-    ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
-
-    ops.def("is_minimax_sparse_attention_split_kv_available() -> bool");
-    ops.impl("is_minimax_sparse_attention_split_kv_available", c10::DispatchKey::CompositeExplicitAutograd,
-             &vllm_ascend::is_minimax_sparse_attention_split_kv_available);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"

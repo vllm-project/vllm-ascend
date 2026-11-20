@@ -56,7 +56,6 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _decode_gbsa_block_counts,
     _minimax_m3_index_score,
     _minimax_m3_index_score_topk,
-    _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
     minimax_m3_index_prefill,
 )
@@ -657,8 +656,6 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
-        assert metadata.prefill.cu_seqlens_k.shape[0] == batch_spec.batch_size + 1
-        assert metadata.prefill.total_kv_blocks == 5
         assert metadata.prefill.max_kv_blocks == 3
         assert metadata.prefill.cu_seqlens_q.data_ptr() == builder.prefill_cu_seqlens_q_buffer.data_ptr()
         rebuilt = builder.build(0, common)
@@ -2428,13 +2425,11 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
         ),
         prefill=AscendMiniMaxM3SparsePrefillMetadata(
             cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
-            cu_seqlens_k=torch.tensor([0, 7], dtype=torch.int32),
             seq_lens=torch.tensor([7], dtype=torch.int32),
             context_lens=torch.tensor([5], dtype=torch.int32),
             block_table=torch.tensor([[2, 3]], dtype=torch.int32),
             max_query_len=2,
             max_seq_len=7,
-            total_kv_blocks=1,
             max_kv_blocks=1,
         ),
     )
@@ -2465,79 +2460,6 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.kwargs["indices_are_sorted"] is expected_sorted
     assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
-    assert mock_sparse_attn_prefill.call_args.kwargs["total_kv_blocks"] == 1
-    assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
-
-
-@pytest.mark.parametrize(("supports_fp8", "expected_inner_precise"), [(False, 0), (True, 1)])
-@patch.object(
-    torch.ops._C_ascend,
-    "npu_sparse_attention_score_prefill",
-    create=True,
-)
-@patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu._npu_k2q_csr")
-def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
-    mock_k2q_csr: MagicMock,
-    mock_sparse_attention_score_prefill: MagicMock,
-    supports_fp8: bool,
-    expected_inner_precise: int,
-) -> None:
-    q = torch.zeros(3, 4, 4, dtype=torch.bfloat16)
-    kv_cache = torch.zeros(2, 8, 128, 2, 4, dtype=torch.bfloat16)
-    topk_idx = torch.tensor(
-        [
-            [[0, 1], [0, -1], [2, 1]],
-            [[0, 1], [1, -1], [2, 0]],
-        ],
-        dtype=torch.int32,
-    )
-    block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
-    original_topk_idx = topk_idx.clone()
-    cu_seqlens_q = torch.tensor([0, 1, 3], dtype=torch.int32)
-    seq_lens = torch.tensor([129, 257], dtype=torch.int32)
-    output = torch.empty_like(q)
-    k2q_row_ptr = torch.zeros(2, 6, dtype=torch.int32)
-    k2q_q_indices = torch.zeros(2, 6, dtype=torch.int32)
-    k2q_slot_indices = torch.zeros(2, 6, dtype=torch.int32)
-    mock_k2q_csr.return_value = (k2q_row_ptr, k2q_q_indices, k2q_slot_indices)
-    mock_sparse_attention_score_prefill.return_value = torch.ones_like(output)
-
-    _minimax_m3_sparse_attn_kv_gather_q(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        num_kv_heads=2,
-        sm_scale=0.5,
-        output=output,
-        block_size=128,
-        total_kv_blocks=5,
-        max_kv_blocks=3,
-        supports_fp8=supports_fp8,
-    )
-
-    mock_k2q_csr.assert_called_once()
-    k2q_kwargs = mock_k2q_csr.call_args.kwargs
-    assert k2q_kwargs["order_method"] == 1
-    assert k2q_kwargs["total_rows"] == 5
-    assert k2q_kwargs["max_kv"] == 3
-    assert k2q_kwargs["use_simt"] == 0
-    assert k2q_kwargs["q_global_offset"] is True
-    assert mock_k2q_csr.call_args.args[0] is topk_idx
-    assert torch.equal(topk_idx, original_topk_idx)
-
-    mock_sparse_attention_score_prefill.assert_called_once()
-    args = mock_sparse_attention_score_prefill.call_args.args
-    kwargs = mock_sparse_attention_score_prefill.call_args.kwargs
-    assert args[0] is q
-    assert args[3] is block_table
-    assert args[4] is k2q_row_ptr
-    assert args[7:12] == (2, 0.5, 128, 2, expected_inner_precise)
-    assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([1, 2], dtype=torch.int32))
-    assert torch.equal(kwargs["actual_seq_lengths_kv"], seq_lens)
-    assert torch.equal(output, torch.ones_like(output))
 
 
 @pytest.mark.parametrize("reuse_prefix", [False, True])
@@ -3167,45 +3089,6 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
     assert torch.equal(output, torch.ones_like(output))
 
 
-@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score_prefill", create=True)
-@patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu._npu_k2q_csr")
-def test_sparse_attn_prefill_a5_uses_fp8_inputs(
-    mock_k2q_csr: MagicMock,
-    mock_sparse_attention_score_prefill: MagicMock,
-) -> None:
-    q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
-    kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
-    topk_idx = torch.tensor([[[0]]], dtype=torch.int32)
-    block_table = torch.zeros(1, 1, dtype=torch.int32)
-    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
-    seq_lens = torch.ones(1, dtype=torch.int32)
-    output = torch.empty_like(q)
-    csr = torch.zeros(1, dtype=torch.int32)
-    mock_k2q_csr.return_value = (csr, csr, csr)
-    mock_sparse_attention_score_prefill.return_value = torch.ones_like(output)
-
-    _minimax_m3_sparse_attn_kv_gather_q(
-        q,
-        kv_cache,
-        topk_idx,
-        block_table,
-        cu_seqlens_q,
-        seq_lens,
-        num_kv_heads=1,
-        sm_scale=0.5,
-        output=output,
-        block_size=128,
-        total_kv_blocks=1,
-        max_kv_blocks=1,
-        supports_fp8=True,
-    )
-    args = mock_sparse_attention_score_prefill.call_args.args
-    assert args[0].dtype == torch.float8_e4m3fn
-    assert args[1].dtype == torch.float8_e4m3fn
-    assert args[2].dtype == torch.float8_e4m3fn
-    assert args[11] == 4
-
-
 @pytest.mark.parametrize(
     ("device_type", "dtype", "expected_precision"),
     [
@@ -3216,11 +3099,13 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
     ],
 )
 @pytest.mark.parametrize("cache_layout", ["tensor", "tuple", "list"])
-def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
+@pytest.mark.parametrize("split_kv_available", [False, True])
+def test_sparse_attn_prefill_uses_cann_gbsa(
     device_type: AscendDeviceType,
     dtype,
     expected_precision,
     cache_layout,
+    split_kv_available: bool,
     mock_gbsa_ops: tuple[MagicMock, MagicMock],
 ) -> None:
     q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]] * 5, dtype=torch.bfloat16)
@@ -3236,8 +3121,14 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     gbsa_attention_op.return_value = (torch.ones_like(q), torch.empty(0))
     with (
         patch.object(msa_m3_npu_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
-        patch.object(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", return_value=False),
-        patch.object(msa_m3_npu_module, "_npu_k2q_csr") as k2q,
+        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": None}),
+        patch.object(
+            torch.ops._C_ascend,
+            "is_minimax_sparse_attention_split_kv_available",
+            return_value=split_kv_available,
+            create=True,
+        ) as is_available,
+        patch.object(torch.ops._C_ascend, "npu_k2q_csr", create=True) as k2q,
         patch("torch.ops._C_ascend.npu_sparse_attention_score_prefill", create=True) as split_kv,
     ):
         msa_m3_npu_module.minimax_m3_sparse_attn(
@@ -3252,9 +3143,8 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
             1,
             0.5,
             output,
-            total_kv_blocks=3,
-            max_kv_blocks=2,
         )
+    is_available.assert_not_called()
     k2q.assert_not_called()
     split_kv.assert_not_called()
     gbsa_metadata_op.assert_called_once()
@@ -3285,14 +3175,14 @@ def test_sparse_attn_prefill_missing_split_kv_uses_cann_gbsa(
     torch.testing.assert_close(output, torch.ones_like(q))
 
 
-def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
+def test_sparse_attn_prefill_rejects_mismatched_fp8_cache() -> None:
     q = torch.zeros(1, 1, 4, dtype=torch.bfloat16)
     kv_cache = (
         torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn),
         torch.zeros(1, 128, 1, 4, dtype=torch.bfloat16),
     )
     with pytest.raises(TypeError, match="FP8 sparse attention"):
-        msa_m3_npu_module._minimax_m3_sparse_attn_a3(
+        msa_m3_npu_module._minimax_m3_sparse_attn_gbsa(
             q,
             kv_cache,
             torch.zeros(1, 1, 1, dtype=torch.int32),
@@ -3328,11 +3218,15 @@ def test_sparse_model_prefill_dispatches_by_operator_availability(
     if load_error is not None:
         mock_union_ops[3][1].load.side_effect = load_error("Union extension failed to load")
     mock_is_available = MagicMock(return_value=split_kv_available)
-    monkeypatch.setattr(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", mock_is_available)
-    mock_union, mock_kv_gather_q, mock_gbsa = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(
+        torch.ops._C_ascend, "is_minimax_sparse_attention_split_kv_available", mock_is_available, raising=False
+    )
+    mock_union, mock_gbsa = MagicMock(), MagicMock()
+    mock_k2q, mock_split_kv = MagicMock(), MagicMock()
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_k2q_csr", mock_k2q, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_attention_score_prefill", mock_split_kv, raising=False)
     monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", mock_union)
-    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_kv_gather_q", mock_kv_gather_q)
-    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3", mock_gbsa)
+    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_gbsa", mock_gbsa)
     impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "auto", topk_blocks=16, sparse_block_size=128)
     builder = _make_sparse_builder(torch.device("cpu"), impl=impl)
     common = _create_common_attn_metadata(BatchSpec(seq_lens=[257, 513], query_lens=[9, 17]), 128, torch.device("cpu"))
@@ -3350,23 +3244,16 @@ def test_sparse_model_prefill_dispatches_by_operator_availability(
     assert metadata_op.call_count == metadata_calls_before_forward
     assert sum(call.kwargs.get("mask_mode") == 3 for call in metadata_op.call_args_list) == int(expect_union)
     assert mock_union.call_count == int(expect_union)
-    assert mock_is_available.call_count == int(not expect_union)
+    mock_is_available.assert_not_called()
+    mock_k2q.assert_not_called()
+    mock_split_kv.assert_not_called()
+    assert md.prefill.max_kv_blocks == 5
     if expect_union:
-        mock_kv_gather_q.assert_not_called()
         mock_gbsa.assert_not_called()
-    elif split_kv_available:
-        mock_kv_gather_q.assert_called_once()
-        mock_gbsa.assert_not_called()
-        assert mock_kv_gather_q.call_args.args[-2:] == (8, 5)
-        assert mock_kv_gather_q.call_args.kwargs == {
-            "supports_fp8": device_type == AscendDeviceType.A5,
-        }
+        assert mock_union.call_args.args[7] == 5
     else:
         mock_gbsa.assert_called_once()
-        mock_kv_gather_q.assert_not_called()
-        assert mock_gbsa.call_args.kwargs == {
-            "max_query_len": 17,
-        }
+        assert mock_gbsa.call_args.kwargs == {"max_query_len": 17}
 
 
 @pytest.mark.parametrize("tp_size", [1, 4, 8])

@@ -20,6 +20,13 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
+MiniMax-M3 sparse Prefill retains Union Attention for supported configurations,
+with native CANN GenericBlockSparseAttention (GBSA) as its fallback on A2/A3
+and 950DT. The optional K2Q / KV-gather-Q Prefill path has been removed;
+installing a Split-KV experimental package no longer changes the Prefill backend.
+Use a CANN Ops Transformer package that provides GBSA and its metadata operator.
+No serving command changes are required for deployments already using GBSA.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

@@ -126,7 +126,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "k2q_csr"
         "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
@@ -177,7 +176,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "k2q_csr"
         "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
@@ -220,7 +218,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
-        "k2q_csr"
         "hisparse_resolve_residency"
     )
 
