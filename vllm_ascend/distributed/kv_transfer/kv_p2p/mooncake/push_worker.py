@@ -248,7 +248,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 setattr(self, name, getattr(self.transfer_metadata, name))
             self._zmq_context = Context()
             self._sender_executor = ThreadPoolExecutor(
-                max_workers=32,
+                max_workers=self._get_transfer_max_workers(self.vllm_config),
                 initializer=torch.npu.set_device,
                 initargs=(self._device,),
                 thread_name_prefix="MooncakePushSending",
