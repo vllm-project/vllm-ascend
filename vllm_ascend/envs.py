@@ -89,13 +89,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # eager-mode offline calibration only (fa_v_calib module); default ""
     # keeps it fully inert. Not sensitive.
     "VLLM_ASCEND_CALIB_FA_V": lambda: os.getenv("VLLM_ASCEND_CALIB_FA_V", ""),
-    # Write the int8_qfa KV payloads via the fused npu_scatter_pa_kv_cache
-    # operator (ScatterPaKvCache contract scenario 1: strided 5-D PA_NZ
-    # packet views, dim0 stride consumed as the block stride -- the same
-    # pattern the C8-MXFP backend uses). "1" (default) takes the fused
-    # scatter; "0" falls back to strided index_put_, which materializes the
-    # whole per-layer pool per call (~8.5 ms/layer) and is kept as the A/B
-    # reference. Not sensitive.
+    # Write the int8_qfa K/V payloads via the triton scatter_kv_payload
+    # kernel, which writes only the addressed bytes of the strided 5-D
+    # PA_NZ packet views (the mxfp_k_scale pattern). "1" (default) takes
+    # the triton scatter; "0" falls back to strided index_put_, which
+    # materializes the whole per-layer pool per call (~8.5 ms/layer) and
+    # is kept as the A/B reference. The fused npu_scatter_pa_kv_cache
+    # operator is not an option here: probe v8 (2026-11-20) confirmed it
+    # addresses blocks by the shape's inner product and ignores the packet
+    # views' dim0 stride. Not sensitive.
     "VLLM_ASCEND_QFA_SCATTER_WRITE": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_SCATTER_WRITE", "1"))),
 }
 

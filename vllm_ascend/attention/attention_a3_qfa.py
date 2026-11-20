@@ -305,11 +305,11 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
     - Write path (reshape_and_cache): Q/K per-token-head dynamic
       quantization (``npu_dynamic_quant``), V static per-head
       (layer.v_cache_scale, the fa_v.scale calibration channel); K/V
-      payloads written by the fused ``npu_scatter_pa_kv_cache`` operator
-      directly over the strided packet views (ScatterPaKvCache scenario 1,
-      the C8-MXFP pattern; ``VLLM_ASCEND_QFA_SCATTER_WRITE=0`` falls back
-      to the strided index_put_ A/B reference, which materializes the
-      whole per-layer pool per call).
+      payloads scattered by the triton ``scatter_kv_payload`` kernel,
+      which writes only the addressed bytes of the strided packet views
+      (``VLLM_ASCEND_QFA_SCATTER_WRITE=0`` falls back to the strided
+      index_put_ A/B reference, which materializes the whole per-layer
+      pool per call).
     - Read path: one QFA call per step for the whole batch (decode and
       prefill alike; the causal mask covers decode rows too).
 
@@ -327,7 +327,7 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
                 "(--kv-cache-dtype int8_qfa); one QFA call per step for "
                 "decode and prefill alike. KV write path: %s "
                 "(VLLM_ASCEND_QFA_SCATTER_WRITE=%d).",
-                "fused ScatterPaKvCache over the packet views"
+                "triton scatter over the packet views"
                 if envs.VLLM_ASCEND_QFA_SCATTER_WRITE
                 else "strided index_put_ reference",
                 int(envs.VLLM_ASCEND_QFA_SCATTER_WRITE),
@@ -446,22 +446,22 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
         nz_last = QFA_INT8_NZ_DIM_FRAG
 
         if envs.VLLM_ASCEND_QFA_SCATTER_WRITE:
-            # Fused ScatterPaKvCache, contract scenario 1 (the C8-MXFP
-            # backend's pattern): the operator's tiling reads the packet
-            # views' dim0 stride as the block stride, so the per-page packet
-            # layout is consumed in place -- no sectioning, and none of the
-            # strided index_put_ materialization of the whole per-layer pool
-            # (~8.5 ms/layer). INT8 is accepted on all targets (FP8 payload
-            # would be 950-only), and PAD_SLOT_ID rows are skipped in-kernel,
-            # keeping shapes static for aclgraph capture.
-            torch_npu.npu_scatter_pa_kv_cache(
-                key=k_int8.view(num_tokens, n_heads, head_dim),
-                value=v_int8.view(num_tokens, n_heads, head_dim),
-                key_cache=k_nz,
-                value_cache=v_nz,
-                slot_mapping=slot_mapping,
-                cache_mode="PA_NZ",
-            )
+            # Triton scatter: write only the addressed bytes of the strided
+            # packet views (the mxfp_k_scale pattern). Strided index_put_
+            # materializes the whole per-layer pool per call (~8.5 ms/layer
+            # at 17k blocks) and NPU IndexPut can copy the strided view back,
+            # overwriting unrelated pages. The fused npu_scatter_pa_kv_cache
+            # operator is NOT usable here: probe v8 (2026-11-20) confirmed it
+            # addresses blocks by the shape's inner product and ignores the
+            # packet views' dim0 stride, while the per-page packet layout
+            # always interleaves the descale section between K and V
+            # (dim0 stride != inner product). Padded rows are clamped to
+            # slot 0 (null block) upstream, keeping shapes static for
+            # aclgraph capture.
+            from vllm_ascend.ops.triton.qfa_kv_scatter import scatter_kv_payload
+
+            scatter_kv_payload(k_int8, k_nz, (pages, pos))
+            scatter_kv_payload(v_int8, v_nz, (pages, pos))
         else:
             # A/B reference: scatter payloads into the NZ views via strided
             # index_put_. A token's K/V payload is the [Df, 32] tail at
