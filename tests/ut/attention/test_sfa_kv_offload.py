@@ -1,5 +1,6 @@
 """Regression tests for SFA KV-offload attention metadata."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,13 +9,23 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention  # noqa: E402
+from vllm.v1.kv_cache_interface import MLAAttentionSpec  # noqa: E402
+
+from vllm_ascend.ascend_config import draft_config_context  # noqa: E402
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention  # noqa: E402
 from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
     AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import (  # noqa: E402
+    AscendSFABackend,
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    AscendSFAMetadataBuilder,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
@@ -23,18 +34,19 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 
 
+@pytest.mark.parametrize("layer_name", ["model.layers.0.self_attn.attn", "model.layers.78.self_attn.attn"])
 @pytest.mark.parametrize("defer_wait", [False, True])
-def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
+def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait, layer_name):
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     k_nope, k_pe = torch.ones(2, 4), torch.ones(2, 2)
     impl._is_decode_only = MagicMock(return_value=True)
     impl._compute_kv_only = MagicMock(return_value=(k_nope, k_pe))
-    impl._offload_layer_name = MagicMock(return_value="layer")
+    impl._offload_layer_name = MagicMock(return_value=layer_name)
     impl._cpu_cache_pair = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
     impl._in_graph_runtime = MagicMock(return_value=False)
     # A bound layer name keeps the registry guard on the host-offload path
     # (the patched manager reports it registered).
-    impl.layer_name = "layer"
+    impl.layer_name = layer_name
     slots = torch.arange(2)
     metadata = SimpleNamespace(fused_copy_sfa_enabled=False)
     with patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager:
@@ -44,6 +56,7 @@ def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
         assert result[0] is k_pe and result[1] is k_nope
         impl._compute_kv_only.assert_called_once_with(k_nope, k_pe, k_pe)
         manager.offload_new_kv.assert_called_once()
+        assert manager.offload_new_kv.call_args.kwargs["layer_name"] == layer_name
         assert manager.offload_new_kv.call_args.kwargs["slot_mapping"] is slots
         assert manager.offload_new_kv.call_args.kwargs["k"] is k_nope
         assert manager.offload_new_kv.call_args.kwargs["v"] is k_pe
@@ -146,6 +159,66 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     assert metadata.num_decodes == 0
     assert metadata.num_prefills == 1
     assert metadata.num_decode_tokens == 0
+
+
+def _make_draft_decode_metadata(max_query_len: int):
+    common = _make_boundary_decode_metadata()
+    common.max_query_len = max_query_len
+    common.num_actual_tokens = max_query_len
+    common.query_start_loc_cpu = torch.tensor([0, max_query_len])
+    common.is_prefilling = torch.tensor([False])
+    # attn_utils derives a per-layer variant for the MTP draft layers and marks
+    # it with copy_sfa_draft_index so the offload keeps the reuse path.
+    common.copy_sfa_draft_index = 0
+    return common
+
+
+@pytest.mark.parametrize(
+    ("max_query_len", "expected_state"),
+    [
+        (1, AscendAttentionState.DecodeOnly),
+        (4, AscendAttentionState.SpecDecoding),
+    ],
+)
+def test_draft_decode_batch_is_never_classified_as_prefill(max_query_len, expected_state):
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
+    builder.decode_threshold = 4
+    builder.is_pd_decode_consumer = True
+    builder.copy_sfa_metadata_steps = 4
+    # build_attn_state labels a 1+num_spec token draft batch ChunkedPrefill.
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill)
+
+    with patch(
+        "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+        return_value=False,
+    ):
+        builder._populate_offload_metadata(metadata, _make_draft_decode_metadata(max_query_len))
+
+    assert metadata.num_prefills == 0
+    assert metadata.num_decodes == 1
+    assert metadata.attn_state is expected_state
+    assert AscendSFAKVOffloadImpl._is_decode_only(metadata)
+
+
+def test_prefill_batch_keeps_its_attention_state():
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
+    builder.decode_threshold = 4
+    builder.is_pd_decode_consumer = True
+    builder.copy_sfa_metadata_steps = 4
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill)
+    common = _make_draft_decode_metadata(8)
+    del common.copy_sfa_draft_index
+
+    with patch(
+        "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+        return_value=False,
+    ):
+        builder._populate_offload_metadata(metadata, common)
+
+    assert metadata.num_prefills == 1
+    assert metadata.attn_state is AscendAttentionState.ChunkedPrefill
 
 
 def _make_fused_overlap_impl() -> AscendSFAKVOffloadImpl:
@@ -335,6 +408,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         _get_offload_layer_id=lambda _: 0,
         get_fused_overlap_cpu_kv_inputs=lambda _: (full_kv_cpu, full_rope_cpu),
         allocate_fused_overlap_membership_map=allocate_membership,
+        is_fused_membership_storage=lambda tensor: tensor.dtype == torch.int16,
         prepare_fused_overlap_external_plan=prepare_plan,
         inject_current_kv_into_selection=inject_current,
         wait_for_current_kv_writeback=wait_for_writeback,
@@ -576,3 +650,120 @@ def test_offload_attention_dispatch_after_removing_unfused_mode(mode):
         paged_attention.assert_not_called()
     assert impl._copy_sfa_attention.call_count == (mode == "copy_sfa")
     assert impl._execute_fused_overlap_offload_decode.call_count == (mode == "overlap")
+
+
+@pytest.mark.parametrize("store_on_host", [False, True])
+@pytest.mark.parametrize("fused_copy", [False, True])
+@pytest.mark.parametrize("dummy", [False, True])
+@pytest.mark.parametrize("draft_step", [None, 0, 2])
+def test_metadata_honors_placement_for_real_dummy_and_draft_steps(store_on_host, fused_copy, dummy, draft_step):
+    cfg = SimpleNamespace(use_fused_copy_sfa=fused_copy)
+    vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True, is_kv_producer=False))
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill)
+    common = SimpleNamespace(offload_dummy=dummy)
+    populated = object()
+    with (
+        patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
+        patch.object(AscendSFAKVOffloadMetadataBuilder, "_init_copy_sfa_metadata_buffers") as allocate,
+        patch.object(AscendSFAMetadataBuilder, "build", return_value=metadata),
+        patch.object(AscendSFAMetadataBuilder, "build_for_drafting", return_value=metadata),
+        patch("vllm_ascend.attention.sfa_kv_offload._validate_fused_copy_sfa_config") as validate,
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=cfg),
+        ),
+    ):
+        builder = AscendSFAKVOffloadMetadataBuilder(
+            kv_cache_spec=SimpleNamespace(store_on_host=store_on_host, is_draft=not store_on_host),
+            layer_names=["model.layers.78.self_attn.attn"],
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+        builder._populate_offload_metadata = MagicMock(return_value=populated)
+        result = builder.build(0, common) if draft_step is None else builder.build_for_drafting(common, draft_step)
+
+    expected_cls = AscendSFAOffloadMetadata if store_on_host else AscendSFAMetadata
+    assert init.call_args.args[4] is expected_cls
+    assert builder.use_fused_copy_sfa is (store_on_host and fused_copy)
+    if store_on_host:
+        validate.assert_called_once_with(vllm_config, cfg)
+        builder._populate_offload_metadata.assert_called_once()
+        assert result is populated
+    else:
+        validate.assert_not_called()
+        builder._populate_offload_metadata.assert_not_called()
+        assert result is metadata
+        assert metadata.attn_state is AscendAttentionState.ChunkedPrefill
+        assert not hasattr(result, "fused_copy_sfa_enabled")
+    assert allocate.call_count == int(store_on_host and fused_copy)
+
+
+@pytest.mark.parametrize(
+    "host_backend,connector_name",
+    [
+        ("memfabric", None),
+        ("memfabric", "SfaRemoteD2HConnector"),
+        ("mooncake", None),
+        ("mooncake", "MooncakeConnectorV2"),
+    ],
+)
+@pytest.mark.parametrize("method", ["mtp", "deepseek_mtp"])
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_ordinary_mtp_host_spec_matches_execution_and_metadata(
+    monkeypatch, host_backend, connector_name, method, is_draft
+):
+    transfer = (
+        SimpleNamespace(
+            kv_connector=connector_name,
+            kv_connector_extra_config={},
+            is_kv_consumer=True,
+            is_kv_producer=False,
+        )
+        if connector_name is not None
+        else None
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa")),
+        speculative_config=SimpleNamespace(method=method),
+        kv_transfer_config=transfer,
+    )
+    ascend = SimpleNamespace(
+        sparse_kv_offload_config=SimpleNamespace(enabled=True, host_backend=host_backend, use_fused_copy_sfa=False)
+    )
+    with (
+        patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
+        patch("vllm_ascend.attention.sfa_v1.get_ascend_config", return_value=ascend),
+        patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer", return_value=False),
+        draft_config_context() if is_draft else nullcontext(),
+    ):
+        impl_cls = AscendSFABackend.get_impl_cls()
+    assert impl_cls is AscendSFAKVOffloadImpl
+
+    source = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=576, dtype=torch.bfloat16, is_draft=is_draft)
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
+    impl = impl_cls.__new__(impl_cls)
+    impl.enable_sparse_sfa_c8 = False
+    impl.enable_sparse_sfa_turboquant = False
+    impl.store_kv_cache_on_host = ascend.sparse_kv_offload_config.enabled
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = impl
+    layer.attn_backend = AscendSFABackend
+    layer.num_heads = 12
+    layer.kv_lora_rank = 512
+    layer.qk_rope_head_dim = 64
+    layer.is_draft_layer = is_draft
+    spec = layer.get_kv_cache_spec(config)
+    assert spec.store_on_host
+    assert spec.is_draft is is_draft
+
+    with (
+        patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
+        patch("vllm_ascend.attention.sfa_kv_offload.get_ascend_config", return_value=ascend),
+    ):
+        builder = AscendSFAKVOffloadMetadataBuilder(
+            spec, ["model.layers.78.self_attn.attn"], config, torch.device("cpu")
+        )
+    assert builder.store_on_host
+    assert init.call_args.args[4] is AscendSFAOffloadMetadata
