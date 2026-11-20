@@ -669,15 +669,11 @@ def test_p_runner_excludes_persistent_draft_from_target_scratch_plan(monkeypatch
     register = Mock()
     monkeypatch.setattr(module, "configure_dspark_kv_transfer", register)
 
-    class PlanReached(Exception):
-        pass
+    def check_plan(config):
+        assert config is not original
+        register.assert_called_once_with(runner.vllm_config, runner.speculator, config, is_last_pp_rank=True)
+        return SimpleNamespace(reused_cache_names={"draft.layers.0.attn"})
 
-    def check_plan(config, runtime, *, excluded_layer_names):
-        assert config is not original and runtime is runner.vllm_config
-        register.assert_called_once_with(runtime, runner.speculator, config, is_last_pp_rank=True)
-        assert excluded_layer_names == {"draft.layers.0.attn"}
-        raise PlanReached
-
-    monkeypatch.setattr(module, "apply_layerwise_kv_cache_plan", check_plan)
-    with pytest.raises(PlanReached):
+    monkeypatch.setattr(module, "get_layerwise_reuse_layout", check_plan)
+    with pytest.raises(ValueError, match="Persistent draft caches cannot rotate"):
         runner.initialize_kv_cache(original)
