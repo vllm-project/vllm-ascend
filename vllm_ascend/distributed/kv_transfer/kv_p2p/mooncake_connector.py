@@ -1967,8 +1967,9 @@ class MooncakeConnectorScheduler:
         """
 
         params = request.kv_transfer_params
-        logger.info(
-            "MooncakeConnector get_num_new_matched_tokens: request_id=%s num_computed_tokens=%s, kv_transfer_params=%s",
+        logger.debug(
+            "MooncakeConnector get_num_new_matched_tokens: request_id=%s, num_computed_tokens=%s, "
+            "kv_transfer_params=%s",
             request.request_id,
             num_computed_tokens,
             params,
