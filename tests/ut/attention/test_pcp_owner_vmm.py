@@ -229,6 +229,196 @@ def test_dsv41_owner_allocator_is_disabled_by_default() -> None:
     assert attn_utils._deepseek_v41_owner_allocator(config, {}, torch.device("cpu")) is None
 
 
+def _unified_split_config(*, num_blocks: int = 2, index_offset: int = 0):
+    """Synthetic two-size pool: owner long-KV backing plus index-only backing."""
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    long_name = "model.layers.0.self_attn.long_kv_cache"
+    index_name = "model.layers.0.self_attn.indexer.k_cache"
+    long_spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        tokens_per_state=1,
+        model_version="deepseek_v41",
+    )
+    index_spec = AscendMLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        tokens_per_state=1,
+        model_version="deepseek_v41",
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+    long_page = long_spec.page_size_bytes
+    index_page = index_spec.page_size_bytes
+    tensors = [
+        KVCacheTensor(
+            size=num_blocks * long_page,
+            layers=[long_name],
+            layer_stride=num_blocks * long_page,
+            block_stride=long_page,
+            offset=0,
+        ),
+        KVCacheTensor(
+            size=index_offset + num_blocks * index_page,
+            layers=[index_name],
+            layer_stride=num_blocks * index_page,
+            block_stride=index_page,
+            offset=index_offset,
+        ),
+    ]
+    groups = [
+        KVCacheGroupSpec(layer_names=[long_name], kv_cache_spec=long_spec),
+        KVCacheGroupSpec(layer_names=[index_name], kv_cache_spec=index_spec),
+    ]
+    config = KVCacheConfig(num_blocks=num_blocks, kv_cache_tensors=tensors, kv_cache_groups=groups)
+    return config, long_name, index_name, long_spec, index_spec
+
+
+def _unified_runtime(*, owner_capacity: bool):
+    from vllm_ascend.ascend_config import PcpConfig
+
+    pcp_config = PcpConfig(kv_sharing="owner", owner_capacity=owner_capacity, local_index=True)
+    return SimpleNamespace(
+        additional_config={"pcp_config": pcp_config},
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=4,
+            decode_context_parallel_size=1,
+            tensor_parallel_size=1,
+        ),
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(block_size=128),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+
+
+def _run_unified_allocation(monkeypatch, *, owner_capacity: bool, allocator, index_offset: int = 0):
+    from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+    from vllm_ascend.worker.v2 import attn_utils
+
+    config, long_name, index_name, long_spec, index_spec = _unified_split_config(index_offset=index_offset)
+    runtime = _unified_runtime(owner_capacity=owner_capacity)
+    layers = {}
+    for group in config.kv_cache_groups:
+        for name in group.layer_names:
+            layers[name] = DeepseekV41CacheLayer(runtime, name, group.kv_cache_spec)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(attn_utils, "_deepseek_v41_owner_allocator", lambda *_args, **_kwargs: allocator)
+    kernel_block_sizes = [group.kv_cache_spec.block_size for group in config.kv_cache_groups]
+    caches = attn_utils.unified_allocate_kv_cache(config, torch.device("cpu"), None, kernel_block_sizes)
+    return caches, config, long_name, index_name, long_spec, index_spec
+
+
+class _RecordingSlabAllocator:
+    def __init__(self, fill: int = 7):
+        self.fill = fill
+        self.calls: list[tuple[tuple[str, ...], int, torch.Tensor]] = []
+
+    def allocate_slab(self, layer_names, size_bytes):
+        tensor = torch.full((size_bytes,), self.fill, dtype=torch.int8)
+        self.calls.append((tuple(layer_names), size_bytes, tensor))
+        return tensor
+
+
+class _FallingBackAllocator(_RecordingSlabAllocator):
+    def allocate_slab(self, layer_names, size_bytes):
+        self.calls.append((tuple(layer_names), size_bytes, None))
+        return None
+
+
+def test_unified_allocation_routes_owner_and_index_backings(monkeypatch) -> None:
+    """The owner slab backs long KV; the index-only split stays replicated."""
+    from vllm_ascend.worker.v2 import attn_utils
+
+    allocator = _RecordingSlabAllocator()
+    replicated: list[tuple[int, torch.Tensor]] = []
+
+    def fake_replicated(size, alignment, device):
+        tensor = torch.full((size,), 3, dtype=torch.int8)
+        replicated.append((size, tensor))
+        return tensor
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", fake_replicated)
+    index_offset = 4096
+    caches, config, long_name, index_name, long_spec, index_spec = _run_unified_allocation(
+        monkeypatch,
+        owner_capacity=True,
+        allocator=allocator,
+        index_offset=index_offset,
+    )
+
+    # The owner group is mapped once; the index-only group never reaches it.
+    assert len(allocator.calls) == 1
+    owner_names, owner_size, owner_tensor = allocator.calls[0]
+    assert owner_names == (long_name,)
+    assert owner_size == config.kv_cache_tensors[0].size
+
+    # The split index tuple gets exactly one replicated backing of its own.
+    assert [size for size, _ in replicated] == [config.kv_cache_tensors[1].size]
+    index_tensor = replicated[0][1]
+    assert index_tensor.untyped_storage().data_ptr() != owner_tensor.untyped_storage().data_ptr()
+
+    long_view = caches[long_name]
+    assert isinstance(long_view, torch.Tensor)
+    assert long_view.untyped_storage().data_ptr() == owner_tensor.untyped_storage().data_ptr()
+    # Views follow the descriptor geometry rather than a page-size invariant.
+    assert long_view.stride(0) == long_spec.page_size_bytes // long_view.element_size()
+    assert long_view.storage_offset() == 0
+
+    index_views = caches[index_name]
+    assert isinstance(index_views, tuple) and len(index_views) == 2
+    for component in index_views:
+        assert component.untyped_storage().data_ptr() == index_tensor.untyped_storage().data_ptr()
+    # The index descriptor's offset and per-block stride are honoured.
+    assert index_views[0].stride(0) == index_spec.page_size_bytes
+    assert index_views[0].storage_offset() == index_offset
+
+
+def test_unified_allocation_falls_back_to_replicated_per_size(monkeypatch) -> None:
+    from vllm_ascend.worker.v2 import attn_utils
+
+    allocator = _FallingBackAllocator()
+    replicated: list[int] = []
+
+    def fake_replicated(size, alignment, device):
+        replicated.append(size)
+        return torch.zeros(size, dtype=torch.int8)
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", fake_replicated)
+    caches, config, long_name, index_name, _, _ = _run_unified_allocation(
+        monkeypatch,
+        owner_capacity=False,
+        allocator=allocator,
+    )
+
+    assert replicated == [tensor.size for tensor in config.kv_cache_tensors]
+    assert set(caches) == {long_name, index_name}
+
+
+def test_unified_capacity_fails_closed_without_a_working_slab(monkeypatch) -> None:
+    with pytest.raises(RuntimeError, match="owner_capacity"):
+        _run_unified_allocation(
+            monkeypatch,
+            owner_capacity=True,
+            allocator=None,
+        )
+
+    with pytest.raises(RuntimeError, match="owner_capacity"):
+        _run_unified_allocation(
+            monkeypatch,
+            owner_capacity=True,
+            allocator=_FallingBackAllocator(),
+        )
+
+
 class _FakeGroup:
     def __init__(self, world_size: int, rank: int) -> None:
         self.world_size = world_size
