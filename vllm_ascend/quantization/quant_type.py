@@ -47,8 +47,9 @@ A5_SUPPORT_MEGA_MOE_QUANT_TYPES = frozenset(
 )
 
 # Quant types whose weight layouts the A2 dispatch_ffn_combine (FUSED_MC2)
-# operator supports. Only the W4A8 variant is built for ascend910b; the
-# int8/bf16 variants exist for ascend910_93 only. MoE layers with another
-# quant type (for example the BF16 MTP/draft layer) must stay on the
-# non-fused path instead of selecting FUSED_MC2.
-A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES = frozenset({QuantType.W4A8})
+# operator supports. On A2 the W4A8 variant and the BF16 variant are built for
+# ascend910b; QuantType.NONE is the unquantized (BF16/FP16) weight layout that
+# the BF16 variant consumes, which is also the MTP/draft layer's layout. MoE
+# layers with another quant type must stay on the non-fused path instead of
+# selecting FUSED_MC2.
+A2_SUPPORT_DISPATCH_FFN_COMBINE_QUANT_TYPES = frozenset({QuantType.NONE, QuantType.W4A8})

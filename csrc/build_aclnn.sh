@@ -102,6 +102,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_flash_attention"
         "kv_quant_sparse_flash_attention_vllm"
         "dispatch_ffn_combine_w4_a8"
+        "dispatch_ffn_combine_bf16"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
         "rms_norm_cast"
