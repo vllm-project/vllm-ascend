@@ -331,6 +331,7 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
         worker._weight_update_active = False
         worker._draft_weight_update_active = False
         worker.use_v2_model_runner = True
+        worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
         worker.vllm_config = SimpleNamespace(
             weight_transfer_config=SimpleNamespace(backend="hccl"),
             speculative_config=SimpleNamespace(draft_model_config=object()),
@@ -400,6 +401,26 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
                     with self.assertRaisesRegex(RuntimeError, "supported only"):
                         worker.start_draft_weight_update()
                     worker.weight_transfer_engine.set_weight_update_target.assert_not_called()
+
+    def test_draft_update_rejects_runner_without_draft_model(self):
+        worker, _ = self._make_worker()
+        worker.model_runner.get_draft_model = lambda: None
+        self.assertFalse(worker.supports_draft_weight_updates())
+        with self.assertRaisesRegex(RuntimeError, "configured draft model"):
+            worker.start_draft_weight_update()
+        worker.weight_transfer_engine.start_weight_update.assert_not_called()
+
+    def test_draft_update_rejects_pipeline_parallelism(self):
+        for has_draft in (True, False):
+            with self.subTest(has_draft=has_draft):
+                worker, _ = self._make_worker()
+                worker.parallel_config.pipeline_parallel_size = 2
+                if not has_draft:
+                    worker.model_runner.get_draft_model = lambda: None
+                self.assertFalse(worker.supports_draft_weight_updates())
+                with self.assertRaisesRegex(RuntimeError, "do not support pipeline parallelism"):
+                    worker.start_draft_weight_update()
+                worker.weight_transfer_engine.start_weight_update.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_draft_update_rejects_nz(self, ascend_config):

@@ -353,12 +353,18 @@ class NPUWorker(GPUWorker):
 
     def supports_draft_weight_updates(self) -> bool:
         config = self.vllm_config.weight_transfer_config
+        speculative_config = self.vllm_config.speculative_config
         return (
             self.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size == 1
             and config is not None
             and config.backend == "hccl"
             and self.weight_transfer_engine is not None
             and self.weight_transfer_engine.supports_draft_weight_update
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+            and not getattr(speculative_config, "prefill_context_kv_only", False)
+            and self.get_draft_model() is not None
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -373,10 +379,15 @@ class NPUWorker(GPUWorker):
 
     def start_draft_weight_update(self) -> None:
         self._check_weight_transfer_engine()
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise RuntimeError("Draft weight updates do not support pipeline parallelism.")
         if self._weight_update_active:
             raise RuntimeError("A weight update is already active. Call finish_weight_update first.")
         if not self.supports_draft_weight_updates():
-            raise RuntimeError("Draft weight updates are supported only by the HCCL Model Runner V2 path.")
+            raise RuntimeError(
+                "Draft weight updates are supported only by the HCCL Model Runner V2 path "
+                "with a configured draft model."
+            )
         self._check_nz_disabled()
         assert self.weight_transfer_engine is not None
         try:
