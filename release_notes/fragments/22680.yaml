@@ -1,0 +1,4 @@
+pr: 22680
+entries:
+  - category: bugfix
+    text: Fixed MooncakeConnectorV1 prefill requests returning an empty response when the placeholder prefill sample stopped on EOS before the KV handoff.
