@@ -42,6 +42,7 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
         impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, device="npu", dtype=torch.bfloat16)
         impl.is_kv_consumer = False
         impl.has_indexer = True
+        impl.pcp_enabled = False
         impl.local_num_heads = 4
         impl.q_lora_rank = 2048
         impl.kv_lora_rank = 512
