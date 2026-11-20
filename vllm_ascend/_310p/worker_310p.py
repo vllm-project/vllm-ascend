@@ -24,12 +24,9 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
-# KV-cache planning lives in kv_cache_planning on both supported versions.
-from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-
 from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend.utils import is_rc_device
-from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+from vllm_ascend.worker.worker import NPUWorker, get_kv_cache_groups, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
