@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from vllm.entrypoints.anthropic.protocol import AnthropicCountTokensRequest, AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.exceptions import VLLMValidationError
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -55,7 +56,7 @@ def test_upstream_sampling_range_validation(min_tokens):
     request = AnthropicMessagesRequest(
         model="test-model", max_tokens=64, messages=[{"role": "user", "content": "Hello"}], min_tokens=min_tokens
     )
-    with pytest.raises(ValueError, match="min_tokens"):
+    with pytest.raises(VLLMValidationError, match="min_tokens"):
         convert(request).to_sampling_params(max_tokens=64, default_sampling_params={})
 
 
