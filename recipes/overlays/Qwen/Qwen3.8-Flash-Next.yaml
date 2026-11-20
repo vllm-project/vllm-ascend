@@ -84,7 +84,7 @@ variants:
       - ascend_910b
       - ascend_910c
     tp: {ascend_910c: 8}
-    min_vllm_version: 0.32.0rc1
+    min_vllm_version: 0.32.0
     hardware_overrides:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
@@ -201,7 +201,7 @@ variants:
     # 48 ModelScope weight shards total 193.26 GB, with 20% headroom.
     vram_minimum_gb: 232
     supported_hardware: [ascend_950dt]
-    min_vllm_version: 0.32.0rc1
+    min_vllm_version: 0.32.0
     tp: 4
     extra_args:
       - '--host'
