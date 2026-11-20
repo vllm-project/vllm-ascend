@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.models.deepseek_v4 import dspark as dspark_module
@@ -94,7 +95,9 @@ def test_context_wkv_weights_are_duplicated_by_layer():
     assert duplicated[3][1].data_ptr() == duplicated[4][1].data_ptr()
 
 
-def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+@pytest.mark.parametrize("push,sharing", [(False, False), (True, False), (True, True)])
+def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch, push, sharing):
+    transfer = push and sharing
     projection_calls = []
     rope = object()
 
@@ -111,6 +114,7 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     attns = [
         SimpleNamespace(
             name=f"attn-{i}",
+            dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(prefix=f"draft-{i}", kv_cache=object())),
             rotary_emb=SimpleNamespace(layername=f"layer-{i}"),
         )
         for i in range(3)
@@ -132,6 +136,7 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     stored = []
 
     model = SimpleNamespace(
+        publish_prompt_context=False,
         context_wkv_proj=StackedProjection(),
         num_dspark_layers=3,
         config=SimpleNamespace(head_dim=4),
@@ -143,6 +148,7 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
         return kv.unsqueeze(1)
 
     def store_standard_swa_kv(shared_kv, slot_mapping, attn):
+        events.append(("write", attn.name))
         stored.append(
             (
                 shared_kv.clone(),
@@ -151,6 +157,20 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
             )
         )
 
+    model.publish_prompt_context = push
+    events = []
+    store = MagicMock()
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePushConnector
+
+    push_child = MagicMock(spec=MooncakePushConnector)
+    push_child.supports_layerwise_buffer_reuse = sharing
+    store.sub_connectors = [SimpleNamespace(supports_layerwise_buffer_reuse=True), push_child]
+    store.has_connector_metadata.return_value = True
+    store.wait_for_layer_load.side_effect = lambda name: events.append(("wait", name))
+    store.save_kv_layer.side_effect = lambda name, *_: events.append(("save", name))
+    monkeypatch.setattr(dspark_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(dspark_module, "get_kv_transfer_group", lambda: store)
+    monkeypatch.setattr(dspark_module, "record_attention_compute_start", lambda: events.append(("gate", None)))
     model._project_shared_kv = project_shared_kv
     model._store_standard_swa_kv = store_standard_swa_kv
 
@@ -163,6 +183,20 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
         torch.tensor([4, 5]),
     ]
 
+    if transfer:
+        with pytest.raises(ValueError, match="slot mapping for every context row"):
+            DeepseekV4DSparkModel.precompute_and_store_context_kv(model, context_states, positions, slot_mappings)
+        slot_mappings[1] = torch.empty(0, dtype=torch.long)
+        with pytest.raises(ValueError, match="slot mapping for every context row"):
+            DeepseekV4DSparkModel.precompute_and_store_context_kv(model, context_states, positions, slot_mappings)
+        slot_mappings[1] = torch.tensor([2, 3])
+        cache = attns[-1].dsa_attn.swa_cache_layer
+        bound_cache, cache.kv_cache = cache.kv_cache, None
+        with pytest.raises(RuntimeError, match="bound draft SWA caches"):
+            DeepseekV4DSparkModel.precompute_and_store_context_kv(model, context_states, positions, slot_mappings)
+        cache.kv_cache = bound_cache
+        assert not events
+        projection_calls.clear()
     DeepseekV4DSparkModel.precompute_and_store_context_kv(
         model,
         context_states,
@@ -173,6 +207,14 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert len(projection_calls) == 1
     assert projection_calls[0] is context_states
 
+    if transfer:
+        assert events == [
+            event
+            for i in range(3)
+            for event in (("wait", f"draft-{i}"), ("gate", None), ("write", f"attn-{i}"), ("save", f"draft-{i}"))
+        ]
+        assert len(stored) == 3
+        return
     assert len(projected) == 2
     assert len(stored) == 2
 
@@ -202,6 +244,7 @@ def test_context_kv_profiles_stacked_projection_without_slot_mappings():
             return torch.zeros(2, 12)
 
     model = SimpleNamespace(
+        publish_prompt_context=False,
         context_wkv_proj=StackedProjection(),
         num_dspark_layers=3,
         config=SimpleNamespace(head_dim=4),

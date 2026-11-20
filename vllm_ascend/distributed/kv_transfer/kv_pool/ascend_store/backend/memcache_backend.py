@@ -135,6 +135,10 @@ class MemcacheBackend(Backend):
         use_hybrid: bool,
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
+        # Pool bytes must agree across resident and rotating device layouts.
+        cache_format = getattr(kv_cache_config, "dsv4_cache_format", None)
+        if cache_format is not None:
+            model_name = f"{model_name}@dsv4:{cache_format}"
         num_groups = len(grouped_block_size)
         parallel = vllm_config.parallel_config
         pp_size = parallel.pipeline_parallel_size
@@ -144,7 +148,13 @@ class MemcacheBackend(Backend):
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
+        return LayerwiseKeyBuilder(
+            make_key,
+            pp_size,
+            pcp_size,
+            pcp_sharded_group_ids,
+            partial_model_namespace=model_name if cache_format is not None else None,
+        )
 
     def __init__(
         self,

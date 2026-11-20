@@ -35,6 +35,9 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LAYERWISE_REUSE_BACKING_BYTES,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import (
     SLOT_BYTES,
     TURBOQUANT_CACHE_DTYPE,
@@ -120,6 +123,27 @@ def test_generic_uniform_spec_falls_back_to_default_grouping():
     assert result == expected
     assert len(result) == 1
     assert set(result[0].layer_names) == {"layer.a", "layer.b"}
+
+
+def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
+    runtime = make_runtime()
+    runtime.kv_transfer_config = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_connector_extra_config={"use_layerwise": True, "layerwise_num_shared_buffers": 1},
+    )
+    builder = AscendKVCacheConfigBuilder()
+    groups = [KVCacheGroupSpec(["layer.a"], generic_specs()["layer.a"])]
+    backing_bytes = 4096
+    probe = Mock(
+        return_value=SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(kv_connector_extra_config={LAYERWISE_REUSE_BACKING_BYTES: backing_bytes})
+        )
+    )
+    monkeypatch.setattr(builder_module, "get_spec_reuse_rules", lambda _: {FullAttentionSpec: True})
+    monkeypatch.setattr(builder, "get_kv_cache_config_from_groups", probe)
+
+    assert builder._get_pool_bytes_per_block(runtime, groups) == backing_bytes
+    probe.assert_called_once_with(runtime, groups, num_blocks=1)
 
 
 def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):

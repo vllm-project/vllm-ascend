@@ -55,6 +55,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -271,6 +274,11 @@ class MooncakePushConnector(MooncakeBaseConnector):
     ) -> None:
         super().__init__(vllm_config, role, kv_cache_config)
 
+        transfer_config = vllm_config.kv_transfer_config
+        assert transfer_config is not None
+        self.is_producer = transfer_config.is_kv_producer
+        layout = get_layerwise_reuse_layout(kv_cache_config)
+        self.supports_layerwise_buffer_reuse = layout is not None and layout.has_layer_reuse
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePushConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
@@ -288,6 +296,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
         assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
         self.connector_worker.wait_for_save()
 
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
@@ -298,6 +310,10 @@ class MooncakePushConnector(MooncakeBaseConnector):
 class MooncakeConnectorV2(MooncakeBaseConnector):
     """Select pull by default, or layerwise push via extra configuration."""
 
+    @staticmethod
+    def is_push_config(name: str, extra: dict) -> bool:
+        return name == "MooncakePushConnector" or (name == "MooncakeConnectorV2" and bool(extra.get("use_layerwise")))
+
     def __new__(
         cls,
         vllm_config: VllmConfig,
@@ -306,7 +322,9 @@ class MooncakeConnectorV2(MooncakeBaseConnector):
     ) -> MooncakeBaseConnector:
         assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        connector_cls = MooncakePushConnector if extra_config.get("use_layerwise", False) else MooncakePullConnector
+        connector_cls = (
+            MooncakePushConnector if cls.is_push_config("MooncakeConnectorV2", extra_config) else MooncakePullConnector
+        )
         return connector_cls(vllm_config, role, kv_cache_config)
 
 

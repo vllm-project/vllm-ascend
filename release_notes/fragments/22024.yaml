@@ -1,0 +1,10 @@
+pr: 22024
+entries:
+  - category: feature
+    text: >-
+      Added layerwise KV offload for the existing DeepSeek-V4 Flash and Pro models
+      through AscendStore and Memcache. The layout can rotate compressed history,
+      indexer history, SWA, and compressor state while keeping draft cache storage
+      resident. A5 transfers indexer data and scales once. Use a fresh pool when
+      upgrading from the earlier experimental indexer format.
+    model: deepseek-v4

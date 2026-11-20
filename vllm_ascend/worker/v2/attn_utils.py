@@ -84,9 +84,10 @@ from vllm_ascend.core.kv_cache_interface import (
     requires_padded_page_layout,
     supports_component_major_mla_pd,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    allocate_shared_indexer_cache,
-    get_layerwise_reuse_config,
+    allocate_cache_backing,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -969,8 +970,17 @@ def _allocate_kv_cache(
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
-    alignment = 2 * 1024 * 1024
+    alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+    if reuse_layout is not None:
+        return allocate_cache_backing(
+            kv_cache_config,
+            layer_kv_cache_spec,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+            reuse_layout.cache_view_sizes,
+        )
+
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.
@@ -1107,35 +1117,10 @@ def _allocate_kv_cache(
     if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
-    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config) is not None
-    layerwise_aliases: dict[str, str] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
             continue
-
-        # Only the layerwise planner's zero-stride descriptors share a
-        # physical slot. Ordinary packed descriptors still own private layers.
-        if layerwise_reuse and kv_cache_tensor.layer_stride == 0:
-            if all(isinstance(layer_kv_cache_spec[name], AscendSFAIndexerCacheSpec) for name in shared_names):
-                indexer_specs = {
-                    name: spec
-                    for name in shared_names
-                    if isinstance((spec := layer_kv_cache_spec[name]), AscendSFAIndexerCacheSpec)
-                }
-                kv_cache_raw_tensors.update(
-                    allocate_shared_indexer_cache(
-                        indexer_specs,
-                        kv_cache_config.num_blocks,
-                        lambda size: _allocate_int8_cache_tensor(size, alignment, device),
-                    )
-                )
-                continue
-            owner_name = shared_names[0]
-            if any(layer_kv_cache_spec[name] != layer_kv_cache_spec[owner_name] for name in shared_names[1:]):
-                raise ValueError("Layerwise V2 KV aliases require identical cache specs.")
-            layerwise_aliases.update({name: owner_name for name in shared_names[1:]})
-            shared_names = shared_names[:1]
 
         if dsv4_backing is not None:
             continue
@@ -1372,9 +1357,6 @@ def _allocate_kv_cache(
                 k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
                 v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
-
-    for layer_name, owner_name in layerwise_aliases.items():
-        kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner_name]
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (

@@ -1952,6 +1952,27 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
         self.assertEqual(hit, 32)
 
+    def test_mtp_lookup_checks_the_checkpoint_before_the_final_block(self):
+        for offload in (False, True):
+            for state_blocks, expected in (([3], 0), ([1, 3], 32)):
+                with self.subTest(offload=offload, state_blocks=state_blocks):
+                    scheduler = self._make_scheduler()
+                    scheduler.layerwise_offload = offload
+                    scheduler.use_eagle = True
+                    scheduler.lcm_block_size = scheduler.cache_coordinator.lcm_block_size
+                    request = self._request(4)
+                    request.prompt_token_ids = list(range(64))
+                    request.num_tokens = 64
+                    self._stub_pool(scheduler, 4, {0: [0, 1, 2, 3], 1: state_blocks})
+
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, False))
+                    if expected:
+                        load = scheduler.load_specs[request.request_id]
+                        self.assertEqual(load.kvpool_cached_tokens, expected)
+                        self.assertEqual(load.pool_hit_tokens, expected)
+                    else:
+                        self.assertNotIn(request.request_id, scheduler.load_specs)
+
     def test_hbm_prefix_is_not_queried_and_pool_tail_can_extend_hit(self):
         for local in (16, 24, 32, 64):
             with self.subTest(local=local):
