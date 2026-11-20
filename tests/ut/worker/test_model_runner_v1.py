@@ -1183,6 +1183,30 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], expected)
                 np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], expected)
 
+    def test_deferred_sync_publishes_snapshot_and_clears_pending_state(self):
+        runner = self._build_runner()
+        runner._deferred_num_accepted_tokens_sync = (3, True)
+        runner.num_accepted_tokens.np[:] = np.arange(12)
+        runner.num_accepted_tokens.np[[11, 4]] = [4, 3]
+        runner.prev_positions.np[:3] = [11, -1, 4]
+
+        runner._finish_deferred_num_accepted_tokens_sync()
+
+        runner.num_accepted_tokens_event.synchronize.assert_called_once_with()
+        np.testing.assert_array_equal(
+            runner.input_batch.num_accepted_tokens_cpu[:3], [4, 1, 3]
+        )
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[3:], 1)
+        self.assertIsNone(runner._deferred_num_accepted_tokens_sync)
+
+    def test_deferred_sync_is_noop_without_pending_state(self):
+        runner = self._build_runner()
+        runner._deferred_num_accepted_tokens_sync = None
+
+        runner._finish_deferred_num_accepted_tokens_sync()
+
+        runner.num_accepted_tokens_event.synchronize.assert_not_called()
+
     def test_non_align_postprocess_keeps_an_independent_snapshot(self):
         for mode in ("none", "all"):
             with self.subTest(mode=mode):
