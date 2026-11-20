@@ -24,21 +24,6 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
-# Model Runner V2 is the only runner, so Ascend extras are always part of
-# ``additional_kwargs``. Keep this as a module constant so compiled FIA/MoE
-# never traces a config lookup.
-_USE_V2_EXTRA_KWARGS = True
-
-
-def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
-    """Refresh the eager/compiled constant for Ascend extras.
-
-    Call this from eager config / forward-context setup, not from compiled
-    attention.
-    """
-    global _USE_V2_EXTRA_KWARGS
-    _USE_V2_EXTRA_KWARGS = True
-
 
 class MoECommType(Enum):
     ALLGATHER = 0
@@ -143,7 +128,6 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
-    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -519,19 +503,14 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
-        return getattr(ctx, name, None)
+        # Unset known extras default to None so optional flags (e.g. `sinks`)
+        # can be read with truthiness checks before the V2 path populates them.
+        return ctx.additional_kwargs.get(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _USE_V2_EXTRA_KWARGS:
-            ctx.additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        ctx.additional_kwargs[name] = value
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX

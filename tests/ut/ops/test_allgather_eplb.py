@@ -25,11 +25,6 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 
 
-@pytest.fixture(autouse=True)
-def v2_forward_context(monkeypatch):
-    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
-
-
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 def test_allgather_routes_execute_and_count_each_token_once(monkeypatch, tp_size):
     profile = get_hardware_profile(AscendDeviceType.A5)
