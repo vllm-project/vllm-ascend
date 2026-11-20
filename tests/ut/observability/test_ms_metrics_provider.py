@@ -79,16 +79,17 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.owned_symbol_prefixes == ("vllm_ascend.",)
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
-    assert [Path(path).name for path in provider.config_paths] == [
-        "base_metrics.yaml",
-        "eplb_metrics.yaml",
-        "rl_lifecycle_metrics.yaml",
-        "runtime_guard_metrics.yaml",
-        "schedule_execute_metrics.yaml",
-    ]
+    packaged_configs = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
+    assert [Path(path).name for path in provider.config_paths] == [path.name for path in packaged_configs]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 16
+    # Assert the shape instead of a symbol count: every packaged yaml must
+    # contribute at least one entry, and no (symbol, handler) pair may be
+    # declared twice. A fixed count made every new metric file collide with
+    # this line and silently went stale after an auto-merged rebase.
+    for config_path in provider.config_paths:
+        assert _load_all_provider_configs([config_path]), f"{config_path} declares no metric"
+    assert len({(item["symbol"], item.get("handler")) for item in config}) == len(config)
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -173,7 +174,6 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 5
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
