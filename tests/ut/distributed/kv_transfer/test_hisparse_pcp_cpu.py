@@ -301,7 +301,12 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     monkeypatch.setattr(sfa_hisparse, "needs_pcp_kv_gather", lambda *args: True)
     monkeypatch.setattr(sfa_hisparse, "compute_token_to_req_indices", lambda q, out, n, size: out[:size].zero_())
     config = NS(
-        scheduler_config=NS(max_num_seqs=2, max_num_batched_tokens=8),
+        scheduler_config=NS(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+            max_num_active_seqs=None,
+            max_num_scheduled_tokens=None,
+        ),
         compilation_config=NS(max_cudagraph_capture_size=8),
         parallel_config=NS(
             prefill_context_parallel_size=2,
