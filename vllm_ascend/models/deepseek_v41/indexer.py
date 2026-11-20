@@ -303,6 +303,6 @@ class DeepseekV41Indexer(nn.Module):
             positions,
             self.compress_ratio,
             indices_output=indices_output,
-            lengths_output=topk_lengths,
+            lengths_output=None,
         )
         return selected, candidate_out if is_candidate_source else candidates

@@ -160,7 +160,9 @@ def test_model_state_capture_override_and_eager_reset(monkeypatch, pcp):
     state = DeepSeekV41ModelState.__new__(DeepSeekV41ModelState)
     state.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(model_type="deepseek_v41"), hf_text_config=SimpleNamespace(index_topk=512)
+            hf_config=SimpleNamespace(model_type="deepseek_v41"),
+            hf_text_config=SimpleNamespace(index_topk=512),
+            max_model_len=16384,
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=4, prefill_context_parallel_size=pcp, decode_context_parallel_size=1
@@ -170,7 +172,7 @@ def test_model_state_capture_override_and_eager_reset(monkeypatch, pcp):
     )
     state.pcp_manager = None
     batch = SimpleNamespace(
-        is_dummy=True, num_tokens_after_padding=8, num_reqs=1, num_computed_tokens_np=np.array([8192])
+        is_dummy=True, num_tokens=8, num_tokens_after_padding=8, num_reqs=1, num_computed_tokens_np=np.array([8192])
     )
     observed = []
 
@@ -194,3 +196,100 @@ def test_model_state_capture_override_and_eager_reset(monkeypatch, pcp):
     state.prepare_attn(batch, CUDAGraphMode.NONE, (), None, [], None)
     assert observed[-1] is None
     assert state.v41_full_indexer_sharded is False
+
+
+@pytest.mark.parametrize("max_model_len", [3072, 4096, 4097])
+def test_unreachable_history_skips_sharded_capture_and_replay(monkeypatch, max_model_len):
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+    from vllm_ascend.attention.dsa_v41_indexer_shard import V41_FULL_INDEXER_SHARD
+    from vllm_ascend.models.deepseek_v41.aclgraph import DeepSeekV41AclGraphManager
+    from vllm_ascend.models.deepseek_v41.model_state import DeepSeekV41ModelState, EngramModelState
+    from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41"),
+            hf_text_config=SimpleNamespace(index_topk=2048),
+            max_model_len=max_model_len,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+        lora_config=None,
+    )
+    desc = BatchExecutionDescriptor(CUDAGraphMode.FULL, 8, 8, uniform_token_count=1)
+
+    def init(self, *args, **kwargs):
+        self._capture_descs = {CUDAGraphMode.FULL: [desc]}
+        self.model_runner = args[4]
+
+    variants = []
+    monkeypatch.setattr(ModelAclGraphManager, "__init__", init)
+    monkeypatch.setattr(
+        ModelAclGraphManager, "capture", lambda *args, **kwargs: variants.append(V41_FULL_INDEXER_SHARD.get())
+    )
+    monkeypatch.setattr(ModelAclGraphManager, "run_fullgraph", lambda self, selected: selected)
+    monkeypatch.setattr(
+        EngramModelState, "prepare_attn", lambda *args, **kwargs: {"variant": V41_FULL_INDEXER_SHARD.get()}
+    )
+    state = DeepSeekV41ModelState.__new__(DeepSeekV41ModelState)
+    state.vllm_config = config
+    manager = DeepSeekV41AclGraphManager(
+        config, torch.device("cpu"), CUDAGraphMode.FULL_DECODE_ONLY, 1, SimpleNamespace(model_state=state)
+    )
+    manager.capture(None, state, None, None, None, [], None)
+    reachable = max_model_len > 4096
+    assert bool(manager._v41_sharded_descs) is reachable
+    assert variants == ([False, True] if reachable else [False])
+    assert V41_FULL_INDEXER_SHARD.get() is None
+    # The largest possible history is one token below max_model_len.
+    batch = SimpleNamespace(
+        is_dummy=False,
+        num_tokens=8,
+        num_tokens_after_padding=8,
+        num_reqs=1,
+        num_computed_tokens_np=np.array([max_model_len - 1]),
+    )
+    assert state.prepare_attn(batch, CUDAGraphMode.FULL, (), None, [], None)["variant"] is reachable
+    assert manager.run_fullgraph(desc) == (manager._v41_sharded_descs[desc] if reachable else desc)
+
+
+@pytest.mark.parametrize("live_rows", [0, 1, 7, 8])
+@pytest.mark.parametrize("mixed_mode", [False, True])
+def test_full_selection_uses_live_work_and_supported_graph_mode(monkeypatch, live_rows, mixed_mode):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.attention.dsa_v41_indexer_shard import V41_FULL_INDEXER_SHARD
+    from vllm_ascend.models.deepseek_v41.model_state import DeepSeekV41ModelState, EngramModelState
+
+    state = DeepSeekV41ModelState.__new__(DeepSeekV41ModelState)
+    state.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41"),
+            hf_text_config=SimpleNamespace(index_topk=512),
+            max_model_len=8192,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8, prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE if mixed_mode else CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+        lora_config=None,
+    )
+    batch = SimpleNamespace(
+        is_dummy=False,
+        num_tokens=live_rows,
+        num_tokens_after_padding=8,
+        num_reqs=1,
+        num_computed_tokens_np=np.array([4096]),
+    )
+    monkeypatch.setattr(
+        EngramModelState, "prepare_attn", lambda *args, **kwargs: {"variant": V41_FULL_INDEXER_SHARD.get()}
+    )
+    expected = live_rows == 8 and not mixed_mode
+    assert state.prepare_attn(batch, CUDAGraphMode.FULL, (), None, [], None)["variant"] is expected
+    assert state.v41_full_indexer_sharded is expected

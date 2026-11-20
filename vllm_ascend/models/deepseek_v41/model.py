@@ -1088,12 +1088,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             device=self.topk_indices_buffer.device,
         )
         self.candidate_indices_buffer = candidate_buffer
-        candidate_lengths = torch.zeros(
-            (max_tokens, 1),
-            dtype=torch.int32,
-            device=self.topk_indices_buffer.device,
+        candidate_lengths = (
+            torch.zeros((max_tokens, 1), dtype=torch.int32, device=self.topk_indices_buffer.device)
+            if DeviceOperator.get_dsv41_packed_cache_ops() is not None
+            else None
         )
-        topk_lengths = torch.zeros_like(candidate_lengths)
+        topk_lengths = torch.zeros_like(candidate_lengths) if candidate_lengths is not None else None
         self.candidate_lengths_buffer = candidate_lengths
         self.topk_lengths_buffer = topk_lengths
         self.shared_attention_state = DeepseekV41SharedAttentionState(

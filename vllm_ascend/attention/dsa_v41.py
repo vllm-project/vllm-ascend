@@ -691,7 +691,11 @@ class AscendDSAV41Impl:
         partition = getattr(index_metadata, "indexer_partition", None)
         rows = slice(num_tokens) if partition is None else partition.rows
         local_metadata = index_metadata if partition is None else index_metadata.local_indexer
-        topk_lengths = None if shared.topk_lengths is None else shared.topk_lengths[rows]
+        topk_lengths = (
+            shared.topk_lengths[rows]
+            if getattr(attn.indexer, "packed_cache_ops", None) is not None and shared.topk_lengths is not None
+            else None
+        )
         selected, candidates = attn.indexer.select_projected(
             prepared_indexer.query,
             prepared_indexer.weights,
@@ -1677,7 +1681,7 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
             self._build_qli_metadata(req.local_indexer, req.local_indexer, sharded=True, **kwargs)
 
     def _build_indexer_partition(self, req: AscendDSAV41Metadata, *, full_graph: bool) -> None:
-        if not self._supports_device_ops or (full_graph and V41_FULL_INDEXER_SHARD.get() is False):
+        if not self._supports_device_ops or (full_graph and V41_FULL_INDEXER_SHARD.get() is not True):
             return
         parallel = self.vllm_config.parallel_config
         if (

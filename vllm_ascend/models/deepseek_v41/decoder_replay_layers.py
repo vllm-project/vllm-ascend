@@ -204,10 +204,12 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         if not cut_writes_candidate_outputs:
             shared_state = getattr(model, "shared_attention_state", None)
             if shared_state is None or parallel.tensor_parallel_size < 2:
-                row_buffers.extend((model.candidate_indices_buffer, model.candidate_lengths_buffer))
+                row_buffers.append(model.candidate_indices_buffer)
+                if model.candidate_lengths_buffer is not None:
+                    row_buffers.append(model.candidate_lengths_buffer)
             else:
                 compact_candidates = shared_state.compact_candidates
-        if not cut_writes_index_outputs:
+        if not cut_writes_index_outputs and model.topk_lengths_buffer is not None:
             row_buffers.append(model.topk_lengths_buffer)
         write_batch_kv = model.layers[cut].write_kv if trim_cut_layer else None
         first_swa_prefix = model.layers[cut].self_attn.v41_impl.swa_prefix if trim_cut_layer else None

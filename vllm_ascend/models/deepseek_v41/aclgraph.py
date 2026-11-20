@@ -109,7 +109,8 @@ class DeepSeekV41AclGraphManager(ModelAclGraphManager):
             pcp_manager=pcp_manager,
         )
         if not self._v41_sharded_descs:
-            capture()
+            with v41_full_indexer_sharding(False):
+                capture()
             return
         capture_descs = self._capture_descs
         try:

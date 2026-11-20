@@ -46,7 +46,8 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     assert model.decoder_replay_start == 1
 
 
-def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
+@pytest.mark.parametrize("packed", [False, True])
+def test_replay_compacts_only_backend_required_buffers(monkeypatch, packed):
     buffers = [torch.arange(6) + offset for offset in (0, 10, 20, 30)]
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[2], engram_layer_ids=[1], sliding_window=2),
@@ -54,8 +55,8 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
         use_sequence_parallel=False,
         topk_indices_buffer=buffers[0],
         candidate_indices_buffer=buffers[1],
-        candidate_lengths_buffer=buffers[2],
-        topk_lengths_buffer=buffers[3],
+        candidate_lengths_buffer=buffers[2] if packed else None,
+        topk_lengths_buffer=buffers[3] if packed else None,
         _run_replay_layers=lambda hidden, optional, positions: (hidden,),
     )
     config = SimpleNamespace(
@@ -76,24 +77,32 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     replay(torch.arange(6), None, torch.arange(6))
-    for buffer, offset in zip(buffers, (0, 10, 20, 30)):
+    assert len(replay.row_buffers) == (4 if packed else 2)
+    for buffer, offset in zip(buffers[: 4 if packed else 2], (0, 10, 20, 30)):
         assert buffer[:2].tolist() == [offset + 4, offset + 5]
 
 
-def test_replay_redistributes_only_retained_candidate_rows(monkeypatch):
+@pytest.mark.parametrize("packed", [False, True])
+def test_replay_redistributes_only_retained_candidate_rows(monkeypatch, packed):
     candidates = torch.tensor([[-1, -1], [-1, -1], [8, -1], [9, 10]], dtype=torch.int32).unsqueeze(1)
     lengths = torch.tensor([[0], [0], [1], [2]], dtype=torch.int32)
-    shared = model_mod.DeepseekV41SharedAttentionState(None, candidates, lengths)
+    shared = model_mod.DeepseekV41SharedAttentionState(None, candidates, lengths if packed else None)
     shared.candidate_partition = IndexerRowPartition((2, 2), 1)
     contributions = iter([torch.tensor([[[4, 0]], [[0, 0]]]), torch.tensor([[1], [0]])])
-    monkeypatch.setattr(
-        model_mod, "get_tp_group", lambda: SimpleNamespace(all_reduce=lambda values: values + next(contributions))
-    )
+    calls = []
+
+    def all_reduce(values):
+        calls.append(values.shape)
+        return values + next(contributions)
+
+    monkeypatch.setattr(model_mod, "get_tp_group", lambda: SimpleNamespace(all_reduce=all_reduce))
 
     shared.compact_candidates(torch.tensor([1, 3]), num_padded_rows=3)
 
     assert candidates[:3].squeeze(1).tolist() == [[3, -1], [9, 10], [-1, -1]]
-    assert lengths[:3].flatten().tolist() == [1, 2, 0]
+    assert len(calls) == (2 if packed else 1)
+    if packed:
+        assert lengths[:3].flatten().tolist() == [1, 2, 0]
     assert shared.candidate_partition is None
 
 

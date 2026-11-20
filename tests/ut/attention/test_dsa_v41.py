@@ -11,7 +11,7 @@ import torch
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
-from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition
+from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition, v41_full_indexer_sharding
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
@@ -254,7 +254,8 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     assert out is not None and out.shape == (TOKENS, TOPK)
 
 
-def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(monkeypatch):
+@pytest.mark.parametrize("packed", [False, True])
+def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(monkeypatch, packed):
     prefix = "model.layers.20.attn"
     partition = IndexerRowPartition((2, 2), 1)
     local = SimpleNamespace(indexer_valid_rows=torch.tensor(1), compress_ratio=1)
@@ -274,12 +275,15 @@ def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(m
         assert positions.tolist() == [2, 3]
         assert metadata is local
         kwargs["indices_output"].fill_(7)
-        kwargs["topk_lengths"].fill_(1)
+        if packed:
+            kwargs["topk_lengths"].fill_(1)
+        else:
+            assert kwargs["topk_lengths"] is None
         kwargs["candidate_lengths"].fill_(2)
         return kwargs["indices_output"], torch.full((2, 1, 2), 5, dtype=torch.int32)
 
     def all_gather(payload, dim):
-        assert dim == 0 and payload.shape == (2, TOPK + 1)
+        assert dim == 0 and payload.shape == (2, TOPK + int(packed))
         return torch.cat((torch.ones_like(payload), payload))
 
     monkeypatch.setattr(
@@ -288,7 +292,10 @@ def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(m
         lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=[None])}),
     )
     monkeypatch.setattr(dsa_v41, "get_tp_group", lambda: SimpleNamespace(all_gather=all_gather))
-    attn = SimpleNamespace(shared_state=shared, indexer=SimpleNamespace(select_projected=select_projected))
+    attn = SimpleNamespace(
+        shared_state=shared,
+        indexer=SimpleNamespace(select_projected=select_projected, packed_cache_ops=object() if packed else None),
+    )
     impl = _impl(
         SimpleNamespace(
             has_long_context=True, is_index_source=True, is_candidate_source=True, uses_candidate_filter=False
@@ -303,7 +310,7 @@ def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(m
     )
 
     assert result[:, 0].tolist() == [1, 1, 7, -1]
-    assert shared.topk_lengths.flatten().tolist() == [1, 1, 1, 0]
+    assert shared.topk_lengths.flatten().tolist() == ([1, 1, 1, 0] if packed else [0, 0, 0, 0])
     assert shared.candidates[:, 0, 0].tolist() == [-1, -1, 5, -1]
     assert shared.candidate_lengths.flatten().tolist() == [0, 0, 2, 0]
     assert shared.candidate_partition is partition
@@ -336,7 +343,8 @@ def test_full_decode_indexer_updates_captured_metadata_storage(monkeypatch):
             num_input_tokens=24,
             max_query_len=6,
         )
-        builder._build_indexer_partition(metadata, full_graph=True)
+        with v41_full_indexer_sharding(True):
+            builder._build_indexer_partition(metadata, full_graph=True)
         return metadata
 
     captured = build([6, 6, 6, 6], 24)
@@ -487,3 +495,73 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
     )
     assert result[0] is quantized
     assert result[1].shape == (2, 1, 2, 2)
+
+
+@pytest.mark.parametrize("variant", [None, False])
+def test_full_indexer_requires_explicit_sharding_selection(variant):
+    builder = object.__new__(dsa_v41.AscendDSAV41IndexerMetadataBuilder)
+    builder._supports_device_ops = True
+    metadata = SimpleNamespace(indexer_partition=None, local_indexer=None)
+    # No parallel config or tensors may be consulted before the FULL guard.
+    with v41_full_indexer_sharding(variant):
+        builder._build_indexer_partition(metadata, full_graph=True)
+    assert metadata.indexer_partition is None
+    assert metadata.local_indexer is None
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_indexer_writes_lengths_only_for_packed_backend(monkeypatch, packed):
+    from vllm_ascend.models.deepseek_v41 import indexer as indexer_module
+
+    indices = torch.full((2, TOPK), -1, dtype=torch.int32)
+    lengths = torch.zeros((2, 1), dtype=torch.int32)
+    candidates = torch.full((2, 1, 2), -1, dtype=torch.int32)
+    packed_op = Mock(return_value=(indices, candidates))
+    indexer = SimpleNamespace(
+        index_topk=TOPK,
+        compress_ratio=1,
+        packed_cache_ops=SimpleNamespace(run_a5_indexer=packed_op) if packed else None,
+    )
+    native_op = Mock(return_value=(indices.unsqueeze(1), None, candidates))
+    prepare = Mock(return_value=indices)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v3", native_op, raising=False)
+    monkeypatch.setattr(indexer_module, "prepare_indexer_indices", prepare)
+    monkeypatch.setattr(indexer_module, "wait_for_device_metadata", lambda *args: None)
+    metadata = SimpleNamespace(
+        max_cache_seq_len=8192,
+        query_start_loc=torch.tensor([0, 2]),
+        cache_seq_lens=torch.tensor([8192]),
+        cmp_residual=None,
+        max_query_len=2,
+        qli_metadata=object(),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+    )
+    query = torch.zeros((2, 1, 8))
+    result = indexer_module.DeepseekV41Indexer.select_projected(
+        indexer,
+        query,
+        torch.zeros((2, 1)),
+        torch.arange(2),
+        (torch.zeros((1, 8)), torch.ones((1, 1))),
+        metadata,
+        is_candidate_source=True,
+        uses_candidate_filter=False,
+        candidate_topk_blocks=2,
+        candidate_block_size=8,
+        candidates=candidates,
+        candidate_lengths=lengths,
+        topk_lengths=lengths,
+        indices_output=indices,
+        quantized_query=query,
+        query_scale=torch.ones((2, 1)),
+    )
+    assert result[0] is indices
+    if packed:
+        assert packed_op.call_args.kwargs["topk_lengths"] is lengths
+        assert packed_op.call_args.kwargs["candidate_lengths"] is lengths
+        prepare.assert_not_called()
+        native_op.assert_not_called()
+    else:
+        assert prepare.call_args.kwargs["lengths_output"] is None
+        native_op.assert_called_once()
+        packed_op.assert_not_called()
