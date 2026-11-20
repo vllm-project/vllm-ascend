@@ -35,7 +35,8 @@ def qwen2_5_vision_attention_forward(
     x, _ = self.qkv(x)
     seq_len, batch_size, _ = x.shape
 
-    fused_qkv_fia = getattr(self.attn, "forward_qkv_rope_pad_fia", None)
+    # The fused adapter reads sequence metadata in Python outside the attention custom op.
+    fused_qkv_fia = None if torch.compiler.is_compiling() else getattr(self.attn, "forward_qkv_rope_pad_fia", None)
     if fused_qkv_fia is not None:
         context_layer = fused_qkv_fia(
             x,

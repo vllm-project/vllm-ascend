@@ -1,10 +1,80 @@
+from threading import Lock
 from unittest.mock import MagicMock
 
 import torch
+from torch import nn
+from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention, Qwen2_5_VisionBlock
 
 from vllm_ascend.patch.worker.patch_qwen2_5_vl import (
     qwen2_5_vision_attention_forward,
 )
+
+
+class _VisionAttentionBackend(nn.Module):
+    def __init__(self, num_heads: int, head_size: int) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.sequence_lock = Lock()
+
+    def forward(self, *, value: torch.Tensor, **kwargs) -> torch.Tensor:
+        return value
+
+    def forward_qkv_rope_pad_fia(
+        self,
+        qkv: torch.Tensor,
+        _cos: torch.Tensor,
+        _sin: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        # Exercise the same Python-only metadata work as the eager adapter.
+        with self.sequence_lock:
+            token_count = cu_seqlens.tolist()[-1]
+        value = qkv.chunk(3, dim=-1)[2].unflatten(-1, (self.num_heads, self.head_size))
+        return value.transpose(0, 1) + token_count
+
+
+class _ResidualNorm(nn.Module):
+    def forward(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = x + residual
+        return x, x
+
+
+def test_compiled_vision_block_uses_generic_attention_with_fusion_available():
+    num_heads, head_size = 8, 72
+    token_count = 7
+
+    # Use the real block and patched attention forwards with CPU stand-ins.
+    attention = Qwen2_5_VisionAttention.__new__(Qwen2_5_VisionAttention)
+    nn.Module.__init__(attention)
+    attention.num_attention_heads_per_partition = num_heads
+    attention.hidden_size_per_attention_head = head_size
+    attention.qkv = lambda x: (x.repeat(1, 1, 3), None)
+    attention.proj = lambda x: (x, None)
+    attention.apply_rotary_emb = lambda qk, cos, sin: qk
+    attention.attn = _VisionAttentionBackend(num_heads, head_size)
+
+    block = Qwen2_5_VisionBlock.__new__(Qwen2_5_VisionBlock)
+    nn.Module.__init__(block)
+    block.attn = attention
+    block.norm1 = nn.Identity()
+    block.norm2 = _ResidualNorm()
+    block.mlp = nn.Identity()
+
+    x = torch.randint(0, 4, (token_count, 1, num_heads * head_size)).to(torch.bfloat16)
+    args = (
+        x,
+        torch.tensor([0, 2, token_count], dtype=torch.int32),
+        torch.ones(token_count, head_size // 2, dtype=x.dtype),
+        torch.zeros(token_count, head_size // 2, dtype=x.dtype),
+        torch.tensor(token_count - 2, dtype=torch.int32),
+    )
+
+    # The identity MLP doubles the sum of the input and the attention output.
+    torch.testing.assert_close(block.forward(*args), 4 * x + 2 * token_count)
+    compiled_forward = torch.compile(block.forward, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled_forward(*args), 4 * x)
 
 
 def test_fused_qkv_rope_pad_short_circuits_generic_path():

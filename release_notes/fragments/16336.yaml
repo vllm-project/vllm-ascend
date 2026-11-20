@@ -1,6 +1,6 @@
 pr: 16336
 entries:
   - category: performance
-    text: Enabled fused vision attention preprocessing by default for eligible Qwen inputs with BF16 data, eight attention heads per rank, and head dimension 72 on Ascend.
+    text: Enabled fused vision attention preprocessing by default for eligible Qwen inputs in eager mode with BF16 data, eight attention heads per rank, and head dimension 72 on Ascend.
   - category: performance
     text: Reduced FIA KV-cache copying for supported Qwen3.5 hybrid-attention workloads.
