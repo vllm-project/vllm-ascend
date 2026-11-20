@@ -120,7 +120,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self.device = device
         self.ready_event = ready_event
         self.executor = ThreadPoolExecutor(
-            max_workers=self._get_pull_max_workers(vllm_config),
+            max_workers=MooncakeBaseConnectorWorker._get_transfer_max_workers(vllm_config),
             initializer=torch.npu.set_device,
             initargs=(self.device,),
         )
@@ -155,14 +155,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         if mode not in ("batch", "request"):
             raise ValueError(f"Mooncake pull_transfer_mode must be 'batch' or 'request', got {mode!r}")
         return mode
-
-    @staticmethod
-    def _get_pull_max_workers(vllm_config: VllmConfig) -> int:
-        assert vllm_config.kv_transfer_config is not None
-        max_workers = vllm_config.kv_transfer_config.get_from_extra_config("pull_max_workers", 32)
-        if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers <= 0:
-            raise ValueError(f"Mooncake pull_max_workers must be a positive integer, got {max_workers!r}")
-        return max_workers
 
     def add_requests(
         self,

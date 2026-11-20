@@ -431,20 +431,22 @@ completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
 
-### MooncakeConnectorV2 Pull Configuration
+### Mooncake V2 Transfer Configuration
 
-Set these options in the decoder's `kv_connector_extra_config`:
+Set these options in `kv_connector_extra_config`. Pull uses the decoder's
+transfer pool; Push uses the prefiller's sending pool.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
-| `pull_transfer_mode` | `"request"` | Submit and complete each request independently. Use `"batch"` to aggregate READs and wait for the whole producer-engine batch. |
-| `pull_max_workers` | `32` | Positive integer controlling the transfer pool size per decoder worker. Booleans and strings are rejected. |
+| `pull_transfer_mode` | `"request"` | Pull only: submit and complete each request independently. Use `"batch"` to aggregate READs and wait for the whole producer-engine batch. |
+| `transfer_max_workers` | `32` | Positive integer controlling the transfer pool size per worker: D-side READs for Pull, P-side sends for Push. Booleans and strings are rejected. |
 
 ```json
-{"kv_connector_extra_config": {"pull_transfer_mode": "request", "pull_max_workers": 32}}
+{"kv_connector_extra_config": {"pull_transfer_mode": "request", "transfer_max_workers": 32}}
 ```
 
-The producer requires no matching setting. Both modes prepare addresses and
+For Push, set only `transfer_max_workers` on the producer. The peer requires no
+matching setting. Both Pull modes prepare addresses and
 execute READs in the transfer pool, and wait for submitted READs to finish before
 reporting a failed receive. Request mode avoids the batch completion barrier but
 can increase READ call overhead; compare both modes under the same workload.

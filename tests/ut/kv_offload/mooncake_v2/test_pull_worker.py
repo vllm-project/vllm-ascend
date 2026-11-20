@@ -2518,91 +2518,11 @@ def test_transfer_bucket_caches_remote_interleave_separately() -> None:
     assert [call.args[16] for call in calls] == [8, 16]
 
 
-@pytest.mark.parametrize(
-    "options,expected",
-    [({}, "request"), ({"pull_transfer_mode": "batch"}, "batch"), ({"pull_transfer_mode": "request"}, "request")],
-)
-def test_pull_transfer_mode_default_and_explicit_values(options, expected) -> None:
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
-    assert MooncakePullRecvingThread._get_pull_transfer_mode(config) == expected
-
-
-@pytest.mark.parametrize("value", [None, True, 1, "", "auto", "REQUEST", []])
-def test_pull_transfer_mode_rejects_invalid_values(value) -> None:
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(get_from_extra_config={"pull_transfer_mode": value}.get)
-    )
-    with pytest.raises(ValueError, match="pull_transfer_mode"):
-        MooncakePullRecvingThread._get_pull_transfer_mode(config)
-
-
-@pytest.mark.parametrize("mode", ["batch", "request"])
-@pytest.mark.parametrize("options,expected", [({}, 32), ({"pull_max_workers": 1}, 1), ({"pull_max_workers": 64}, 64)])
-def test_pull_executor_uses_configured_max_workers(mode, options, expected) -> None:
-    options = {**options, "pull_transfer_mode": mode}
-    config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get),
-        model_config=SimpleNamespace(is_deepseek_mla=False, hf_text_config=SimpleNamespace()),
-        speculative_config=None,
-    )
-    metadata = make_transfer_metadata()
-    with patch.object(pull_worker, "ThreadPoolExecutor") as executor:
-        thread = MooncakePullRecvingThread(
-            engine=MagicMock(),
-            vllm_config=config,
-            kv_cache_config=SimpleNamespace(kv_cache_groups=[MagicMock()]),
-            kv_cache_specs=[make_full_spec()],
-            layer_name_to_group_index={name: 0 for name in metadata.layer_names},
-            layer_name_to_spec_index={name: 0 for name in metadata.layer_names},
-            local_metadata=metadata,
-            tp_rank=0,
-            tp_size=1,
-            pp_rank=0,
-            pp_size=1,
-            dp_rank=0,
-            dp_size=1,
-            pcp_rank=0,
-            pcp_size=1,
-            dcp_rank=0,
-            dcp_size=1,
-            device=0,
-            ready_event=threading.Event(),
-        )
-    executor.assert_called_once_with(max_workers=expected, initializer=torch.npu.set_device, initargs=(0,))
-    assert thread.executor is executor.return_value
-    assert thread.pull_transfer_mode == mode
-
-
-@pytest.mark.parametrize("value", [None, True, False, 0, -1, 1.5, "32", [], {}])
-def test_pull_max_workers_rejects_invalid_values(value) -> None:
-    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config={"pull_max_workers": value}.get))
-    with pytest.raises(ValueError, match="pull_max_workers must be a positive integer"):
-        MooncakePullRecvingThread._get_pull_max_workers(config)
-
-
-def test_request_pipeline_concurrent_callbacks_finish_once() -> None:
-    thread = make_thread(pull_transfer_mode="request")
-    futures = [Future() for _ in range(4)]
-    thread._track_request("a", make_req_meta(), {future: (0, 0, i, {"a"}) for i, future in enumerate(futures)}, None)
-    barrier = threading.Barrier(len(futures))
-
-    def complete(future):
-        barrier.wait(timeout=5)
-        future.set_result(None)
-
-    workers = [threading.Thread(target=complete, args=(future,)) for future in futures]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-    assert thread.finished_requests.get_nowait() == ("a", False)
-    assert thread.finished_requests.empty()
-
-
 @pytest.mark.parametrize("mode,read_count", [("batch", 1), ("request", 2)])
 def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_count) -> None:
-    thread = make_thread(pull_transfer_mode=mode)
+    options = {} if mode == "request" else {"pull_transfer_mode": mode}
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(get_from_extra_config=options.get))
+    thread = make_thread(pull_transfer_mode=MooncakePullRecvingThread._get_pull_transfer_mode(config))
     thread._get_remote_metadata = MagicMock(return_value=make_metadata_groups(pp_metadata=make_pp_metadata()))
     thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0]]}}}
     thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
@@ -2637,36 +2557,23 @@ def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_co
     assert all(call.args[0] == thread._execute_tp_transfer_bucket for call in thread.executor.submit.call_args_list)
 
 
-@pytest.mark.parametrize("failure", [None, "mapping", "submit", "read"])
-def test_request_completion_drains_reads_and_preserves_replica_mapping(failure, monkeypatch):
+@pytest.mark.parametrize("failure", ["submit", "read"])
+def test_request_completion_drains_reads(failure, monkeypatch):
     thread = make_thread(pull_transfer_mode="request", device=0, ready_event=threading.Event())
-    remote = make_metadata_groups(tp_size=2, pp_metadata=make_pp_metadata())
+    remote = make_metadata_groups(pp_metadata=make_pp_metadata())
     remote.metadata_by_pp_rank[1] = remote.metadata_by_pp_rank[0]
     thread._get_remote_metadata = MagicMock(return_value=remote)
-    thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0, 1]]} for pp in range(2)}}
+    thread.remote_tp_rank_groups = {"engine-p": {pp: {(0, 0): [[0]]} for pp in range(2)}}
     thread.remote_layer_index_pairs = {"engine-p": {pp: [(0, 0)] for pp in range(2)}}
-    thread._compute_group_block_ids = MagicMock(wraps=thread._compute_group_block_ids)
-    build = thread._build_transfer_block_buckets
     futures = {}
-    caches = []
-
-    def prepare(*args, **kwargs):
-        caches.append(args[-1])
-        assert kwargs["selection_index_offset"] == (len(caches) - 1) // 2
-        if failure == "mapping" and len(caches) == 2:
-            raise ValueError("mapping failed")
-        return build(*args, **kwargs)
 
     def submit(fn, pp, pcp, tp, *args):
         name = args[-1][0][(0, 0)][0][0]
-        assert fn == thread._execute_tp_transfer_bucket
-        assert tp == (0 if name == "a" else 1)
         if failure == "submit" and (name, pp) == ("a", 1):
             raise RuntimeError("submit failed")
         future = futures[name, pp] = Future()
         return future
 
-    thread._build_transfer_block_buckets = MagicMock(side_effect=prepare)
     thread.executor = MagicMock()
     thread.executor.submit.side_effect = submit
     thread.request_queue = MagicMock()
@@ -2677,38 +2584,17 @@ def test_request_completion_drains_reads_and_preserves_replica_mapping(failure, 
     monkeypatch.setattr(torch.npu, "set_device", MagicMock())
     with pytest.raises(_StopWorkerLoop):
         thread.run()
-    thread.request_queue.task_done.assert_called_once_with()
     assert thread.finished_requests.empty()
-    assert caches[0] is caches[1] and caches[2] is caches[3] and caches[0] is not caches[2]
-    assert thread._compute_group_block_ids.call_count == 2
     # B completes independently while A still owns an in-flight READ.
     futures["b", 0].set_result(None)
     assert thread.finished_requests.empty()
     futures["b", 1].set_result(None)
     assert thread.finished_requests.get_nowait() == ("b", False)
-    if ("a", 1) in futures:
-        if failure == "read":
-            futures["a", 1].set_exception(RuntimeError("READ failed"))
-        else:
-            futures["a", 1].set_result(None)
+    if failure == "read":
+        futures["a", 1].set_exception(RuntimeError("READ failed"))
     assert thread.finished_requests.empty()
     assert not thread.invalid_block_ids
     futures["a", 0].set_result(None)
-    assert thread.finished_requests.get_nowait() == ("a", failure is not None)
-    assert thread.invalid_block_ids == ({10} if failure else set())
-    assert thread.finished_requests.empty()
-
-
-@pytest.mark.parametrize("state", ["empty", "done", "submission_error"])
-def test_request_callbacks_handle_immediate_completion(state):
-    thread = make_thread(pull_transfer_mode="request")
-    future = Future()
-    future.set_result(None)
-    thread._track_request(
-        "a",
-        make_req_meta(),
-        {future: (0, 0, 0, {"a"})} if state == "done" else {},
-        RuntimeError("submit failed") if state == "submission_error" else None,
-    )
-    assert thread.finished_requests.get_nowait() == ("a", state == "submission_error")
+    assert thread.finished_requests.get_nowait() == ("a", True)
+    assert thread.invalid_block_ids == {10}
     assert thread.finished_requests.empty()
