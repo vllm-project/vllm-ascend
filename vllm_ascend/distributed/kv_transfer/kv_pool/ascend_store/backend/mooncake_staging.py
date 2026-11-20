@@ -14,7 +14,7 @@ from typing import Any
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import require_aligned_batch_results
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 # Each direction owns a bounded buffer; network waits never serialize PUT and GET.
 _HOST_STAGING_BYTES = 64 * 1024 * 1024
@@ -48,7 +48,9 @@ class MooncakeHostStaging:
     def register(self, buffers: list[BufferDescriptor]) -> None:
         if len({buffer.address for buffer in buffers}) != len(buffers):
             raise ValueError("Mooncake bulk buffer addresses must be distinct")
-        self._host_ranges = {buffer.address: buffer.size_bytes for buffer in buffers if buffer.host}
+        self._host_ranges = {
+            buffer.address: buffer.size_bytes for buffer in buffers if buffer.memory_location is MemoryLocation.HOST
+        }
         if not self._host_ranges:
             raise ValueError("Mooncake bulk transfer requires explicit Host Source buffer ranges")
         self._host_bases = sorted(self._host_ranges)
@@ -58,7 +60,7 @@ class MooncakeHostStaging:
             staging.prepare()
             self._register(staging.base, _HOST_STAGING_BYTES)
         for buffer in buffers:
-            if not buffer.host:
+            if buffer.memory_location is MemoryLocation.DEVICE:
                 self._register(buffer.address, buffer.size_bytes)
 
     def _register(self, ptr: int, size: int) -> None:
@@ -104,9 +106,10 @@ class MooncakeHostStaging:
             raise ValueError(f"Mooncake Host Source key exceeds {_HOST_STAGING_BYTES} byte staging capacity")
         return key_bytes
 
-    def _host_batches(
+    def _iter_host_staging_batches(
         self, addrs: list[list[int]], sizes: list[list[int]], staging: _HostStaging
     ) -> Iterator[tuple[int, int, list[list[int]]]]:
+        """Yield batch slices and their staging addresses."""
         # Validate all ranges before any copy; addresses are raw pointers.
         totals = [self._validate_host_key(a, s) for a, s in zip(addrs, sizes, strict=True)]
         begin = 0
@@ -125,15 +128,21 @@ class MooncakeHostStaging:
             yield begin, len(sizes), staged
 
     def put(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], config: Any, *, host: bool
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        config: Any,
+        *,
+        memory_location: MemoryLocation,
     ) -> list[bool]:
         if not len(keys) == len(addrs) == len(sizes):
             raise ValueError("Mooncake bulk PUT requires one buffer list per key")
-        if not host:
+        if memory_location is MemoryLocation.DEVICE:
             return self._put(keys, addrs, sizes, config)
         result = []
         with self._send.lock:
-            for begin, end, staged in self._host_batches(addrs, sizes, self._send):
+            for begin, end, staged in self._iter_host_staging_batches(addrs, sizes, self._send):
                 for src, dst, lengths in zip(addrs[begin:end], staged, sizes[begin:end], strict=True):
                     for source, target, length in zip(src, dst, lengths, strict=True):
                         ctypes.memmove(target, source, length)
@@ -146,14 +155,16 @@ class MooncakeHostStaging:
         )
         return [rc == 0 for rc in codes]
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool) -> list[int]:
+    def get(
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, memory_location: MemoryLocation
+    ) -> list[int]:
         if not len(keys) == len(addrs) == len(sizes):
             raise ValueError("Mooncake bulk GET requires one buffer list per key")
-        if not host:
+        if memory_location is MemoryLocation.DEVICE:
             return self._get(keys, addrs, sizes)
         results = []
         with self._recv.lock:
-            for begin, end, staged in self._host_batches(addrs, sizes, self._recv):
+            for begin, end, staged in self._iter_host_staging_batches(addrs, sizes, self._recv):
                 lengths = sizes[begin:end]
                 codes = self._get(keys[begin:end], staged, lengths)
                 for src, dst, spans, code in zip(staged, addrs[begin:end], lengths, codes, strict=True):

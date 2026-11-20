@@ -10,7 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 # QoS range supported by the pooled KV store backends. A larger value
 # means a higher transfer priority.
@@ -80,7 +80,7 @@ class Backend(ABC):
     strict_get_results: bool = False
 
     @classmethod
-    def validate_mixed_bulk_config(cls) -> None:
+    def validate_hisparse_colocated_config(cls) -> None:
         """Opt in to whole-block transfer of both DDR and device buffers."""
         raise ValueError(f"{cls.__name__} does not support mixed Host/Device bulk transfers")
 
@@ -198,18 +198,34 @@ class Backend(ABC):
 
     @abstractmethod
     def put(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
     ) -> bool | list[bool] | None:
         """Store a batch, returning False for a detected backend failure.
 
         A per-key boolean list preserves partial-success information. ``None``
         remains valid for legacy backends that report failures by raising.
-        ``host`` explicitly selects a homogeneous Host/Device batch. Omit it
-        for existing device-only callers and their legacy result conventions.
+        ``memory_location`` identifies the local source buffers for this batch.
+        ``None`` uses the original backend path and its result conventions.
         """
         pass
 
     @abstractmethod
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None):
-        """Read a homogeneous batch, with one status per key (zero on success)."""
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        """Read a batch into local buffers at the given memory location.
+
+        Returns one status per key (zero on success). ``None`` for
+        ``memory_location`` uses the original backend path.
+        """
         pass

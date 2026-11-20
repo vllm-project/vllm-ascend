@@ -36,7 +36,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
+    has_hisparse_cache_layout,
+    validate_hisparse_decode_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
 )
@@ -182,24 +185,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.save_decode_cache = extra_config.get("save_decode_cache", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        if has_hisparse_layout(kv_cache_config):
+        if has_hisparse_cache_layout(kv_cache_config):
             incompatibilities = []
             if self.use_layerwise or self.kv_role != "kv_both":
                 incompatibilities.append("requires whole-block transfers with kv_role=kv_both")
             if not extra_config.get("load_async", False):
                 # HiSparse publishes imported Host Source pages on receive completion.
                 incompatibilities.append("requires load_async=true")
-            if self.save_decode_cache:
-                # Without eager mirroring, a newly decoded row can still be
-                # Resident-only when the Store publishes the completed block.
-                mirror = vllm_config.attention_config.hisparse_config
-                if mirror is None or not mirror.eager_host_mirror:
-                    incompatibilities.append("save_decode_cache=true requires eager_host_mirror=true")
             try:
-                mixed_backend = get_backend_class(self.backend_name)
-                if mixed_backend is None:
+                validate_hisparse_decode_config(vllm_config, save_decode_cache=self.save_decode_cache)
+            except ValueError as error:
+                incompatibilities.append(str(error))
+            try:
+                hisparse_backend = get_backend_class(self.backend_name)
+                if hisparse_backend is None:
                     raise ValueError(f"unknown pool backend {self.backend_name!r}")
-                mixed_backend.validate_mixed_bulk_config()
+                hisparse_backend.validate_hisparse_colocated_config()
             except (ValueError, OSError, NotImplementedError) as error:
                 incompatibilities.append(str(error))
             if incompatibilities:

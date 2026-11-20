@@ -37,9 +37,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVI
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
     HiSparseStoreViews,
-    has_hisparse_layout,
+    build_pool_key_namespace,
+    has_hisparse_cache_layout,
     plan_hisparse_store_views,
-    store_model_name,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
@@ -362,7 +362,9 @@ class BaseKVPoolWorker(ABC):
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
-        model_name = store_model_name(vllm_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity)
+        pool_key_namespace = build_pool_key_namespace(
+            vllm_config, self.kv_cache_config, self.dcp_size, self.cache_transfer_granularity
+        )
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -372,7 +374,7 @@ class BaseKVPoolWorker(ABC):
                 group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
-                    model_name,
+                    pool_key_namespace,
                     group_tp_rank,
                     self.dcp_rank,
                     self.pp_rank,
@@ -420,18 +422,6 @@ class BaseKVPoolWorker(ABC):
         self.enable_kv_events = False
         if kv_event_config and kv_event_config.enable_kv_cache_events:
             self.enable_kv_events = True
-
-    def _start_threads_and_wait(self) -> None:
-        try:
-            for thread in (self.kv_send_thread, self.kv_recv_thread):
-                if thread is not None:
-                    thread.start()
-                    thread.ready_event.wait()
-                    thread.raise_if_failed()
-        except BaseException:
-            self._stop_transfer_threads()
-            raise
-        self._transfer_threads_started = True
 
     def _stop_transfer_threads(self) -> None:
         threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
@@ -692,7 +682,7 @@ class BaseKVPoolWorker(ABC):
             return
         alignment = DEVICE_BUFFER_ALIGNMENT
         for storage_key in registered_regions:
-            if self._transfer_layout is not None and storage_key in self._transfer_layout.host_storage_keys:
+            if self._transfer_layout is not None and storage_key in self._transfer_layout.host_storage_base_ptrs:
                 continue
             start, end = registered_regions[storage_key]
             new_start = start // alignment * alignment
@@ -740,7 +730,7 @@ class BaseKVPoolWorker(ABC):
             kv_caches = self._recoverssm_store_caches(kv_caches)
         excluded_layer_names = None
         self._transfer_layout = None
-        if has_hisparse_layout(self.kv_cache_config):
+        if has_hisparse_cache_layout(self.kv_cache_config):
             assert self.kv_cache_config is not None
             self._transfer_layout, kv_caches, excluded_layer_names = plan_hisparse_store_views(
                 self.kv_cache_config,
@@ -1487,8 +1477,8 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
-        host_resident_groups: frozenset[int] = (
-            self._transfer_layout.host_groups if self._transfer_layout is not None else frozenset()
+        host_memory_group_ids: frozenset[int] = (
+            self._transfer_layout.host_memory_group_ids if self._transfer_layout is not None else frozenset()
         )
 
         if self.can_put:
@@ -1508,7 +1498,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 enable_kv_event=self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
-                host_resident_groups=host_resident_groups,
+                host_memory_group_ids=host_memory_group_ids,
             )
         if self.load_async:
             self.kv_recv_thread = KVCacheStoreRecvingThread(
@@ -1522,9 +1512,18 @@ class KVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
-                host_resident_groups=host_resident_groups,
+                host_memory_group_ids=host_memory_group_ids,
             )
-        self._start_threads_and_wait()
+        try:
+            for thread in (self.kv_send_thread, self.kv_recv_thread):
+                if thread is not None:
+                    thread.start()
+                    thread.ready_event.wait()
+                    thread.raise_if_failed()
+        except BaseException:
+            self._stop_transfer_threads()
+            raise
+        self._transfer_threads_started = True
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0

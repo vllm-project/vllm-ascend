@@ -1773,16 +1773,44 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_register_kv_caches_initializes_layerwise_memcache(self):
         worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
-        fake_cache = MagicMock()
-        fake_cache.shape = [100, 16, 8, 64]
-        fake_cache.element_size.return_value = 2
-        fake_cache.data_ptr.return_value = 10000
+        cache = torch.empty((4, 16, 2, 8), dtype=torch.float16)
         worker._transfer_threads_started = True
 
-        worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+        worker.register_kv_caches({"layer.0": cache})
 
         worker.m_store.ensure_initialized.assert_called_once_with()
-        worker.m_store.register_buffer.assert_called_once()
+        worker.m_store.register_buffer.assert_called_once_with(
+            [BufferDescriptor(address=cache.data_ptr(), size_bytes=cache.nbytes)]
+        )
+
+    def test_layerwise_shutdown_joins_threads_before_releasing_store(self):
+        worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
+        lifecycle = MagicMock()
+        worker.kv_send_thread = lifecycle.sender
+        worker.kv_recv_thread = lifecycle.receiver
+        worker.kv_send_thread.is_alive.return_value = True
+        worker.kv_recv_thread.is_alive.return_value = True
+        worker.m_store = lifecycle.store
+        worker.m_store.batch_remove_lease.return_value = 0
+        worker._step_load_keys.add("key")
+
+        worker.shutdown()
+        worker.shutdown()
+
+        self.assertFalse(worker._step_load_keys)
+        self.assertEqual(
+            lifecycle.mock_calls,
+            [
+                call.sender.stop(),
+                call.receiver.stop(),
+                call.sender.is_alive(),
+                call.sender.join(),
+                call.receiver.is_alive(),
+                call.receiver.join(),
+                call.store.batch_remove_lease(["key"]),
+                call.store.close(),
+            ],
+        )
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker(extra_config={"load_async": False})
@@ -2074,7 +2102,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                     patch.object(host_mirror.torch, "Event") as event,
                     patch.object(host_mirror.torch, "npu", create=True) as npu,
                 ):
-                    save_hook.before_save()
+                    save_hook.flush_host_mirror_if_needed()
                     worker.wait_for_save(meta)
 
                 if pending:
@@ -2121,7 +2149,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         mirror = SimpleNamespace(_draft_mirror_pending=True)
         store = SimpleNamespace(has_pending_bulk_save=lambda: False)
         save_hook = HiSparseDraftHostMirrorSaveHook(mirror, [store])
-        save_hook.before_save()
+        save_hook.flush_host_mirror_if_needed()
         worker.wait_for_save(meta)
         self.assertTrue(mirror._draft_mirror_pending)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()

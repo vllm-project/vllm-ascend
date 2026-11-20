@@ -60,7 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 
 def _format_log_call(call):
@@ -1861,14 +1861,14 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_hisparse_put_validates_both_indexer_and_source_batches(self):
         backend = self._make_backend()
-        for host in (False, True):
-            with self.subTest(host=host):
+        for memory_location in (MemoryLocation.DEVICE, MemoryLocation.HOST):
+            with self.subTest(memory_location=memory_location):
                 backend.store.reset_mock()
-                self.assertIs(backend.put(["k"], [], [[8]], host=host), False)
+                self.assertIs(backend.put(["k"], [], [[8]], memory_location=memory_location), False)
                 backend.store.batch_put_from_layers.assert_not_called()
                 for malformed in ([False], ["0"], [], [0, 0]):
                     backend.store.batch_put_from_layers.return_value = malformed
-                    self.assertIs(backend.put(["k"], [[100]], [[8]], host=host), False)
+                    self.assertIs(backend.put(["k"], [[100]], [[8]], memory_location=memory_location), False)
 
     def test_put_exception(self):
         b = self._make_backend()

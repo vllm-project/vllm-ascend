@@ -22,7 +22,8 @@ class HiSparseDraftHostMirrorSaveHook:
         self._source = source
         self._stores = tuple(stores)
 
-    def before_save(self) -> None:
+    def flush_host_mirror_if_needed(self) -> None:
+        """Order pending draft DMA before the child connectors save Host bytes."""
         if any(store.has_pending_bulk_save() for store in self._stores):
             # Queue the mirror once, then let each child record its save event.
             # Sender threads wait for those events before reading Host bytes.

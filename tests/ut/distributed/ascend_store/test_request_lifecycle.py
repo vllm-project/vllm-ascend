@@ -73,14 +73,14 @@ class MemoryBackend(Backend):
     def check_address(self, addr, size):
         assert any(start <= addr and addr + size <= start + length for start, length in self.regions)
 
-    def put(self, keys, addrs, sizes, *, host=None):
+    def put(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)
             self.payloads[key] = [ctypes.string_at(addr, size) for addr, size in zip(row, lengths, strict=True)]
         return [True] * len(keys)
 
-    def get(self, keys, addrs, sizes, *, host=None):
+    def get(self, keys, addrs, sizes, *, memory_location=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size, data in zip(row, lengths, self.payloads[key], strict=True):
                 self.check_address(addr, size)

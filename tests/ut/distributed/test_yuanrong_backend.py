@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_b
     YuanrongBackend,
     YuanrongConfig,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 
 def test_yuanrong_put_does_not_require_exists_check():
@@ -42,19 +42,30 @@ def _make_backend():
     return backend
 
 
-def test_get_and_put_use_multi_buffer_apis():
+@pytest.mark.parametrize("memory_location", [None, MemoryLocation.DEVICE])
+def test_get_and_put_use_multi_buffer_apis(memory_location):
     backend = _make_backend()
     keys = ["Qwen2.5-7B@pcp0@dcp0@head_or_tp_rank:0@pp_rank:0@abcdef"]
     addrs = [[100, 200]]
     sizes = [[10, 20]]
 
-    assert backend.get(keys, addrs, sizes) == [0]
-    backend.put(keys, addrs, sizes)
+    assert backend.get(keys, addrs, sizes, memory_location=memory_location) == [0]
+    backend.put(keys, addrs, sizes, memory_location=memory_location)
 
     backend.store.mget_h2d_from_multi_buffers.assert_called_once_with(keys, addrs, sizes, 1234)
     backend.store.mset_d2h_from_multi_buffers.assert_called_once_with(keys, addrs, sizes, backend._ds_set_param)
     assert backend.store.mget_h2d_from_multi_buffers.call_args.args[0] is keys
     assert backend.store.mset_d2h_from_multi_buffers.call_args.args[0] is keys
+
+
+def test_host_pool_transfers_are_rejected_before_calling_sdk():
+    backend = _make_backend()
+
+    for transfer in (backend.get, backend.put):
+        with pytest.raises(ValueError, match="does not support Host pool transfers"):
+            transfer(["key"], [[100]], [[8]], memory_location=MemoryLocation.HOST)
+
+    assert not backend.store.mock_calls
 
 
 def test_get_forwards_empty_keys_to_sdk():

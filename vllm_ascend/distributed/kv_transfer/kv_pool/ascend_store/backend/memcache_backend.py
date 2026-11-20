@@ -19,7 +19,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, buffer_arrays
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 _MEMCACHE_PROTOCOL_KEY = "ock.mmc.local_service.protocol"
@@ -261,17 +265,18 @@ class MemcacheBackend(Backend):
     strict_get_results = True
 
     @classmethod
-    def validate_mixed_bulk_config(cls) -> None:
+    def validate_hisparse_colocated_config(cls) -> None:
         require_hisparse_host_tcp()
 
     def _get_registered(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool
+        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, memory_location: MemoryLocation
     ) -> list[int] | None:
         if not len(keys) == len(addrs) == len(sizes):
             raise ValueError("MemCache bulk GET requires one buffer list per key")
         self.ensure_initialized()
         assert self.store is not None
-        direction = MmcDirect.COPY_G2H if host else MmcDirect.COPY_G2L
+        is_host = memory_location is MemoryLocation.HOST
+        direction = MmcDirect.COPY_G2H if is_host else MmcDirect.COPY_G2L
         result = []
         begin, batch_bytes = 0, 0
         try:
@@ -280,7 +285,7 @@ class MemcacheBackend(Backend):
                 # Only Host GETs hold a host_tcp lease. An indivisible key
                 # larger than the lease batch budget is transferred alone.
                 if end > begin and (
-                    end == len(keys) or (host and batch_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES)
+                    end == len(keys) or (is_host and batch_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES)
                 ):
                     result.extend(
                         require_aligned_batch_results(
@@ -300,7 +305,7 @@ class MemcacheBackend(Backend):
 
     def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
         ptrs, sizes = buffer_arrays(buffers)
-        self._pending_buffers = (ptrs, sizes, any(buffer.host for buffer in buffers))
+        self._pending_buffers = (ptrs, sizes, any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers))
         self._register_buffers_if_needed()
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
@@ -507,10 +512,10 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
         *,
-        host: bool | None = None,
+        memory_location: MemoryLocation | None = None,
     ):
-        if host is not None:
-            return self._get_registered(key, addr, size, host=host)
+        if memory_location is not None:
+            return self._get_registered(key, addr, size, memory_location=memory_location)
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -552,17 +557,17 @@ class MemcacheBackend(Backend):
         addr: list[list[int]],
         size: list[list[int]],
         *,
-        host: bool | None = None,
+        memory_location: MemoryLocation | None = None,
     ) -> list[bool] | bool:
-        if host is not None and not (len(key) == len(addr) == len(size)):
+        if memory_location is not None and not (len(key) == len(addr) == len(size)):
             logger.error("Invalid HiSparse MemCache PUT metadata: expected one address and size per key")
             return False
         self.ensure_initialized()
         assert self.store is not None
         try:
-            direction = MmcDirect.COPY_H2G if host else MmcDirect.COPY_L2G
+            direction = MmcDirect.COPY_H2G if memory_location is MemoryLocation.HOST else MmcDirect.COPY_L2G
             res = self.store.batch_put_from_layers(key, addr, size, direction.value)
-            if host is not None:
+            if memory_location is not None:
                 res = require_aligned_batch_results("HiSparse Memcache PUT", key, res)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
