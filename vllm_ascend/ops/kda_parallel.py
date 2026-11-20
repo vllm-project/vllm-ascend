@@ -71,11 +71,12 @@ class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParalle
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
-            for name in self.padding_fill_params():
-                param = getattr(self, name)
+        if padding_size and not vllm_version_is("0.33.0"):
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
                 self._zero_output_padding(param)
-                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True})
 
 
 class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAMergedColumnParallelLinear):
