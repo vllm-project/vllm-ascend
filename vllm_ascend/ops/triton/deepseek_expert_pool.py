@@ -11,11 +11,11 @@ from vllm_ascend.worker.v2.dspark_expert_pool import CONTRIBUTOR, RESTRICTED, TO
 
 @triton.jit
 def _build_pool(
-    Logits,
-    Roles,
-    Bias,
-    RawScores,
-    Votes,
+    logits_ptr,
+    roles_ptr,
+    bias_ptr,
+    raw_scores_ptr,
+    votes_ptr,
     ROW_STRIDE: tl.constexpr,
     EXPERT_STRIDE: tl.constexpr,
     EXPERTS: tl.constexpr,
@@ -29,14 +29,14 @@ def _build_pool(
         row = tl.program_id(0)
         expert = tl.arange(0, BLOCK)
         valid = expert < EXPERTS
-        x = tl.load(Logits + row * ROW_STRIDE + expert * EXPERT_STRIDE, valid, 0).to(tl.float32)
+        x = tl.load(logits_ptr + row * ROW_STRIDE + expert * EXPERT_STRIDE, valid, 0).to(tl.float32)
         # Preserve the frozen L score rounding, including its effect on ties.
         raw = tl.sqrt(tl.log(tl.exp(x) + 1.0))
-        tl.store(RawScores + row * EXPERTS + expert, raw, valid)
-        role = tl.load(Roles + row)
+        tl.store(raw_scores_ptr + row * EXPERTS + expert, raw, valid)
+        role = tl.load(roles_ptr + row)
         limit = tl.where(role == CONTRIBUTOR_ROLE, K, tl.where(role == RESTRICTED_ROLE, SUFFIX_EXPERTS, 0))
         if limit > 0:
-            score = raw + tl.load(Bias + expert, valid, 0.0)
+            score = raw + tl.load(bias_ptr + expert, valid, 0.0)
             remaining = valid
             selected = tl.full((BLOCK,), False, tl.int1)
             for i in tl.static_range(K):
@@ -45,17 +45,17 @@ def _build_pool(
                 chosen = remaining & (expert == picked)
                 selected = selected | (chosen & (i < limit))
                 remaining = remaining & ~chosen
-            tl.atomic_add(Votes + expert, 1, selected, sem="relaxed")
+            tl.atomic_add(votes_ptr + expert, 1, selected, sem="relaxed")
 
 
 @triton.jit
 def _finish_route(
-    RawScores,
-    Roles,
-    Bias,
-    Votes,
-    Weights,
-    Ids,
+    raw_scores_ptr,
+    roles_ptr,
+    bias_ptr,
+    votes_ptr,
+    weights_ptr,
+    ids_ptr,
     EXPERTS: tl.constexpr,
     BLOCK: tl.constexpr,
     RESTRICTED_ROLE: tl.constexpr,
@@ -66,22 +66,26 @@ def _finish_route(
         row = tl.program_id(0)
         expert = tl.arange(0, BLOCK)
         valid = expert < EXPERTS
-        role = tl.load(Roles + row)
-        allowed = tl.load(Votes + expert, valid, 0) > 0
-        raw = tl.load(RawScores + row * EXPERTS + expert, valid, 0.0)
-        score = raw + tl.load(Bias + expert, valid, 0.0)
+        role = tl.load(roles_ptr + row)
+        allowed = tl.load(votes_ptr + expert, valid, 0) > 0
+        raw = tl.load(raw_scores_ptr + row * EXPERTS + expert, valid, 0.0)
+        score = raw + tl.load(bias_ptr + expert, valid, 0.0)
         remaining = valid & ((role != RESTRICTED_ROLE) | allowed)
-        out = tl.arange(0, 8)
-        ids = tl.full((8,), 0, tl.int32)
+        # Triton vectors need power-of-two extents; only the first K lanes are stored.
+        OUTPUT_BLOCK: tl.constexpr = triton.next_power_of_2(K)
+        out = tl.arange(0, OUTPUT_BLOCK)
+        ids = tl.full((OUTPUT_BLOCK,), 0, tl.int32)
         for i in tl.static_range(K):
             best = tl.max(tl.where(remaining, score, -float("inf")), 0)
             picked = tl.min(tl.where(remaining & (score == best), expert, BLOCK), 0)
             ids = tl.where(out == i, picked, ids)
             remaining = remaining & (expert != picked)
         weights = tl.where(out < K, tl.gather(raw, ids, axis=0), 0.0)
-        denom = tl.maximum(tl.sum(weights, 0), 1e-20)
-        tl.store(Ids + row * K + out, ids, out < K)
-        tl.store(Weights + row * K + out, weights / denom * SCALING, out < K)
+        # Preserve the reference denominator floor when selected raw scores sum to zero.
+        NORMALIZATION_EPS: tl.constexpr = 1e-20
+        denom = tl.maximum(tl.sum(weights, 0), NORMALIZATION_EPS)
+        tl.store(ids_ptr + row * K + out, ids, out < K)
+        tl.store(weights_ptr + row * K + out, weights / denom * SCALING, out < K)
 
 
 def route_experts(
