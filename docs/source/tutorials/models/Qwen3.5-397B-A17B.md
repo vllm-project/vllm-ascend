@@ -48,11 +48,11 @@ It is recommended to download the model weights to a shared directory across mul
 
 ### 3.2 Verify Multi-node Communication
 
-For multi-node deployment, verify inter-node connectivity by following [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect).
+For multi-node deployment, verify inter-node connectivity by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Use mutually reachable service IPs on all nodes. In the scripts below, `local_ip` must belong to `nic_name`.
 
-For 950DT PD deployment, prepare the [Mooncake communication environment](../features/pd_disaggregation_mooncake_multi_node.md) and mount the required host-specific communication resources into each serving container. When `ascend_local_comm_res_path=/etc/hixlep` is set, ensure that `/etc/hixlep` contains the configuration required for that host.
+For 950DT PD deployment, prepare the communication environment in [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) and mount the required host-specific communication resources into each serving container. When `ascend_local_comm_res_path=/etc/hixlep` is set, ensure that `/etc/hixlep` contains the configuration required for that host.
 
 ## 4 Installation
 
@@ -377,7 +377,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
@@ -471,7 +471,7 @@ The 16 NPUs are divided into two non-overlapping device sets:
 
 Prefill and Decode use the same service NIC and IP because they run on the same host, but they use different HTTP and Mooncake ports. The Decode launcher creates two local DP engines, each with TP4. Do not start a second copy of the Decode command.
 
-We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
+We recommend using Mooncake for deployment. Refer to [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow. This example uses `MooncakeConnectorV1` with the standard Pull proxy in [Section 5.7](#57-request-forwarding).
 
 #### 5.4.1 Prefill Service Group
 
@@ -992,7 +992,7 @@ C8 KV cache is part of this performance recipe, not just a model-name convention
 
 - Use the same compatible W4A8C8 checkpoint revision, tokenizer, chat template, quantization metadata, and `--kv-cache-dtype mxfp8` on P and D.
 - Use `MooncakeConnectorV2` and the standard Pull proxy in [Section 5.7](#57-request-forwarding).
-- Use a v0.30.0 MRv1 build containing [the MXFP8 KV-scale fix #19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
+- Use a v0.30.0 MRv1 build containing the MXFP8 KV-scale fix in [#19017](https://github.com/vllm-project/vllm-ascend/pull/19017), merged into `releases/v0.30.0` as `14c6c3f43`, or a build with an equivalent verified fix.
 - Keep `VLLM_USE_V2_MODEL_RUNNER=0`, the P DP1/TP8 and D DP2/TP4 topology, and the connector topology consistent.
 - Keep MTP settings identical on P and D. To run an MTP-off comparison, remove `--speculative-config` from both commands.
 - Prefix caching and asynchronous scheduling are enabled on both nodes for this performance case.
@@ -1007,7 +1007,7 @@ Use the standard Pull proxy with Prefill port 30060 and Decode port 30050. Start
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. These examples demonstrate how to tune prefill and decode resource ratios.
 
-We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
+We recommend using Mooncake for deployment. Refer to [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
 For Atlas 800I A2 (64 GB x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a8-mtp`:
 
@@ -1202,9 +1202,9 @@ Equal TP sizes do not make these connectors interchangeable. For unequal TP, ver
 
 Use the complete proxy command for the selected deployment:
 
-- [A3 single-host 1P1D](#543-proxy): P and D use the same service IP and different HTTP ports.
-- [950DT two-host 1P1D](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
-- [A2 two-host 1P1D](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
+- A3 single-host 1P1D in [Section 5.4.3](#543-proxy): P and D use the same service IP and different HTTP ports.
+- 950DT two-host 1P1D in [Section 5.5.3](#553-proxy): P and D use their respective high-speed service IPs; the D backend is HTTP port `30050`.
+- A2 two-host 1P1D in [Section 5.6.3](#563-proxy): P and D use their respective service IPs and the HTTP ports passed to the launcher scripts.
 
 Do not use a DP RPC port or Mooncake KV-transfer port as a proxy backend. If requests reach the proxy but return no output, verify the P and D `/health` endpoints from the proxy host, confirm that the configured backend addresses exactly match each service's `--host` and HTTP port, and then run the end-to-end checks in [Section 6](#6-functional-verification).
 
@@ -1381,7 +1381,7 @@ Use the settings in the selected deployment script as a starting point. Merge th
 | Fused MC2 | `enable_fused_mc2` | `1`: dispatch-FFN-combine; `2`: CANN MegaMoe with matching operators. `0` disables fusion. The A3 PD performance case uses `2`; the 950DT W4A8C8 and A2 PD examples use `0` or do not enable it. |
 | MoE sequence parallelism | `enable_flashcomm1=true` | Requires `--enable-expert-parallel` and TP greater than 1. |
 | Shared expert data parallelism | `enable_shared_expert_dp=true` | Enabled on both P and D in [Section 5.4](#54-prefill-decode-disaggregation-a3) and [Section 5.5](#55-prefill-decode-disaggregation-950dt-products), and on Prefill in [Section 5.6](#56-prefill-decode-disaggregation-a2). Requires EP and TP greater than 1; increases weight memory usage. |
-| Shared expert overlap | `multistream_overlap_shared_expert=true` | Used by the [MP example](#52-multi-node-deployment-with-mp-recommended). |
+| Shared expert overlap | `multistream_overlap_shared_expert=true` | See [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node deployment with MP. |
 | Recompute scheduler | `scheduler_config.recompute_scheduler_enable=true` | Enabled on PD Decode, where `kv_role=kv_consumer`; keep it nested under `scheduler_config`. |
 | CPU binding | `enable_cpu_binding=true` | Explicitly enabled in the single-node, MP, A3 PD, and 950DT W4A8C8 PD scripts. |
 
@@ -1399,7 +1399,7 @@ Verify connectivity using [Section 3.2](#32-verify-multi-node-communication). Se
 
 ### Q3: Can I enable prefix caching in PD disaggregation?
 
-The [A3 PD](#54-prefill-decode-disaggregation-a3), [950DT W4A8C8 PD](#55-prefill-decode-disaggregation-950dt-products), and [A2 PD](#56-prefill-decode-disaggregation-a2) examples enable prefix caching. When changing this setting, compare cached and uncached outputs, request completion, and cache reuse with the same connector and software version.
+The [5.4 A3 PD](#54-prefill-decode-disaggregation-a3), [5.5 950DT W4A8C8 PD](#55-prefill-decode-disaggregation-950dt-products), and [5.6 A2 PD](#56-prefill-decode-disaggregation-a2) examples enable prefix caching. When changing this setting, compare cached and uncached outputs, request completion, and cache reuse with the same connector and software version.
 
 ### Q4: Why does performance regress after enabling sequence parallelism or Fused MC2?
 
@@ -1419,4 +1419,4 @@ Inspect predictions for empty responses, truncated outputs, and answer-extractio
 
 ### Q8: Why do HIXL/Mooncake connections time out after the HTTP service starts?
 
-HTTP readiness does not verify KV transfer. Check P/D service IPs, NICs, routes, physical NPU IDs, communication resource mounts, and KV ports using [Section 3.2](#32-verify-multi-node-communication) and the [Mooncake deployment guide](../features/pd_disaggregation_mooncake_multi_node.md). Ensure both nodes use matching runtime environments. After correcting the configuration, restart both services and send a request through the proxy as described in [Section 6](#6-functional-verification).
+HTTP readiness does not verify KV transfer. Check P/D service IPs, NICs, routes, physical NPU IDs, communication resource mounts, and KV ports using [Section 3.2](#32-verify-multi-node-communication) and the [Prefill-Decode Disaggregation](../features/pd_disaggregation_mooncake_multi_node.md). Ensure both nodes use matching runtime environments. After correcting the configuration, restart both services and send a request through the proxy as described in [Section 6](#6-functional-verification).

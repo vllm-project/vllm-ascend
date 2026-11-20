@@ -132,9 +132,7 @@ PP is useful in the following situations:
 - A Prefill node in a P/D-disaggregated deployment needs more devices for model
   capacity or long-context prefill.
 
-PP also introduces activation transfers between stages and pipeline bubbles.
-Use a TP-only deployment as the baseline when the model fits in one node, then
-add PP when model capacity or the network topology requires it.
+PP also introduces activation transfers between stages and pipeline bubbles. Use a TP-only deployment as the baseline when the model fits in one node, then add PP when model capacity or the network topology requires it.
 
 | Deployment goal | Recommended starting point |
 | --- | --- |
@@ -144,20 +142,13 @@ add PP when model capacity or the network topology requires it.
 
 ## Model Support for PP
 
-A model can run with `--pipeline-parallel-size > 1` only when its
-implementation exposes the `SupportsPP` interface (the upstream marker in
-`vllm.model_executor.models.interfaces`). The interface declares that the
-model implementation can:
+A model can run with `--pipeline-parallel-size > 1` only when its implementation exposes the `SupportsPP` interface (the upstream marker in `vllm.model_executor.models.interfaces`). The interface declares that the model implementation can:
 
 - Split its Transformer decoder layers into per-stage `[start_layer, end_layer)` ranges.
 - Skip layers that fall outside its own range.
 - Send and receive the intermediate activations exchanged at stage boundaries.
 
-Models without this marker reject PP at startup, so checking support is
-mechanical: inspect the model class (or one of its parents) for
-`SupportsPP`, or check the **Pipeline Parallel** column in
-[Supported Models](../support_matrix/supported_models.md) for the validated
-per-model status on Ascend.
+Models without this marker reject PP at startup, so checking support is mechanical: inspect the model class (or one of its parents) for `SupportsPP`, or check the **Pipeline Parallel** column in [Supported Models](../support_matrix/supported_models.md) for the validated per-model status on Ascend.
 
 Model families with `SupportsPP` implementations on Ascend:
 

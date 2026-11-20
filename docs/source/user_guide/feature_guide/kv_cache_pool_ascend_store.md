@@ -43,7 +43,7 @@ KV Cache supports the following three external storage backends, choose the stor
     | Category | Constraints |
     | :--- | :--- |
     | Software Dependencies | • Requires `memfabric-hybrid >= 1.3.0` and `memcache-hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
-    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
+    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of Memcache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
 
@@ -131,7 +131,7 @@ on the same instances that previously exported the environment variable.
         "protocol": "ascend",
         "device_name": "",
         "master_server_address": "<master_ip>:50088",
-        "global_segment_size": "1GB",
+        "global_segment_size": "30GB",
         "preferred_segment": false,
         "prefer_alloc_in_same_node": true,
         "enable_ssd_offload": false,
@@ -507,7 +507,7 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 #### Step 5: MooncakeStore SSD Offload (Embedded Real Client Mode)
 
-In Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
+In Embedded Real Client mode, Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
 
 **Low eviction watermark:** With a 100 GB DRAM pool, `eviction_high_watermark_ratio=0.5` triggers eviction at 50 GB. If the warmup working set exceeds this threshold, data can be evicted before asynchronous SSD writes finish, leaving the benchmark with a cold cache and a lower initial hit rate.
 
@@ -753,7 +753,7 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 #### Step 2: Software Installation
 
-The MemCache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
+The Memcache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
 
 ```shell
 pip install "memfabric-hybrid>=1.3.0"
@@ -1064,9 +1064,9 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 #### Step 6: Memcache and vLLM Separated Deployment {: #Memcache-and-vLLM-Separated-Deployment }
 
-This deployment mode runs MemCache and vLLM in different processes (distinct from vLLM PD disaggregation). In the default co-located mode, vLLM loads the model weights before the KV connector initializes MemCache, so MemCache may not be able to reserve sufficient memory from the remaining available space. Starting a standalone MemCache process before vLLM allows MemCache to reserve a larger memory pool.
+This deployment mode runs Memcache and vLLM in different processes (distinct from vLLM PD disaggregation). In the default co-located mode, vLLM loads the model weights before the KV connector initializes Memcache, so Memcache may not be able to reserve sufficient memory from the remaining available space. Starting a standalone Memcache process before vLLM allows Memcache to reserve a larger memory pool.
 
-Prepare two LocalService configuration files with the same connection and protocol settings: the configuration used by the vLLM process does not contribute DRAM (`dram.size = 0GB`), and the configuration used by the standalone MemCache process specifies the amount of DRAM to contribute. Set `ock.mmc.local_service.max.dram.size` to accommodate the maximum `dram.size` used by the LocalService processes.
+Prepare two LocalService configuration files with the same connection and protocol settings: the configuration used by the vLLM process does not contribute DRAM (`dram.size = 0GB`), and the configuration used by the standalone Memcache process specifies the amount of DRAM to contribute. Set `ock.mmc.local_service.max.dram.size` to accommodate the maximum `dram.size` used by the LocalService processes.
 
 Steps:
 
@@ -1104,7 +1104,7 @@ ock.mmc.local_service.dram.size = 0GB
 ock.mmc.local_service.max.dram.size = 1024GB
 ```
 
-##### mmc-local-standalone.conf (used by the standalone MemCache process)
+##### mmc-local-standalone.conf (used by the standalone Memcache process)
 
 ```ini
 ock.mmc.meta_service_url = tcp://<meta_service_ip>:5000
@@ -1130,7 +1130,7 @@ maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO 
 
 For example, if `200` GB is available to UBS IO and four local services have DRAM enabled, the upper limit is `50` GB per process. If the calculated upper limit is less than `5`, free more node memory or reduce the number of DRAM-enabled local services.
 
-For the scenario of separate deployment of MemCache, it is recommended to configure a single process with `50` GB. In other scenarios, the recommended value is `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [ubsio.wcache.evict_water_level](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
+For the scenario of separate deployment of Memcache, it is recommended to configure a single process with `50` GB. In other scenarios, the recommended value is `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [ubsio.wcache.evict_water_level](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
 
 For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
 
@@ -1407,7 +1407,7 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 
 </details>
 
-#### Step 4: Configure Environment Variables and `yuanrong.json`
+#### Step 4: Configure Environment Variables and yuanrong.json
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1583,7 +1583,7 @@ Expected output: vLLM starts successfully, OpenAI API service is ready.
 
 ### Verification
 
-Refer to the verification operations in Steps 1–5 of Configuration Examples.
+Refer to the verification operations in Steps 1-5 of Configuration Examples.
 
 ### Tuning
 
@@ -1688,7 +1688,7 @@ Public FAQ references:
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
 
-### Issue 2: `SEGMENT_NOT_FOUND` (SSD Offload)
+### Issue 2: SEGMENT_NOT_FOUND (SSD Offload)
 
 **Problem Description:** Client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FOUND`. The rank's SSD Offload stops until the segment is registered again.
 
@@ -1707,15 +1707,15 @@ Public FAQ references:
 
 **Root Cause Analysis:** On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, each fabric mem allocation must be an integer multiple of 1 GB. Mooncake does not round sizes up, and the default 1280 MB (1.25 GB) is not aligned.
 
-**Resolution Steps:** For buffer alignment and fabric memory quota configuration, see "Tuning Recommendations - Mooncake SSD Offload Parameter Tuning".
+**Resolution Steps:** For buffer alignment and fabric memory quota configuration, see "Tuning - Mooncake SSD Offload Parameter Tuning".
 
-### Issue 4: `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` Too Small (`BUFFER_OVERFLOW`)
+### Issue 4: MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES Too Small (BUFFER_OVERFLOW)
 
 **Problem Description:** SSD reads fail with `BUFFER_OVERFLOW` (`error_code=-10`) during `FileStorage::AllocateBatch`, and vLLM may fail when `kv_load_failure_policy=fail`.
 
 **Root Cause Analysis:** With `enable_ssd_offload=true`, Mooncake allocates a separate per-rank SSD read/write buffer. This buffer is independent of `global_segment_size` in `mooncake.json` — increasing the segment does not fix `BUFFER_OVERFLOW`.
 
-**Resolution Steps:** For how to increase the buffer and how to verify after tuning, see "Tuning Recommendations - Mooncake SSD Offload Parameter Tuning".
+**Resolution Steps:** For how to increase the buffer and how to verify after tuning, see "Tuning - Mooncake SSD Offload Parameter Tuning".
 
 ### Issue 5: Memcache Related Issues
 

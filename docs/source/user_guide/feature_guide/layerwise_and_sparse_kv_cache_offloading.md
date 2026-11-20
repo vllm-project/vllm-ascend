@@ -116,7 +116,7 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 
 The following log confirms that buffer reuse is enabled:
 
-```text
+```output
 Layerwise KV cache reuse merged ... descriptors into ... descriptors using ... buffer assignments.
 ```
 
