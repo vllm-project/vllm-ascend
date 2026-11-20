@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -56,6 +57,9 @@ def test_v41_vision_bias_and_image_sentinel(
         [-1, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, -1],
         dtype=id_dtype,
     )
+    if not get_current_hardware_profile().supports(HardwareCapability.MOE_GATING_TOP_K_HASH_RAW_IDS):
+        # Match the router's normalization on devices without raw padding support.
+        input_ids = torch.where(input_ids == -1, 0, input_ids).to(torch.int64)
     tid2eid = None
     if with_hash:
         tid2eid = torch.empty(64, top_k, dtype=torch.int32)

@@ -14,6 +14,8 @@ from pathlib import Path
 import torch
 import torch_npu
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 
 def make_case(rows, with_hash, with_vision, id_dtype):
     generator = torch.Generator().manual_seed(20261110 + rows)
@@ -151,6 +153,8 @@ def main():
             raise RuntimeError("Hash TopK custom op is unavailable")
     op = getattr(torch.ops, args.namespace).moe_gating_top_k_hash
     torch.npu.set_device(0)
+    if not get_current_hardware_profile().supports(HardwareCapability.MOE_GATING_TOP_K_HASH_RAW_IDS):
+        parser.error("Raw-ID Hash TopK benchmarking requires an A2/A3 kernel with padding normalization")
     results = {
         "torch": torch.__version__,
         "device": torch.npu.get_device_name(0),
