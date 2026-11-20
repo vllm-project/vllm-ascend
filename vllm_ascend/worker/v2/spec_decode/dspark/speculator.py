@@ -390,13 +390,24 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Match FULL-graph query lengths to the padded request count."""
+        """Match padded Q lengths and align KV rows only for the FIA backend."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
+        for layer_name, metadata in attn_metadata.items():
             if getattr(metadata, "external_flashmla", None) is not None:
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # Backend subclasses can use different metadata contracts (e.g.
+            # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
+            if self.attn_backends[layer_name] is not AscendAttentionBackend:
+                continue
+            # The builder may append a synthetic request for the padded Q tail.
+            # Uniform Q already covers that tail, so discard its extra KV row.
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens_list[:num_reqs_padded]
+            decode_metadata.seq_lens = decode_metadata.seq_lens[:num_reqs_padded]
+            decode_metadata.seq_lens_cpu = decode_metadata.seq_lens_cpu[:num_reqs_padded]
+            if decode_metadata.block_tables is not None:
+                decode_metadata.block_tables = decode_metadata.block_tables[:num_reqs_padded]
         return attn_metadata
 
     def propose(

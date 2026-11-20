@@ -1,5 +1,6 @@
 """Idle inputs-embeds batches must join the target's embedding exchange."""
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -106,7 +107,8 @@ def test_real_and_idle_inputs_embeds_join_matching_embedding_collectives(monkeyp
 @pytest.mark.parametrize("num_tokens", [0, 1, 8])
 def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_inputs, num_tokens):
     monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
-    layer, _ = _make_embedding(1, [])
+    events: list[tuple[int, str, tuple[int, ...]]] = []
+    layer, _ = _make_embedding(1, events)
     state = _make_state(supports_mm_inputs, layer)
     first = state.dummy_inputs_embeds(num_tokens)
     _, token_ids = state._embedding_tp_dummy_join
@@ -118,6 +120,54 @@ def test_dummy_embedding_reuses_ids_and_output_buffer(monkeypatch, supports_mm_i
     if num_tokens:
         assert first.data_ptr() == second.data_ptr() == state.inputs_embeds.data_ptr()
     state.model.modules.assert_called_once()
+    assert events == [(1, "gather", (8,)), (1, "scatter", (16, 4))] * 2
+
+
+@pytest.mark.parametrize("supports_mm_inputs", [False, True], ids=["prompt-embeds", "multimodal"])
+@pytest.mark.parametrize("embedding_tp", [False, True], ids=["tp-disabled", "tp-enabled"])
+def test_dummy_inputs_embeds_accepts_explicit_none(monkeypatch, supports_mm_inputs, embedding_tp):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: embedding_tp)
+    events: list[tuple[int, str, tuple[int, ...]]] = []
+    layer, _ = _make_embedding(1, events)
+    state = _make_state(supports_mm_inputs, layer)
+
+    result = state.dummy_inputs_embeds(3, None)
+
+    assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    torch.testing.assert_close(result, torch.full((3, 4), -1.0))
+    assert events == ([(1, "gather", (8,)), (1, "scatter", (16, 4))] if embedding_tp else [])
+    if not embedding_tp:
+        state.model.modules.assert_not_called()
+
+
+@pytest.mark.skipif(
+    "input_ids" not in inspect.signature(default.DefaultModelState.dummy_inputs_embeds).parameters,
+    reason="Randomized dummy embeddings require the newer upstream model state",
+)
+@pytest.mark.parametrize("supports_mm_inputs", [False, True], ids=["prompt-embeds", "multimodal"])
+@pytest.mark.parametrize("embedding_tp", [False, True], ids=["tp-disabled", "tp-enabled"])
+def test_dummy_input_ids_use_upstream_lookup_once(monkeypatch, supports_mm_inputs, embedding_tp):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: embedding_tp)
+    events: list[tuple[int, str, tuple[int, ...]]] = []
+    layer, weight = _make_embedding(0, events)
+    if not embedding_tp:
+        layer = torch.nn.Embedding.from_pretrained(weight)
+    state = _make_state(supports_mm_inputs, layer)
+    input_ids = torch.tensor([1, 5, 7], dtype=torch.int32)
+
+    with patch.object(layer, "forward", wraps=layer.forward) as lookup:
+        result = state.dummy_inputs_embeds(4, input_ids)
+    lookup.assert_called_once()
+    torch.testing.assert_close(lookup.call_args.args[0], input_ids)
+
+    assert result.shape == (4, 4)
+    assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    torch.testing.assert_close(result[:3], weight[input_ids])
+    torch.testing.assert_close(result[3:], torch.full((1, 4), -1.0))
+    torch.testing.assert_close(state.inputs_embeds[4:], torch.full((4, 4), -1.0))
+    assert events == ([(0, "gather", (8,)), (0, "scatter", (16, 4))] if embedding_tp else [])
+    state.model.modules.assert_not_called()
+    assert not hasattr(state, "_embedding_tp_dummy_join")
 
 
 @pytest.mark.parametrize("supports_mm_inputs", [False, True])
