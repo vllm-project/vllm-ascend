@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-import vllm.envs as envs_vllm
 from flash_attn_npu_3 import (  # type: ignore[import-not-found,import-untyped]
     flash_attn_with_kvcache,
     get_scheduler_metadata,
 )
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -37,16 +36,8 @@ def _get_window_size(sliding_window: int | None, causal: bool) -> tuple[int, int
     return (sliding_window - 1, 0 if causal else sliding_window - 1)
 
 
-def _uses_hnd_kv_cache(config: VllmConfig | None = None) -> bool:
-    # The engine resolves the connector preference and sends it to workers
-    # after model construction, before cache allocation. Do not freeze the
-    # layout in the attention implementation's constructor.
-    if config is None:
-        config = get_current_vllm_config_or_none()
-    if config is not None and getattr(config.cache_config, "kv_cache_layout", None) is not None:
-        return config.cache_config.get_resolved_kv_cache_layout().name == "LBHNC"
-    # Legacy runners and standalone callers may not have a resolved config.
-    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND")
+def _uses_hnd_kv_cache(config: VllmConfig) -> bool:
+    return config.cache_config.get_resolved_kv_cache_layout().name == "LBHNC"
 
 
 class AscendFlashAttentionBackend(AttentionBackend):
@@ -69,7 +60,7 @@ class AscendFlashAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
-        if _uses_hnd_kv_cache():
+        if _uses_hnd_kv_cache(get_current_vllm_config()):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -337,29 +328,25 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # FA3 uses softcap=0.0 to disable logit capping. Explicit None from
         # vLLM must be normalized for both scheduler tiling and execution.
         self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
-        config = get_current_vllm_config_or_none()
+        config = get_current_vllm_config()
         # Keep the config reference, not the pre-negotiation layout value. The
         # worker records the resolved layout after model construction, and
         # DFlash context-KV writes need it outside set_current_vllm_config().
         self.vllm_config = config
-        if config is not None and hasattr(torch, "npu") and torch.npu.is_available():
-            # Every selected FA3 implementation completes native registration
-            # before profiling, including non-speculative and DSpark users.
-            # Keep availability checks here, before querying the current NPU.
-            spec = (
-                self.num_heads,
-                self.num_kv_heads,
-                self.head_size,
-                config.model_config.dtype,
-                self.scale,
-                self.logits_soft_cap,
-                self.sliding_window,
-            )
-            _initialize_fa3_scheduler(
-                torch.device("npu", torch.npu.current_device()),
-                {spec},
-                config.cache_config.block_size or 128,
-            )
+        spec = (
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            config.model_config.dtype,
+            self.scale,
+            self.logits_soft_cap,
+            self.sliding_window,
+        )
+        _initialize_fa3_scheduler(
+            torch.device("npu", torch.npu.current_device()),
+            {spec},
+            config.cache_config.block_size or 128,
+        )
 
     @property
     def use_hnd_kv_cache(self) -> bool:

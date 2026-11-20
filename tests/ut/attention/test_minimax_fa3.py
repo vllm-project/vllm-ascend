@@ -39,11 +39,11 @@ def test_fa3_scheduler_registration_completes_before_runtime(fa3, monkeypatch, d
         ones=Mock(return_value=torch.ones(1, dtype=torch.int32)),
         npu=NS(synchronize=sync),
     )
-    namespace = fa3._initialize_fa3_scheduler.__globals__
+    namespace = fa3.native_initializer.__globals__
     monkeypatch.setitem(namespace, "torch", fake_torch)
     monkeypatch.setitem(namespace, "get_scheduler_metadata", scheduler)
     monkeypatch.setitem(namespace, "logger", NS(info=Mock()))
-    fa3._initialize_fa3_scheduler(device, specs, 128)
+    fa3.native_initializer(device, specs, 128)
     assert events == ["synchronize", "scheduler", "synchronize"]
     args = scheduler.call_args.kwargs
     assert args["batch_size"] == 1 and args["page_size"] == 128
@@ -53,15 +53,15 @@ def test_fa3_scheduler_registration_completes_before_runtime(fa3, monkeypatch, d
     assert args["window_size"] == ((-1, -1) if sliding_window is None else (2047, 2047))
     torch.testing.assert_close(args["cu_seqlens_q"], torch.tensor([0, 1], dtype=torch.int32))
     # Layers sharing an operator contract initialize once per device.
-    fa3._initialize_fa3_scheduler(device, specs, 128)
+    fa3.native_initializer(device, specs, 128)
     assert scheduler.call_count == 1 and sync.call_count == 2
     # A different device must complete its own registration.
-    fa3._initialize_fa3_scheduler(NS(type="npu", index=1), specs, 128)
+    fa3.native_initializer(NS(type="npu", index=1), specs, 128)
     assert scheduler.call_count == 2 and sync.call_count == 4
 
 
 def test_fa3_initialization_failure_is_not_cached(fa3, monkeypatch):
-    namespace = fa3._initialize_fa3_scheduler.__globals__
+    namespace = fa3.native_initializer.__globals__
     sync = Mock(side_effect=[None, RuntimeError("registration failed"), None, None])
     scheduler = Mock(return_value=torch.zeros(8, dtype=torch.uint8))
     monkeypatch.setitem(
@@ -79,9 +79,9 @@ def test_fa3_initialization_failure_is_not_cached(fa3, monkeypatch):
     spec = {(16, 1, 128, torch.bfloat16, 0.1, 0.0, None)}
     device = NS(type="npu", index=0)
     with pytest.raises(RuntimeError, match="registration failed"):
-        fa3._initialize_fa3_scheduler(device, spec, 128)
+        fa3.native_initializer(device, spec, 128)
     assert not namespace["_FA3_WARMUP_KEYS"]
-    fa3._initialize_fa3_scheduler(device, spec, 128)
+    fa3.native_initializer(device, spec, 128)
     assert scheduler.call_count == 2 and sync.call_count == 4
 
 
@@ -244,9 +244,21 @@ def test_unsupported_configurations_fall_back(selection, fault):
 
 @pytest.fixture
 def fa3(monkeypatch):
-    # Contract tests must stay on CPU even when torch_npu is installed.
-    if hasattr(torch, "npu"):
-        monkeypatch.setattr(torch.npu, "is_available", lambda: False)
+    # Mock only constructor device access and native initialization.
+    class TorchProxy:
+        npu = NS(current_device=Mock(return_value=0))
+
+        @staticmethod
+        def device(*args):
+            return torch.device("cpu")
+
+        def __getattr__(self, name):
+            return getattr(torch, name)
+
+    config = NS(
+        model_config=NS(dtype=torch.bfloat16),
+        cache_config=NS(block_size=128, get_resolved_kv_cache_layout=lambda: NS(name="LBNHC")),
+    )
 
     class Base:
         def __init__(self, *args, **kwargs):
@@ -258,7 +270,7 @@ def fa3(monkeypatch):
 
     namespace = {
         "__name__": __name__,
-        "torch": torch,
+        "torch": TorchProxy(),
         "dataclass": dataclass,
         "field": field,
         "Enum": Enum,
@@ -270,10 +282,9 @@ def fa3(monkeypatch):
         "CUDAGraphMode": NS(FULL_DECODE_ONLY="full_decode_only"),
         "logger": NS(info_once=lambda *args, **kwargs: None),
         "get_scheduler_metadata": Mock(),
-        "get_current_vllm_config_or_none": lambda: None,
+        "get_current_vllm_config": lambda: config,
         "_FA3_WARMUP_KEYS": set(),
         "flash_attn_with_kvcache": Mock(),
-        "envs_vllm": NS(VLLM_KV_CACHE_LAYOUT="NHD"),
         "DeviceOperator": NS(reshape_and_cache=Mock()),
         "notify_kv_cache_written": Mock(),
     }
@@ -293,6 +304,9 @@ def fa3(monkeypatch):
         "AscendFlashAttentionImpl",
     }
     execute_nodes(ROOT / "vllm_ascend/attention/flash_attention_v3.py", names, namespace)
+
+    namespace["native_initializer"] = namespace["_initialize_fa3_scheduler"]
+    namespace["_initialize_fa3_scheduler"] = Mock()
 
     # A module proxy keeps patched operator callables in the production globals.
     class Proxy:
@@ -433,12 +447,19 @@ def test_cache_layout_alias_resolution(fa3, monkeypatch, layout_source):
     assert fa3._uses_hnd_kv_cache(config)
 
 
+def test_cache_layout_must_be_resolved(fa3, monkeypatch):
+    from vllm.config import CacheConfig
+
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "HND")
+    with pytest.raises(ValueError, match="not been resolved"):
+        fa3._uses_hnd_kv_cache(NS(cache_config=CacheConfig()))
+
+
 def test_copied_draft_config_uses_worker_layout_outside_context(fa3, monkeypatch):
     _check_cache_layout(fa3, monkeypatch, "HND", 8, "connector", False, "auto")
 
 
 def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_config_visible, draft_kv_dtype):
-    fa3.envs_vllm.VLLM_KV_CACHE_LAYOUT = layout if layout_source == "env" else None
     # Model construction precedes the layout RPC/cache initialization.
     from vllm.config import CacheConfig, replace
 
@@ -447,14 +468,14 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     draft_cache_config = (
         replace(config.cache_config, cache_dtype=draft_kv_dtype) if draft_kv_dtype is not None else config.cache_config
     )
-    draft_config = NS(cache_config=draft_cache_config, speculative_config=None)
+    draft_config = NS(cache_config=draft_cache_config, speculative_config=None, model_config=NS(dtype=torch.bfloat16))
     assert (draft_config.cache_config is config.cache_config) is (draft_kv_dtype is None)
-    fa3.get_current_vllm_config_or_none = lambda: draft_config
+    fa3.get_current_vllm_config = lambda: draft_config
     impl = fa3.AscendFlashAttentionImpl(heads, 16, 0.1, num_kv_heads=heads)
-    fa3.get_current_vllm_config_or_none = lambda: config
-    if layout_source == "connector":
-        from vllm.v1.attention.backends import utils
+    fa3.get_current_vllm_config = lambda: config
+    from vllm.v1.attention.backends import utils
 
+    if layout_source == "connector":
         # Exercise upstream negotiation without an environment override, as in
         # PD. The worker receives the resolved cache config after construction.
         monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
@@ -465,6 +486,9 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
         resolved = utils.resolve_kv_cache_layout(config, [["LBNHC", "LBHNC"]])
         assert resolved.name == ("LBHNC" if layout in ("HND", "LBHNC") else "LBNHC")
         connector_layout.assert_called_once_with(config)
+    if layout_source == "env":
+        monkeypatch.setattr(utils.envs, "VLLM_KV_CACHE_LAYOUT", layout)
+        utils.resolve_kv_cache_layout(config, [["LBNHC", "LBHNC"]])
     if draft_kv_dtype is not None:
         assert draft_config.cache_config.kv_cache_layout is None
     config.scheduler_config = NS(max_num_seqs=2)
@@ -482,7 +506,7 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     if not runtime_config_visible:
         # Runtime DFlash context-KV updates can run after leaving the config
         # context used for connector negotiation and cache allocation.
-        fa3.get_current_vllm_config_or_none = lambda: None
+        fa3.get_current_vllm_config = Mock(side_effect=RuntimeError("no active config"))
     assert impl.use_hnd_kv_cache is hnd
     query = torch.ones(2, heads, 16, dtype=torch.bfloat16)
     key = torch.arange(2 * heads * 16, dtype=torch.float32).reshape(2, heads, 16).to(torch.bfloat16)
@@ -712,27 +736,14 @@ def test_minimax_fa3_graph_metadata_keeps_storage_across_batch_sizes(fa3):
 
 
 @pytest.mark.parametrize(
-    ("method", "has_config", "npu_available", "eager", "block_size"),
-    [
-        ("dflash", True, True, True, None),
-        ("dflash", True, True, False, 256),
-        ("dspark", True, True, False, 256),
-        ("mtp", True, True, True, 256),
-        (None, True, True, False, 256),
-        ("dflash", False, True, True, 256),
-        ("dflash", True, None, True, 256),
-        ("dflash", True, False, True, 256),
-    ],
+    ("method", "eager", "block_size"),
+    [("dflash", True, None), ("dflash", False, 256), ("dspark", False, 256), ("mtp", True, 256), (None, False, 256)],
 )
-def test_scheduler_warmup_precedes_metadata_builder(
-    fa3, monkeypatch, method, has_config, npu_available, eager, block_size
-):
+def test_scheduler_warmup_precedes_metadata_builder(fa3, monkeypatch, method, eager, block_size):
     namespace = fa3.AscendFlashAttentionImpl.__init__.__globals__
     device = NS(type="npu", index=3)
     current_device = Mock(return_value=3)
-    fake_torch = NS(device=Mock(return_value=device))
-    if npu_available is not None:
-        fake_torch.npu = NS(is_available=lambda: npu_available, current_device=current_device)
+    fake_torch = NS(device=Mock(return_value=device), npu=NS(current_device=current_device))
     monkeypatch.setitem(namespace, "torch", fake_torch)
     warmup = Mock()
     monkeypatch.setitem(namespace, "_initialize_fa3_scheduler", warmup)
@@ -747,16 +758,12 @@ def test_scheduler_warmup_precedes_metadata_builder(
             static_forward_context={},
         ),
     )
-    monkeypatch.setitem(namespace, "get_current_vllm_config_or_none", lambda: config if has_config else None)
+    monkeypatch.setitem(namespace, "get_current_vllm_config", lambda: config)
     impl = fa3.AscendFlashAttentionImpl(4, 128, 0.1, num_kv_heads=1)
     expected_specs = {(4, 1, 128, torch.float16, 0.1, 0.0, None)}
-    if has_config and npu_available:
-        warmup.assert_called_once_with(device, expected_specs, block_size or 128)
-        current_device.assert_called_once()
-    else:
-        warmup.assert_not_called()
-        current_device.assert_not_called()
-    if method == "dflash" and has_config and npu_available and eager:
+    warmup.assert_called_once_with(device, expected_specs, block_size or 128)
+    current_device.assert_called_once()
+    if method == "dflash" and eager:
         config.compilation_config.static_forward_context = {"draft.0": NS(impl=impl), "draft.1": NS(impl=impl)}
         warmup.reset_mock()
         builder = fa3.AscendFlashAttentionMetadataBuilder(
