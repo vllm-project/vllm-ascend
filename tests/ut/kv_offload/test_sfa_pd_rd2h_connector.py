@@ -539,6 +539,7 @@ def test_small_chunks_rotate_across_tp_ranks():
 
 def _make_consumer_worker_for_completion_test():
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker._d2h_pending_release_req_ids = ()
     worker.tp_rank = 0
     worker.tp_size = 2
     worker.request_map = {"req-0": "req-0-internal"}
@@ -1554,6 +1555,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()
@@ -1581,8 +1583,128 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     assert req_meta.tail_block_index == 80
     assert req_meta.kv_tokens == 10367
 
-    scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    from unittest.mock import patch as _patch
+
+    _cfg = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True))
+    with _patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_cfg):
+        finished, _ = scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    # Delayed D2H keeps the request-owned row reserved until every worker
+    # retires the batches referencing it (finished_sending handshake).
+    assert finished
+    assert scheduler._copy_sfa_slot_allocator.get("req-tail") == 0
+    scheduler.update_connector_output(SimpleNamespace(finished_sending=["req-tail"], finished_recving=[]))
     assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
+
+
+def test_cancelled_receive_completes_once_and_releases_row_once():
+    # Review regression: a DSpark request cancelled while its KV receive is
+    # still in flight resolves its transport DONE in the same step its
+    # delayed-D2H row becomes releasable. The worker must terminal-ack it
+    # through finished_recving alone (also reporting it in finished_sending
+    # would hit the core scheduler's membership assert on the request that
+    # the finished_recving pass already freed), and the scheduler must
+    # release the resident row exactly once for that acknowledgement.
+    receiver = MagicMock()
+    receiver.get_descriptor.return_value = None
+    receiver.ready_requests.return_value = {"ext-req-cancel"}
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.tp_size = 1
+    worker.tp_rank = 0
+    worker._terminal_ext_ids = {"ext-req-cancel"}
+    worker.request_map = {"ext-req-cancel": "req-cancel"}
+    worker._pending_done = set()
+    worker._invalid_block_ids = set()
+    worker._dest_blocks_by_req = {}
+    worker._dspark_context_receiver = receiver
+    worker._dspark_pending_recv = {"req-cancel"}
+    worker._deferred_finished_req_ids = set()
+    worker.offload_manager = MagicMock()
+    worker.offload_manager.d2h_slot_releasable.return_value = True
+    worker.copy_sfa_slots_by_req = {"req-cancel": 0}
+    worker._cleanup_request_state = MagicMock()  # type: ignore[method-assign]
+
+    done_sending, done_recving = worker.get_finished({"req-cancel"})
+
+    # Single terminal acknowledgement: finished_recving only.
+    assert done_recving == {"req-cancel"}
+    assert "req-cancel" not in done_sending
+    # Worker-side cleanup kept: the resident row released exactly once.
+    worker.offload_manager.release_d2h_slots.assert_called_once_with([0])
+    assert worker._d2h_pending_release_req_ids == set()
+    assert "req-cancel" not in worker._dspark_pending_recv
+    cleanup_targets = [call_args.args[0] for call_args in worker._cleanup_request_state.call_args_list]
+    assert {"req-cancel"} in cleanup_targets
+
+    # Scheduler side: reserve the delayed release the way the finish path
+    # does, then feed the worker's actual output through the completion
+    # handler; a duplicate re-delivery must not re-release the row.
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 0
+    scheduler.indexer_group_idx = 1
+    scheduler.engine_id = "decode-engine"
+    scheduler.side_channel_host = "decode-host"
+    scheduler.side_channel_port = 1234
+    scheduler.block_size = [128, 128]
+    scheduler.main_block_size = 128
+    scheduler.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+    )
+    scheduler._request_trackers = {}
+    scheduler._reqs_need_recv = set()
+    scheduler._dspark_pending_recv = set()
+    scheduler._deferred_finished_req_ids = set()
+    scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
+    scheduler._copy_sfa_hot_tokens = 8192
+    scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
+    scheduler._metaserver_lock = threading.Lock()
+    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_futures = {}
+    scheduler._metaserver_retry_timers = {}
+    scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
+    params = {"do_remote_prefill": True, "metaserver": "http://metaserver"}
+    request = SimpleNamespace(
+        request_id="req-cancel",
+        kv_transfer_params=params,
+        num_computed_tokens=0,
+        prompt_token_ids=list(range(10367)),
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([1, 2], [3])
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=10367)
+    from unittest.mock import patch as _patch
+
+    _cfg = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True))
+    with _patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_cfg):
+        finished, _ = scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    assert finished
+    reserved_slot = scheduler._copy_sfa_slot_allocator.get("req-cancel")
+    assert reserved_slot is not None
+    assert "req-cancel" in scheduler._d2h_pending_releases
+
+    allocator = scheduler._copy_sfa_slot_allocator
+    release_calls: list[str] = []
+    original_release = allocator.release
+
+    def _count_release(req_id: str) -> None:
+        release_calls.append(req_id)
+        original_release(req_id)
+
+    allocator.release = _count_release  # type: ignore[method-assign]
+
+    output = SimpleNamespace(finished_sending=list(done_sending), finished_recving=list(done_recving))
+    scheduler.update_connector_output(output)
+    assert scheduler._copy_sfa_slot_allocator.get("req-cancel") is None
+    assert release_calls == ["req-cancel"]
+    assert scheduler._d2h_pending_releases == {}
+    # Re-delivering the same acknowledgement stays idempotent.
+    scheduler.update_connector_output(output)
+    assert release_calls == ["req-cancel"]
 
 
 def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
@@ -1604,6 +1726,7 @@ def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()

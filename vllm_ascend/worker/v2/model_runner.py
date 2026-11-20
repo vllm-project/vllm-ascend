@@ -505,8 +505,9 @@ class NPUModelRunner(GPUModelRunner):
         persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
         if sparse_cfg.enabled:
-            offload_manager = init_sparse_kv_offload_manager(self.vllm_config, kv_cache_config, sparse_cfg)
-            self.sparse_kv_offload_manager = offload_manager
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
+                self.vllm_config, kv_cache_config, sparse_cfg
+            )
             self.model_state.runner_plan_launch_d2h = make_d2h_plan_launch_hook(self)
             self.model_state._offload_live_req_ids = self.req_states.req_id_to_index
             self.model_state._offload_draft_layer_names = (

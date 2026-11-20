@@ -31,6 +31,9 @@ def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
     impl._offload_layer_name = MagicMock(return_value="layer")
     impl._cpu_cache_pair = MagicMock(return_value=(torch.empty(1), torch.empty(1)))
     impl._in_graph_runtime = MagicMock(return_value=False)
+    # A bound layer name keeps the registry guard on the host-offload path
+    # (the patched manager reports it registered).
+    impl.layer_name = "layer"
     slots = torch.arange(2)
     metadata = SimpleNamespace(fused_copy_sfa_enabled=False)
     with patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager") as get_manager:
@@ -72,7 +75,9 @@ def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected
         patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None) as init,
         patch(
             "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
-            return_value=SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False)),
+            return_value=SimpleNamespace(
+                sparse_kv_offload_config=SimpleNamespace(use_fused_copy_sfa=False, delayed_d2h=False)
+            ),
         ),
     ):
         builder = AscendSFAKVOffloadMetadataBuilder(

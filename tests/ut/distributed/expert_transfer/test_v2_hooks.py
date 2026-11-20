@@ -70,7 +70,13 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     runner_class = load_hook_class(
         "vllm_ascend/worker/v2/model_runner.py",
         "NPUModelRunner",
-        {"load_model", "execute_model", "gather_batch_req_state", "shutdown"},
+        {
+            "load_model",
+            "execute_model",
+            "gather_batch_req_state",
+            "shutdown",
+            "_maybe_send_draft_kv",
+        },
         Parent,
         {
             "torch": torch,
@@ -84,6 +90,9 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
             # The stub parent creates no host-offload owners.
             "track_host_offload_owners": lambda: nullcontext([]),
             "has_kv_transfer_group": lambda: False,
+            # D2H runner hooks: stubs so the isolated module resolves the import.
+            "d2h_retire": lambda runner, ids=None: 0,
+            "d2h_record_source_ready": lambda runner: False,
             "should_skip_allreduce_across_dp_group": lambda _vc: False,
             "nullcontext": nullcontext,
             "lmhead_tp_enable": lambda: False,

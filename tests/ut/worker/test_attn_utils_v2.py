@@ -1200,8 +1200,9 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
+@pytest.mark.parametrize("dspark_active", [False, True])
 def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
-    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded
+    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded, dspark_active
 ):
     source_spec = MLAAttentionSpec(
         block_size=128,
@@ -1237,6 +1238,15 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
         attention_config=AttentionConfig(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
     )
+    if dspark_active:
+        # Only a DSpark draft protocol owns device-resident draft layers.
+        vllm_config.speculative_config = SimpleNamespace(method="dspark")
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            is_kv_producer=False,
+            is_kv_consumer=True,
+            kv_connector="SfaRemoteD2HConnector",
+            kv_connector_extra_config={},
+        )
     monkeypatch.setattr(
         attn_utils,
         "get_layers_from_vllm_config",
@@ -1251,7 +1261,13 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.dcp_sharded is dcp_sharded
     assert spec.page_size_bytes == source_spec.page_size_bytes
     assert spec.is_draft is (source_is_draft or is_draft_layer)
-    assert spec.store_on_host is not spec.is_draft
+    if spec.is_draft:
+        # Draft layers stay device-resident only under the DSpark protocol;
+        # any other draft method must ride the host pipeline (its only PD
+        # transfer path, broken by upstream #20878's blanket exclusion).
+        assert spec.store_on_host is not dspark_active
+    else:
+        assert spec.store_on_host is True
     assert spec.non_causal_multi_token_decode is non_causal
 
 
