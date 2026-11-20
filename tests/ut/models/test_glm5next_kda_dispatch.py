@@ -49,7 +49,9 @@ def test_projection_tp_uses_shared_kda_boundary_with_live_metadata(monkeypatch, 
     library = torch.library.Library("vllm", "IMPL", "CPU")
     hidden = torch.arange(8, dtype=torch.float32).view(2, 4)
     try:
-        library.impl(name, getattr(model_kda, name))
+        # CPU-platform runs already register the kernel when importing KDA.
+        if not torch._C._dispatch_has_kernel_for_dispatch_key(f"vllm::{name}", "CPU"):
+            library.impl(name, getattr(model_kda, name))
         with torch.inference_mode():
             compiled = torch.compile(layer, backend="eager", fullgraph=True)
             torch.testing.assert_close(compiled(hidden, torch.arange(2)), torch.zeros_like(hidden))
@@ -239,10 +241,12 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     layer._merged_conv_weight = None
     # Checkpoints retain FP32 convolution weights; AscendC needs the activation
     # dtype and [width, q|k|v] ordering in the cached packed weight.
-    for index, name in enumerate(("q_conv1d", "k_conv1d", "v_conv1d"), start=1):
-        setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
+    layer.conv1d = SimpleNamespace(
+        weight=torch.arange(1, 4).repeat_interleave(128).float().view(384, 1, 1).expand(-1, 1, 4)
+    )
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
+    layer.process_weights_after_loading(torch.bfloat16)
     tokens = 2 if spec_only else (5 if speculative else 4)
     metadata = object.__new__(model_kda.GDNAttentionMetadata)
     values = dict(

@@ -71,6 +71,16 @@ def test_cpu_parameters_need_no_backup(worker):
     assert worker._sleep_saved_parameters == {}
 
 
+def test_sleep_retention_rejects_meta_parameters_before_sleep(worker):
+    worker.model_runner.model.register_parameter("placeholder", torch.nn.Parameter(torch.empty(2, device="meta")))
+    worker.model_config.sleep_preserve_parameter_names = ["placeholder"]
+
+    with pytest.raises(ValueError, match="Sleep retention cannot snapshot meta parameters: placeholder"):
+        worker.sleep(level=2)
+
+    worker.allocator.sleep.assert_not_called()
+
+
 @pytest.mark.parametrize("config", [SimpleNamespace(), SimpleNamespace(sleep_preserve_parameter_names=[])])
 def test_empty_or_older_configuration_clears_saved_parameters(worker, config):
     worker.model_config = config

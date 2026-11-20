@@ -8,6 +8,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.patch.platform.release_scheduler_fixture import release_cached_request_abi
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
     _is_pd_prefill_node,
@@ -22,6 +23,18 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
     _use_pp_mtp_runtime_patch,
 )
 from vllm_ascend.utils import vllm_version_is
+
+
+@pytest.fixture(autouse=True)
+def _release_ipc_payload_abi_on_main(monkeypatch, request):
+    if vllm_version_is("0.33.0") or not request.node.originalname.startswith("test_pp_ipc_cached_request_data_"):
+        return
+    from vllm.v1.core.sched import scheduler as native_module
+
+    legacy_scheduler, _ = release_cached_request_abi()
+    monkeypatch.setattr(request.module, "Scheduler", legacy_scheduler)
+    monkeypatch.setattr(native_module, "Scheduler", legacy_scheduler)
+    _patch_scheduler_make_cached_request_data()
 
 
 @pytest.mark.parametrize(
@@ -339,7 +352,9 @@ def test_pp_mtp_spec_tokens_remain_unconstrained_during_reasoning(monkeypatch):
     monkeypatch.setattr(
         manager,
         "_get_reasoner",
-        lambda _request: SimpleNamespace(is_reasoning_end_streaming=lambda _ids, _tokens: False),
+        lambda _request: SimpleNamespace(
+            reasoning_end_token_ids=set(), is_reasoning_end_streaming=lambda _ids, _tokens: False
+        ),
     )
     scheduler = SimpleNamespace(requests={"req-0": request}, structured_output_manager=manager)
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})

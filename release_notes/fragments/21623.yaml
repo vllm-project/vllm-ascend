@@ -1,0 +1,6 @@
+pr: 21623
+entries:
+  - category: feature
+    text: Automatically use local host VMM for supported shared CPU-offloaded DeepSeek-V4.1 Engram tables on A3.
+    model: deepseek-v4.1
+    hardware: [A3]

@@ -261,6 +261,21 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     assert results.finished_sending == {"p-request"}
 
 
+def test_shared_layer_hook_does_not_schedule_a_transfer(worker, monkeypatch):
+    worker.vllm_config.compilation_config.static_forward_context["model.layers.4.attn"] = SimpleNamespace(
+        kv_sharing_target_layer_name="model.layers.0.attn"
+    )
+    worker.start_load_kv(source_meta())
+    record_event = Mock()
+    monkeypatch.setattr(push_worker.torch.npu, "Event", record_event)
+
+    worker.save_kv_layer("model.layers.4.attn")
+
+    assert not worker._reqs_send_state["d-request"].available_layers
+    record_event.assert_not_called()
+    worker.engine.batch_transfer_sync_write.assert_not_called()
+
+
 def test_partial_block_waits_for_later_chunk(worker):
     worker.start_load_kv(source_meta(0, 3))
     worker.wait_for_save()
