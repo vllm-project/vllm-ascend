@@ -195,6 +195,34 @@ def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
     return b"data: " + chunk + b"\n\n" if is_sse else chunk
 
 
+def parse_non_stream_document(buffer: bytes) -> tuple[dict | None, bytes]:
+    """Consume one complete JSON document from a non-streaming body buffer.
+
+    A ``stream=False`` decode backend returns a single JSON object, but on the
+    wire it can arrive split across chunks, wrapped in SSE framing, or followed
+    by a ``data: [DONE]`` sentinel. Returns the parsed document (``None`` while
+    it is still incomplete) plus the bytes that were not consumed, so a trailing
+    sentinel never blocks parsing of an otherwise complete body.
+    """
+    try:
+        text = buffer.decode("utf-8")
+    except UnicodeDecodeError:
+        # A multi-byte character straddles the chunk boundary; wait for more bytes.
+        return None, buffer
+    text = text.lstrip()
+    if text.startswith("data: "):
+        text = text[len("data: ") :].lstrip()
+    if text.startswith("[DONE]"):
+        return None, b""
+    try:
+        payload, end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return None, text.encode("utf-8")
+    if not isinstance(payload, dict):
+        return None, text[end:].encode("utf-8")
+    return payload, text[end:].encode("utf-8")
+
+
 global_args: argparse.Namespace | None = None
 shared_scheduler: "SharedProxyScheduler | None" = None
 runtime: "WorkerRuntime | None" = None
@@ -1149,6 +1177,7 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            non_stream_buffer = b""
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1161,6 +1190,11 @@ async def handle_completions_impl(api: str, request: Request):
             try:
                 while retry:
                     retry = False
+                    # Each decoder attempt emits a self-contained body. Leftover
+                    # bytes from a previous attempt (e.g. an unconsumed [DONE]
+                    # sentinel) would poison parsing of the next attempt's body,
+                    # so the buffer must be reset at every attempt boundary.
+                    non_stream_buffer = b""
                     if preopened_gen is not None:
                         # First iteration: consume the decode stream pre-opened by the
                         # caller so initial 4xx/5xx could be returned with the real status.
@@ -1179,29 +1213,40 @@ async def handle_completions_impl(api: str, request: Request):
                     async for chunk in gen:
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
+                        is_sse = False
+                        if not stream_flag:
+                            # Non-streaming: accumulate chunks until a complete
+                            # JSON document is available, then keep the remainder
+                            # so a trailing sentinel cannot block parsing.
+                            non_stream_buffer += chunk
+                            chunk_json, non_stream_buffer = parse_non_stream_document(non_stream_buffer)
+                            if chunk_json is None:
+                                continue  # Incomplete body, keep accumulating
+                        else:
+                            # Streaming: parse each chunk individually
+                            try:
+                                chunk_str = chunk.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk)
+                                yield chunk
+                                continue
+                            if not chunk_str:
+                                continue
+                            is_sse = chunk_str.startswith("data: ")
+                            if is_sse:
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk_str)
+                                yield chunk
+                                continue
+
                         choices = chunk_json.get("choices", [])
                         if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
                                 if not choices:
-                                    yield chunk
+                                    yield encode_response_chunk(chunk_json, is_sse if stream_flag else False)
                                     continue
 
                         choice = choices[0]
@@ -1245,8 +1290,13 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
+                        yield encode_response_chunk(chunk_json, is_sse if stream_flag else False)
+                if not stream_flag and non_stream_buffer.strip():
+                    logger.warning(
+                        "Dropping %d unparsed bytes of the non-streaming response for request %s",
+                        len(non_stream_buffer),
+                        instance_info.request_id,
+                    )
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
@@ -1268,8 +1318,15 @@ async def handle_completions_impl(api: str, request: Request):
                 released_kv = True
                 request_released = True
 
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream; charset=utf-8")
+        else:
+            # Non-streaming: collect all chunks and return as a single JSON
+            # response with Content-Length, instead of chunked StreamingResponse.
+            full_response = b""
+            async for chunk in generate_stream():
+                full_response += chunk
+            return Response(content=full_response, media_type="application/json")
     except Exception as e:
         import traceback
 

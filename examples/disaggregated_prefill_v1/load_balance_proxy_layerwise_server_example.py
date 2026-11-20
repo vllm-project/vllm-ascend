@@ -98,7 +98,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from vllm.logger import init_logger
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
@@ -314,6 +314,34 @@ def _validate_hosts(hosts: list, arg_name: str) -> None:
         _validate_host(host, arg_name, i)
 
 
+def parse_non_stream_document(buffer: bytes) -> tuple[dict | None, bytes]:
+    """Consume one complete JSON document from a non-streaming body buffer.
+
+    A ``stream=False`` decode backend returns a single JSON object, but on the
+    wire it can arrive split across chunks, wrapped in SSE framing, or followed
+    by a ``data: [DONE]`` sentinel. Returns the parsed document (``None`` while
+    it is still incomplete) plus the bytes that were not consumed, so a trailing
+    sentinel never blocks parsing of an otherwise complete body.
+    """
+    try:
+        text = buffer.decode("utf-8")
+    except UnicodeDecodeError:
+        # A multi-byte character straddles the chunk boundary; wait for more bytes.
+        return None, buffer
+    text = text.lstrip()
+    if text.startswith("data: "):
+        text = text[len("data: ") :].lstrip()
+    if text.startswith("[DONE]"):
+        return None, b""
+    try:
+        payload, end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return None, text.encode("utf-8")
+    if not isinstance(payload, dict):
+        return None, text[end:].encode("utf-8")
+    return payload, text[end:].encode("utf-8")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
@@ -518,6 +546,9 @@ async def _handle_completions(api: str, request: Request):
             origin_prompt = req_data["prompt"]
         elif chat_flag:
             messages = req_data["messages"]
+            # Keep the raw content: it may be a plain string or a multimodal
+            # list (text parts mixed with images). The retry path below must
+            # preserve the list and its non-text parts.
             origin_prompt = messages[0].get("content", "")
         else:
             origin_prompt = ""
@@ -531,10 +562,16 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            non_stream_buffer = b""
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
                     retry = False
+                    # Each decoder attempt emits a self-contained body. Leftover
+                    # bytes from a previous attempt (e.g. an unconsumed [DONE]
+                    # sentinel) would poison parsing of the next attempt's body,
+                    # so the buffer must be reset at every attempt boundary.
+                    non_stream_buffer = b""
                     async for chunk in stream_service_response_with_retry(
                         decoder.client,
                         api,
@@ -543,26 +580,41 @@ async def _handle_completions(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            # if chunk is [done], skip it.
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
+                        is_sse = False
+                        if not stream_flag:
+                            # Non-streaming: accumulate chunks until a complete
+                            # JSON document is available, then keep the remainder
+                            # so a trailing sentinel cannot block parsing.
+                            non_stream_buffer += chunk
+                            chunk_json, non_stream_buffer = parse_non_stream_document(non_stream_buffer)
+                            if chunk_json is None:
+                                continue  # Incomplete body, keep accumulating
+                        else:
+                            # Streaming: parse each chunk individually
+                            try:
+                                chunk_str = chunk.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk)
+                                yield chunk
+                                continue
+                            if not chunk_str:
+                                continue
+                            if chunk_str.startswith("data: "):
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                # if chunk is [done], skip it.
+                                logger.debug("Skipping chunk: %s", chunk_str)
+                                yield chunk
+                                continue
+
                         choices = chunk_json.get("choices", [])
                         if not choices:
-                            yield chunk
+                            if not stream_flag:
+                                yield json.dumps(chunk_json).encode("utf-8")
+                            else:
+                                yield chunk
                             continue
 
                         choice = choices[0]
@@ -582,6 +634,9 @@ async def _handle_completions(api: str, request: Request):
                             retry = True
                             retry_count += 1
                             if chat_flag:
+                                # Multimodal content is a list of parts (text +
+                                # images). Append the continuation as a new text
+                                # part and keep the non-text parts intact.
                                 messages[0]["content"] = (
                                     origin_prompt
                                     + ([{"type": "text", "text": generated_token}] if generated_token else [])
@@ -597,8 +652,16 @@ async def _handle_completions(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = json.dumps(chunk_json).encode("utf-8")
-                        yield chunk
+                        if not stream_flag:
+                            yield json.dumps(chunk_json).encode("utf-8")
+                        else:
+                            yield chunk
+                if not stream_flag and non_stream_buffer.strip():
+                    logger.warning(
+                        "Dropping %d unparsed bytes of the non-streaming response for request %s",
+                        len(non_stream_buffer),
+                        request_id,
+                    )
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
@@ -613,9 +676,14 @@ async def _handle_completions(api: str, request: Request):
                 await proxy_state.cleanup_request_batch(request_id)
 
         if stream_flag:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return StreamingResponse(generate_stream(), media_type="text/event-stream; charset=utf-8")
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
+            # Non-streaming: collect all chunks and return as a single JSON
+            # response with Content-Length, instead of chunked StreamingResponse.
+            full_response = b""
+            async for chunk in generate_stream():
+                full_response += chunk
+            return Response(content=full_response, media_type="application/json")
     except Exception as e:
         import traceback
 
