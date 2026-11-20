@@ -121,7 +121,7 @@ def test_attention_retires_eager_dsl_stream_uses(monkeypatch, capturing, return_
     calls.is_capturing.return_value = capturing
     stream = calls.current_stream.return_value
     npu_utils = ModuleType("torch_npu.npu.utils")
-    npu_utils._erase_stream = calls.erase_stream
+    monkeypatch.setattr(npu_utils, "_erase_stream", calls.erase_stream, raising=False)
     monkeypatch.setitem(sys.modules, npu_utils.__name__, npu_utils)
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", calls.is_capturing)
     monkeypatch.setattr(torch.npu, "current_stream", calls.current_stream)
