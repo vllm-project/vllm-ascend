@@ -5,10 +5,6 @@ num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
 
-# Static-kernel startup budget; worker lifetime includes all benchmark phases.
-server_ready_timeout_seconds: 14400
-worker_wait_timeout_seconds: 21600
-
 routing:
   type: "disaggregated_prefill"
   groups:
@@ -69,268 +65,283 @@ config:
 env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  HCCL_OP_EXPANSION_MODE: "AIV"
-  HCCL_BUFFSIZE: "1024"
-  TASK_QUEUE_ENABLE: "1"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
-  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["hccs:device"]}'
-  ASCEND_LOCAL_COMM_RES: '{"version":"1.2"}'
-  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3000"
+  VLLM_USE_MODELSCOPE: "true"
+  VLLM_KV_CACHE_LAYOUT: "HND"
+  VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "1800"
   HCCL_CONNECT_TIMEOUT: "1800"
   ASCEND_TRANSFER_TIMEOUT: "10000"
-  VLLM_USE_MODELSCOPE: true
+  MC_TRANSFER_TIMEOUT: "120"
+  VLLM_HOST_IP: "${LOCAL_IP}"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  PYTHONHASHSEED: "0"
+  ACL_OP_INIT_MODE: "1"
+
 env_prefill: &env_prefill
   <<: *env_common
-  # DispatchFFNCombine needs 1162 MiB for 8192 tokens per TP rank.
-  HCCL_BUFFSIZE: "2560"
-  # Upstream vLLM gates cache reset APIs behind development mode (CI only).
-  VLLM_SERVER_DEV_MODE: "1"
+  HCCL_BUFFSIZE: "512"
+  VLLM_PP_LAYER_PARTITION: "41,37"
   VLLM_USE_FASTOKENS: "1"
-  VLLM_PP_LAYER_PARTITION: "42,36"
+  # Required for the benchmark cache reset API.
+  VLLM_SERVER_DEV_MODE: "1"
 
 env_decode: &env_decode
   <<: *env_common
-  OMP_PROC_BIND: "false"
-  OMP_NUM_THREADS: "10"
+  HCCL_BUFFSIZE: "1024"
 
 templates:
   - node_index: 0
     envs:
       <<: *env_decode
     server_cmd_template:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--data-parallel-size"
-      - "${DP_SIZE}"
-      - "--data-parallel-rank"
-      - "${DP_RANK}"
-      - "--data-parallel-address"
-      - "${DP_ADDRESS}"
-      - "--data-parallel-rpc-port"
-      - "${DP_RPC_PORT}"
-      - "--tensor-parallel-size"
-      - "${TP_SIZE}"
-      - "--enable-expert-parallel"
-      - "--enable-chunked-prefill"
-      - "--no-enable-prefix-caching"
-      - "--seed"
-      - "1024"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-batched-tokens"
-      - "192"
-      - "--trust-remote-code"
-      - "--max-num-seqs"
-      - "32"
-      - "--gpu-memory-utilization"
-      - "0.92"
-      - "--async-scheduling"
-      - "--quantization"
-      - "ascend"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--enable-auto-tool-choice"
-      - "--tool-call-parser"
-      - "glm47"
-      - "--reasoning-parser"
-      - "glm47"
-      - "--kv-cache-dtype"
-      - "int8"
-      - "--attention_config.indexer_kv_dtype"
-      - "int8"
-      - "--additional-config"
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true}, "multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}}'
-      - "--speculative-config"
-      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 30, 48, 132, 192], "max_cudagraph_capture_size": 192}'
-      - "--kv-transfer-config"
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - --tensor-parallel-size
+      - '2'
+      - --data-parallel-size
+      - '16'
+      - --host
+      - 0.0.0.0
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --enable-expert-parallel
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --max-model-len
+      - '135000'
+      - --trust-remote-code
+      - --max-num-seqs
+      - '48'
+      - --quantization
+      - ascend
+      - --safetensors-load-strategy
+      - prefetch
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm47
+      - --kv-cache-dtype
+      - int8
+      - --attention_config.indexer_kv_dtype
+      - int8
+      - --max-num-batched-tokens
+      - '288'
+      - --gpu-memory-utilization
+      - '0.92'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 5, "method": "mtp", "enforce_eager": true, "kv_cache_dtype": "auto"}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true}}'
 
   - node_index: 1
     envs:
       <<: *env_decode
     server_cmd_template:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--data-parallel-size"
-      - "${DP_SIZE}"
-      - "--data-parallel-rank"
-      - "${DP_RANK}"
-      - "--data-parallel-address"
-      - "${DP_ADDRESS}"
-      - "--data-parallel-rpc-port"
-      - "${DP_RPC_PORT}"
-      - "--tensor-parallel-size"
-      - "${TP_SIZE}"
-      - "--enable-expert-parallel"
-      - "--enable-chunked-prefill"
-      - "--no-enable-prefix-caching"
-      - "--seed"
-      - "1024"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-batched-tokens"
-      - "192"
-      - "--trust-remote-code"
-      - "--max-num-seqs"
-      - "32"
-      - "--gpu-memory-utilization"
-      - "0.92"
-      - "--async-scheduling"
-      - "--quantization"
-      - "ascend"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--enable-auto-tool-choice"
-      - "--tool-call-parser"
-      - "glm47"
-      - "--reasoning-parser"
-      - "glm47"
-      - "--kv-cache-dtype"
-      - "int8"
-      - "--attention_config.indexer_kv_dtype"
-      - "int8"
-      - "--additional-config"
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true}, "multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}}'
-      - "--speculative-config"
-      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12, 30, 48, 132, 192], "max_cudagraph_capture_size": 192}'
-      - "--kv-transfer-config"
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - --tensor-parallel-size
+      - '2'
+      - --data-parallel-size
+      - '16'
+      - --host
+      - 0.0.0.0
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --enable-expert-parallel
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --max-model-len
+      - '135000'
+      - --trust-remote-code
+      - --max-num-seqs
+      - '48'
+      - --quantization
+      - ascend
+      - --safetensors-load-strategy
+      - prefetch
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm47
+      - --kv-cache-dtype
+      - int8
+      - --attention_config.indexer_kv_dtype
+      - int8
+      - --max-num-batched-tokens
+      - '288'
+      - --gpu-memory-utilization
+      - '0.92'
+      - --compilation-config
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 2, "enable_shared_expert_dp": true}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 5, "method": "mtp", "enforce_eager": true, "kv_cache_dtype": "auto"}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30200", "kv_connector_extra_config": {"use_ascend_direct": true}}'
 
   - node_index: 2
     envs:
       <<: *env_prefill
     server_cmd_template:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--tensor-parallel-size"
-      - "${TP_SIZE}"
-      - "--prefill-context-parallel-size"
-      - "${CP_SIZE}"
-      - "--pipeline-parallel-size"
-      - "${PP_SIZE}"
-      - "--distributed-executor-backend"
-      - "mp"
-      - "--master-addr"
-      - "${MASTER_ADDR}"
-      - "--master-port"
-      - "${MASTER_PORT}"
-      - "--nnodes"
-      - "2"
-      - "--node-rank"
-      - "${NODE_RANK}"
-      - "--enable-expert-parallel"
-      - "--enable-chunked-prefill"
-      - "--enable-prefix-caching"
-      - "--async-scheduling"
-      - "--seed"
-      - "1024"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--trust-remote-code"
-      - "--max-num-seqs"
-      - "64"
-      - "--gpu-memory-utilization"
-      - "0.92"
-      - "--quantization"
-      - "ascend"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--enable-auto-tool-choice"
-      - "--tool-call-parser"
-      - "glm47"
-      - "--reasoning-parser"
-      - "glm47"
-      - "--enforce-eager"
-      - "--kv-cache-dtype"
-      - "int8"
-      - "--attention_config.indexer_kv_dtype"
-      - "int8"
-      - "--additional-config"
-      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": false}'
-      - "--speculative-config"
-      - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
-      - "--kv-transfer-config"
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - --data-parallel-size
+      - '1'
+      - --host
+      - 0.0.0.0
+      - --port
+      - $SERVER_PORT
+      - --tensor-parallel-size
+      - '1'
+      - --prefill-context-parallel-size
+      - '16'
+      - --enable-expert-parallel
+      - --pipeline-parallel-size
+      - '2'
+      - --distributed-executor-backend
+      - mp
+      - --master-addr
+      - ${MASTER_ADDR}
+      - --master-port
+      - ${MASTER_PORT}
+      - --nnodes
+      - '2'
+      - --node-rank
+      - ${NODE_RANK}
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --max-model-len
+      - '135000'
+      - --trust-remote-code
+      - --max-num-seqs
+      - '64'
+      - --quantization
+      - ascend
+      - --safetensors-load-strategy
+      - prefetch
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm47
+      - --enforce-eager
+      - --kv-cache-dtype
+      - int8
+      - --attention_config.indexer_kv_dtype
+      - int8
+      - --max-num-batched-tokens
+      - '16384'
+      - --gpu-memory-utilization
+      - '0.92'
+      - --api-server-count
+      - '1'
+      - --additional-config
+      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": true, "kv_cache_dtype": "auto"}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"use_ascend_direct": true}}'
 
   - node_index: 3
     envs:
       <<: *env_prefill
     server_cmd_template:
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "$SERVER_PORT"
-      - "--tensor-parallel-size"
-      - "${TP_SIZE}"
-      - "--prefill-context-parallel-size"
-      - "${CP_SIZE}"
-      - "--pipeline-parallel-size"
-      - "${PP_SIZE}"
-      - "--distributed-executor-backend"
-      - "mp"
-      - "--master-addr"
-      - "${MASTER_ADDR}"
-      - "--master-port"
-      - "${MASTER_PORT}"
-      - "--nnodes"
-      - "2"
-      - "--node-rank"
-      - "${NODE_RANK}"
-      - "--headless"
-      - "--enable-expert-parallel"
-      - "--enable-chunked-prefill"
-      - "--enable-prefix-caching"
-      - "--async-scheduling"
-      - "--seed"
-      - "1024"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--trust-remote-code"
-      - "--max-num-seqs"
-      - "64"
-      - "--gpu-memory-utilization"
-      - "0.92"
-      - "--quantization"
-      - "ascend"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--enable-auto-tool-choice"
-      - "--tool-call-parser"
-      - "glm47"
-      - "--reasoning-parser"
-      - "glm47"
-      - "--enforce-eager"
-      - "--kv-cache-dtype"
-      - "int8"
-      - "--attention_config.indexer_kv_dtype"
-      - "int8"
-      - "--additional-config"
-      - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": false}'
-      - "--speculative-config"
-      - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
-      - "--kv-transfer-config"
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - --data-parallel-size
+      - '1'
+      - --host
+      - 0.0.0.0
+      - --port
+      - $SERVER_PORT
+      - --tensor-parallel-size
+      - '1'
+      - --prefill-context-parallel-size
+      - '16'
+      - --enable-expert-parallel
+      - --pipeline-parallel-size
+      - '2'
+      - --distributed-executor-backend
+      - mp
+      - --master-addr
+      - ${MASTER_ADDR}
+      - --master-port
+      - ${MASTER_PORT}
+      - --nnodes
+      - '2'
+      - --node-rank
+      - ${NODE_RANK}
+      - --enable-chunked-prefill
+      - --enable-prefix-caching
+      - --async-scheduling
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --max-model-len
+      - '135000'
+      - --trust-remote-code
+      - --max-num-seqs
+      - '64'
+      - --quantization
+      - ascend
+      - --safetensors-load-strategy
+      - prefetch
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - glm47
+      - --reasoning-parser
+      - glm47
+      - --enforce-eager
+      - --kv-cache-dtype
+      - int8
+      - --attention_config.indexer_kv_dtype
+      - int8
+      - --max-num-batched-tokens
+      - '16384'
+      - --gpu-memory-utilization
+      - '0.92'
+      - --api-server-count
+      - '1'
+      - --additional-config
+      - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - --speculative-config
+      - '{"num_speculative_tokens": 1, "method": "mtp", "enforce_eager": true, "kv_cache_dtype": "auto"}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"use_ascend_direct": true}}'
+      - --headless
 
-# P/PD use the lower of two valid formal samples; D20 uses one provisional sample.
-# P gates input throughput; PD/D20 gate output throughput. Warmups are ungated.
-# P/PD samples: actions/runs/44440873203/job/135285671057 and
-# actions/runs/44659395560/job/136034231445 (D20 only ran in the latter).
+# Benchmark workloads and gates are retained from the previous launch configuration.
+# Throughput baselines have not yet been recalibrated for this launch configuration.
 benchmarks:
   prefill_perf_16k_warmup:
     case_type: performance

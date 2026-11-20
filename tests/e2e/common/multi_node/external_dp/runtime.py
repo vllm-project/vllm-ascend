@@ -500,7 +500,7 @@ class ExternalDPServerManager:
 
             wait_ranks_ready(
                 local_ranks,
-                timeout=self.config.server_ready_timeout_seconds,
+                timeout=SERVER_READY_TIMEOUT_SECONDS,
                 rank_processes=self.rank_processes,
             )
         except Exception:
@@ -718,10 +718,8 @@ def wait_ranks_ready(
         time.sleep(5)
 
 
-def wait_master_rank_stopped(
-    ranks: list[RankInfo], timeout: int, ready_timeout: int = SERVER_READY_TIMEOUT_SECONDS
-) -> None:
+def wait_master_rank_stopped(ranks: list[RankInfo], timeout: int) -> None:
     url = master_rank_health_url(ranks)
-    wait_http_ready(url, timeout=ready_timeout)
+    wait_http_ready(url, timeout=SERVER_READY_TIMEOUT_SECONDS)
     logger.info("Hanging until master external DP rank stops: %s", url)
     wait_http_unready(url, timeout=timeout)

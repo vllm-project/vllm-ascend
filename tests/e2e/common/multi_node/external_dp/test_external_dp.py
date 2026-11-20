@@ -223,7 +223,7 @@ def test_external_dp() -> None:
     ranks = RankResolver(config).resolve()
     current_node_index = resolve_current_node_index(config)
     log_root = Path(os.environ.get("EXTERNAL_DP_LOG_DIR", str(DEFAULT_LOG_ROOT)))
-    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", str(config.worker_wait_timeout_seconds)))
+    max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "9000"))
     is_master = current_node_index == 0
     profile_spec = ProfileSpec.from_env()
     if is_master and profile_spec.enabled:
@@ -324,8 +324,6 @@ def test_external_dp() -> None:
                     "Waiting for master external DP rank to stop",
                     status_fn=lambda: format_http_status("master", master_url),
                 ):
-                    wait_master_rank_stopped(
-                        ranks, timeout=max_wait_seconds, ready_timeout=config.server_ready_timeout_seconds
-                    )
+                    wait_master_rank_stopped(ranks, timeout=max_wait_seconds)
     finally:
         _archive_rank_logs(log_root, current_node_index)

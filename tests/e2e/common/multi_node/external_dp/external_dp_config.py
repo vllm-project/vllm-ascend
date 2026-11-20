@@ -133,8 +133,6 @@ class ExternalDPConfig:
     acceptance_rate: dict[str, Any] = field(default_factory=dict)
     api_keyword_args: dict[str, Any] | list | None = None
     expected_response: dict[str, Any] = field(default_factory=dict)
-    server_ready_timeout_seconds: int = 3600
-    worker_wait_timeout_seconds: int = 9000
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -239,8 +237,6 @@ class ExternalDPConfigLoader:
             acceptance_rate=dict(raw_config.get("acceptance_rate", {})),
             api_keyword_args=raw_config.get("api_keyword_args"),
             expected_response=dict(raw_config.get("expected_response", {})),
-            server_ready_timeout_seconds=raw_config.get("server_ready_timeout_seconds", 3600),
-            worker_wait_timeout_seconds=raw_config.get("worker_wait_timeout_seconds", 9000),
         )
         cls._validate_config(config)
         return config
