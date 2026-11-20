@@ -1,0 +1,5 @@
+pr: 20785
+entries:
+  - category: bugfix
+    text: Constrained A3 MegaMoE eligibility to the validated intermediate-width range of 512 to 3072 with 128-element alignment, retaining width 640 with a compatible operator package.
+    hardware: [A3]
