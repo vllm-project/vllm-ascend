@@ -61,7 +61,7 @@ def prepare_pcp_mirror_staging(worker, max_num_tokens: int, max_num_reqs: int):
     )
     staging = worker._slot_mapping_staging
     if staging is not None and staging.slots.numel() < capacity:
-        staging.slots = torch.empty(capacity, dtype=staging.slots.dtype, pin_memory=True)
+        staging.slots.resize_(capacity)
 
 
 class PCPHiSparseConnector(ActiveKVConnector):

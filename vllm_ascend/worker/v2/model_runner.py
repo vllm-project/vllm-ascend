@@ -916,12 +916,13 @@ class NPUModelRunner(GPUModelRunner):
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         expert_offload.prepare_batch(self, batch_state)
-        if self.pcp_manager is None and self.input_padding_plan.token_alignment > 1:
+        padding_plan = getattr(self, "input_padding_plan", None)
+        if getattr(self, "pcp_manager", None) is None and padding_plan is not None and padding_plan.token_alignment > 1:
             logical_num_tokens = (
                 scheduler_output.total_num_scheduled_tokens if batch_state is None else batch_state.num_tokens
             )
             num_reqs = len(scheduler_output.num_scheduled_tokens)
-            physical_num_tokens = self.input_padding_plan.align_batch_tokens(
+            physical_num_tokens = padding_plan.align_batch_tokens(
                 logical_num_tokens,
                 num_reqs,
                 uniform_token_count or None,
@@ -1355,17 +1356,17 @@ class NPUModelRunner(GPUModelRunner):
         # preserves logical query lengths separately from graph padding.
         dummy_query_tokens: int | None = None
         dummy_num_reqs: int | None = None
-        if self.pcp_manager is None:
+        if getattr(self, "pcp_manager", None) is None:
             # Match the logical token count in the upstream dummy scheduler.
             dummy_query_tokens = max(num_tokens, self.decode_query_len) if uniform_decode else num_tokens
             dummy_num_reqs = (
                 dummy_query_tokens // self.decode_query_len
                 if uniform_decode
-                else min(dummy_query_tokens, self.logical_max_num_reqs)
+                else min(dummy_query_tokens, getattr(self, "logical_max_num_reqs", dummy_query_tokens))
             )
 
         previous_dummy_tokens = self.input_buffers.dummy_num_tokens
-        previous_dummy_reqs = self.input_buffers.dummy_num_reqs
+        previous_dummy_reqs = getattr(self.input_buffers, "dummy_num_reqs", None)
         self.input_buffers.dummy_num_tokens = dummy_query_tokens
         self.input_buffers.dummy_num_reqs = dummy_num_reqs
         try:

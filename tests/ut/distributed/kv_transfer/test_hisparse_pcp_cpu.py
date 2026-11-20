@@ -317,6 +317,7 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
         ),
         additional_config={},
         uniform_decode_query_len=1,
+        get_decode_cudagraph_query_lens=lambda query_len: {query_len: 2},
     )
     builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], config, torch.device("cpu"))
     common = NS(num_reqs=3, query_start_loc_cpu=torch.tensor([0, 2, 3, 4], dtype=torch.int32))

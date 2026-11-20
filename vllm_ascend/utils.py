@@ -127,7 +127,6 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
         CUDAGraphMode.FULL_AND_PIECEWISE,
     ):
         # Capture sizes are already PCP-local, including graph padding.
-        # Older vLLM versions use the shared token grid instead of a prefill grid.
         prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
         if prefill_sizes is None:
             prefill_sizes = compilation_config.cudagraph_capture_sizes
@@ -1242,49 +1241,12 @@ def align_num_tokens_to_tp(num_tokens: int, alignment: int) -> int:
 
 
 def get_mrv2_decode_query_limits(vllm_config: VllmConfig) -> dict[int, int]:
-    """Return decode query lengths and their logical request limits.
-
-    vLLM main exposes a mapping because dynamic speculative decoding can use a
-    different request limit for each query length. vLLM v0.33 has no tier
-    resolver, so it falls back to the uniform decode width below.
-    """
+    """Return main's decode query lengths and logical request limits."""
     uniform_query_len = vllm_config.uniform_decode_query_len
-    resolve_query_lens = getattr(vllm_config, "get_decode_cudagraph_query_lens", None)
-    scheduler_config = vllm_config.scheduler_config
-    max_num_reqs = getattr(scheduler_config, "max_num_active_seqs", None) or scheduler_config.max_num_seqs
-    if callable(resolve_query_lens):
-        resolved = resolve_query_lens(uniform_query_len)
-        limits = {int(query_len): int(limit) for query_len, limit in resolved.items()}
-        if limits:
-            return limits
-
-    # vLLM v0.33 has no public query-tier resolver, but its graph manager
-    # still expands dynamic speculative decoding into every scheduled query
-    # length. Rebuild the same widest-request mapping used by its config so
-    # graph normalization can validate the actual FULL descriptors.
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    uses_dynamic = getattr(speculative_config, "uses_dynamic_speculative_decoding", None)
-    if speculative_config is not None and callable(uses_dynamic) and uses_dynamic():
-        schedule = speculative_config.num_speculative_tokens_per_batch_size
-        try:
-            from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                schedule,
-                vllm_max_batch_size=max_num_reqs,
-                vllm_num_speculative_tokens=vllm_config.num_speculative_tokens,
-            )
-        except ValueError:
-            pass
-        else:
-            widest_batch: dict[int, int] = {}
-            for batch_size, num_spec in enumerate(dense_schedule[1:], start=1):
-                widest_batch[num_spec + 1] = batch_size
-            if widest_batch:
-                return widest_batch
-
-    # Static vLLM v0.33 decode has one uniform width.
-    return {uniform_query_len: max_num_reqs}
+    return {
+        int(query_len): int(limit)
+        for query_len, limit in vllm_config.get_decode_cudagraph_query_lens(uniform_query_len).items()
+    }
 
 
 def get_mrv2_physical_batch_capacity(
@@ -1310,14 +1272,6 @@ def get_mrv2_physical_batch_capacity(
     # not divisors of one another (for example, TP=8 and query_len=6).
     query_limits = get_mrv2_decode_query_limits(vllm_config)
     common_request_alignment = plan.common_request_alignment(query_limits)
-    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
-    model_config = getattr(vllm_config, "model_config", None)
-    legacy_full_graph = bool(
-        vllm_version_is("0.33.0")
-        and not getattr(model_config, "enforce_eager", False)
-        and cudagraph_mode is not None
-        and cudagraph_mode.has_full_cudagraphs()
-    )
     for query_len, tier_max_reqs in query_limits.items():
         logical_reqs = min(
             tier_max_reqs,
@@ -1329,7 +1283,7 @@ def get_mrv2_physical_batch_capacity(
                 logical_reqs,
                 common_request_alignment,
             )
-            if legacy_full_graph or physical_reqs > logical_reqs:
+            if physical_reqs > logical_reqs:
                 max_reqs = max(max_reqs, physical_reqs)
             max_tokens = max(max_tokens, physical_reqs * query_len)
 

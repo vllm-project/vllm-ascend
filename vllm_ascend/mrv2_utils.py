@@ -127,6 +127,21 @@ def resolve_mrv2_varlen_decode_token_sizes(
     return upstream(vllm_config, decode_query_len)
 
 
+def _patch_config_resolver(cls, name: str, marker: str, resolve: Callable) -> None:
+    """Wrap one c410 graph resolver once, preserving its upstream callable."""
+    upstream = getattr(cls, name)
+    if getattr(upstream, marker, False):
+        return
+
+    @wraps(upstream)
+    def patched(self, *args):
+        return resolve(self, *args, upstream)
+
+    setattr(patched, marker, True)
+    cast(Any, patched)._vllm_ascend_upstream = upstream
+    setattr(cls, name, patched)
+
+
 def apply_v2_model_runner_config_patch() -> None:
     """Install Ascend runner selection on ``VllmConfig``.
 
@@ -152,47 +167,17 @@ def apply_v2_model_runner_config_patch() -> None:
     # per-config aligned target mapping stable across that re-entry. This class
     # patch is stateless: unlike a runner-capturing closure, it reads only the
     # current VllmConfig's serialized ``additional_config``.
-    resolver = getattr(VllmConfig, "get_decode_cudagraph_query_lens", None)
-    if resolver is not None and not getattr(resolver, "_vllm_ascend_mrv2_limits", False):
-
-        @wraps(resolver)
-        def patched(self, decode_query_len):
-            return resolve_mrv2_decode_query_lens(self, decode_query_len, resolver)
-
-        cast(Any, patched)._vllm_ascend_mrv2_limits = True
-        cast(Any, patched)._vllm_ascend_upstream = resolver
-        VllmConfig.get_decode_cudagraph_query_lens = patched
-
-    draft_resolver = getattr(VllmConfig, "get_draft_decode_cudagraph_request_sizes", None)
-    if draft_resolver is not None and not getattr(
-        draft_resolver,
-        "_vllm_ascend_mrv2_draft_sizes",
-        False,
+    for name, marker, resolve in (
+        ("get_decode_cudagraph_query_lens", "_mrv2_limits", resolve_mrv2_decode_query_lens),
+        (
+            "get_draft_decode_cudagraph_request_sizes",
+            "_mrv2_draft",
+            resolve_mrv2_draft_decode_request_sizes,
+        ),
+        (
+            "get_varlen_decode_cudagraph_token_sizes",
+            "_mrv2_varlen",
+            resolve_mrv2_varlen_decode_token_sizes,
+        ),
     ):
-
-        @wraps(draft_resolver)
-        def patched_draft(self):
-            return resolve_mrv2_draft_decode_request_sizes(self, draft_resolver)
-
-        cast(Any, patched_draft)._vllm_ascend_mrv2_draft_sizes = True
-        cast(Any, patched_draft)._vllm_ascend_upstream = draft_resolver
-        VllmConfig.get_draft_decode_cudagraph_request_sizes = patched_draft
-
-    varlen_resolver = getattr(VllmConfig, "get_varlen_decode_cudagraph_token_sizes", None)
-    if varlen_resolver is not None and not getattr(
-        varlen_resolver,
-        "_vllm_ascend_mrv2_varlen_sizes",
-        False,
-    ):
-
-        @wraps(varlen_resolver)
-        def patched_varlen(self, decode_query_len):
-            return resolve_mrv2_varlen_decode_token_sizes(
-                self,
-                decode_query_len,
-                varlen_resolver,
-            )
-
-        cast(Any, patched_varlen)._vllm_ascend_mrv2_varlen_sizes = True
-        cast(Any, patched_varlen)._vllm_ascend_upstream = varlen_resolver
-        VllmConfig.get_varlen_decode_cudagraph_token_sizes = patched_varlen
+        _patch_config_resolver(VllmConfig, name, marker, resolve)

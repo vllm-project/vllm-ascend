@@ -107,6 +107,47 @@ class TestUtils(TestBase):
         importlib.reload(platform)
         utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
+    @staticmethod
+    def mrv2_parallel_config(tp_size, *, dp_size=1, hc_sp=False, pcp_size=1):
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=tp_size,
+                data_parallel_size=dp_size,
+                enable_hc_sp=hc_sp,
+                prefill_context_parallel_size=pcp_size,
+            ),
+            additional_config={},
+        )
+
+    @staticmethod
+    def mrv2_capacity_config(
+        *,
+        max_tokens,
+        max_reqs,
+        query_limits,
+        capture_sizes=(),
+        prefill_sizes=(),
+        decode_sizes=(),
+        additional_config=None,
+    ):
+        query_len = next(iter(query_limits))
+        return SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_batched_tokens=max_tokens,
+                max_num_scheduled_tokens=None,
+                max_num_seqs=max_reqs,
+                max_num_active_seqs=None,
+            ),
+            compilation_config=SimpleNamespace(
+                cudagraph_capture_sizes=list(capture_sizes),
+                prefill_cudagraph_capture_token_sizes=list(prefill_sizes),
+                decode_cudagraph_capture_request_sizes=list(decode_sizes),
+            ),
+            uniform_decode_query_len=query_len,
+            get_decode_cudagraph_query_lens=lambda _query_len: query_limits,
+            additional_config=additional_config or {},
+        )
+
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
@@ -250,23 +291,6 @@ class TestUtils(TestBase):
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
-    def test_pad_sequence_parallel_tokens_pads_unconditionally(self):
-        with mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4):
-            padded = utils.pad_sequence_parallel_tokens(torch.zeros(6, 3))
-        self.assertEqual(padded.shape, (8, 3))
-
-        aligned = torch.zeros(8, 3)
-        with (
-            mock.patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
-            mock.patch("torch.nn.functional.pad", wraps=torch.nn.functional.pad) as mock_pad,
-        ):
-            padded = utils.pad_sequence_parallel_tokens(aligned)
-
-        # An aligned tracing input must still record the pad, otherwise the
-        # replayed graph drops padding for non-aligned token counts.
-        mock_pad.assert_called_once_with(aligned, (0, 0, 0, 0))
-        self.assertEqual(padded.shape, (8, 3))
-
     def test_mrv2_padding_plan_identity(self):
         plan = utils.MRV2PaddingPlan()
 
@@ -286,15 +310,7 @@ class TestUtils(TestBase):
                 enable_hc_sp=enable_hc_sp,
                 shared_expert_dp=shared_expert_dp,
             ):
-                config = SimpleNamespace(
-                    parallel_config=SimpleNamespace(
-                        tensor_parallel_size=4,
-                        data_parallel_size=1,
-                        enable_hc_sp=enable_hc_sp,
-                        prefill_context_parallel_size=1,
-                    ),
-                    additional_config={},
-                )
+                config = self.mrv2_parallel_config(4, hc_sp=enable_hc_sp)
 
                 plan = utils.get_mrv2_padding_plan(
                     config,
@@ -334,15 +350,7 @@ class TestUtils(TestBase):
         )
 
     def test_mrv2_padding_plan_keeps_pcp_separate_from_tp_alignment(self):
-        config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                tensor_parallel_size=8,
-                data_parallel_size=1,
-                enable_hc_sp=False,
-                prefill_context_parallel_size=2,
-            ),
-            additional_config={},
-        )
+        config = self.mrv2_parallel_config(8, pcp_size=2)
 
         plan = utils.get_mrv2_padding_plan(
             config,
@@ -353,15 +361,7 @@ class TestUtils(TestBase):
         self.assertEqual(plan.token_alignment, 1)
 
     def test_mrv2_padding_plan_finegrained_tp_only_requires_uniform_rows(self):
-        config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                tensor_parallel_size=8,
-                data_parallel_size=2,
-                enable_hc_sp=False,
-                prefill_context_parallel_size=1,
-            ),
-            additional_config={},
-        )
+        config = self.mrv2_parallel_config(8, dp_size=2)
         finegrained_tp_config = SimpleNamespace(
             oproj_tensor_parallel_size=2,
             mlp_tensor_parallel_size=1,
@@ -388,50 +388,16 @@ class TestUtils(TestBase):
         self.assertEqual(utils.get_mrv2_decode_query_limits(config), {3: 8, 5: 16})
         self.assertEqual(resolver.call_args_list, [mock.call(4)])
 
-    def test_mrv2_decode_query_lens_supports_v033_config(self):
-        config = SimpleNamespace(
-            uniform_decode_query_len=4,
-            scheduler_config=SimpleNamespace(max_num_seqs=7),
-        )
-
-        self.assertEqual(utils.get_mrv2_decode_query_limits(config), {4: 7})
-
-    def test_mrv2_decode_query_lens_derives_v033_dynamic_tiers(self):
-        speculative_config = SimpleNamespace(
-            num_speculative_tokens_per_batch_size=[(1, 2, 5), (3, 8, 2)],
-            uses_dynamic_speculative_decoding=lambda: True,
-        )
-        config = SimpleNamespace(
-            uniform_decode_query_len=6,
-            scheduler_config=SimpleNamespace(
-                max_num_seqs=8,
-                max_num_active_seqs=None,
-            ),
-            speculative_config=speculative_config,
-            num_speculative_tokens=5,
-        )
-
-        self.assertEqual(utils.get_mrv2_decode_query_limits(config), {6: 2, 3: 8})
-
     def test_mrv2_physical_capacity_does_not_mutate_scheduler_limits(self):
-        scheduler_config = SimpleNamespace(
-            max_num_batched_tokens=5,
-            max_num_scheduled_tokens=None,
-            max_num_seqs=3,
-            max_num_active_seqs=None,
+        config = self.mrv2_capacity_config(
+            max_tokens=5,
+            max_reqs=3,
+            query_limits={2: 3},
+            capture_sizes=[8],
+            prefill_sizes=[8],
+            decode_sizes=[4],
         )
-        config = SimpleNamespace(
-            scheduler_config=scheduler_config,
-            model_config=SimpleNamespace(enforce_eager=False),
-            compilation_config=SimpleNamespace(
-                cudagraph_capture_sizes=[8],
-                prefill_cudagraph_capture_token_sizes=[8],
-                decode_cudagraph_capture_request_sizes=[4],
-                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
-            ),
-            uniform_decode_query_len=2,
-            get_decode_cudagraph_query_lens=lambda _query_len: {2: 3},
-        )
+        scheduler_config = config.scheduler_config
 
         capacity = utils.get_mrv2_physical_batch_capacity(
             config,
@@ -459,41 +425,11 @@ class TestUtils(TestBase):
         self.assertEqual(scheduler_config.max_num_batched_tokens, 10)
         self.assertEqual(scheduler_config.max_num_seqs, 1)
 
-        config.compilation_config.cudagraph_mode = SimpleNamespace(has_full_cudagraphs=lambda: True)
-        with mock.patch.object(utils, "vllm_version_is", return_value=True):
-            capacity = utils.get_mrv2_physical_batch_capacity(
-                config,
-                utils.MRV2PaddingPlan(token_alignment=8),
-            )
-
-        self.assertEqual(capacity, (24, 4))
-
-        config.model_config.enforce_eager = True
-        with mock.patch.object(utils, "vllm_version_is", return_value=True):
-            capacity = utils.get_mrv2_physical_batch_capacity(
-                config,
-                utils.MRV2PaddingPlan(token_alignment=8),
-            )
-
-        self.assertEqual(capacity, (24, 4))
-
     def test_mrv2_physical_capacity_uses_common_query_grid(self):
-        config = SimpleNamespace(
-            scheduler_config=SimpleNamespace(
-                max_num_batched_tokens=64,
-                max_num_scheduled_tokens=None,
-                max_num_seqs=1,
-                max_num_active_seqs=None,
-            ),
-            model_config=SimpleNamespace(enforce_eager=False),
-            compilation_config=SimpleNamespace(
-                cudagraph_capture_sizes=[],
-                prefill_cudagraph_capture_token_sizes=[],
-                decode_cudagraph_capture_request_sizes=[],
-                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
-            ),
-            uniform_decode_query_len=6,
-            get_decode_cudagraph_query_lens=lambda _query_len: {4: 1, 6: 1},
+        config = self.mrv2_capacity_config(
+            max_tokens=64,
+            max_reqs=1,
+            query_limits={4: 1, 6: 1},
         )
 
         capacity = utils.get_mrv2_physical_batch_capacity(
@@ -507,23 +443,15 @@ class TestUtils(TestBase):
         self.assertEqual(capacity, (72, 6))
 
     def test_ensure_mrv2_physical_capacity_preserves_logical_budget(self):
-        scheduler_config = SimpleNamespace(
-            max_num_batched_tokens=5,
-            max_num_scheduled_tokens=None,
-            max_num_seqs=1,
-            max_num_active_seqs=None,
+        config = self.mrv2_capacity_config(
+            max_tokens=5,
+            max_reqs=1,
+            query_limits={1: 1},
+            capture_sizes=[8],
+            prefill_sizes=[8],
+            decode_sizes=[4],
         )
-        config = SimpleNamespace(
-            scheduler_config=scheduler_config,
-            compilation_config=SimpleNamespace(
-                cudagraph_capture_sizes=[8],
-                prefill_cudagraph_capture_token_sizes=[8],
-                decode_cudagraph_capture_request_sizes=[4],
-                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
-            ),
-            uniform_decode_query_len=1,
-            get_decode_cudagraph_query_lens=lambda _query_len: {1: 1},
-        )
+        scheduler_config = config.scheduler_config
 
         capacity = utils.ensure_mrv2_physical_batch_capacity(
             config,
@@ -546,22 +474,10 @@ class TestUtils(TestBase):
     def test_mrv2_physical_capacity_includes_adaptive_varlen_gears(self):
         from vllm_ascend.mrv2_utils import MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY
 
-        config = SimpleNamespace(
-            scheduler_config=SimpleNamespace(
-                max_num_batched_tokens=5,
-                max_num_scheduled_tokens=None,
-                max_num_seqs=1,
-                max_num_active_seqs=None,
-            ),
-            model_config=SimpleNamespace(enforce_eager=False),
-            compilation_config=SimpleNamespace(
-                cudagraph_capture_sizes=[],
-                prefill_cudagraph_capture_token_sizes=[],
-                decode_cudagraph_capture_request_sizes=[],
-                cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
-            ),
-            uniform_decode_query_len=1,
-            get_decode_cudagraph_query_lens=lambda _query_len: {1: 1},
+        config = self.mrv2_capacity_config(
+            max_tokens=5,
+            max_reqs=1,
+            query_limits={1: 1},
             additional_config={MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {1: [8, 12]}},
         )
 
