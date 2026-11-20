@@ -134,7 +134,8 @@ the base's logical width). Shapes use the real Step5 attention geometry
 (head_dim 192 plus the other supported 128; per-rank head counts 4/8/16
 for TP16/TP8/TP4 on the 64-head checkpoint) with token counts spanning
 single-token decode, an odd boundary and a prefill chunk; an out-of-range
-offset must fail loudly.
+offset must fail loudly, and zero-token inputs return an empty output
+without launching a kernel.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_gated_scale.py

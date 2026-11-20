@@ -154,8 +154,10 @@ e4m3 mantissa); both require at least 99% of elements within tolerance.
 index_z is compared bit-exact. The inputs are the strided `split` views of one packed row (the
 production layout). Real Step5 indexer shape (`proxy_dim=256`,
 `sparse_indexer_rope_dim=32`, `rope_theta=1e7`) plus head-count variants,
-token counts from single-token decode to odd tiles; a pos-0 identity test
-guards the pair/dims layout regression.
+token counts from single-token decode to odd tiles. Coverage also includes
+zero-token inputs, full-RoPE geometry (`rotary_dim == head_dim`), and a
+large-mean/small-spread K row for the centered LayerNorm variance. A
+pos-0 identity test guards the pair/dims layout regression.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_indexer_qkz_norm_rope.py
