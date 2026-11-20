@@ -57,6 +57,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     enable_custom_op,
     get_potential_max_tokens,
+    is_deepseek_v41,
     is_internal_npu_format,
     npu_stream_switch,
     oproj_tp_enable,
@@ -384,18 +385,21 @@ class AscendDSAV41Impl:
         ):
             return None, None
         vllm_config = get_current_vllm_config()
-        if vllm_config.parallel_config.decode_context_parallel_size != 1 or not enable_custom_op():
+        model_config = vllm_config.model_config
+        if (
+            model_config is None
+            or not is_deepseek_v41(model_config.hf_config)
+            or vllm_config.parallel_config.decode_context_parallel_size != 1
+            or not enable_custom_op()
+        ):
             return None, None
-        if not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.cudagraph_mode not in (
+        if not model_config.enforce_eager and vllm_config.compilation_config.cudagraph_mode not in (
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL_DECODE_ONLY,
         ):
             return None, None
         ops = torch.ops._C_ascend
-        decode_op = (
-            getattr(ops, "dsv41_mla_prolog", None) if config.ascend_fusion_config.fuse_sparse_mla_prologue else None
-        )
-        return decode_op, getattr(ops, "dsv41_mla_prolog_no_cache", None)
+        return getattr(ops, "dsv41_mla_prolog", None), getattr(ops, "dsv41_mla_prolog_no_cache", None)
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
@@ -578,16 +582,17 @@ class AscendDSAV41Impl:
             replicated_cache = local_metadata is not global_metadata or swa.global_metadata is not None
             # A PCP rank may have no local prefill tokens in a global prefill batch.
             has_prefill = global_metadata.swa.num_prefills > 0
-            pure_decode = not has_prefill and (mode == CUDAGraphMode.FULL or swa.num_decodes == swa.num_reqs)
-            # Prefill and PCP retain the framework's SWA write ordering and gathers.
-            write_cache = pure_decode and not replicated_cache
-            if write_cache:
-                use_fused = self._fused_mla_prolog is not None
-            else:
-                use_fused = self._fused_mla_prolog_no_cache is not None and (
-                    has_prefill or self._fused_mla_prolog is not None
-                )
-            if use_fused and (mode == CUDAGraphMode.NONE or (mode == CUDAGraphMode.FULL and write_cache)):
+            # FULL is reachable here through FULL_DECODE_ONLY, whose capture metadata
+            # can include padded requests. Eager decode requires a complete classification.
+            write_cache = (
+                self._fused_mla_prolog is not None
+                and not has_prefill
+                and not replicated_cache
+                and (mode == CUDAGraphMode.FULL or (mode == CUDAGraphMode.NONE and swa.num_decodes == swa.num_reqs))
+            )
+            # Prefill and mixed batches keep the framework's SWA write and PCP gather.
+            return_kv = self._fused_mla_prolog_no_cache is not None and has_prefill and mode == CUDAGraphMode.NONE
+            if write_cache or return_kv:
                 fused_tokens = swa.num_input_tokens if mode == CUDAGraphMode.FULL else num_tokens
                 if 0 < fused_tokens <= hidden_states.shape[0]:
                     # A replay uses the capture bucket's shape and persistent slots.

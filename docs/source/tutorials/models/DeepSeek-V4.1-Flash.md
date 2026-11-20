@@ -2838,8 +2838,8 @@ headroom for the KV cache.
 
 ### 9.1 Fused MLA Prologue on Atlas A3
 
-Eligible eager batches containing prefill automatically use the fused MLA prologue for
-DeepSeek-V4.1-Flash on Atlas A3. Pure decode fusion is opt-in.
+DeepSeek-V4.1-Flash on Atlas A3 automatically uses the fused MLA prologue for
+eligible eager batches containing prefill and for eligible pure decode batches.
 Use a build with A3 custom operators, tensor parallel size 1, 2, or 4, and a compatible checkpoint.
 The attention projections `wq_a` and `wkv` must use BF16 ND weights. The `wq_b` projection must
 use `W8A8_DYNAMIC` with an INT8 FRACTAL_NZ weight and BF16 per-channel scales. For a
@@ -2860,21 +2860,14 @@ size 128, and decode context parallel size 1.
 - **Combined prefill and decode server**. Eager batches containing prefill use the
   same automatic path, including batches that also contain decode requests.
   `FULL_DECODE_ONLY` supports this path because these batches execute eagerly.
-- **Decode fusion**. Set `ascend_fusion_config.fuse_sparse_mla_prologue` to `true`
-  in `--additional-config` and use `--prefill-context-parallel-size 1` for direct
-  SWA KV writes. Use `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`
-  to capture pure decode with `--enforce-eager` omitted. The prologue uses the
-  capture bucket's token shape and skips padded slots. Eager pure decode is also
-  supported.
+- **Decode server**. Use `--prefill-context-parallel-size 1` for direct SWA KV writes.
+  The prologue runs automatically in eager mode and under
+  `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`. Omit
+  `--enforce-eager` to capture the decode graph. The prologue uses the capture
+  bucket's token shape and skips padded slots.
 
-Merge this Decode option into the existing `--additional-config` object:
-
-```bash
---additional-config '{"ascend_fusion_config":{"fuse_sparse_mla_prologue":true}}'
-```
-
-The Decode switch defaults to `false`. Ineligible devices, graph modes, batches and
-tensor layouts use the existing attention implementation. In an NPU profile, look for
+Ineligible model and device combinations, graph modes, batches, and tensor
+layouts use the existing attention implementation. In an NPU profile, look for
 `dsv41_mla_prolog` on Decode or `dsv41_mla_prolog_no_cache` on Prefill at the
 PyTorch operator level.
 

@@ -3,10 +3,8 @@ entries:
   - category: performance
     text: >-
       Added a fused MLA prologue for eligible DeepSeek-V4.1-Flash batches on
-      Atlas A3. Eager batches containing prefill use it automatically with
-      framework KV writes. Pure decode can opt in to fused KV writes in eager
-      or full decode-only ACL Graph mode by setting
-      ascend_fusion_config.fuse_sparse_mla_prologue to true in --additional-config.
-      The fusion requires weight_nz_mode=1.
+      Atlas A3. Eligible batches use it automatically with framework KV writes
+      for eager prefill or fused KV writes for pure decode in eager and full
+      decode-only ACL Graph modes. The fusion requires weight_nz_mode=1.
     model: DeepSeek-V4.1-Flash
     hardware: [A3]
