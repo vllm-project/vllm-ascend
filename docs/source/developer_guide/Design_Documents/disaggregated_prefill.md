@@ -45,28 +45,6 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
 
-#### Mooncake V2 pull heartbeat logs
-
-For `MooncakeConnectorV2` in pull mode, enable DEBUG logging on both P and D
-to observe `MooncakeHeartbeat` events. Each scheduler logs `event=config` once
-after validating its lease configuration, including the engine ID and KV role:
-
-| Field | Meaning | Default (seconds) |
-| --- | --- | --- |
-| `initial_lease_s` | Initial KV retention duration on P | 120 |
-| `renewal_window_s` | Window from the heartbeat processing time to the candidate lease deadline | 80 |
-| `heartbeat_interval_s` | Configured D heartbeat interval | 20 |
-
-These values derive from `kv_connector_extra_config.kv_lease_duration`: the
-duration itself, `duration * 2 // 3`, and `duration // 6`, respectively.
-D's existing `event=send` also includes `heartbeat_interval_s`; P's
-`event=process` includes `renewal_window_s` alongside the batch outcome counts.
-Renewal only advances the deadline when `now + renewal_window_s` exceeds the
-existing deadline and the lease has not expired. The window is not an amount
-added to the old deadline, and `unchanged` means no extension was needed.
-The configured heartbeat interval is not a measured gap between log entries:
-idle periods, batching, ACK waits, and scheduling can affect those gaps.
-
 #### Mooncake Layerwise Connector
 
 1. The request is sent to the Proxy's `_handle_completions` endpoint.

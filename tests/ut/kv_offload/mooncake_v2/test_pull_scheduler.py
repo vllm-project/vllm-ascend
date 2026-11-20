@@ -1442,8 +1442,7 @@ def test_heartbeat_logs_batch_outcomes_outside_state_lock(monkeypatch) -> None:
     thread._handle_heartbeat(("extend", "unchanged", "expired", "missing"))
 
     assert messages == [
-        "MooncakeHeartbeat event=process engine_id=engine-p renewal_window_s=20 "
-        "received=4 extended=1 unchanged=1 expired=1 unknown=1",
+        "MooncakeHeartbeat event=process engine_id=engine-p received=4 extended=1 unchanged=1 expired=1 unknown=1",
         "Force freed expired Mooncake request expired after KV lease expired; "
         "MooncakeHeartbeat event=lease_finish engine_id=engine-p request_id=expired "
         "reason=expired expired_by_s=0.000 action=queued_for_release",
@@ -1533,8 +1532,8 @@ def test_heartbeat_logs_only_successfully_sent_batches(monkeypatch) -> None:
     assert [len(message[1]) for message in sent] == [512, 1]
     assert {req for _, ids in sent for req in ids} == {f"remote-{index}" for index in range(513)}
     assert messages == [
-        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=512 heartbeat_interval_s=20",
-        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=1 heartbeat_interval_s=20",
+        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=512",
+        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=1",
     ]
     assert socket.send.call_count == 3
     socket.recv.assert_called_once()
