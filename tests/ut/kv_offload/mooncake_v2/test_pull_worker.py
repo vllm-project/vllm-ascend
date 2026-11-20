@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import pickle
 import queue
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
     MooncakePullRecvingThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     group_concurrent_contiguous,
@@ -66,6 +69,8 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.block_shapes = [[(1, 16, 4)]]
     thread.block_size_scales = [[1]]
     thread.can_report_invalid_block_ids = True
+    thread.xfer_stats = MooncakeKVConnectorStats(data={})
+    thread.executor = ThreadPoolExecutor(max_workers=1)
     thread.invalid_block_ids = set()
     thread.invalid_block_ids_lock = threading.Lock()
     thread.finished_requests = queue.SimpleQueue()
@@ -1203,6 +1208,150 @@ def test_execute_bucket_calls_mooncake_and_raises_on_negative_return() -> None:
         thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
 
 
+def _fake_append_addresses(*args: Any, **kwargs: Any) -> None:
+    """Append one canonical (src, dst, length) triple, as the real helper does.
+
+    The real _append_spec_transfer_addresses receives src_list/dst_list/
+    length_list as keyword call-site arguments (pull_worker.py:1182-1193
+    passes every argument by name), so **kwargs captures them reliably;
+    positional arguments are a drift guard pointing at the real call site.
+    """
+    assert not args
+    kwargs["src_list"].append(1000)
+    kwargs["dst_list"].append(2000)
+    kwargs["length_list"].append(128)
+
+
+def test_transfer_records_stats_on_success_and_failure() -> None:
+    thread = make_thread(engine=MagicMock())
+    thread._append_spec_transfer_addresses = MagicMock(  # type: ignore[method-assign]
+        side_effect=_fake_append_addresses
+    )
+    remote = make_pp_metadata()
+    entries = {0: {(0, 0): [("request", [1], [2])]}}
+
+    thread.engine.batch_transfer_sync_read.return_value = 0
+    thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    assert thread.xfer_stats.num_successful_transfers == 1
+    assert thread.xfer_stats.data["bytes_transferred"] == [128]
+    assert len(thread.xfer_stats.data["transfer_duration"]) == 1
+    assert 0 <= thread.xfer_stats.data["transfer_duration"][0] < 1.0
+    assert not thread.xfer_stats.data["num_failed_transfers"]
+
+    thread.engine.batch_transfer_sync_read.return_value = -1
+    with pytest.raises(RuntimeError, match="transfer failed"):
+        thread._execute_tp_transfer_bucket(0, 0, 0, 1, 1, 1, remote, entries)
+    assert thread.xfer_stats.data["num_failed_transfers"] == [1]
+    assert thread.xfer_stats.num_successful_transfers == 1  # failure adds no success sample
+
+    thread.xfer_stats.clone_and_reset()
+    assert thread.xfer_stats.is_empty()
+
+
+def test_handle_requests_records_single_failed_transfer_per_batch() -> None:
+    """Bucket failures are swallowed by the as_completed loop; exactly one record."""
+    thread = make_thread(engine=MagicMock())
+    thread._append_spec_transfer_addresses = MagicMock(  # type: ignore[method-assign]
+        side_effect=_fake_append_addresses
+    )
+    thread.engine.batch_transfer_sync_read.return_value = -1
+    thread.remote_tp_rank_groups = {"engine-p": {0: {(0, 0): [[0]]}}}
+    thread.remote_layer_index_pairs = {"engine-p": {0: [(0, 0)]}}
+    # The real _get_remote_metadata returns MooncakeTransferMetadataGroups
+    # (pull_worker.py:1295-1300; full field set metadata.py:128-140:
+    # engine_id/scheduler_host/scheduler_port/pp_size/pcp_size/dcp_size/tp_size/
+    # use_kv_pp/metadata_by_pp_rank). _handle_requests reads only four of them,
+    # so a four-field SimpleNamespace is a faithful stand-in; a future field
+    # read will fail loudly with AttributeError instead of drifting silently.
+    thread._get_remote_metadata = MagicMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(
+            metadata_by_pp_rank={0: make_pp_metadata()},
+            pcp_size=1,
+            tp_size=1,
+            dcp_size=1,
+        )
+    )
+    thread._build_transfer_block_buckets = MagicMock(  # type: ignore[method-assign]
+        return_value=(
+            # Real return annotation (pull_worker.py:616-620):
+            # (pcp, tp) -> local_spec_index -> (local_layer, remote_layer)
+            # -> [(request_id, local_blocks, remote_blocks)];
+            # second element request_ids_by_remote_rank: (pcp, tp) -> request ids.
+            # The middle key 0 is local_spec_index (not pp/layer).
+            {
+                (0, 0): {0: {(0, 0): [("request-a", [1], [2])]}},
+            },
+            {(0, 0): {"request-a"}},
+        )
+    )
+    failed = thread._handle_requests("engine-p", "10.0.0.1", 9000, {"request-a": make_req_meta()})
+    assert failed == {"request-a"}
+    assert thread.xfer_stats.data["num_failed_transfers"] == [1]  # exactly one after as_completed
+
+
+def test_worker_run_records_single_failed_transfer_on_metadata_error(monkeypatch) -> None:
+    """run()'s except path records the metadata/submission failure exactly once.
+
+    _get_remote_endpoint is mocked so the exception provably comes from
+    _handle_requests, not from the endpoint parse that precedes it.
+    """
+    thread = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=True)
+    request_queue = MagicMock()
+    # Second get(): MagicMock raises exception instances from a side_effect
+    # list at the call site; BaseException escapes run()'s except Exception.
+    request_queue.get.side_effect = [("engine-p", {"request-a": make_req_meta()}), _StopWorkerLoop()]
+    thread.request_queue = request_queue
+    thread._get_remote_endpoint = MagicMock(  # type: ignore[method-assign]
+        return_value=("10.0.0.1", 9000)
+    )
+    thread._handle_requests = MagicMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("metadata unavailable")
+    )
+    # Pin the marking loop inside the except block: exactly once for this batch.
+    thread._mark_request_failed = MagicMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    with pytest.raises(_StopWorkerLoop):
+        thread.run()
+    assert thread.xfer_stats.data["num_failed_transfers"] == [1]
+    assert thread._mark_request_failed.call_count == 1
+
+
+def test_stats_survives_pickle_and_deepcopy() -> None:
+    """Worker outputs are shipped to the engine over a pickle channel
+    (shm_broadcast.MessageQueue), so the stats object must survive
+    pickling despite carrying a threading.Lock; copies must never share
+    the lock (or the underlying samples) with the original.
+
+    Three contracts asserted below:
+    1. pickle roundtrip: data preserved verbatim and the rebuilt lock is
+       usable (record_* works after __setstate__).
+    2. deepcopy: data is deep-copied with the state, so the copy never
+       shares samples with the original (the lock is rebuilt as well).
+    3. clone_and_reset: the snapshot holds an independent lock and the OLD
+       data dict (reset() rebinds, never clears), so recording on the
+       snapshot after hand-off is safe without locking.
+    """
+    stats = MooncakeKVConnectorStats(data={})
+    stats.record_transfer(0.01, 2**20)
+    stats.record_failed_transfer()
+
+    restored = pickle.loads(pickle.dumps(stats))
+    assert restored.data["transfer_duration"] == [0.01]
+    assert restored.data["num_failed_transfers"] == [1]
+    restored.record_transfer(0.02, 1)  # fresh lock after __setstate__
+    assert restored.num_successful_transfers == 2
+
+    deep = copy.deepcopy(stats)
+    deep.record_failed_transfer()
+    assert deep.data["num_failed_transfers"] == [1, 1]
+    assert stats.data["num_failed_transfers"] == [1]  # no shared state
+
+    snapshot = stats.clone_and_reset()
+    snapshot.record_transfer(0.5, 10)  # fresh lock on the snapshot too
+    assert snapshot.num_successful_transfers == 2
+    assert stats.is_empty()
+
+
 def test_execute_bucket_uses_selected_pcp_endpoint_and_addresses() -> None:
     thread = make_thread(engine=MagicMock())
     remote = make_pp_metadata(
@@ -1777,6 +1926,7 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
     worker.layer_name_to_spec_index = {"model.layers.0.self_attn": 0}
     worker.tp_rank = worker.pp_rank = worker.dp_rank = worker.pcp_rank = worker.dcp_rank = 0
     worker.tp_size = worker.pp_size = worker.dp_size = worker.pcp_size = worker.dcp_size = 1
+    worker.xfer_stats = MooncakeKVConnectorStats(data={})
     worker._recving_thread = None
 
     def fake_register(instance: MooncakePullConnectorWorker, _kv_caches: object) -> None:
