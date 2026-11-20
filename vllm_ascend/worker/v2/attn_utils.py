@@ -334,7 +334,7 @@ def _prepare_qsa_step_metadata(
         if not layer_names:
             continue
         layer = builder.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
-        if layer is None or not hasattr(layer, "indexer"):
+        if not hasattr(layer, "indexer"):
             continue
         main_metadata = attn_metadata.get(layer_names[0])
         compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)

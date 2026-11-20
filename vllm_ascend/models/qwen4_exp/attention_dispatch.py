@@ -191,7 +191,7 @@ def prepare_qsa_union_batches(
                 max_query_length=max(b - a for a, b in zip(batch.query_starts, batch.query_starts[1:])),
             )
         )
-        if group_row_map.numel() and int(group_row_map.shape[0]) * 8 < rows:
+        if int(group_row_map.shape[0]) * 8 < rows:
             raise RuntimeError("Union group map does not cover every query row")
     return replace(request_plan, prepared_union_batches=tuple(prepared))
 
