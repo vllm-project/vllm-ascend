@@ -5505,14 +5505,25 @@ def test_stash_pending_reformat_merges_batches_arriving_separately():
     # consumer by
     # test_reformat_pending_kv_caches_dispatches_mixed_pull_bucket.
 
-    # A group index repeated within one batch is stashed once (first arrival wins).
+    # An entry repeated within one batch is stashed once (first arrival wins).
     receiver._stash_pending_reformat("req-dup", 0, [gqa_group, gqa_group])
     assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
 
-    # A later arrival carrying a different block layout for an already-stashed
-    # group is ignored, so the consumer applies that group exactly once.
+    # A later arrival carrying a different block layout for the same group and
+    # layer subset is ignored, so the consumer applies that work exactly once.
     receiver._stash_pending_reformat("req-dup", 0, [(2, [[99, 100]], 8, [2, 3, 4])])
     assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
+
+    # Same group index but a disjoint layer subset is different work (prefill
+    # PP > 1) and must not be dropped by de-duplication.
+    # Covered end-to-end against the real consumer by
+    # test_stash_pending_reformat_keeps_prefill_pp_layer_subsets.
+    receiver._stash_pending_reformat("req-pp", 0, [gqa_group])
+    receiver._stash_pending_reformat("req-pp", 0, [(2, [[12, 13], [14, 15]], 8, [5, 6, 7])])
+    assert receiver.pending_reformat["req-pp"][0] == [
+        gqa_group,
+        (2, [[12, 13], [14, 15]], 8, [5, 6, 7]),
+    ]
 
 
 def test_reformat_pending_kv_caches_dispatches_mixed_pull_bucket(monkeypatch):
@@ -5566,6 +5577,64 @@ def test_reformat_pending_kv_caches_dispatches_mixed_pull_bucket(monkeypatch):
     # single-pull group must not be dragged into it.
     assert reformats == [([[12, 13], [14, 15]], 8)]
     assert "req-mixed" not in receiver.pending_reformat
+
+
+def test_stash_pending_reformat_keeps_prefill_pp_layer_subsets(monkeypatch):
+    """Regression test for prefill PP > 1: one attention group is pulled once per
+    prefill PP rank, and each of those pulls ends the group transfer for its own
+    layer subset. The resulting entries share a group index but cover disjoint
+    layers, so they are distinct reformat work. De-duplicating on the group index
+    alone kept only the first PP rank and left the other stages' layers
+    un-reformatted.
+
+    Both layer subsets must reach the real consumer exactly once."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.pending_reformat = defaultdict(dict)
+    receiver.pending_reformat_lock = threading.Lock()
+    receiver.is_hma_required = False
+    receiver.kv_group2layeridx = {
+        2: ({"kv_cache_spec_type": "FullAttentionSpec"}, [2, 3, 4, 5, 6, 7]),
+    }
+    # Record the layer subset the consumer hands to the device-level reformat.
+    seen_layers: list[tuple[int, ...]] = []
+
+    def get_group_kv_caches(group_idx, layer_indices=None):
+        seen_layers.append(tuple(layer_indices or ()))
+        return {group_idx: object()}
+
+    receiver._get_group_kv_caches = get_group_kv_caches
+
+    module = sys.modules[KVCacheRecvingThread.__module__]
+    monkeypatch.setattr(
+        module,
+        "get_ascend_config",
+        lambda: types.SimpleNamespace(enable_kv_nz=False, enable_transpose_kv_cache_by_block=False),
+    )
+    reformats: list[tuple[list[list[int]], int]] = []
+    monkeypatch.setattr(
+        receiver,
+        "reformat_kv_cache",
+        lambda block_ids, num_group_pulls, need_cat_cache, need_nz_cache, kv_caches: reformats.append(
+            (block_ids, num_group_pulls)
+        ),
+    )
+
+    # One 8-KV-head GQA group, its layers split across two prefill PP stages.
+    pp_stage_0 = (2, [[12, 13], [14, 15]], 8, [2, 3, 4])
+    pp_stage_1 = (2, [[12, 13], [14, 15]], 8, [5, 6, 7])
+
+    receiver._stash_pending_reformat("req-pp", 0, [pp_stage_0])
+    receiver._stash_pending_reformat("req-pp", 0, [pp_stage_1])
+    # A repeat of an already stashed (group, layer subset) is the same work.
+    receiver._stash_pending_reformat("req-pp", 0, [pp_stage_1])
+    assert receiver.pending_reformat["req-pp"][0] == [pp_stage_0, pp_stage_1]
+
+    receiver._reformat_pending_kv_caches("req-pp")
+
+    # Two device-level reformats, one per PP stage, each on its own layers.
+    assert reformats == [([[12, 13], [14, 15]], 8), ([[12, 13], [14, 15]], 8)]
+    assert seen_layers == [(2, 3, 4), (5, 6, 7)]
+    assert "req-pp" not in receiver.pending_reformat
 
 
 if __name__ == "__main__":

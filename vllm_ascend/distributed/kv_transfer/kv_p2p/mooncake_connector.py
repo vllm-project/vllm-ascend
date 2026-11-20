@@ -1096,23 +1096,25 @@ class KVCacheRecvingThread(threading.Thread):
     ) -> None:
         with self.pending_reformat_lock:
             # Attention groups of the same shard can become transfer-complete in
-            # different pull tasks running on different executor threads, each
-            # of which stashes once. Merge instead of overwriting so
-            # earlier-stashed groups survive until _reformat_pending_kv_caches
-            # consumes them; skip groups already stashed so a group is
-            # reformatted exactly once.
+            # different pull tasks running on different executor threads, each of
+            # which stashes once. Merge instead of overwriting so earlier-stashed
+            # groups survive until _reformat_pending_kv_caches consumes them.
             stashed = self.pending_reformat[request_id].setdefault(shard_idx, [])
-            stashed_group_ids = {entry[0] for entry in stashed}
-            # Walk the batch one entry at a time so a group index repeated
-            # within the same call is deduplicated too; the previous
-            # set-comprehension snapshot only covered groups stashed by
-            # earlier calls. A group arriving again with a different block
-            # layout keeps its first layout, so the consumer applies each
-            # group exactly once.
+            # De-duplicate per (group, pull count, layer partition) rather than per
+            # group index: with prefill PP > 1 the same group index is pulled once
+            # per prefill PP rank and each of those pulls ends the group transfer
+            # for its own layer subset, so the group index alone would drop every
+            # PP rank but the first. The block layout is not part of the key, so a
+            # repeat covering the same layers keeps the first layout instead of
+            # reformatting those layers twice.
+            stashed_keys = {(entry[0], entry[2], tuple(entry[3])) for entry in stashed}
+            # Walk the batch one entry at a time so entries repeated within one
+            # call are deduplicated as well.
             for entry in ready_attention_group_reformat_block_ids:
-                if entry[0] in stashed_group_ids:
+                key = (entry[0], entry[2], tuple(entry[3]))
+                if key in stashed_keys:
                     continue
-                stashed_group_ids.add(entry[0])
+                stashed_keys.add(key)
                 stashed.append(entry)
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
