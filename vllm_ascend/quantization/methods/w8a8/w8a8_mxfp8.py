@@ -33,7 +33,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.ops.moe_stream_events import wait_eager_boundary
+from vllm_ascend.ops.moe_stream_events import record_capture_boundary, wait_eager_boundary
 from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
@@ -757,6 +757,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer = mlp_compute_input.layer
         assert layer is not None
 
+        record_capture_boundary()
         group_list = cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0)
         wait_eager_boundary()
         hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
