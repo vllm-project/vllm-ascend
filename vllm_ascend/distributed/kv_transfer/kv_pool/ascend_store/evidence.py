@@ -51,8 +51,9 @@ Truthfulness rules
   identity key), mirroring the upstream mooncake producer's claim for the
   same store and key scheme. "none" -- no verification beyond GET success.
   The memcache and yuanrong backends are FORCED to "none": the memcache
-  service was MEASURED to behave add-if-absently and atomically, but that
-  behavior is undocumented and version-specific (not a citable contract);
+  service was MEASURED to behave as add-if-absent and write atomically,
+  but that behavior is undocumented and version-specific (not a citable
+  contract);
   the load-bearing reason is that the pool key addressing (tokens + model +
   parallel coordinates) does NOT bind content uniquely (dtype,
   quantization, kernel numerics are absent from the key), so
@@ -354,6 +355,15 @@ class EvidenceBuffer:
           the scheduler's partition rejects it -- so replacing an
           identified attempt with it would only destroy the request's
           potentially valid evidence).
+
+        A TERMINAL registered entry is never silently discarded: its
+        completed evidence moves to the drain-ready list and the incoming
+        attempt takes the live slot, so BOTH reach the next drain -- each
+        carrying its own generation, which the scheduler's identity
+        partition uses to drop the stale one. A NON-terminal entry holds
+        no completed evidence and is simply replaced: its superseded
+        generation can no longer authorize anything, and its owner's late
+        finalize writes only the orphaned object.
         """
         with self._lock:
             existing = self._attempts.get(evidence.req_id)
@@ -366,14 +376,14 @@ class EvidenceBuffer:
                     return
                 if existing.transfer_generation is not None and evidence.transfer_generation is None:
                     return
-                if existing.terminal and not evidence.terminal:
-                    # A TERMINAL-but-undrained entry's evidence is complete
-                    # and about to be consumed by this step's drain; a newer
-                    # NON-terminal registration (an in-flight attempt that
-                    # just started) must not destroy it -- the delivery
-                    # would silently demote to a full recompute. Move the
-                    # terminal evidence to the drain-ready list and register
-                    # the new attempt: BOTH survive, each in its own channel.
+                if existing.terminal:
+                    # The registered entry's evidence is COMPLETE: silently
+                    # overwriting it would lose it and the delivery would
+                    # demote to a full recompute. Move it to the drain-ready
+                    # list and register the incoming attempt: BOTH survive,
+                    # each in its own channel, and the scheduler's identity
+                    # partition keeps only the current generation's
+                    # evidence (older generations are dropped as stale).
                     self._drained_ready.append(existing)
                     self._attempts[evidence.req_id] = evidence
                     return

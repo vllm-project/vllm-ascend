@@ -344,6 +344,110 @@ class TestEvidenceBufferGenerations(unittest.TestCase):
         self.assertEqual(by_req["r-a"].failed_cells, 0)
         self.assertEqual(by_req["r-b"].failed_cells, LAYERS)
 
+    def test_terminal_registration_preserves_terminal_existing(self):
+        # [review F-1] existing TERMINAL + incoming TERMINAL: the old code
+        # silently overwrote the completed evidence. Both attempts must
+        # survive -- each in its own channel -- and one drain delivers both.
+        buf = EvidenceBuffer()
+        old = self._buffered(1, terminal=True)
+        buf.start_attempt(old)
+        new = self._buffered(2, terminal=True)
+        buf.start_attempt(new)
+        self.assertIs(buf.get_attempt("r1"), new)
+        drained = buf.drain_terminal()
+        self.assertEqual({e.transfer_generation for e in drained}, {1, 2})
+        self.assertIsNone(buf.get_attempt("r1"))
+
+    def test_nonterminal_existing_replaced_by_terminal_incoming(self):
+        # [review F-1] existing NON-TERMINAL + incoming TERMINAL: the old
+        # entry holds no completed evidence (its generation is superseded
+        # and can no longer authorize anything); replacement loses nothing.
+        buf = EvidenceBuffer()
+        old = self._buffered(1)
+        buf.start_attempt(old)
+        new = self._buffered(2, terminal=True)
+        buf.start_attempt(new)
+        self.assertIs(buf.get_attempt("r1"), new)
+        drained = buf.drain_terminal()
+        self.assertEqual({e.transfer_generation for e in drained}, {2})
+
+    def test_stale_terminal_registration_not_preserved(self):
+        # [review F-1, stale guard] an OLDER generation registering after a
+        # NEWER one is rejected BEFORE the preserve branch: the stale
+        # attempt must not sneak into the drain-ready list either.
+        buf = EvidenceBuffer()
+        buf.start_attempt(self._buffered(2))
+        buf.start_attempt(self._buffered(1, terminal=True))
+        self.assertEqual(buf.get_attempt("r1").transfer_generation, 2)
+        self.assertEqual(buf.drain_terminal(), [])
+
+    def test_identityless_terminal_cannot_replace_identified(self):
+        # [review F-1, identity guard] an identity-less attempt never
+        # replaces an identified one -- even when the incoming is terminal
+        # and the identified entry is the one being protected.
+        buf = EvidenceBuffer()
+        buf.start_attempt(self._buffered(3, terminal=True))
+        buf.start_attempt(self._buffered(None, terminal=True))
+        self.assertEqual(buf.get_attempt("r1").transfer_generation, 3)
+        drained = buf.drain_terminal()
+        self.assertEqual({e.transfer_generation for e in drained}, {3})
+
+    def test_repeated_preserves_all_delivered_by_single_drain(self):
+        # [review F-1, accumulation edge] multiple terminal generations
+        # displaced before a drain all reach that one drain; the live slot
+        # keeps only the newest (non-terminal) attempt.
+        buf = EvidenceBuffer()
+        buf.start_attempt(self._buffered(1, terminal=True))
+        buf.start_attempt(self._buffered(2, terminal=True))
+        buf.start_attempt(self._buffered(3))
+        drained = buf.drain_terminal()
+        self.assertEqual({e.transfer_generation for e in drained}, {1, 2})
+        self.assertEqual(buf.get_attempt("r1").transfer_generation, 3)
+
+    def test_drain_delivers_each_attempt_exactly_once(self):
+        # [review F-1, exactly-once] the second drain returns nothing:
+        # a preserved attempt lives in exactly one container, and the
+        # drain empties both -- no double delivery of reports or
+        # attestations is possible.
+        buf = EvidenceBuffer()
+        first = self._buffered(1, terminal=True)
+        buf.start_attempt(first)
+        buf.start_attempt(self._buffered(2, terminal=True))
+        drained_once = buf.drain_terminal()
+        drained_again = buf.drain_terminal()
+        self.assertEqual(len(drained_once), 2)
+        self.assertEqual(len({id(e) for e in drained_once}), 2)
+        self.assertEqual(drained_again, [])
+        self.assertIsNone(buf.get_attempt("r1"))
+
+    def test_preserved_evidence_keeps_own_generation_for_partition(self):
+        # [review F-1, no stale certification] the preserved attempt keeps
+        # its OWN generation (never inherits the newer one), so the
+        # scheduler's identity partition can drop it as stale and only the
+        # current generation's evidence can certify anything.
+        buf = EvidenceBuffer()
+        old = fill_attempt(make_attempt(gen=1))
+        old.finalize()
+        buf.start_attempt(old)
+        new = fill_attempt(make_attempt(gen=2))
+        new.finalize()
+        buf.start_attempt(new)
+        drained = buf.drain_terminal()
+        by_gen = {e.transfer_generation: e for e in drained}
+        self.assertEqual(set(by_gen), {1, 2})
+        current_gen = 2
+        current = by_gen[current_gen]
+        att = current.to_attestation()
+        self.assertTrue(att.terminal and att.certifies_content())
+        stale_att = by_gen[1].to_attestation()
+        self.assertEqual(stale_att.transfer_generation, 1)
+        # Core's partition rule (scheduler identity check): only evidence
+        # whose generation equals the request's latest attempt counts.
+        self.assertEqual(
+            [e for e in drained if e.transfer_generation == current_gen],
+            [current],
+        )
+
 
 class TestEvidenceGates(unittest.TestCase):
     """Activation gates: everything except the exact supported layout keeps
