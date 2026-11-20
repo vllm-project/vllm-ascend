@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -13,6 +14,75 @@ from vllm_ascend.attention import dsa_v41
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+
+
+def test_fused_swa_cache_store_rejects_pcp_global_metadata(monkeypatch):
+    monkeypatch.setattr(dsa_v41, "_SWA_CACHE_FUSION_AVAILABLE", True)
+
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    attn = SimpleNamespace(packed_cache_ops=None)
+    metadata = SimpleNamespace(global_metadata=object())
+
+    assert not impl._try_write_fused_swa_cache(attn, metadata, None, None, None)
+
+
+def test_fused_swa_cache_uses_shared_wrapper_and_falls_back_when_rejected(monkeypatch):
+    projected = torch.randn(3, 512, dtype=torch.bfloat16)
+    weight = torch.randn(512, dtype=torch.bfloat16)
+    cos = torch.randn(3, 1, 1, 64)
+    sin = torch.randn_like(cos)
+    cache = torch.zeros(2, 8, 1, 512, dtype=torch.bfloat16)
+    slots = torch.tensor([[0, 2], [-1, -1], [1, 7]], dtype=torch.int32)
+    norm = Mock(side_effect=AssertionError("baseline RMSNorm must not run"), bias_loaded=False)
+    norm.weight = weight
+    norm.variance_epsilon = 1e-6
+    attn = SimpleNamespace(
+        kv_norm=norm,
+        nope_head_dim=448,
+        head_dim=512,
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=cache)),
+    )
+    metadata = SimpleNamespace(slot_mapping=slots, global_metadata=None)
+    store = Mock(return_value=True)
+    module = ModuleType("vllm_ascend.ops.triton.dsv41_swa_cache")
+
+    monkeypatch.setattr(module, "dsv41_rmsnorm_rope_cache", store, raising=False)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(dsa_v41, "_SWA_CACHE_FUSION_AVAILABLE", True)
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    store.assert_called_once_with(projected, weight, cos, sin, cache, slots, 1e-6, 448)
+
+    new_cache = torch.empty_like(cache)
+    attn.dsa_attn.swa_cache_layer.kv_cache = new_cache
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_args.args[4] is new_cache
+
+    norm.weight = torch.empty_like(weight)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_args.args[1] is norm.weight
+    norm.assert_not_called()
+
+    norm.bias_loaded = True
+    assert not impl._try_write_fused_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_count == 3
+
+    norm.bias_loaded = False
+    attn.packed_cache_ops = object()
+    assert not impl._try_write_fused_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_count == 3
+    attn.packed_cache_ops = None
+    norm.side_effect = None
+    norm.return_value = projected
+    store.return_value = False
+    apply_rotary, write_cache = Mock(), Mock()
+    monkeypatch.setattr(impl, "_apply_rotary", apply_rotary)
+    monkeypatch.setattr(impl, "_write_swa_cache", write_cache)
+    impl._write_projected_swa_cache(attn, metadata, projected, cos, sin)
+    assert store.call_count == 4
+    norm.assert_called_once_with(projected)
+    assert apply_rotary.call_count == write_cache.call_count == 1
+    assert write_cache.call_args.args[:2] == (attn, metadata)
 
 
 def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):

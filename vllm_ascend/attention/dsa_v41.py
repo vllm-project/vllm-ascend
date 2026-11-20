@@ -19,6 +19,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -43,6 +44,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
@@ -61,6 +63,10 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 V41_METADATA_BUFFER_SIZE = 1024
+MAX_FUSED_DSV41_SWA_TOKENS = 8192
+_SWA_CACHE_FUSION_AVAILABLE = HAS_TRITON and get_current_hardware_profile().supports(
+    HardwareCapability.DSV41_SWA_CACHE_FUSION
+)
 
 
 @eager_break_during_capture
@@ -413,18 +419,54 @@ class AscendDSAV41Impl:
             and (metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs)
         )
 
+    def _try_write_fused_swa_cache(self, attn, metadata, projected_kv, cos, sin) -> bool:
+        # Replicated PCP must gather through the baseline cache writer.
+        if (
+            not _SWA_CACHE_FUSION_AVAILABLE
+            or metadata.global_metadata is not None
+            or getattr(attn, "packed_cache_ops", None) is not None
+            or projected_kv.ndim != 2
+            or projected_kv.shape[0] > MAX_FUSED_DSV41_SWA_TOKENS
+            or projected_kv.shape[1] != attn.head_dim
+        ):
+            return False
+        norm = attn.kv_norm
+        if getattr(norm, "bias_loaded", False):
+            return False
+        weight = getattr(norm, "weight", None)
+        eps = getattr(norm, "variance_epsilon", None)
+        if weight is None or eps is None:
+            return False
+
+        from vllm_ascend.ops.triton.dsv41_swa_cache import dsv41_rmsnorm_rope_cache
+
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache
+        return dsv41_rmsnorm_rope_cache(
+            projected_kv, weight, cos, sin, cache, metadata.slot_mapping, eps, attn.nope_head_dim
+        )
+
+    def _write_projected_swa_cache(self, attn, metadata, projected_kv, cos, sin):
+        """Publish raw WKV output through the fused path or its baseline."""
+        if self._try_write_fused_swa_cache(attn, metadata, projected_kv, cos, sin):
+            return
+        value = attn.kv_norm(projected_kv).view(-1, 1, attn.head_dim)
+        self._apply_rotary(attn, value, cos, sin)
+        self._write_swa_cache(attn, metadata, value.squeeze(1))
+
     @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
         kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
         cls._apply_rotary(attn, kv, cos, sin)
         return kv.squeeze(1)
 
+    def _project_and_write_swa_cache(self, attn, hidden_states, cos, sin, metadata):
+        self._write_projected_swa_cache(attn, metadata, attn.wkv(hidden_states), cos, sin)
+
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:
             return
         cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
-        kv = self._project_kv(attn, hidden_states, cos, sin)
-        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv)
+        self._project_and_write_swa_cache(attn, hidden_states, cos, sin, metadata.swa)
         if self.role.is_kv_source:
             self._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata)
 
@@ -449,12 +491,11 @@ class AscendDSAV41Impl:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
                 q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
-                kv = self._project_kv(attn, hidden_states, cos, sin)
+                self._project_and_write_swa_cache(attn, hidden_states, cos, sin, local_metadata.swa)
             else:
                 q = qr = None
-                kv = hidden_states.new_empty((0, attn.head_dim))
-            # Empty PCP ranks still participate in the replicated-cache gather.
-            self._write_swa_cache(attn, local_metadata.swa, kv)
+                # Empty PCP ranks still participate in the replicated-cache gather.
+                self._write_swa_cache(attn, local_metadata.swa, hidden_states.new_empty((0, attn.head_dim)))
         prepared_indexer = None
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
@@ -567,17 +608,18 @@ class AscendDSAV41Impl:
         qr = attn.q_norm(q_a)
         q_b_quant, q_b_scale = wq_b.quantize(qr)
 
-        # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
+        # Part 3: Q_b matmul (Cube) overlaps fused KV prep/store (Vector).
         # A5 prefill/mixed cache publication follows the stream join below.
         write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(part3_start)
-            kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            self._apply_rotary(attn, kv, cos, sin)
             if not write_cache_on_main:
-                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+                self._write_projected_swa_cache(attn, swa_metadata, kv, cos, sin)
+            else:
+                kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
+                self._apply_rotary(attn, kv, cos, sin)
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
         if write_cache_on_main:

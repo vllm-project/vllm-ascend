@@ -30,6 +30,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.DSV41_SWA_CACHE_FUSION,
         HardwareCapability.FLA_GDN_PREFILL,
         HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
@@ -57,9 +58,9 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
-        HardwareCapability.RMS_NORM_CAST,
-        HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.RMS_NORM_CAST,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
