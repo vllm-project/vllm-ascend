@@ -1,0 +1,6 @@
+pr: 22688
+entries:
+  - category: bugfix
+    text: Fixed FP8 overflow clamping when serving Qwen3.5 block-FP8 and MXFP8 models on Ascend 950, preventing accuracy degradation and long-reasoning generation loops.
+    model: Qwen3.5
+    hardware: [950PR, 950DT]
