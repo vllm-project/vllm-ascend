@@ -22,10 +22,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.common.ops.sequence_parallel import (
@@ -33,6 +35,11 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
+)
+from vllm_ascend.models.qwen3_5_vl import (
+    AscendQwen3_5VLProcessor,
+    _AscendProcessorMixin,
+    _AscendVLPreprocessMixin,
 )
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
@@ -507,7 +514,18 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         return AscendQwen4ExpModelState
 
 
-class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
+class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4ExpProcessingInfo):
+    """Preserve Qwen4Exp config handling while emitting raw image payloads."""
+
+    pass
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    AscendQwen3_5VLProcessor,
+    info=AscendQwen4ExpProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
