@@ -1,4 +1,3 @@
-import inspect
 from typing import Optional
 
 import torch
@@ -15,10 +14,6 @@ from vllm_ascend.utils import FP8_METHOD
 
 from ..methods import get_scheme_class
 from ..utils import is_fused_moe_layer
-
-# vLLM 0.27.1's is_layer_skipped has no match_mode; newer trees default to exact.
-_IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE = "match_mode" in inspect.signature(is_layer_skipped).parameters
-
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
@@ -63,13 +58,11 @@ class AscendFp8Config(Fp8Config):
         if not getattr(self, "ignored_layers", None):
             return False
 
-        skip_kwargs = {}
-        if _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE:
-            skip_kwargs["match_mode"] = getattr(self, "ignored_layers_match_mode", "exact")
-        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, **skip_kwargs):
+        match_mode = getattr(self, "ignored_layers_match_mode", "exact")
+        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, match_mode=match_mode):
             return True
 
-        if not _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE or skip_kwargs.get("match_mode") == "suffix":
+        if match_mode == "suffix":
             return False
 
         if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, match_mode="suffix"):

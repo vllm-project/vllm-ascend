@@ -172,6 +172,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         self._pending_merged_bus_dump_jobs: list[dict[str, Any]] = []
         self._pending_merged_bus_can_dump = False
         self._pending_merged_bus_is_first = False
+        self._pending_prev_needs_sample_hooks: bool | None = None
         self._tokenizer: Any | None = None
         self._tokenizer_failed = False
         self._scheduler_output_for_step: Any | None = None

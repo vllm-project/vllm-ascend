@@ -24,6 +24,7 @@ from vllm_ascend.core.recompute_scheduler import (
     _normalize_encoder_schedule_result,
 )
 from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -409,6 +410,9 @@ def test_waiting_multimodal_duplicate_cache_tracking():
     manager = scheduler.encoder_cache_manager
     assert manager.request_cached_ids[request.request_id] == {0, 1}
     assert manager.cpu_num_free_slots == 6
+    if not vllm_version_is("0.33.0"):
+        # Diagnostic manager payload, not a field transported by native MRv2.
+        output.ec_manager_metadata = manager.get_manager_metadata()
     assert output.ec_manager_metadata.cpu_get_encoder_mm_hashes == []
     manager._check_invariant()
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)

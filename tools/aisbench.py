@@ -63,6 +63,8 @@ class AisbenchRunner:
         dataset_conf = self.dataset_conf.split("/")[-1]
         if self.task_type in ("accuracy", "spec_decode"):
             aisbench_cmd = ["ais_bench", "--models", f"{self.request_conf}_custom", "--datasets", f"{dataset_conf}"]
+        if self.task_type == "accuracy":
+            aisbench_cmd.append("--response-anomaly")
         if self.task_type == "performance":
             aisbench_cmd = [
                 "ais_bench",
@@ -285,8 +287,9 @@ class AisbenchRunner:
                 f'ignore_eos=False,\n            reasoning_effort="{self.reasoning_effort}",',
                 content,
             )
+        if self.task_type in ("accuracy", "performance"):
+            content = re.sub(r"path=.*", lambda _: f"path={str(self.model_path)!r},", content)
         if self.task_type == "performance":
-            content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
             content = re.sub(r"temperature.*", "temperature=0,", content)
             content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
@@ -358,8 +361,22 @@ class AisbenchRunner:
     def _get_result_accuracy(self):
         acc_file = re.search(r"write csv to (.*)", self.result_line).group(1)
         df = pd.read_csv(acc_file)
-        self.result = float(df.iloc[0, -1])
+        assert "metric" in df.columns, f"Missing metric column in AISBench summary {acc_file}"
+        metrics = df["metric"]
+        anomaly_rows = metrics.str.startswith("response_anomaly_", na=False)
+        anomaly_summary = df.loc[anomaly_rows]
+        assert "response_anomaly_rate" in set(anomaly_summary["metric"]), (
+            f"Missing response_anomaly_rate in AISBench summary {acc_file}"
+        )
+        print(f"AISBench response anomaly summary from {acc_file}\n{anomaly_summary.to_string(index=False)}")
+        checked_rows = anomaly_summary.loc[
+            ~anomaly_summary["metric"].isin(["response_anomaly_total", "response_anomaly_normal"])
+        ]
+        values = pd.to_numeric(checked_rows.iloc[:, -1], errors="coerce")
+        failures = checked_rows.loc[~values.eq(0)]
+        assert failures.empty, f"Response anomaly verification failed in {acc_file}\n{failures.to_string(index=False)}"
 
+        df = df.loc[~anomaly_rows]
         if "longbenchv2" in str(self.dataset_conf):
             self.result = float(df["accuracy"].mean())
         else:

@@ -148,7 +148,12 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         # Keep one empty request for dummy forwards: the operator requires B > 0.
         active_reqs = max(
             1,
-            int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens)),
+            # With MTP graph padding, num_actual_tokens can exceed the last
+            # CPU query offset, so searchsorted returns num_reqs + 1.
+            # Clamp to num_reqs to match the available per-request metadata.
+            min(
+                num_reqs, int(torch.searchsorted(common.query_start_loc_cpu[: num_reqs + 1], common.num_actual_tokens))
+            ),
         )
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.

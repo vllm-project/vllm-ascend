@@ -196,7 +196,12 @@ def test_bilateral_chunks_copy_each_token_once(
             assert list(target) == expected
         previous = end
     assert len(writes) == len(set(writes)), "Replicas/chunks must not overwrite the same D byte twice"
-    assert all(sender._send_done.call_count == d_tp * d_pcp for sender in senders)
+    # Concurrent Mock calls can lose call_count increments; inspect the recorded
+    # destinations instead, checking that every D rank is notified exactly once.
+    for sender in senders:
+        assert sorted(call.args[0]["consumer_rank"] for call in sender._send_done.call_args_list) == [
+            [0, pcp, tp] for pcp in range(d_pcp) for tp in range(d_tp)
+        ]
 
 
 @pytest.mark.parametrize(
@@ -323,7 +328,10 @@ def test_mamba_dcp_preserves_tp_state_bytes(
             expected[11 * stride : 11 * stride + len(value)] = value
             assert buf.raw == expected
     assert len(writes) == len(set(writes)), "Each destination state byte must have exactly one TP owner"
-    assert all(sender._send_done.call_count == d_tp * d_pcp for sender in senders)
+    for sender in senders:
+        assert sorted(call.args[0]["consumer_rank"] for call in sender._send_done.call_args_list) == [
+            [0, pcp, tp] for pcp in range(d_pcp) for tp in range(d_tp)
+        ]
     assert all(call.args[1] is None for sender in senders for call in sender._send_done.call_args_list)
 
 
