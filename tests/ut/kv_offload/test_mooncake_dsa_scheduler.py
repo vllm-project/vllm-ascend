@@ -26,6 +26,7 @@ def _scheduler():
     scheduler.indexer_group_idx = 0
     scheduler._dsa_requests = {}
     scheduler._dsa_prefill_tp_size = 2
+    scheduler._prefill_pp_size = 1
     scheduler._expected_tp_ranks = frozenset((0, 1))
     return scheduler
 
@@ -222,7 +223,8 @@ def test_source_group_order_is_independent_of_local_groups():
     assert source.indexer_block_ids == (20, 21)
 
 
-def test_dsa_scheduler_initializes_main_groups_without_copy_sfa_state():
+@pytest.mark.parametrize("prefill_pp_size", [1, 2])
+def test_dsa_scheduler_initializes_main_groups_without_copy_sfa_state(prefill_pp_size):
     main = AscendMLAAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -243,7 +245,7 @@ def test_dsa_scheduler_initializes_main_groups_without_copy_sfa_state():
             SimpleNamespace(layer_names=["model.layers.0.indexer.attn.index_cache"], kv_cache_spec=indexer),
         ]
     )
-    extra = {"prefill": {"tp_size": 4}}
+    extra = {"prefill": {"tp_size": 4, "pp_size": prefill_pp_size}}
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             engine_id="decode",
@@ -271,12 +273,44 @@ def test_dsa_scheduler_initializes_main_groups_without_copy_sfa_state():
         assert scheduler.main_group_idx == 0
         assert scheduler.indexer_group_idx == 1
         assert scheduler._main_block_size == 128
+        assert scheduler._prefill_pp_size == prefill_pp_size
         assert scheduler.side_channel_port == 5004
         assert scheduler._expected_tp_ranks == frozenset((0, 1))
         assert scheduler._copy_sfa_hot_tokens == 0
         assert scheduler._copy_sfa_slot_allocator is None
     finally:
         scheduler.shutdown()
+
+
+def test_dsa_scheduler_gets_pp_topology_from_configuration_without_wire_field():
+    scheduler = _scheduler()
+    scheduler._prefill_pp_size = 2
+    request = _request()
+    peers = {
+        str(rank): {"host": f"192.0.2.{rank + 1}", "handshake_port": 6000 + rank, "engine_id": f"prefill-{rank}"}
+        for rank in range(4)
+    }
+    request.kv_transfer_params["remote_multi_nodes_meta_mapping"] = peers
+    assert "remote_pp_size" not in request.kv_transfer_params
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (4, True)
+    source = scheduler._dsa_requests[request.request_id].source
+    assert source.remote_pp_size == 2
+    assert len(source.endpoints_by_prefill_rank) == 4
+    for rank, endpoint in enumerate(source.endpoints_by_prefill_rank):
+        assert endpoint.remote_host == peers[str(rank)]["host"]
+        assert endpoint.remote_port == peers[str(rank)]["handshake_port"]
+        assert endpoint.remote_engine_id == peers[str(rank)]["engine_id"]
+
+
+def test_dsa_scheduler_keeps_endpoint_coverage_check_for_configured_pp():
+    scheduler = _scheduler()
+    scheduler._prefill_pp_size = 2
+    request = _request()
+    request.kv_transfer_params["remote_multi_nodes_meta_mapping"] = {
+        str(rank): {"host": "192.0.2.1", "handshake_port": 6000 + rank} for rank in range(2)
+    }
+    with pytest.raises(ValueError, match="remote endpoint mapping must cover Prefill TP ranks"):
+        scheduler.get_num_new_matched_tokens(request, 0)
 
 
 def test_on_new_request_is_a_noop_hook():

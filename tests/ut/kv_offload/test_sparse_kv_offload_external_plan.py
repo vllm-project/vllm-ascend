@@ -1030,9 +1030,9 @@ def test_mooncake_local_views_and_fused_inputs_share_mapping(peer_change):
     with patch.object(torch.distributed, "all_gather_object", side_effect=gather):
         if peer_change:
             with pytest.raises(ValueError, match="layout mismatch"):
-                manager._register_local_mooncake_views()
+                manager._validate_and_bind_local_mooncake_views()
             return
-        manager._register_local_mooncake_views()
+        manager._validate_and_bind_local_mooncake_views()
     local = manager.get_local_host_kv_views("layer.0")
     fused = manager.get_fused_overlap_cpu_kv_inputs("layer.0")
     assert local[0] is fused[0] is k

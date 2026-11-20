@@ -23,6 +23,7 @@ class DsaLocalResultKind(str, Enum):
 
 class DsaTransferPhase(str, Enum):
     INDEXER_D2D = "indexer_d2d"
+    DRAFT_D2D = "draft_d2d"
     MAIN_D2RH = "main_d2rh"
 
 

@@ -6,3 +6,13 @@ entries:
       VMM host memory through RD2H while transferring Indexer KV into HBM
       through D2D for sparse KV offload, with Prefill CP/DCP and unequal TP
       mappings, bounded registrations, and receive lifecycle handling.
+  - category: bugfix
+    text: >-
+      Fixed Mooncake sparse KV offload with MTP on Model Runner V2 by
+      transferring resident draft KV to each Decode rank's HBM while
+      retaining shared host-memory transfers for offloaded Main KV.
+  - category: bugfix
+    text: >-
+      Fixed resident MTP attention and metadata routing with sparse KV
+      offload on Model Runner V2, preventing Host-pool lookups for draft
+      KV stored in HBM during serving and idle dummy execution.

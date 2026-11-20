@@ -845,10 +845,15 @@ class KVCacheRecvingThread(threading.Thread):
         first, last = self.pp_layer_indices[task["pp_rank"]]
         if task["pp_rank"] == self._prefill_pp_size - 1:
             last += self.num_draft_layers
-        # Assemble both phases before Transfer Engine submission so missing components cannot
-        # silently yield a partial successful transfer. No device reformat for Host.
+        # Validate every destination before submitting any read. Draft KV stays
+        # in rank-local HBM; only offloaded Main KV uses shared Host ownership.
+        phases = (
+            (DsaTransferPhase.INDEXER_D2D, True, self._dsa_indexer_local_layout),
+            (DsaTransferPhase.DRAFT_D2D, False, [item for item in self._dsa_main_local_layout if not item.is_host]),
+            (DsaTransferPhase.MAIN_D2RH, False, [item for item in self._dsa_main_local_layout if item.is_host]),
+        )
         plans = []
-        for indexer, layout in ((True, self._dsa_indexer_local_layout), (False, self._dsa_main_local_layout)):
+        for phase, indexer, layout in phases:
             if indexer and not task["include_indexer"]:
                 continue
             combined = ([], [], [])
@@ -886,29 +891,29 @@ class KVCacheRecvingThread(threading.Thread):
                     command.indexer_hbm_block_ids if indexer else command.main_host_block_ids,
                     start,
                     end,
-                    cp_size=source.remote_pcp_size * source.remote_dcp_size,
+                    cp_size=source.remote_dcp_size,
                     cp_rank=task["cp_rank"],
-                    writer_rank=self.tp_rank,
-                    writer_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                    writer_rank=self.tp_rank if local.is_host else 0,
+                    writer_size=self.vllm_config.parallel_config.tensor_parallel_size if local.is_host else 1,
                     indexer=indexer,
                     statistics=statistics,
                     mapping_cache=mapping_cache,
                 )
                 for output, values in zip(combined, part):
                     output.extend(values)
-            plans.append((indexer, combined, statistics))
+            plans.append((phase, combined, statistics))
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "DSA built transfer plans request=%s decode_rank=%s phases=%s token_range=[%s,%s) pp_layers=[%s,%s)",
                 command.request_id,
                 self.tp_rank,
-                [("indexer" if indexer else "main", len(plan[0]), sum(plan[2])) for indexer, plan, _ in plans],
+                [(phase.value, len(plan[0]), sum(plan[2])) for phase, plan, _ in plans],
                 start,
                 end,
                 first,
                 last,
             )
-        for indexer, plan, statistics in plans:
+        for phase, plan, statistics in plans:
             if task["cancelled"].is_set():
                 logger.debug(
                     "DSA stop remaining phases request=%s decode_rank=%s reason=cancelled",
@@ -916,15 +921,15 @@ class KVCacheRecvingThread(threading.Thread):
                     self.tp_rank,
                 )
                 break
-            task["failure_phase"] = DsaTransferPhase.INDEXER_D2D if indexer else DsaTransferPhase.MAIN_D2RH
+            task["failure_phase"] = phase
             if plan[0]:
                 started = time.perf_counter()
                 result = self.engine.batch_transfer_sync_read(session, *plan)
                 logger.debug(
-                    "DSA receive request=%s rank=%s indexer=%s bytes=%s entries=%s seconds=%s coalescing=%s",
+                    "DSA receive request=%s rank=%s phase=%s bytes=%s entries=%s seconds=%s coalescing=%s",
                     command.request_id,
                     self.tp_rank,
-                    indexer,
+                    phase.value,
                     sum(plan[2]),
                     len(plan[0]),
                     time.perf_counter() - started,
@@ -2031,8 +2036,11 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
         self._dsa_cancelled: set[str] = set()
         prefill = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
         self._dsa_prefill_tp_size = int(prefill.get("tp_size", 0))
+        self._prefill_pp_size = int(prefill.get("pp_size", 1))
         if self._dsa_prefill_tp_size <= 0:
             raise ValueError("Blockwise DSA requires kv_connector_extra_config.prefill.tp_size")
+        if self._prefill_pp_size <= 0:
+            raise ValueError("Blockwise DSA requires positive kv_connector_extra_config.prefill.pp_size")
         self._expected_tp_ranks = frozenset(range(vllm_config.parallel_config.tensor_parallel_size))
 
     def get_num_new_matched_tokens(
@@ -2059,7 +2067,7 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
             raise ValueError("DSA remote multi-group metadata requires explicit Main/Indexer group IDs")
         remote_tp = int(params.get("remote_ptp_size", self._dsa_prefill_tp_size))
         remote_pcp = int(params.get("remote_pcp_size", 1))
-        remote_pp = int(params.get("remote_pp_size", 1))
+        remote_pp = self._prefill_pp_size
         source = RemoteSource(
             remote_request_id=params["remote_request_id"],
             endpoints_by_prefill_rank=_project_remote_endpoints(
@@ -2802,7 +2810,6 @@ class MooncakeConnectorScheduler:
             ].kv_cache_spec.block_size
         return delay_free_blocks, dict(
             **component_groups,
-            remote_pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -3409,24 +3416,24 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
-    def _dsa_consumer_indexer_register_regions(
+    def _dsa_consumer_hbm_register_regions(
         self,
         kv_caches: dict[str, torch.Tensor],
         layouts: list[DsaCacheLayout],
     ) -> tuple[RegisterRegions, list[str]]:
-        """Collect HBM Indexer atoms; shared VMM Main needs no registration."""
+        """Register Indexer and resident draft HBM; shared VMM Main needs no registration."""
         atoms: list[DsaRegisterAtom] = []
         for layout in layouts:
             tensors = self._as_kv_cache_tuple(kv_caches[layout.layer_name])
             if layout.position >= len(tensors):
-                raise ValueError(f"missing DSA Indexer tensor position {layout.position}")
+                raise ValueError(f"missing DSA HBM tensor position {layout.position}")
             tensor = tensors[layout.position]
             storage = tensor.untyped_storage()
             storage_start = tensor_storage_key(tensor)
             storage_end = storage_start + storage.nbytes()
             end = layout.base + layout_span_bytes(layout)
             if layout.base < storage_start or end > storage_end:
-                raise ValueError(f"DSA Indexer component {layout.layer_name} is outside its storage")
+                raise ValueError(f"DSA HBM component {layout.layer_name} is outside its storage")
             atoms.append(DsaRegisterAtom(layout.base, end, "*", ("hbm", storage_start)))
 
         bounded = collect_bounded_register_regions(atoms)
@@ -3492,12 +3499,14 @@ class MooncakeConnectorWorker:
         indexer, main = [], []
         for name, caches in kv_caches.items():
             is_indexer = "indexer" in name.lower()
-            tensors = self._as_kv_cache_tuple(caches) if is_indexer else manager.get_local_host_kv_views(name)
+            spec = self._get_layer_spec(name)
+            is_host = not is_indexer and bool(getattr(spec, "store_on_host", False))
+            tensors = manager.get_local_host_kv_views(name) if is_host else self._as_kv_cache_tuple(caches)
             for position, tensor in enumerate(tensors):
                 if tensor.shape[0] % self.num_blocks:
                     raise ValueError("DSA tensor pages must divide manager blocks")
                 scale = tensor.shape[0] // self.num_blocks
-                if not is_indexer and scale != 1:
+                if is_host and scale != 1:
                     raise ValueError("Host Main requires one view block per manager block")
                 entry = DsaCacheLayout(
                     name,
@@ -3506,9 +3515,10 @@ class MooncakeConnectorWorker:
                     tensor.element_size() * math.prod(tensor.shape[1:]),
                     tensor.stride(0) * tensor.element_size(),
                     scale,
-                    self._get_layer_spec(name).block_size,
+                    spec.block_size,
                     str(tensor.dtype),
                     self.num_blocks,
+                    is_host=is_host,
                 )
                 (indexer if is_indexer else main).append(entry)
         if not indexer or not main:
@@ -3554,7 +3564,7 @@ class MooncakeConnectorWorker:
         # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
         # aggregating layer views that share the same raw KVCacheTensor.
         for layer_name, kv_cache_tuple in kv_caches.items():
-            if self._dsa_decode and "indexer" not in layer_name.lower():
+            if self._dsa_decode and getattr(self._get_layer_spec(layer_name), "store_on_host", False):
                 continue
             layer_idx = layer_name_to_idx[layer_name]
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
@@ -3573,12 +3583,11 @@ class MooncakeConnectorWorker:
 
         register_locations = None
         if self._dsa_decode:
-            # Shared VMM Main is directly addressable, while ordinary HBM
-            # Indexer destinations still require local transfer engine registration.
+            # VMM Main needs no local registration. Indexer and resident draft
+            # destinations are ordinary HBM and must both be registered.
             assert dsa_local_layouts is not None
-            register_regions, register_locations = self._dsa_consumer_indexer_register_regions(
-                kv_caches, dsa_local_layouts[0]
-            )
+            hbm_layouts = dsa_local_layouts[0] + [item for item in dsa_local_layouts[1] if not item.is_host]
+            register_regions, register_locations = self._dsa_consumer_hbm_register_regions(kv_caches, hbm_layouts)
         elif has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
@@ -3619,7 +3628,7 @@ class MooncakeConnectorWorker:
         # After KV Caches registered, start the sending or receiving thread.
         cache_dtypes = [[] for _ in self.kv_caches_base_addr]
         for name, caches in kv_caches.items():
-            if not self._dsa_decode or "indexer" in name.lower():
+            if not self._dsa_decode or not getattr(self._get_layer_spec(name), "store_on_host", False):
                 cache_dtypes[layer_name_to_idx[name]] = [str(t.dtype) for t in self._as_kv_cache_tuple(caches)]
         metadata = MooncakeAgentMetadata(
             cache_dtypes=cache_dtypes,
@@ -4104,133 +4113,6 @@ class MooncakeConnectorWorker:
                 remote_block_ids_list,
             )
 
-        def context_parallel_parameters_check():
-            assert remote_cp_size % local_cp_size == 0 or local_cp_size % remote_cp_size == 0, (
-                f"P/D CP sizes must be divisible in either direction, got P={remote_cp_size}, D={local_cp_size}."
-            )
-            if not (self.use_mla or self.use_sparse):
-                p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
-                d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
-                assert d_node_heads_per_rank % p_node_heads_per_rank == 0
-
-        def get_kv_head_groups(tp_size):
-            if self.use_mla or self.use_sparse:
-                kv_head_groups = []
-                kv_head_ids = [0]
-                kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if self.num_key_value_heads // tp_size >= 1:
-                kv_head_groups = []
-                for tp_rank in range(tp_size):
-                    kv_head_ids = [
-                        head_idx + tp_rank * (self.num_key_value_heads // tp_size)
-                        for head_idx in range(self.num_key_value_heads // tp_size)
-                    ]
-                    kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if tp_size // self.num_key_value_heads > 1:
-                kv_head_groups = []
-                for kv_head_ids_ in range(self.num_key_value_heads):
-                    kv_head_groups.append(tuple([kv_head_ids_]))
-                return kv_head_groups
-
-        def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
-            # key is kv_head_group, value is cp_groups and which cp_groups to select
-            cp_group_meta: dict = {}
-            kv_head_groups = get_kv_head_groups(tp_size)
-            dcp_repeat_num = tp_size * pcp_size // len(kv_head_groups) // dcp_size
-
-            for kv_head_group_idx, kv_head_group in enumerate(kv_head_groups):
-                if kv_head_group not in cp_group_meta:
-                    cp_group_meta[kv_head_group] = {}
-                    cp_group_meta[kv_head_group]["cp_groups"] = []
-                    cp_group_meta[kv_head_group]["select_cp_groups_id"] = 0
-                kv_head_group_offset = tp_size // len(kv_head_groups) * kv_head_group_idx
-                for dcp_repeat_idx in range(dcp_repeat_num):
-                    # MRV2 orders DCP ranks along PCP first, then TP.
-                    cp_group = []
-                    dcp_repeat_offset = dcp_size * dcp_repeat_idx
-                    for dcp_rank in range(dcp_size):
-                        flat_rank = dcp_repeat_offset + dcp_rank
-                        pcp_rank = flat_rank % pcp_size
-                        tp_rank = flat_rank // pcp_size + kv_head_group_offset
-                        cp_group.append(port_base + pcp_rank * tp_size + tp_rank)
-                    cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
-
-            return cp_group_meta
-
-        def get_local_remote_block_port_mappings():
-            context_parallel_parameters_check()
-            p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port
-            )
-            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
-            local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
-            for d_node_head_key in d_node_cp_group_meta:
-                for p_node_head_key in p_node_cp_group_meta:
-                    if not set(p_node_head_key).issubset(set(d_node_head_key)):
-                        continue
-                    d_node_head_group = d_node_cp_group_meta[d_node_head_key]
-                    p_node_head_group = p_node_cp_group_meta[p_node_head_key]
-                    for d_cp_group in d_node_head_group["cp_groups"]:
-                        select_cp_groups_id = p_node_head_group["select_cp_groups_id"]
-                        p_cp_groups = p_node_head_group["cp_groups"]
-                        p_cp_group = p_cp_groups[select_cp_groups_id]
-                        p_node_head_group["select_cp_groups_id"] = (
-                            select_cp_groups_id + 1 if select_cp_groups_id + 1 < len(p_cp_groups) else 0
-                        )
-                        for d_idx, d_port in enumerate(d_cp_group):
-                            if d_port not in local_remote_block_port_mappings:
-                                local_remote_block_port_mappings[d_port] = []
-                            p_port_remote_list = []
-                            for p_idx, p_port in enumerate(p_cp_group):
-                                # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
-                                # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
-                                if (p_idx // r_blk - d_idx) % min(len(d_cp_group), len(p_cp_group)) == 0:
-                                    p_port_remote_list.append(p_port)
-                            local_remote_block_port_mappings[d_port].append(p_port_remote_list)
-
-            logger.info(
-                "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
-                "local_remote_block_port_mappings is:: %s. ",
-                p_node_cp_group_meta,
-                d_node_cp_group_meta,
-                local_remote_block_port_mappings,
-            )
-
-            return local_remote_block_port_mappings
-
-        def get_remote_port_send_num(
-            local_remote_block_port_mappings: dict[int, list[list[int]]],
-        ) -> dict[int, RemotePortInfo]:
-            remote_port_send_num: dict[int, RemotePortInfo] = {}
-            remote_ports: set[int] = set(
-                range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
-            )
-            kv_port = self.vllm_config.kv_transfer_config.kv_port
-            for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
-                remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_ports.add(remote_port)
-
-            for remote_port in remote_ports:
-                remote_host, _ = self._get_remote_host_info_by_port(
-                    meta.remote_port,
-                    remote_port,
-                    meta.remote_host,
-                    meta.remote_engine_id,
-                    meta.remote_multi_nodes_meta_mapping,
-                )
-                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
-
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_port_send_num[remote_port]["num"] += 1
-            return remote_port_send_num
-
         def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
             """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
 
@@ -4249,7 +4131,7 @@ class MooncakeConnectorWorker:
             """
             if self._is_hma_required and not (self.use_mla or self.use_sparse):
                 remote_dcp = max(meta.remote_dcp_size, 1)
-                group_span = prefill_tp_size // len(get_kv_head_groups(prefill_tp_size))
+                group_span = prefill_tp_size // len(self._get_kv_head_groups(prefill_tp_size))
                 n_replica = max(group_span // remote_dcp, 1)
                 chosen_tp_list = self._get_remote_rank(req_id, prefill_tp_size)
                 if n_replica > 1:
@@ -4288,15 +4170,13 @@ class MooncakeConnectorWorker:
             is_dcp_replicated_attention_group(spec) for spec, _ in self.kv_group2layeridx.values()
         )
         if self.local_remote_block_port_mapping[meta.remote_engine_id] is None or has_replicated_attention:
-            local_remote_block_port_mappings = get_local_remote_block_port_mappings()
-            if has_replicated_attention:
-                self._add_group_source_ports(req_id, meta, local_remote_block_port_mappings)
+            local_remote_block_port_mappings, reader_counts = self._get_cp_source_ports(
+                meta, prefill_tp_size, r_blk, req_id=req_id if has_replicated_attention else None
+            )
             self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
                 self.handshake_port
             ]
-            self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
-                local_remote_block_port_mappings
-            )
+            self.remote_port_send_num[meta.remote_engine_id] = reader_counts
 
         local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
 
@@ -4482,37 +4362,56 @@ class MooncakeConnectorWorker:
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-    def _validate_cp_source_coverage(self, mappings, meta: ReqMeta, prefill_tp_size: int) -> None:
-        """Reject missing PP/CP source shards before any transfer is submitted."""
-        if self._prefill_pp_size > 1:
-            # Inspect selected sources, not advertised endpoints or zero-reader
-            # notification entries. DCP is inside TP; PCP is inside each PP stage.
-            stage_width = prefill_tp_size * meta.remote_pcp_size
-            selected_ports = {port for groups in mappings.values() for ports in groups for port in ports}
-            selected_shards = set()
-            for port in selected_ports:
-                pp_rank, stage_rank = divmod(port - meta.remote_port, stage_width)
-                pcp_rank, tp_rank = divmod(stage_rank, prefill_tp_size)
-                selected_shards.add((pp_rank, pcp_rank * meta.remote_dcp_size + tp_rank % meta.remote_dcp_size))
-            required_shards = {
-                (pp_rank, cp_rank)
-                for pp_rank in range(self._prefill_pp_size)
-                for cp_rank in range(meta.remote_pcp_size * meta.remote_dcp_size)
-            }
-            missing_shards = required_shards - selected_shards
-            assert not missing_shards, (
-                "Mooncake KV source coverage incomplete before transfer: "
-                f"request={getattr(meta, 'remote_request_id', '<unknown>')}, remote_engine={meta.remote_engine_id}, "
-                f"P(TP={prefill_tp_size}, PCP={meta.remote_pcp_size}, "
-                f"DCP={meta.remote_dcp_size}, PP={self._prefill_pp_size}), "
-                f"D(TP={self.tp_size}, PCP={self.pcp_size}, DCP={self.dcp_size}), "
-                f"base_port={meta.remote_port}, selected_ports={sorted(selected_ports)}, "
-                f"missing_(pp_rank,cp_rank)={sorted(missing_shards)}. "
-                "These source shards have no planned reader; KV byte contents have not been checked."
+    def _validate_dsa_cp_source_coverage(self, mappings, meta: ReqMeta, prefill_tp_size: int) -> None:
+        """Check logical DCP shards, allowing unused physical cache replicas."""
+        stage_width = prefill_tp_size * meta.remote_pcp_size
+        selected_ports = {port for groups in mappings.values() for ports in groups for port in ports}
+        selected_shards = set()
+        for port in selected_ports:
+            pp_rank, stage_rank = divmod(port - meta.remote_port, stage_width)
+            pcp_rank, tp_rank = divmod(stage_rank, prefill_tp_size)
+            dcp_rank = (tp_rank * meta.remote_pcp_size + pcp_rank) % meta.remote_dcp_size
+            selected_shards.add((pp_rank, dcp_rank))
+        required_shards = {
+            (pp_rank, dcp_rank) for pp_rank in range(self._prefill_pp_size) for dcp_rank in range(meta.remote_dcp_size)
+        }
+        missing_shards = required_shards - selected_shards
+        if missing_shards:
+            raise ValueError(
+                "Mooncake DSA source coverage incomplete before transfer: "
+                f"request={meta.remote_request_id}, selected_ports={sorted(selected_ports)}, "
+                f"missing_(pp_rank,dcp_rank)={sorted(missing_shards)}"
             )
 
-    def _get_cp_source_ports(self, meta: ReqMeta, prefill_tp_size: int, r_blk: int):
-        """Shared ordinary CP source mapping and logical notification counts."""
+    def _get_kv_head_groups(self, tp_size):
+        if self.use_mla or self.use_sparse:
+            kv_head_groups = []
+            kv_head_ids = [0]
+            kv_head_groups.append(tuple(kv_head_ids))
+            return kv_head_groups
+        if self.num_key_value_heads // tp_size >= 1:
+            kv_head_groups = []
+            for tp_rank in range(tp_size):
+                kv_head_ids = [
+                    head_idx + tp_rank * (self.num_key_value_heads // tp_size)
+                    for head_idx in range(self.num_key_value_heads // tp_size)
+                ]
+                kv_head_groups.append(tuple(kv_head_ids))
+            return kv_head_groups
+        if tp_size // self.num_key_value_heads > 1:
+            kv_head_groups = []
+            for kv_head_ids_ in range(self.num_key_value_heads):
+                kv_head_groups.append(tuple([kv_head_ids_]))
+            return kv_head_groups
+
+    def _get_cp_source_ports(self, meta: ReqMeta, prefill_tp_size: int, r_blk: int, *, req_id: str | None = None):
+        """Plan source ports and reader counts using the main DCP layout.
+
+        DCP owns sequence sharding; PCP participates in physical rank ordering
+        and source-replica selection, without multiplying the shard count.
+        """
+        local_cp_size = self.dcp_size
+        remote_cp_size = meta.remote_dcp_size
 
         def context_parallel_parameters_check():
             assert remote_cp_size % local_cp_size == 0 or local_cp_size % remote_cp_size == 0, (
@@ -4523,31 +4422,10 @@ class MooncakeConnectorWorker:
                 d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
                 assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
-        def get_kv_head_groups(tp_size):
-            if self.use_mla or self.use_sparse:
-                kv_head_groups = []
-                kv_head_ids = [0]
-                kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if self.num_key_value_heads // tp_size >= 1:
-                kv_head_groups = []
-                for tp_rank in range(tp_size):
-                    kv_head_ids = [
-                        head_idx + tp_rank * (self.num_key_value_heads // tp_size)
-                        for head_idx in range(self.num_key_value_heads // tp_size)
-                    ]
-                    kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if tp_size // self.num_key_value_heads > 1:
-                kv_head_groups = []
-                for kv_head_ids_ in range(self.num_key_value_heads):
-                    kv_head_groups.append(tuple([kv_head_ids_]))
-                return kv_head_groups
-
         def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
             # key is kv_head_group, value is cp_groups and which cp_groups to select
             cp_group_meta: dict = {}
-            kv_head_groups = get_kv_head_groups(tp_size)
+            kv_head_groups = self._get_kv_head_groups(tp_size)
             dcp_repeat_num = tp_size * pcp_size // len(kv_head_groups) // dcp_size
 
             for kv_head_group_idx, kv_head_group in enumerate(kv_head_groups):
@@ -4596,7 +4474,7 @@ class MooncakeConnectorWorker:
                             for p_idx, p_port in enumerate(p_cp_group):
                                 # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
                                 # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
-                                if (p_idx // r_blk) % len(d_cp_group) == d_idx:
+                                if (p_idx // r_blk - d_idx) % min(len(d_cp_group), len(p_cp_group)) == 0:
                                     p_port_remote_list.append(p_port)
                             local_remote_block_port_mappings[d_port].append(p_port_remote_list)
 
@@ -4642,7 +4520,8 @@ class MooncakeConnectorWorker:
             return remote_port_send_num
 
         mappings = get_local_remote_block_port_mappings()
-        self._validate_cp_source_coverage(mappings, meta, prefill_tp_size)
+        if req_id is not None:
+            self._add_group_source_ports(req_id, meta, mappings)
         return mappings, get_remote_port_send_num(mappings)
 
     def _get_dcp_shard_pulls(
@@ -5268,7 +5147,7 @@ class MooncakeConnectorWorker:
     def _plan_dsa_endpoints(self, command: DsaStepRequest):
         """Adapt ordinary source participants; writer filtering cannot remove tasks."""
         source = command.source
-        cp_size = source.remote_pcp_size * source.remote_dcp_size
+        cp_size = source.remote_dcp_size
         endpoints = source.endpoints_by_prefill_rank
         expected_endpoints = source.remote_ptp_size * source.remote_pcp_size * source.remote_pp_size
         if len(endpoints) != expected_endpoints:
@@ -5294,6 +5173,7 @@ class MooncakeConnectorWorker:
                 source.remote_block_size,
             )
             mappings, counts = self._get_cp_source_ports(meta, source.remote_ptp_size, 1)
+            self._validate_dsa_cp_source_coverage(mappings, meta, source.remote_ptp_size)
             # Source planner's virtual offsets retain CP shard identity. Actual
             # host/port translation happens after planning, as in ordinary pulls.
             all_ranks = [
@@ -5302,18 +5182,25 @@ class MooncakeConnectorWorker:
             ]
             expected = {rank: counts[base + rank]["num"] for rank in range(len(endpoints))}
         else:
-            all_ranks = self._get_remote_ranks_for_req(source.remote_request_id, source.remote_ptp_size)
+            selected_pcp = self._get_selected_pcp_rank(source.remote_request_id, source.remote_pcp_size)
+            stage_width = source.remote_ptp_size * source.remote_pcp_size
+            all_ranks = [
+                [
+                    (rank // source.remote_ptp_size) * stage_width
+                    + selected_pcp * source.remote_ptp_size
+                    + rank % source.remote_ptp_size
+                    for rank in ranks
+                ]
+                for ranks in self._get_remote_ranks_for_req(source.remote_request_id, source.remote_ptp_size)
+            ]
             expected = {rank: sum(ranks.count(rank) for ranks in all_ranks) for rank in range(len(endpoints))}
         selected = all_ranks[self.tp_rank]
         tasks = []
         indexer_stages = set()
         for task_index, rank in enumerate(selected):
-            pp_rank = rank // source.remote_ptp_size if cp_size == 1 else 0
-            cp_rank = (
-                (rank // source.remote_ptp_size * source.remote_dcp_size + rank % source.remote_dcp_size)
-                if cp_size > 1
-                else 0
-            )
+            pp_rank, stage_rank = divmod(rank, source.remote_ptp_size * source.remote_pcp_size)
+            pcp_rank, tp_rank = divmod(stage_rank, source.remote_ptp_size)
+            cp_rank = (tp_rank * source.remote_pcp_size + pcp_rank) % cp_size
             include_indexer = pp_rank not in indexer_stages
             indexer_stages.add(pp_rank)
             tasks.append((rank, cp_rank, pp_rank, include_indexer, expected[rank], task_index))

@@ -26,6 +26,8 @@ class DsaCacheLayout:
     block_tokens: int
     dtype: str
     capacity: int = 0
+    # Only offloaded Main KV is shared across Decode TP ranks.
+    is_host: bool = True
 
 
 @dataclass(frozen=True)
