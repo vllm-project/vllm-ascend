@@ -268,8 +268,11 @@ def fa3(monkeypatch):
         def __class_getitem__(cls, _):
             return cls
 
+    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+
     namespace = {
         "__name__": __name__,
+        "get_kv_cache_torch_dtype": get_kv_cache_torch_dtype,
         "torch": TorchProxy(),
         "dataclass": dataclass,
         "field": field,
@@ -455,14 +458,16 @@ def test_cache_layout_must_be_resolved(fa3, monkeypatch):
         fa3._uses_hnd_kv_cache(NS(cache_config=CacheConfig()))
 
 
-def test_copied_draft_config_uses_worker_layout_outside_context(fa3, monkeypatch):
-    _check_cache_layout(fa3, monkeypatch, "HND", 8, "connector", False, "auto")
+@pytest.mark.parametrize("draft_kv_dtype", ["auto", "float16"])
+def test_copied_draft_config_uses_worker_layout_outside_context(fa3, monkeypatch, draft_kv_dtype):
+    _check_cache_layout(fa3, monkeypatch, "HND", 8, "connector", False, draft_kv_dtype)
 
 
 def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_config_visible, draft_kv_dtype):
     # Model construction precedes the layout RPC/cache initialization.
     from vllm.config import CacheConfig, replace
 
+    cache_dtype = torch.float16 if draft_kv_dtype == "float16" else torch.bfloat16
     config = NS(cache_config=CacheConfig(), speculative_config=None)
     # Match load_dflash_model: even "auto" creates an independent cache config.
     draft_cache_config = (
@@ -471,7 +476,8 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     draft_config = NS(cache_config=draft_cache_config, speculative_config=None, model_config=NS(dtype=torch.bfloat16))
     assert (draft_config.cache_config is config.cache_config) is (draft_kv_dtype is None)
     fa3.get_current_vllm_config = lambda: draft_config
-    impl = fa3.AscendFlashAttentionImpl(heads, 16, 0.1, num_kv_heads=heads)
+    impl = fa3.AscendFlashAttentionImpl(heads, 16, 0.1, num_kv_heads=heads, kv_cache_dtype=draft_kv_dtype or "auto")
+    assert fa3._initialize_fa3_scheduler.call_args.args[1] == {(heads, heads, 16, cache_dtype, 0.1, 0.0, None)}
     fa3.get_current_vllm_config = lambda: config
     from vllm.v1.attention.backends import utils
 
@@ -495,14 +501,15 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
     config.compilation_config = NS(
         cudagraph_capture_sizes=[], cudagraph_mode=None, static_forward_context={"draft": NS(impl=impl)}
     )
-    fa3.AscendFlashAttentionMetadataBuilder(
-        NS(block_size=128, dtype=torch.bfloat16), ["draft"], config, torch.device("cpu")
+    builder = fa3.AscendFlashAttentionMetadataBuilder(
+        NS(block_size=128, dtype=cache_dtype), ["draft"], config, torch.device("cpu")
     )
+    assert builder.scheduler_specs == {(heads, heads, 16, cache_dtype, 0.1, 0.0, None)}
     hnd = layout in ("HND", "LBHNC")
     assert impl.use_hnd_kv_cache is hnd
     shape = fa3.AscendFlashAttentionBackend.get_kv_cache_shape(2, 128, heads, 16)
     assert shape == ((2, 2, heads, 128, 16) if hnd else (2, 2, 128, heads, 16))
-    cache = torch.zeros(shape, dtype=torch.bfloat16)
+    cache = torch.zeros(shape, dtype=cache_dtype)
     if not runtime_config_visible:
         # Runtime DFlash context-KV updates can run after leaving the config
         # context used for connector negotiation and cache allocation.
@@ -529,8 +536,8 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
         assert k.stride() == ((heads * 128 * 16, 16, 128 * 16, 1) if hnd else (128 * heads * 16, heads * 16, 16, 1))
         for i, slot in enumerate(slots.tolist()):
             block, offset = divmod(slot, 128)
-            assert torch.equal(k[block, offset], key[i])
-            assert torch.equal(v[block, offset], value[i])
+            assert torch.equal(k[block, offset], key[i].to(cache_dtype))
+            assert torch.equal(v[block, offset], value[i].to(cache_dtype))
         return q
 
     fa3.DeviceOperator.reshape_and_cache.side_effect = write_cache
@@ -543,7 +550,7 @@ def _check_cache_layout(fa3, monkeypatch, layout, heads, layout_source, runtime_
         query_start_loc=torch.tensor([0, 1, 2]),
         max_query_len=1,
         causal=False,
-        scheduler_metadata={(heads, heads, 16, torch.bfloat16, 0.1, 0.0, None): torch.tensor([1])},
+        scheduler_metadata={(heads, heads, 16, cache_dtype, 0.1, 0.0, None): torch.tensor([1])},
     )
     layer = NS(layer_name="draft", _k_scale_float=1.0, _v_scale_float=1.0)
     output = torch.empty_like(query)

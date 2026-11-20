@@ -13,6 +13,7 @@ from flash_attn_npu_3 import (  # type: ignore[import-not-found,import-untyped]
 )
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.logger import logger
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -333,11 +334,12 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         # worker records the resolved layout after model construction, and
         # DFlash context-KV writes need it outside set_current_vllm_config().
         self.vllm_config = config
+        kv_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype, config.model_config.dtype)
         spec = (
             self.num_heads,
             self.num_kv_heads,
             self.head_size,
-            config.model_config.dtype,
+            kv_dtype,
             self.scale,
             self.logits_soft_cap,
             self.sliding_window,
@@ -419,7 +421,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
             self.num_heads,
             self.num_kv_heads,
             self.head_size,
-            query.dtype,
+            kv_cache[0].dtype,
             self.scale,
             self.logits_soft_cap,
             self.sliding_window,
