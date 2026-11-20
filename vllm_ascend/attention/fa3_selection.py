@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.config import SpeculativeConfig
+    from vllm.config import ModelConfig, SpeculativeConfig
 
 
 _QWEN_FA3_TARGETS = frozenset(
@@ -30,26 +30,25 @@ _FA3_ARCHITECTURE_PAIRS: dict[str, frozenset[str] | tuple[frozenset[str], frozen
 }
 
 
-def supports_fa3_model(spec: SpeculativeConfig, model_tag: str) -> bool:
-    """Match the FA3 target/draft architecture pair for the active loader."""
-    if model_tag not in _FA3_ARCHITECTURE_PAIRS:
-        return False
-
-    draft_tag = f"{spec.method}_head"
-    draft_pair = _FA3_ARCHITECTURE_PAIRS.get(draft_tag)
-    if not isinstance(draft_pair, tuple):
-        return False
-    supported_targets, supported_drafts = draft_pair
-    if model_tag == "backbone":
-        supported_targets = supported_targets.intersection(_FA3_ARCHITECTURE_PAIRS[model_tag])
-    elif model_tag != draft_tag:
-        return False
-    if supported_drafts.isdisjoint(spec.draft_model_config.architectures or ()):
-        return False
-
-    target = spec.target_model_config
+def _matches_target(target: ModelConfig, supported_targets: frozenset[str]) -> bool:
     target_architecture = getattr(target, "architecture", None)
     if target_architecture is not None:
         return target_architecture in supported_targets
     target_hf = getattr(target, "hf_config", None)
     return not supported_targets.isdisjoint(getattr(target_hf, "architectures", None) or ())
+
+
+def supports_fa3_model(spec: SpeculativeConfig, model_tag: str) -> bool:
+    """Match the backbone architecture or the active draft loader's model pair."""
+    rule = _FA3_ARCHITECTURE_PAIRS.get(model_tag)
+    if rule is None:
+        return False
+    if isinstance(rule, frozenset):
+        return _matches_target(spec.target_model_config, rule)
+
+    if spec.draft_model_config is None or spec.method != model_tag.removesuffix("_head"):
+        return False
+    supported_targets, supported_drafts = rule
+    return _matches_target(spec.target_model_config, supported_targets) and not supported_drafts.isdisjoint(
+        spec.draft_model_config.architectures or ()
+    )
