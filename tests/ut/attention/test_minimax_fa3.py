@@ -409,7 +409,7 @@ def test_glm_dflash_local_draft_routing(selection, device, eager, fault):
     elif fault == "no_model":
         r.config.model_config = None
     actual = r.select()
-    assert ("flash_attention_v3" in actual) == (fault is None)
+    assert ("flash_attention_v3" in actual) == (fault is None and eager)
 
 
 @pytest.mark.parametrize("layout", ["NHD", "HND"])
