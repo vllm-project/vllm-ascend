@@ -1053,20 +1053,25 @@ hardware_notes:
       href: '#ascend-deployment'
 
   ascend_910c:
-    title: Single-host deployment on A3
+    title: Docker setup for A3
     body: >-
-      Select W4A8 (Ascend A2/A3) and Single-host PD (A3) to open the paired workload commands (128g shm).
+      Use the A3 container script in Section 4.1 with the v0.32.0rc1-a3 image and 128g of shared memory.
+      For PD, mount /etc/hccn.conf read-only and run Prefill and Decode in separate shells in that container.
+      Select W4A8 (Ascend A2/A3) and Single-host PD (A3) for the paired worker commands.
     link:
-      label: Single-host PD configurations
-      href: '#single-host-pd-configurations'
+      label: Section 4.1 — A3 Docker script
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L84-L123
 
   ascend_950dt:
-    title: Single-host deployment on 950DT
+    title: Docker setup for 950DT
     body: >-
-      Select W4A8-MXFP and Single-host PD (950DT) to open the paired workload commands (500g shm).
+      Use the 950DT container script in Section 4.1 with the v0.32.0rc1-a5 image and 500g of shared memory.
+      It maps /dev/ummu and /dev/uburma and mounts the firmware and /etc/hixlep directories.
+      For PD, run Prefill and Decode in separate shells in that container.
+      Select W4A8-MXFP and Single-host PD (950DT) for the paired worker commands.
     link:
-      label: Single-host PD configurations
-      href: '#single-host-pd-configurations'
+      label: Section 4.1 — 950DT Docker script
+      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L125-L162
 
 guide_sections:
   ascend: |
@@ -1249,7 +1254,8 @@ guide_sections:
     detects the installed vLLM version.
 
     For basic, image or long-context serving, prepare the hardware-specific container
-    from Section 4.1. Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
+    using the [A3 Docker script](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L84-L123) or the [950DT Docker script](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md?plain=1#L125-L162) in Section 4.1.
+    Set `LOCAL_SERVICE_IP` and `SERVICE_NIC` to the service address
     and interface. In each role shell, initialize CANN/ATB, unset proxy variables
     and any inherited `VLLM_PP_LAYER_PARTITION`, and add Mooncake to the library path:
 
