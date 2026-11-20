@@ -374,7 +374,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
-        self.dynamic_eplb = False
         self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         self._dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
@@ -433,7 +432,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 topk_ids=topk_ids,
                 layer=layer,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
+                dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
