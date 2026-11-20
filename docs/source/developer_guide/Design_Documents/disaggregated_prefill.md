@@ -190,6 +190,75 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe).
 
+#### DSA Host KV offload with MooncakeConnectorV2
+
+DSA CPU-offloaded KV uses request-level Mooncake transfers after Prefill finishes.
+`MooncakeLayerwiseConnector` does not support this DSA CPU-offload path and is
+rejected before offloaded KV allocation. Its ordinary layerwise transfer remains
+available without DSA CPU offload. `SfaRemoteD2HConnector` retains its separate
+layerwise Decode-offload protocol.
+
+With vLLM 0.32.0, enable ModelRunner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1` and select `MooncakeConnectorV2` on both nodes:
+
+```json
+{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"}
+```
+
+Set `kv_role` to `kv_producer` on P. On D, enable the existing Manager
+path in `additional_config`:
+
+```json
+{
+  "sparse_kv_offload_config": {
+    "enabled": true,
+    "topk_buffer_size": 2048,
+    "dram_size_per_dp_GB": 128,
+    "use_fused_overlap": false
+  }
+}
+```
+
+`SparseKVOffloadManager` owns Host KV, hot rows and current-token writeback.
+Mooncake borrows its cache views and transfers Host-bound bytes through the
+existing bounded HBM staging window. Indexer, dense-prefix and circular-tail
+HBM destinations retain their direct READ plans. Completion requires the
+existing landing/event drain before decode can use the received KV.
+
+P and D must receive the same original prompt. Discard P's first output token
+and let D replay the final prompt token and generate the complete output, as
+with the SFA connector. Appending P's first output token to D's prompt is not
+supported with Sparse KV offload and is rejected before receiving KV. Ordinary
+Mooncake transfers retain their existing first-token behavior.
+
+The retired `dsa_sparse_attention_config` is rejected when nonempty. Remove
+its CPU-store and TP-shared-pool settings and use the Manager configuration
+above. The experimental independent Host pool and its V1/V2 allocation
+branches have been removed. Ordinary device-resident Mooncake transfers and
+the separate SFA connector retain their existing configuration.
+
+See [Mooncake V2 with SFA offload](../../user_guide/feature_guide/mooncake_sfa_v2.md)
+for supported layouts and failure-policy requirements.
+
+Configure staging through `additional_config.mooncake_staging_config`:
+`window_chunks` defaults to 16 and `bank_count` defaults to 4. These typed integer
+settings replace the staging environment controls. Values below 1 become 1;
+effective banks are capped by the window. Each chunk is aligned to 2 MiB and
+sized for the KV layout, with source-page offsets preserved.
+
+One effective bank executes serial READ/landing on the caller, waiting for each
+landing before reuse. Multiple banks pipeline READ and Host landing with one
+Host worker and one copy stream per bank. The 16/4 default uses four banks of
+four chunks without increasing total staging capacity. Each worker sets its NPU
+device before executing and owns a bank's entire request queue.
+
+A bank's reusable completion event protects its staging slices and destination
+tensors. Reusing a bank waits for its preceding landing; receive completion joins
+all Host workers and drains the last pending copy in every bank. Failed waits
+retain owners until a later drain succeeds. Independent copy-stream fan-out and
+the device-wide READ diagnostic probe have been removed; staging reuse, final
+drain and exception cleanup remain part of the receive contract.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:

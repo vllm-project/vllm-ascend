@@ -46,9 +46,9 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name in self.boolean_vars:
+                    if var_name in self.boolean_vars or "_strict_binary_env(" in handler_source:
                         test_vals = ["1", "0"]
-                    elif "int(" in handler_source:
+                    elif "int(" in handler_source or "_positive_int_env(" in handler_source:
                         test_vals = ["123", "456"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]

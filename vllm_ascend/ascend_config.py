@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, StrictInt, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -519,6 +519,19 @@ class ExpertOffloadConfig:
         return self
 
 
+@config(config=ConfigDict(frozen=True))
+class MooncakeStagingConfig:
+    """Startup settings for the Mooncake Host-KV staging window."""
+
+    window_chunks: StrictInt = 16
+    bank_count: StrictInt = 4
+
+    @field_validator("window_chunks", "bank_count")
+    @classmethod
+    def _normalize_counts(cls, value: int) -> int:
+        return max(1, value)
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -757,6 +770,7 @@ class AscendConfig:
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
     quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
+    mooncake_staging_config: MooncakeStagingConfig = dataclasses.field(default_factory=MooncakeStagingConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
@@ -1805,6 +1819,20 @@ class SchedulerConfig:
         return cls(**resolved)  # type: ignore[arg-type]
 
 
+def _validate_removed_dsa_host_config(additional_config: dict[str, Any]) -> None:
+    """Reject retired Host settings before they can silently select device KV."""
+    legacy = additional_config.get("dsa_sparse_attention_config")
+    if legacy is None:
+        return
+    if not isinstance(legacy, dict):
+        raise TypeError("dsa_sparse_attention_config must be a dict")
+    if legacy:
+        raise ValueError(
+            "dsa_sparse_attention_config has been removed. Use MooncakeConnectorV2 with ModelRunner V2 "
+            "and sparse_kv_offload_config for SparseKVOffloadManager-owned Host KV (LIM + Copy-SFA)."
+        )
+
+
 @config
 class SparseKVOffloadConfig:
     """
@@ -1840,6 +1868,7 @@ class SparseKVOffloadConfig:
 
     @classmethod
     def from_additional_config(cls, vllm_config: VllmConfig, user_config: Any) -> SparseKVOffloadConfig:
+        _validate_removed_dsa_host_config(getattr(vllm_config, "additional_config", None) or {})
         if not isinstance(user_config, dict):
             raise ValueError(
                 f"additional_config.sparse_kv_offload_config must be a dict, got {type(user_config).__name__}."
@@ -1860,6 +1889,32 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
 
         kv_transfer_config = vllm_config.kv_transfer_config
+        kv_connector = getattr(kv_transfer_config, "kv_connector", None)
+        if kv_connector == "MultiConnector" and (
+            kv_transfer_config.has_connector("MooncakeConnectorV2")
+            or kv_transfer_config.has_connector("MooncakePullConnector")
+        ):
+            raise ValueError("Mooncake SFA KV offload currently requires a direct connector, not MultiConnector")
+        if kv_connector == "MooncakePullConnector":
+            raise ValueError("Mooncake SFA KV offload requires kv_connector='MooncakeConnectorV2'")
+        if kv_connector == "MooncakeConnectorV2":
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError("Mooncake SFA KV offload requires ModelRunner V2")
+            if self.use_fused_overlap:
+                raise ValueError("Mooncake SFA KV offload currently requires LIM + Copy-SFA")
+            speculative = getattr(vllm_config, "speculative_config", None)
+            if speculative is not None and speculative.method == "dspark":
+                raise ValueError("Mooncake SFA KV offload has not adapted the DSpark remote prompt protocol")
+            # Device main KV alone does not reset the failed remote PD handoff.
+            # Require fail until the connector can transition to local prefill.
+            if (
+                kv_transfer_config.is_kv_consumer
+                and getattr(kv_transfer_config, "kv_load_failure_policy", "fail") != "fail"
+            ):
+                raise ValueError(
+                    "Mooncake SFA KV offload consumers require kv_load_failure_policy='fail'; "
+                    "failed PD recovery to local prefill is not supported, including keep_device_kv_cache=True"
+                )
         if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
             raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
 
@@ -1962,6 +2017,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
                 _prefill_value,
             )
 
+    _validate_removed_dsa_host_config(additional_config)
+
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -2021,6 +2078,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        "dsa_sparse_attention_config",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
         "kvpp_config",

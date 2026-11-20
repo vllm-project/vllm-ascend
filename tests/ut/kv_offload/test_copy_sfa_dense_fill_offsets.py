@@ -42,9 +42,11 @@ def test_dense_fill_uses_exact_int64_offsets_above_2gib_and_4gib(monkeypatch, bl
     assert values[1][0] * 4 * token_bytes[1] > 2**32
     for layer, call in enumerate(copy.call_args_list):
         sources, destinations, lengths, count = call.args
-        for tensor in (sources, destinations, lengths):
+        for tensor in (sources, destinations):
             assert tensor.dtype == torch.int64
             assert tensor.device.type == "cpu"
+        assert lengths.dtype == torch.int32
+        assert lengths.device.type == "cpu"
         assert sources.tolist() == [
             host_bases[layer][component] + block_id * 4 * stride
             for component, stride in enumerate(token_bytes)

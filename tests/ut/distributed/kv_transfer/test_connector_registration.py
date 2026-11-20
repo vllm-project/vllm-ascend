@@ -12,6 +12,10 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 # MultiConnector keys transfer stats by `__class__.__name__` and resolves that
 # key through KVConnectorFactory, so the class name must be registered too.
 CLASS_NAME_ALIASES = {
+    "MooncakeSFACompatibleConnector": (
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector",
+        "MooncakeSFACompatibleConnector",
+    ),
     "AscendOffloadingConnector": (
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
@@ -21,6 +25,36 @@ CLASS_NAME_ALIASES = {
         "UCMConnectorV1",
     ),
 }
+
+
+def test_mooncake_entries_resolve_to_ordinary_and_compatible_implementations(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    assert KVConnectorFactory._registry["MooncakePullConnector"]() is MooncakePullConnector
+    assert KVConnectorFactory._registry["MooncakeConnectorV2"]() is MooncakeSFACompatibleConnector
+    assert "MooncakeSFAConnector" not in KVConnectorFactory._registry
+
+
+@pytest.mark.parametrize("connector_name", ["MooncakePullConnector", "MooncakeSFACompatibleConnector"])
+def test_mooncake_class_name_roundtrips_metrics(monkeypatch, connector_name):
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFACompatibleConnector
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    classes = {cls.__name__: cls for cls in (MooncakePullConnector, MooncakeSFACompatibleConnector)}
+    name = connector_name
+    assert KVConnectorFactory.get_connector_class_by_name(name) is classes[name]
+    values = {"transfer_duration": [0.25], "bytes_transferred": [128], "num_failed_transfers": []}
+    stats = MultiConnector.build_kv_connector_stats(data={name: values})
+    assert stats is not None and stats.data[name].data == values
 
 
 def test_connectors_with_mismatched_names_register_class_name_alias(
