@@ -1,8 +1,46 @@
-# Source: https://github.com/vllm-project/vllm/blob/bffbfccb7e0b8ce77e65e9a7b87489bf335ab747/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
+# Source: https://github.com/vllm-project/vllm/blob/9b088c6667cbb9cce3eaa5ad937548aad36e8e7e/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
 # Ascend lane extracted from a measured vLLM-Ascend deployment (hardware-scoped overrides only).
 meta:
   hardware:
     ascend_910b: verified
+hardware_overrides:
+  ascend_910b:
+    extra_args:
+      - '--data-parallel-size-local'
+      - '1'
+      - '--max-model-len'
+      - '200000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--block-size'
+      - '128'
+      - '--max-num-seqs'
+      - '46'
+      - '--gpu-memory-utilization'
+      - '0.88'
+      - '--trust-remote-code'
+      - '--async-scheduling'
+      - '--allowed-local-media-path'
+      - /
+      - '--mm-processor-cache-gb'
+      - '0'
+      - '--additional-config'
+      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
+      - '--enable-expert-parallel'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--enable-chunked-prefill'
+      - '--enable-prefix-caching'
+    extra_env:
+      HCCL_CONNECT_TIMEOUT: '7200'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      TASK_QUEUE_ENABLE: '1'
+      OMP_NUM_THREADS: '1'
+      HCCL_SOCKET_IFNAME: '$IFACE_NAME'
+      GLOO_SOCKET_IFNAME: '$IFACE_NAME'
+      TP_SOCKET_IFNAME: '$IFACE_NAME'
 hardware_notes:
   ascend_910b:
     title: vLLM Ascend A2 image required
@@ -23,59 +61,9 @@ variants:
         docker_serve_command: vllm serve
         install:
           pip: false
-  ascend_w8a8:
-    model_id: Qwen/Qwen3.5-122B-A10B
-    label: W8A8 (Ascend A2)
-    precision: int8
-    vram_minimum_gb: 147
-    description: ModelSlim INT8 W8A8 checkpoint for one Atlas 800I A2 (Ascend 910B) node, using TP8. Requires --quantization ascend.
-    supported_hardware: [ascend_910b]
-    supported_frontends: [python]
-    tp:
-      ascend_910b: 8
-    min_vllm_version: 0.17.0
-    extra_args:
-      - '--quantization'
-      - ascend
-    hardware_overrides:
-      npu:
-        extra_args:
-          - '--data-parallel-size-local'
-          - '1'
-          - '--max-model-len'
-          - '200000'
-          - '--max-num-batched-tokens'
-          - '16384'
-          - '--max-num-seqs'
-          - '128'
-          - '--gpu-memory-utilization'
-          - '0.94'
-          - '--trust-remote-code'
-          - '--async-scheduling'
-          - '--allowed-local-media-path'
-          - /
-          - '--mm-processor-cache-gb'
-          - '0'
-          - '--additional-config'
-          - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
-        extra_env:
-          HCCL_CONNECT_TIMEOUT: '7200'
-          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-          HCCL_BUFFSIZE: '1024'
-          HCCL_OP_EXPANSION_MODE: AIV
-          TASK_QUEUE_ENABLE: '1'
-          OMP_NUM_THREADS: '1'
-          HCCL_SOCKET_IFNAME: '$IFACE_NAME'
-          GLOO_SOCKET_IFNAME: '$IFACE_NAME'
-          TP_SOCKET_IFNAME: '$IFACE_NAME'
-      ascend_910b:
-        docker_image: quay.io/ascend/vllm-ascend:v0.30.0
-        docker_serve_command: vllm serve
-        install:
-          pip: false
 guide_sections:
   ascend: |-
-    ### Huawei Atlas 800I A2 (Ascend 910B) w8a8 (vLLM Ascend)
+    ### Huawei Atlas 800I A2 (Ascend 910B) (vLLM Ascend)
 
     Verified with `quay.io/ascend/vllm-ascend:v0.30.0` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (topology per hardware notes).
 
@@ -97,11 +85,17 @@ guide_sections:
       --tensor-parallel-size 8 \
       --max-model-len 200000 \
       --max-num-batched-tokens 16384 \
-      --max-num-seqs 128 \
-      --gpu-memory-utilization 0.94 \
+      --block-size 128 \
+      --max-num-seqs 46 \
+      --gpu-memory-utilization 0.88 \
       --trust-remote-code \
       --async-scheduling \
       --allowed-local-media-path / \
       --mm-processor-cache-gb 0 \
-      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
+      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}' \
+      --enable-expert-parallel \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
     ```
