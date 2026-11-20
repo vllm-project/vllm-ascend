@@ -11,7 +11,7 @@ In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved
 All knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step.
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
-- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
+- **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
 - **QKV IProj (per-step exchanges with padding)** shards the GLM-5.3-Flash KDA Q/K/V and beta projection weights by head. Each rank pads its hidden states to a shared capacity from the DP token counts before `all_gather`, including idle ranks. After projection, `all_to_all` restores the full set of heads on each request's DP owner and overlaps with the local forget and gate up-projections. Each owner runs the recurrent core and keeps its convolution and recurrent state. Configure output projection TP independently with `oproj_tensor_parallel_size`.
 
 ### Usage Scenarios
@@ -93,7 +93,7 @@ Prompt logprobs is also not supported with LM head TP: a request asking for prom
 
 #### Configuration Limit
 
-The Fine-Grained TP size for any component must:
+The Fine-grained TP size for any component must:
 
 - Be **≤ the data-parallel (DP) size**, and  
 - **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
@@ -206,19 +206,19 @@ After the instance starts, check which knobs passed startup validation:
 
    Expected output (Scenario 1):
 
-   ```text
+   ```output
    finegrained_tp_config enabled: lmhead_tensor_parallel_size=4, embedding_tensor_parallel_size=4
    ```
 
    Expected output (Scenario 2):
 
-   ```text
+   ```output
    finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
    ```
 
    Scenario 3 logs this entry.
 
-   ```text
+   ```output
    finegrained_tp_config enabled: qkv_iproj_tensor_parallel_size=8
    ```
 
@@ -249,14 +249,14 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
 | `oproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
 | `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
 
 ## Experimental Results
 
-To evaluate the effectiveness of fine-grained TP in large-scale serving, we deploy P/D-disaggregated decode instances of **DeepSeek-R1-W8A8** on 32 Ascend Atlas A2 inference cards (64 GB per card), with DP32+EP32 and a fine-grained TP size of 8. The performance data is as follows.
+To evaluate the effectiveness of fine-grained TP in large-scale serving, we deploy P/D-disaggregated decode instances of **DeepSeek-R1-W8A8** on 32 Atlas A2 inference cards (64 GB per card), with DP32+EP32 and a fine-grained TP size of 8. The performance data is as follows:
 
 | Module           | Memory Savings | TPOT Impact (batch=24)    |
 | ---------------- | -------------- | ------------------------- |
@@ -270,7 +270,7 @@ To evaluate the effectiveness of fine-grained TP in large-scale serving, we depl
 
 ## FAQs
 
-### Startup fails with "The finegrained tp sizes can be enabled only for MOE models."
+### Startup fails with "The finegrained tp sizes can be enabled only for MoE models."
 
 **Problem Description**: With any `finegrained_tp_config` size set, the instance fails at configuration load with this error.
 

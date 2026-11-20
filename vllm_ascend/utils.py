@@ -133,13 +133,9 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     return profile_tokens
 
 
-def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
-    """Whether a GQA/MQA model enables both PCP and DCP."""
-    return (
-        parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size > 1
-        and not model_config.use_mla
-    )
+def model_supports_dcp(model_config: Any) -> bool:
+    """Whether the model enables MLA or uses Ascend SFA attention."""
+    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -1669,6 +1665,32 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
     mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
+
+
+def uses_ascend_store_memcache(kv_transfer_config: Any) -> bool:
+    """Find an AscendStoreConnector using the Memcache backend, including in MultiConnector."""
+    if isinstance(kv_transfer_config, (list, tuple)):
+        return any(uses_ascend_store_memcache(item) for item in kv_transfer_config)
+
+    if isinstance(kv_transfer_config, dict):
+        connector = kv_transfer_config.get("kv_connector")
+        extra_config = kv_transfer_config.get("kv_connector_extra_config")
+    else:
+        connector = getattr(kv_transfer_config, "kv_connector", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+
+    if isinstance(extra_config, dict):
+        backend = extra_config.get("backend", "mooncake")
+        connectors = extra_config.get("connectors", [])
+    else:
+        backend = getattr(extra_config, "backend", "mooncake")
+        connectors = getattr(extra_config, "connectors", [])
+
+    if connector == "AscendStoreConnector":
+        if isinstance(backend, str) and backend.lower() == "memcache":
+            return True
+
+    return uses_ascend_store_memcache(connectors)
 
 
 def _collect_kv_connector_names(value: Any) -> set[str]:

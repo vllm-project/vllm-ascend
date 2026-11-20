@@ -3,15 +3,69 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
 
 
-def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
-    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
+@pytest.mark.parametrize("layout", ["contiguous", "row_stride", "column_stride"])
+def test_main_fused_norm_rope_requires_contiguous_qkv(layout) -> None:
+    layer = SimpleNamespace(
+        attn_output_gate=True,
+        q_size=512,
+        kv_size=256,
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=256,
+        rotary_emb=SimpleNamespace(
+            mrope_section=[11, 11, 10],
+            rotary_dim=64,
+            is_neox_style=True,
+            mrope_interleaved=True,
+        ),
+    )
+    width = 2 * layer.q_size + 2 * layer.kv_size
+    if layout == "row_stride":
+        qkv = torch.empty((4, width), dtype=torch.bfloat16)[::2]
+    elif layout == "column_stride":
+        qkv = torch.empty((2, 2 * width), dtype=torch.bfloat16)[:, ::2]
+    else:
+        qkv = torch.empty((2, width), dtype=torch.bfloat16)
+
+    eligible = qsa.AscendQwen4ExpQSAAttention._main_fused_norm_rope_eligible(layer, qkv, torch.arange(2))
+    assert eligible == (layout == "contiguous")
+
+
+def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
+    monkeypatch,
+) -> None:
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    monkeypatch.setattr(
+        layer,
+        "_main_fused_norm_rope_eligible",
+        Mock(return_value=False),
+    )
+    expected = (
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+    )
+    fallback = Mock(return_value=expected)
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        fallback,
+    )
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) is expected
+    fallback.assert_called_once_with(qkv, positions)
 
 
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:

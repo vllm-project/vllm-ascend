@@ -24,13 +24,14 @@
 
 ## Parameters
 
-All parameters are required.
+`positions` is optional; other parameters are required.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `tensor` | Input | QSA projection, shape `[num_tokens, num_heads, head_dim]` | BF16 | Contiguous head rows |
 | `weight` | Input | RMSNorm weight, shape `[head_dim]`; the kernel applies `weight + 1` | BF16 | Contiguous 1D |
 | `cos_sin` | Input | MRoPE cache `[3, num_tokens, rope_dim]` or RoPE cache `[num_tokens, rope_dim]` | BF16 | Strided ND with contiguous rotary width |
+| `positions` | Input, optional | With positions, `cos_sin` is instead the full `[cache_rows, rope_dim]` table; positions are `[num_tokens]` or `[3, num_tokens]` | int32/int64 | Strided, same device as input |
 | `eps` | Attribute | RMS normalization epsilon | float | Scalar |
 | `mrope_section` | Attribute | Temporal, height, and width MRoPE section sizes | `list[int]` | Three elements for MRoPE |
 | `rope_dim` | Attribute | Even rotary width, no greater than `head_dim` | int | Scalar |
@@ -40,12 +41,27 @@ All parameters are required.
 
 - `tensor` and `weight` must be BF16. The last dimension of `tensor` and `weight` must match.
 - `tensor` must have three dimensions and contiguous head rows.
-- `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. MRoPE requires exactly three cache axes and three section values.
-- The token count in `cos_sin` must equal `tensor.shape[0]`.
+- Without `positions`, `cos_sin` must have two dimensions for RoPE or three dimensions for MRoPE. Gathered MRoPE requires exactly three cache axes.
+- With `positions`, `cos_sin` is always a two-dimensional full table. MRoPE uses three position axes instead of three cache axes. Both MRoPE modes require three section values.
+- Without `positions`, the token count in `cos_sin` must equal `tensor.shape[0]`.
+- With `positions`, the full cache must be nonempty, BF16, on the input device, and contiguous along rotary width. Position values are clamped to `[0, cache_rows - 1]` inside the kernel. Position token count must match the input.
 - `rope_dim` must be positive, even, and no greater than `head_dim`.
 - An empty token dimension returns an empty output without launching the kernel.
 - Forward inference only; no autograd backward implementation is provided.
 - The custom op provides a fake implementation for compilation and shape propagation. The single-operator tests below validate eager device execution.
+
+### Direct-position mode
+
+The QSA model passes the full rotary table and original positions. Each token/head
+program reads positions using their actual strides, chooses the MRoPE axis for
+each rotary lane, clamps the position and loads only the required cosine/sine.
+This replaces external clamp/contiguous/gather preparation; it does not change
+the normalization or BF16 rotary arithmetic. The contiguous three-axis reads
+described above remain the legacy mode when `positions=None`.
+
+This mode also serves the decomposed compressed-key reference. It returns a new
+tensor, without mutating positions, weights or the rotary table. Graph replay
+reads current position contents, not captured Python values.
 
 ## Origin and Differences
 
@@ -60,16 +76,12 @@ All parameters are required.
 
 ## Test Cases
 
-The device test compares the Triton output with an independent CPU fp32 PyTorch reference and uses `rtol=2e-2`, `atol=2e-2`.
-
-| Device | Case | Shape | Maximum absolute difference |
-| --- | --- | --- | ---: |
-| Ascend A3 | Prefill | `(4096, 4, 128)` | 0.03125 |
-| Ascend A3 | Decode | `(4096, 1, 128)` | 0.0078125 |
-| Ascend950DT (A5) | Prefill | `(4096, 4, 128)` | 0.015625 |
-| Ascend950DT (A5) | Decode | `(4096, 1, 128)` | 0.0078125 |
-
-Both cases passed on A3 and A5 using the Qwen3.8-Next 2026-11-02 validation images.
+[test_qsa_rmsnorm_mrope.py](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py)
+compares direct-position lookup with legacy gathered-cache inputs using
+`rtol=0, atol=0`. Cases cover 0/1/32/129 tokens, 1/3 position axes,
+non-contiguous query rows, strided positions, position clamping and NPUGraph
+replay after updating positions. These tests select A3 only; execution on the
+final PR revision and compatibility on other applicable devices remain pending.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_rmsnorm_mrope.py

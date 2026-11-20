@@ -1,0 +1,10 @@
+pr: 22056
+entries:
+  - category: breaking
+    text: Raw block-wise FP8 MiniMax-M2 checkpoints are rejected on A2/A3; native block-wise FP8 is Ascend 950-only (#21604). Use a W8A8 QuaRot checkpoint with --quantization ascend.
+    model: minimax-m2
+    hardware: [A2, A3]
+  - category: config
+    text: MiniMax-M2 no longer sets HCCL_OP_EXPANSION_MODE=AIV automatically; set it explicitly when using ACL graph capture.
+    model: minimax-m2
+    hardware: [A2, A3]

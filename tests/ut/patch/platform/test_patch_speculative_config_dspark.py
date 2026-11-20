@@ -261,26 +261,24 @@ def test_glm_speculators_rejects_malformed_mla_dimensions(initialize_dspark, glm
         initialize_dspark(hf_config, model=str(glm_dspark_checkpoint))
 
 
-def test_gqa_pcp_dcp_preserves_other_upstream_checks(monkeypatch):
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_gqa_dcp_keeps_upstream_validation(monkeypatch, pcp_size):
     model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
     parallel_config = SimpleNamespace(
         enable_expert_parallel=True,
         tensor_parallel_size=8,
-        prefill_context_parallel_size=2,
+        prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=2,
     )
     validated = []
 
     def validate_config(model, config):
         validated.append((model, config))
-        assert config is not parallel_config
-        assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 1
+        assert config is parallel_config
 
     monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
     _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert len(validated) == 1
-    assert validated[0][0] is model_config
+    assert validated == [(model_config, parallel_config)]
     assert parallel_config.decode_context_parallel_size == 2
 
 
@@ -306,7 +304,8 @@ def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypat
 
     def fail(model, config):
         assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 1
+        assert config.decode_context_parallel_size == 2
+        assert config is parallel_config
         raise ValueError("other upstream validation failed")
 
     monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", fail)
@@ -315,25 +314,6 @@ def test_ascend_parallel_validation_preserves_original_config_on_error(monkeypat
 
     assert parallel_config.enable_expert_parallel is True
     assert parallel_config.decode_context_parallel_size == 2
-
-
-def test_gqa_tp_only_dcp_keeps_upstream_validation(monkeypatch):
-    model_config = SimpleNamespace(use_mla=False, is_moe=True, runner_type="generate")
-    parallel_config = SimpleNamespace(
-        enable_expert_parallel=True,
-        tensor_parallel_size=8,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=2,
-    )
-    validated = []
-
-    def validate_config(model, config):
-        validated.append((model, config))
-
-    monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
-
-    _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert validated == [(model_config, parallel_config)]
 
 
 @pytest.mark.parametrize("flattened", [False, True])
