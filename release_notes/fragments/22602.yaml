@@ -1,0 +1,13 @@
+pr: 22602
+entries:
+  - category: breaking
+    text: >-
+      MiniMax-M3 sparse Prefill retains Union Attention for supported
+      configurations and uses native CANN GenericBlockSparseAttention (GBSA)
+      as its fallback on A2/A3 and 950DT. The optional K2Q / KV-gather-Q path and its
+      npu_k2q_csr, npu_sparse_attention_score_prefill, and
+      is_minimax_sparse_attention_split_kv_available interfaces have been removed;
+      installing a Split-KV experimental package no longer selects that backend.
+      Use a CANN Ops Transformer package providing GBSA and its metadata operator;
+      existing GBSA deployments require no serving command changes, while direct
+      callers of the removed interfaces must migrate to GBSA.
