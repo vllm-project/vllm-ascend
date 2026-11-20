@@ -653,8 +653,8 @@ def test_actual_receive_handler_waits_for_source_before_overwrite(ns, save_faile
 
 
 
-@pytest.mark.parametrize("cacheable", [True, False])
-def test_dsv4_push_final_chunk_uses_live_component_groups(ns, cacheable):
+@pytest.mark.parametrize("sliding_window, cacheable", [(None, True), (8, True), (8, False)])
+def test_dsv4_push_chunk_ranges_use_live_component_groups(ns, sliding_window, cacheable):
     path = "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/push_worker.py"
     ns.update(
         MambaSpec=type("MambaSpec", (), {}),
@@ -666,21 +666,33 @@ def test_dsv4_push_final_chunk_uses_live_component_groups(ns, cacheable):
     worker._is_dsv4 = True
     worker._layer_indices = {"component": 0}
     worker.layer_name_to_spec_index = {"component": 0}
-    worker.kv_cache_specs = [NS(sliding_window=8)]
+    worker.kv_cache_specs = [NS(sliding_window=sliding_window)]
     worker.transfer_metadata = NS(group_indices=[1], block_size_scales=[[1]], layer_block_sizes=[4])
     peer = NS(layer_names=["component"], group_indices=[0], block_size_scales=[[1]], layer_block_sizes=[4])
+    d_prefix_tokens = 4 if sliding_window is None else 8
     destination = NS(
         transfer_params=dict(
-            num_computed_tokens=8, num_external_tokens=3, consumer_rank=(0, 0, 0), block_ids=((0, 7, 8),)
+            num_computed_tokens=d_prefix_tokens,
+            num_external_tokens=11 - d_prefix_tokens,
+            consumer_rank=(0, 0, 0),
+            block_ids=((0, 7, 8),),
         ),
         sent_tokens={},
         metadata_future=NS(result=lambda: NS(metadata_by_pp_rank=[peer])),
     )
     state = NS(
         metadata=NS(num_prompt_tokens=11, local_block_ids=((99,), (0, 3, 4))),
-        available_layers={"component": (8, "event")},
+        available_layers={"component": (9, "event")},
     )
-    assert worker._build_layer_transfer_request("r", state, destination, "component") is None
+    intermediate = worker._build_layer_transfer_request("r", state, destination, "component")
+    if sliding_window is None:
+        transfer, event = intermediate
+        assert transfer == ("r", (3,), (7,), 4, 8)
+        assert event == "event"
+        destination.sent_tokens["component"] = transfer[-1]
+        assert worker._build_layer_transfer_request("r", state, destination, "component") is None
+    else:
+        assert intermediate is None
     state.available_layers["component"] = 11, "event"
     transfer, event = worker._build_layer_transfer_request("r", state, destination, "component")
     expected = ("r", (4,), (8,), 8, 11) if cacheable else ("r", (3, 4), (7, 8), 3, 11)

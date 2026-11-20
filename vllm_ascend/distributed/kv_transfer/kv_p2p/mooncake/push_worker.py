@@ -551,7 +551,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             or is_circular_kv_cache_spec(spec)
             or getattr(spec, "sliding_window", None) is not None
         )
-        if (final_only or self._is_dsv4) and not final:
+        if final_only and not final:
             return None
         local_blocks = meta.local_block_ids[self.transfer_metadata.group_indices[local_index]]
         remote_blocks = params["block_ids"][pp.group_indices[remote_index]]

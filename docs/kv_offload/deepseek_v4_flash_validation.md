@@ -92,7 +92,7 @@ bash format.sh ci
 - P：`MultiConnector`，组合 `MooncakePushConnector` 与 `AscendStoreConnector`。
 - D：独立 `MooncakePushConnector`，全驻留缓存，不配置共享槽，不从 Store 恢复交接数据。
 - 两端使用同一版 Push 代码。P 在发送前核对模型、缓存组件和缓存格式。
-- P 仅在最终 chunk 逐层发送该请求的完整有效历史、滑窗、状态及索引；中间 chunk 只 offload 到 Store。
+- P 在中间 chunk 逐层发送 D 缺少的完整历史页。最终 chunk 补齐剩余历史页，并按最终端点发送有效滑窗和循环状态。Store 继续负责 P 端缓存的保存与恢复。
 - D 保留最后一个 prompt token 本地计算。P 在原始 token 端点 N−1 完成预填充并产生一个供交接流程使用的 token，代理最终响应来自 D。
 - 每个组件按自身组号、当前有效块表和两端真实页步长传输；必要空块、格式不一致均拒绝。
 - Store PUT 与 D2D 读取都释放后才允许共享槽覆盖；step 结束前排空 D2D，禁止回收仍被读取的请求块。
@@ -142,6 +142,6 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_exa
 | 第2～3章布局与预算 | 现有组件计划、独立分配与统一预算保留；P/D 地址差异由真实页步长处理 | B=1/3/4，普通布局回归 |
 | 第4章续算和块表 | Store 增量更新块表并刷新可缓存 SWA 组。P2P 在最终端点同步块表，避免携带已回收 SWA 块 | 长输入、多并发及非对齐尾页 |
 | 第5章外部完整恢复和身份 | 复用现有协调器；P2P 新增模型、组件及格式身份校验，不以页长相等代替兼容性 | 缺辅助组件、不同后缀、并发发布 |
-| P/D 部署（原方案未明确） | 补最终 chunk 多缓存组 D2D、回调连接器组合及两端示例 | 首次完整 P/D 服务运行和确定性输出 |
+| P/D 部署（原方案未明确） | 普通历史页逐 chunk D2D，滑窗和循环状态在最终 chunk 交接，保留回调连接器组合及两端示例 | 完整 P/D 服务运行和确定性输出 |
 
 本轮 CPU 用例和静态检查只能证明其覆盖的生产函数行为；全部 NPU 场景仍以服务器日志判定。
