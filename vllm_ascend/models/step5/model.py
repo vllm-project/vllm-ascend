@@ -33,6 +33,7 @@ from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context
@@ -41,8 +42,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -100,6 +104,12 @@ from vllm_ascend.ops.triton.step5.fused_add_rms_norm import (
 )
 from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
     fused_qknorm_rope,
+)
+from vllm_ascend.ops.triton.step5.gated_scale import (
+    gated_scale,
+)
+from vllm_ascend.ops.triton.step5.indexer_qkz_norm_rope import (
+    fused_indexer_qkz_norm_rope,
 )
 from vllm_ascend.utils import vllm_version_is
 
@@ -398,21 +408,6 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
         )
 
-    def _apply_sparse_indexer_rope(
-        self,
-        positions: torch.Tensor,
-        index_q: torch.Tensor,
-        index_k: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        proxy_dim = int(index_q.shape[-1])
-        positions = positions.reshape(-1).to(device=index_q.device, dtype=torch.long)
-        q_shape = tuple(index_q.shape)
-        k_shape = tuple(index_k.shape)
-        q = index_q.reshape(q_shape[0], -1, proxy_dim)
-        k = index_k.reshape(k_shape[0], -1, proxy_dim)
-        q, k = self.sparse_indexer_rotary_emb(positions, q, k)
-        return q.reshape(q_shape), k.reshape(k_shape)
-
     def _finish_indexer(
         self,
         positions: torch.Tensor,
@@ -423,10 +418,9 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Indexer norm+rope and head scores, all local shapes.
 
-        Returns index_q [t, groups, heads_per_group, proxy] (float8_e4m3fn
-        on the fused path -- the kernel quantizes at the store and the
-        scoring op consumes it directly; bf16 on the non-fused fallback),
-        index_k [t, 1, proxy], index_z [t, 1, proxy],
+        Returns index_q [t, groups, heads_per_group, proxy] (float8_e4m3fn;
+        the kernel quantizes at the store and the scoring op consumes it
+        directly), index_k [t, 1, proxy], index_z [t, 1, proxy],
         weights [t, groups, heads_per_group] fp32.
         """
         num_tokens = int(hidden_states.shape[0])
@@ -437,18 +431,30 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         num_index_k_heads = int(index_k.shape[-1]) // proxy_dim
         heads_per_group = num_index_q_heads // self.num_kv_heads
 
-        index_k = self.sparse_indexer_k_norm(index_k.contiguous())
-        index_q = index_q.view(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim).contiguous()
-        index_q = self.sparse_indexer_q_norm(index_q)
-        index_k = index_k.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
-        index_q, index_k = self._apply_sparse_indexer_rope(
-            positions,
-            index_q.reshape(num_tokens, -1, proxy_dim),
+        # One kernel for the whole indexer chain: per-head RMSNorm on
+        # index_q, per-head LayerNorm on index_k, NeoX RoPE on both and
+        # the Z passthrough, reading the strided split_indexer views in
+        # place (no materializing copy on any of the three inputs) and
+        # quantizing index_q to e4m3 at the store.
+        index_q, index_k, index_z = fused_indexer_qkz_norm_rope(
+            index_q,
             index_k,
+            index_z,
+            self.sparse_indexer_q_norm.weight,
+            self.sparse_indexer_k_norm.weight,
+            self.sparse_indexer_rotary_emb.cos_sin_cache,
+            positions,
+            k_norm_bias=self.sparse_indexer_k_norm.bias,
+            head_dim=proxy_dim,
+            num_q_heads=num_index_q_heads,
+            num_k_heads=num_index_k_heads,
+            rotary_dim=self.sparse_indexer_rotary_emb.rotary_dim,
+            eps=self.sparse_indexer_q_norm.variance_epsilon,
+            q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
         )
         index_q = index_q.reshape(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim)
-        index_z = index_z.view(num_tokens, num_index_k_heads, proxy_dim).contiguous()
-
+        index_k = index_k.reshape(num_tokens, num_index_k_heads, proxy_dim)
+        index_z = index_z.reshape(num_tokens, num_index_k_heads, proxy_dim)
         weights = weights.to(dtype=torch.float32)
         weights = weights.view(num_tokens, self.num_kv_heads, heads_per_group)
         weights = weights * (float(heads_per_group) ** -0.5)
@@ -526,9 +532,16 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
         attn_output = output.view(num_tokens, self.num_heads * self.head_dim)
         if gate is not None:
-            attn_output = (
-                attn_output.view(num_tokens, self.num_heads, self.head_dim) * gate.unsqueeze(-1).sigmoid()
-            ).view(num_tokens, -1)
+            # The gate is the tail of the fused qkv+indexer GEMM row. Address
+            # it through the offset-0 qkv view of the same storage so no
+            # mid-storage view crosses the op boundary (the dispatch layer
+            # would materialize it first: TensorMove).
+            attn_output = gated_scale(
+                attn_output,
+                qkv,
+                gate.storage_offset(),
+                gate.shape[-1],
+            )
         output_tensor, _ = self.o_proj(attn_output)
         return output_tensor
 
@@ -598,16 +611,66 @@ class AscendStep5Attention(nn.Module):
         if norm_dtype is None:
             norm_dtype = get_step5_norm_dtype(vllm_config.model_config.hf_config)
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=qkv_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        # Pack Q/K/V and the per-head gate into one column-parallel GEMM when
+        # KV heads are partitioned (not replicated) across TP ranks, mirroring
+        # the upstream ``Step5Attention`` construction. The local output layout
+        # is [Q, K, V, gate]. ``MergedColumnParallelLinear`` cannot replicate
+        # KV heads, so packing stays off when ``total_num_kv_heads < tp_size``
+        # and the layer falls back to ``qkv_proj`` + ``g_proj``.
+        packed_quant_ok = True
+        if use_head_wise_attn_gate and quant_config is not None:
+            tp_rank = get_tensor_model_parallel_rank()
+            packed_quant_ok = all(
+                isinstance(
+                    LinearBase(
+                        hidden_size,
+                        width,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.{name}",
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                    ).quant_method,
+                    UnquantizedLinearMethod,
+                )
+                for name, width in (
+                    (
+                        "qkv_proj",
+                        (self.total_num_heads + 2 * num_kv_heads) * self.head_dim,
+                    ),
+                    ("g_proj", self.total_num_heads),
+                )
+            )
+        self.fuse_qkv_gate = (
+            use_head_wise_attn_gate and not qkv_bias and self.total_num_kv_heads >= tp_size and packed_quant_ok
         )
-        self.params_dtype = self.qkv_proj.params_dtype
+        if self.fuse_qkv_gate:
+            # Keep the qkv_proj prefix so quantization configuration and
+            # checkpoint weight remapping that target qkv_proj continue to
+            # apply to the fused module (same contract as upstream).
+            self.qkvg_proj = MergedColumnParallelLinear(
+                hidden_size,
+                [
+                    self.total_num_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_heads,
+                ],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.params_dtype = self.qkvg_proj.params_dtype
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=qkv_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.params_dtype = self.qkv_proj.params_dtype
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -615,7 +678,7 @@ class AscendStep5Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if use_head_wise_attn_gate:
+        if use_head_wise_attn_gate and not self.fuse_qkv_gate:
             self.g_proj = ColumnParallelLinear(
                 hidden_size,
                 self.total_num_heads,
@@ -676,7 +739,12 @@ class AscendStep5Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkvg = None
+        if self.fuse_qkv_gate:
+            qkvg, _ = self.qkvg_proj(hidden_states)
+            qkv = qkvg[..., : self.q_size + 2 * self.kv_size]
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
         if self.use_fused_qknorm_rope:
             q, k, v = fused_qknorm_rope(
                 qkv,
@@ -702,13 +770,26 @@ class AscendStep5Attention(nn.Module):
                 q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
-        extra_dims = None
-        if self.use_head_wise_attn_gate:
-            extra_dims, _ = self.g_proj(hidden_states)
-            attn_output = (
-                attn_output.view(*attn_output.shape[:-1], self.num_heads, self.head_dim)
-                * extra_dims.unsqueeze(-1).sigmoid()
-            ).view(*attn_output.shape)
+        if qkvg is not None:
+            # Packed layout: the gate is the tail of the qkvg row and anchors
+            # at the packed GEMM output (offset-0), so no mid-storage view
+            # crosses the op boundary (the dispatch layer would materialize
+            # it first: TensorMove).
+            gate_base = qkvg
+            gate_col_offset = self.q_size + 2 * self.kv_size
+        elif self.use_head_wise_attn_gate:
+            # Standalone layout: the g_proj output anchors itself with offset 0.
+            gate_base, _ = self.g_proj(hidden_states)
+            gate_col_offset = 0
+        else:
+            gate_base = None
+        if gate_base is not None:
+            attn_output = gated_scale(
+                attn_output,
+                gate_base,
+                gate_col_offset,
+                self.num_heads,
+            )
         output, _ = self.o_proj(attn_output)
         return output
 
