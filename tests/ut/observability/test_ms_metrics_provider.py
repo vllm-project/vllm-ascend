@@ -320,13 +320,17 @@ def test_graph_replay_handler_records_duration_ms(monkeypatch):
     handlers = _load_feature_handlers(monkeypatch, "test_acl_graph_replay", "acl_graph")
     sys.modules[_COMMON_MODULE].set_metric_level("detail")
 
-    assert handlers.graph_replay_handler(lambda manager: "replayed", object()) == "replayed"
+    assert handlers.graph_replay_handler(lambda manager, model: "replayed", object(), None) == "replayed"
     assert metrics.record_metric.call_args.args[0] == "graph:replay:duration_ms"
-    assert metrics.record_metric.call_args.kwargs["labels"] == {}
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"mode": "full"}
+    assert handlers.graph_pw_replay_handler(lambda manager, model: "replayed", object(), None) == "replayed"
+    assert metrics.record_metric.call_args.args[0] == "graph:replay:duration_ms"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {"mode": "piecewise"}
 
     metrics.reset_mock()
     sys.modules[_COMMON_MODULE].set_metric_level("basic")
-    handlers.graph_replay_handler(lambda manager: "replayed", object())
+    handlers.graph_replay_handler(lambda manager, model: "replayed", object(), None)
+    handlers.graph_pw_replay_handler(lambda manager, model: "replayed", object(), None)
     metrics.record_metric.assert_not_called()
 
 
