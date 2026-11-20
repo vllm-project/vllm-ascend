@@ -5,6 +5,8 @@ entries:
       Added BF16 and native C8 HiSparse support with prefill context parallelism,
       PCP decode request sharding, decode graphs and MTP on 950PR&950DT Products
       using Model Runner V2.
+      Ascend A3 also supports these features with INT8 C8 HiSparse in Model
+      Runner V2.
       With HiSparse configured, enable PCP by setting
       `--prefill-context-parallel-size` greater than 1; the default remains 1.
       Later speculative draft steps remain replicated.

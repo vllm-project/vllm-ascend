@@ -383,8 +383,15 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
     assert cache.host_mirror_required
 
 
-@pytest.mark.parametrize("prefill,pcp_world_size,capture", [(False, 2, False), (True, 2, False), (True, 4, True)])
-def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill):
+@pytest.mark.parametrize(
+    "prefill,pcp_world_size,capture,dtype",
+    [
+        (False, 2, False, torch.float8_e4m3fn),
+        (True, 2, False, torch.int8),
+        (True, 4, True, torch.float8_e4m3fn),
+    ],
+)
+def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill, dtype):
     from vllm.config.compilation import CUDAGraphMode
 
     import vllm_ascend.attention.sfa_hisparse as module
@@ -394,6 +401,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)
     impl.pcp_enabled = True
     impl.is_pcp_decode_sharded = not prefill
+    impl.c8_cache_dtype = dtype
     impl._kv_staging_capacity = 256
     impl.index_group = NS(logical_topk_indices=torch.empty(1))
     impl.hisparse_cache = handle()
@@ -426,7 +434,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
 
     def fused(self, hidden, caches, cos, sin, mapping, **kwargs):
         assert caches[0].shape == (2, 128, 1, module.C8_ROW_BYTES)
-        assert caches[0].dtype == torch.float8_e4m3fn
+        assert caches[0].dtype == dtype
         assert mapping.tolist() == [0, 1, 2]
         assert torch.count_nonzero(impl.hisparse_cache.view.cache) == 0
         caches[0].view(torch.uint8).view(-1, 656)[:3] = torch.arange(1, 4)[:, None]

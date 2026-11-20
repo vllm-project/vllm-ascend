@@ -309,7 +309,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             return (
                 torch.empty(
                     (self._kv_staging_capacity // 128, 128, 1, C8_ROW_BYTES),
-                    dtype=torch.float8_e4m3fn,
+                    dtype=self.c8_cache_dtype,
                     device=device,
                 ),
                 torch.arange(self._kv_staging_capacity, dtype=torch.int64, device=device),
@@ -317,7 +317,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         # Layers execute sequentially on the same stream. Share scratch across
         # layers while keeping its address fixed for graph capture/replay.
-        key = ("ascend_hisparse_pcp_prolog", self._kv_staging_capacity)
+        key = ("ascend_hisparse_pcp_prolog", self._kv_staging_capacity, self.c8_cache_dtype)
         return current_workspace_manager().get_persistent_resource(key, allocate)
 
     def _prolog_slot_mapping(self, mapping, num_input_rows):

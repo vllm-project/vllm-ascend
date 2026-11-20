@@ -11,7 +11,9 @@ import torch_npu
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.forward_context import override_forward_context  # noqa: E402
 from vllm.v1.hisparse.runtime import PagedCacheView  # noqa: E402
+from vllm.v1.worker.workspace import WorkspaceManager  # noqa: E402
 
+from vllm_ascend.attention import sfa_hisparse  # noqa: E402
 from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl  # noqa: E402
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl  # noqa: E402
 from vllm_ascend.hisparse.cache_ops import gather_resident_rows  # noqa: E402
@@ -20,9 +22,9 @@ from vllm_ascend.utils import AscendDeviceType, bootstrap_custom_op_env, get_asc
 
 
 @pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("hisparse", [False, True])
-def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
-    """Check INT8 weight slices and resident writes against SFA in eager and graph modes."""
+@pytest.mark.parametrize(("hisparse", "pcp"), [(False, False), (True, False), (True, True)])
+def test_int8_prolog_writes_match_sfa(capture, hisparse, pcp, monkeypatch):
+    """Check INT8 Prolog outputs and KV writes against SFA in eager and graph modes."""
     bootstrap_custom_op_env()
     if not torch.npu.is_available() or get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
         pytest.skip("requires A2/A3")
@@ -42,7 +44,8 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
         impl.sfa_qsfa_kr_cache_dummy = torch.empty(0, device="npu", dtype=torch.bfloat16)
         impl.is_kv_consumer = False
         impl.has_indexer = True
-        impl.pcp_enabled = False
+        impl.pcp_enabled = pcp
+        impl.is_pcp_decode_sharded = False
         impl.local_num_heads = 4
         impl.q_lora_rank = 2048
         impl.kv_lora_rank = 512
@@ -78,13 +81,22 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
         valid = 32
         slots = torch.arange(128, 128 + rows, device="npu", dtype=torch.int32)
         metadata = NS(
-            query_start_loc=torch.tensor([0, valid], dtype=torch.int32, device="npu"), hisparse_for_capture=True
+            query_start_loc=torch.tensor([0, valid], dtype=torch.int32, device="npu"),
+            hisparse_for_capture=True,
+            uses_pcp_sharded_layout=pcp,
+            num_prefills=int(pcp),
         )
         impl.hisparse_cache = NS(write_target=lambda n, s: (cache, slots, rows))
         x = torch.randn(rows, 6144, device="npu", dtype=torch.bfloat16)
         cos = torch.randn(rows, 1, 1, 64, device="npu", dtype=torch.bfloat16)
         sin = torch.randn_like(cos)
         refcache = (torch.empty((1, 128, 1, 656), device="npu", dtype=torch.int8),)
+        if pcp:
+            workspace = WorkspaceManager(slots.device)
+            monkeypatch.setattr(sfa_hisparse, "current_workspace_manager", lambda: workspace)
+            impl.index_group = NS(logical_topk_indices=slots)
+            scratch, _ = impl._pcp_prolog_workspace()
+            workspace.lock()
 
         def forward():
             with override_forward_context(NS()):
@@ -115,11 +127,16 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
                 torch.testing.assert_close(a.cpu(), b.cpu(), atol=0, rtol=0)
             for a, b in zip(actual[3], ref[3]):
                 torch.testing.assert_close(a.cpu(), b.cpu(), atol=0, rtol=0)
-            selected = torch.empty((rows, 656), device="npu", dtype=torch.int8)
-            gather_resident_rows(cache, selected, torch.arange(start, start + rows, device="npu", dtype=torch.int32))
-            expected = refcache[0].view(-1, 656)[:valid]
-            torch.testing.assert_close(selected[:valid].cpu(), expected.cpu(), atol=0, rtol=0)
-            assert torch.all(selected[valid:].cpu() == -7)
+            expected = refcache[0].view(-1, 656)
+            if pcp:
+                torch.testing.assert_close(scratch.view(-1, 656)[:rows].cpu(), expected[:rows].cpu(), atol=0, rtol=0)
+            else:
+                selected = torch.empty((rows, 656), device="npu", dtype=torch.int8)
+                gather_resident_rows(
+                    cache, selected, torch.arange(start, start + rows, device="npu", dtype=torch.int32)
+                )
+                torch.testing.assert_close(selected[:valid].cpu(), expected[:valid].cpu(), atol=0, rtol=0)
+                assert torch.all(selected[valid:].cpu() == -7)
     finally:
         torch.npu.synchronize()
         if graph is not None:
