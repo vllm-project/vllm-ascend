@@ -11,7 +11,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
-from vllm_ascend.ops.triton.muls_add import muls_add_triton
+from vllm_ascend.ops.triton.scale_and_add import scale_and_add_triton
 
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
@@ -241,7 +241,7 @@ def _rope_forward_oot_impl_fake(
     return query, key
 
 
-def _muls_add_impl_fake(
+def _scale_and_add_fake(
     x: torch.Tensor,
     y: torch.Tensor,
     scale: float,
@@ -298,9 +298,18 @@ direct_register_custom_op(
 )
 
 direct_register_custom_op(
+    op_name="scale_and_add",
+    op_func=scale_and_add_triton,
+    fake_impl=_scale_and_add_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+# Preserve the existing dispatcher name for callers and captured graphs.
+direct_register_custom_op(
     op_name="muls_add",
-    op_func=muls_add_triton,
-    fake_impl=_muls_add_impl_fake,
+    op_func=scale_and_add_triton,
+    fake_impl=_scale_and_add_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

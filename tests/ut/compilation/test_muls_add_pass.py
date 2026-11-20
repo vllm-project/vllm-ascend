@@ -34,7 +34,7 @@ def fused_op(monkeypatch):
         lib.impl("fused", lambda x, y, scale: x * scale + y, "CPU")
         torch.library.register_fake("ascend_test_muls_add::fused", lambda x, y, scale: torch.empty_like(x), lib=lib)
         op = torch.ops.ascend_test_muls_add.fused.default
-        monkeypatch.setattr(torch.ops.vllm, "muls_add", op, raising=False)
+        monkeypatch.setattr(torch.ops.vllm, "scale_and_add", op, raising=False)
         yield op
     finally:
         lib._destroy()

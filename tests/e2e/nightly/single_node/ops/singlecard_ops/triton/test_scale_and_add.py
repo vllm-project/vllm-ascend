@@ -3,7 +3,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.muls_add import muls_add_triton
+from vllm_ascend.ops.triton.scale_and_add import scale_and_add_triton
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
 
@@ -19,8 +19,8 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
     ],
 )
 @torch.inference_mode()
-def test_muls_add_triton_correctness(shape, dtype, scale):
-    """compare the correctness of muls_add_triton with the PyTorch baseline implementation."""
+def test_scale_and_add_triton_correctness(shape, dtype, scale):
+    """compare the correctness of scale_and_add_triton with the PyTorch baseline implementation."""
     init_device_properties_triton()
     device = "npu"
 
@@ -28,7 +28,7 @@ def test_muls_add_triton_correctness(shape, dtype, scale):
     x = torch.randn(*shape, dtype=dtype, device=device)
     y = torch.randn(*shape, dtype=dtype, device=device)
 
-    out_triton = muls_add_triton(x, y, scale)
+    out_triton = scale_and_add_triton(x, y, scale)
     out_ref = x * scale + y
 
     rtol, atol = 1e-3, 1e-3

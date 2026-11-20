@@ -5,7 +5,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.jit
-def muls_add_kernel(
+def scale_and_add_kernel(
     x_ptr,  # *Pointer* to first input vector.
     y_ptr,  # *Pointer* to second input vector.
     output_ptr,  # *Pointer* to output vector.
@@ -26,7 +26,7 @@ def muls_add_kernel(
         tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def muls_add_triton(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
+def scale_and_add_triton(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Tensor:
     assert x.shape == y.shape, "Input tensors must have the same shape."
     hidden_size = x.shape[-1]
 
@@ -44,7 +44,7 @@ def muls_add_triton(x: torch.Tensor, y: torch.Tensor, scale: float) -> torch.Ten
     num_programs = min(num_blocks, num_cores)
 
     # Launch the Triton kernel
-    muls_add_kernel[(num_programs,)](
+    scale_and_add_kernel[(num_programs,)](
         x,
         y,
         output,
