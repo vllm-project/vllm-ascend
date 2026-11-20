@@ -1,35 +1,10 @@
 # Triton operator layout
 
-Runner operators live in the main package, with their documentation in `docs/`.
-Model-layer kernels and general utilities keep their functional directories. A
-model supported by a runner does not make all of its mathematical kernels runner
-operators.
+Use this inventory to find the module and its owning runner or model. Implementations live at the package root or in functional subdirectories. The shared JIT registry and generic warmup code serve these paths.
 
-This inventory covers every non-`__init__.py` Python module under this package.
-It includes launch wrappers and utilities as well as JIT definitions. Operators
-defined under `worker/v2/`, `models/`, or other packages are outside this layout
-change.
+Find callable interfaces in the [Triton operator reference](../../../docs/source/developer_guide/operator_reference/triton/index.md). The [contribution guide](../../../docs/source/developer_guide/contribution/triton_operators.md) describes how to document a wrapper and verify its production caller. Earlier [package notes](docs/) cover the remaining kernels and cross-component designs.
 
-Warmup uses the shared upstream JIT registry. The generic
-`ascend_jit_warmup.py` stays at the package root.
-
-## Adding or moving an operator
-
-Paths below are relative to `vllm_ascend/ops/triton/`.
-
-| Operator ownership | Implementation | Operator document |
-| --- | --- | --- |
-| V2 runner operator | `<functional-dir>/<operator>.py` | `docs/<operator>.md` |
-| Shared runner, model-layer, or utility operator | Existing functional directory | `docs/<operator>.md` |
-
-The functional subdirectory is optional for operators placed directly at the
-package root. New code and documents use the main package rather than a `v2/`
-subdirectory. Choose ownership from the production callers.
-
-Use the [operator documentation template](docs/triton_description_specification.md)
-for the operator document. When adding or moving a module, update this inventory,
-production imports, warmup registrations, tests and mock targets, and documentation
-examples and links together.
+When adding or moving a module, update its inventory entry, production imports, warmup registrations, tests and documentation links.
 
 ## Runner operators
 
@@ -37,18 +12,18 @@ examples and links together.
 | --- | --- | --- |
 | [engram_lookback.py](engram_lookback.py) | `models/deepseek_v41/engram/model_state.py` | [engram.md](docs/engram.md) |
 | [apply_grammar_bitmask.py](apply_grammar_bitmask.py) | `patch/worker/patch_triton.py` | [apply_grammar_bitmask.md](docs/apply_grammar_bitmask.md) |
-| [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [compute_slot_mappings.md](docs/compute_slot_mappings.md) |
+| [block_table/compute_slot_mappings.py](block_table/compute_slot_mappings.py) | `worker/v2/block_table.py` | [`ascendblocktables.compute_slot_mappings`](../../../docs/source/developer_guide/operator_reference/triton/ascendblocktables.compute_slot_mappings.md) |
 | [mamba/precopy.py](mamba/precopy.py) | `patch/worker/patch_triton.py` | [mamba_precopy.md](docs/mamba_precopy.md) |
 | [mamba/postprocess.py](mamba/postprocess.py) | `patch/worker/patch_mamba_utils.py` | [mamba_postprocess.md](docs/mamba_postprocess.md) |
-| [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [num_nans.md](docs/num_nans.md) |
-| [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [categorical_sample.md](docs/categorical_sample.md) |
+| [metrics/num_nans.py](metrics/num_nans.py) | `patch/worker/patch_triton.py` | [`get_num_nans`](../../../docs/source/developer_guide/operator_reference/triton/get_num_nans.md) |
+| [sample/categorical_sample.py](sample/categorical_sample.py) | `patch/worker/patch_triton.py` | [`categorical_sample`](../../../docs/source/developer_guide/operator_reference/triton/categorical_sample.md) |
 | [sample/fill_logprob_token_idx.py](sample/fill_logprob_token_idx.py) | `patch/worker/patch_triton.py` | [fill_logprob_token_ids.md](docs/fill_logprob_token_ids.md) |
-| [sample/sampling_mask.py](sample/sampling_mask.py) | `patch/worker/patch_triton.py` | [sampling_mask.md](docs/sampling_mask.md) |
+| [sample/sampling_mask.py](sample/sampling_mask.py) | `patch/worker/patch_triton.py` | [`sampling_mask_from_logits_npu`](../../../docs/source/developer_guide/operator_reference/triton/sampling_mask_from_logits_npu.md) |
 | [sample/thinking_budget.py](sample/thinking_budget.py) | `patch/worker/patch_triton.py` | [thinking_budget.md](docs/thinking_budget.md) |
-| [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [prepare_dflash_inputs.md](docs/prepare_dflash_inputs.md) |
-| [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [resample.md](docs/resample.md) |
-| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [gdn_prepare.md](docs/gdn_prepare.md) |
-| [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [entropy_verify.md](docs/entropy_verify.md) |
+| [spec_decode/prepare_dflash_inputs.py](spec_decode/prepare_dflash_inputs.py) | `worker/v2/spec_decode/dflash/speculator.py` | [`prepare_dflash_inputs_triton`](../../../docs/source/developer_guide/operator_reference/triton/prepare_dflash_inputs_triton.md) |
+| [spec_decode/resample.py](spec_decode/resample.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [`resample`](../../../docs/source/developer_guide/operator_reference/triton/resample.md) |
+| [mamba/gdn_prepare.py](mamba/gdn_prepare.py) | `attention/gdn_attn_builder.py` | [`prepare_gdn`](../../../docs/source/developer_guide/operator_reference/triton/prepare_gdn.md) |
+| [spec_decode/entropy_verify.py](spec_decode/entropy_verify.py) | `worker/v2/spec_decode/rejection_sampler_utils.py` | [`rejection_sample`](../../../docs/source/developer_guide/operator_reference/triton/rejection_sample.md) |
 
 ## Shared runner support
 
@@ -118,15 +93,15 @@ configuration rather than the runner input or sampling interface.
 | [kda/kda.py](kda/kda.py) | KDA computation |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
-| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
-| [kda/recoverssm.py](kda/recoverssm.py) | KDA RecoverSSM operators and commit context; [operator documentation](docs/kda_recoverssm.md) |
+| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [`kimi_pixel_norm_lut`](../../../docs/source/developer_guide/operator_reference/triton/kimi_pixel_norm_lut.md). |
+| [kda/recoverssm.py](kda/recoverssm.py) | KDA RecoverSSM operators and commit context; [`kda_recoverssm_verify`](../../../docs/source/developer_guide/operator_reference/triton/kda_recoverssm_verify.md) |
 | [kda/solve_tril.py](kda/solve_tril.py) | KDA computation |
 | [kda/utils.py](kda/utils.py) | KDA computation |
 | [hisparse.py](hisparse.py) | HiSparse mapped-Host refill, Resident gather, KV packing and invalidation; see [operator documentation](docs/hisparse.md). |
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
-| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion; [interface and modes](docs/split_qkv_rmsnorm_mrope.md) |
+| [linearnorm/split_qkv_rmsnorm_mrope.py](linearnorm/split_qkv_rmsnorm_mrope.py) | Normalization/rotary fusion; [`triton_split_qkv_rmsnorm_mrope`](../../../docs/source/developer_guide/operator_reference/triton/triton_split_qkv_rmsnorm_mrope.md) |
 | [linearnorm/split_qkv_rmsnorm_rope.py](linearnorm/split_qkv_rmsnorm_rope.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_simt.py](linearnorm/split_qkv_rmsnorm_rope_simt.py) | Normalization/rotary fusion |
 | [linearnorm/split_qkv_rmsnorm_rope_vnorm.py](linearnorm/split_qkv_rmsnorm_rope_vnorm.py) | Normalization/rotary fusion |
@@ -153,15 +128,15 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/lightning_v2_prepare.py](qwen4_exp/lightning_v2_prepare.py) | Native QSA LightningIndexerV2 input preparation; [operator documentation](docs/prepare_qsa_lightning_v2_inputs.md) |
-| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [compressed-key preparation](docs/qsa_compress_groups_with_ratio.md) |
+| [qwen4_exp/lightning_v2_prepare.py](qwen4_exp/lightning_v2_prepare.py) | Native QSA LightningIndexerV2 input preparation; [`prepare_qsa_lightning_v2_inputs`](../../../docs/source/developer_guide/operator_reference/triton/prepare_qsa_lightning_v2_inputs.md) |
+| [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive; [`qsa_compress_groups_with_ratio`](../../../docs/source/developer_guide/operator_reference/triton/qsa_compress_groups_with_ratio.md) |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
-| [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
+| [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [`store_indexer_key_scale`](../../../docs/source/developer_guide/operator_reference/triton/store_indexer_key_scale.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
-| [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
-| [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
-| [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
+| [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [`fused_add_rms_norm_cast`](../../../docs/source/developer_guide/operator_reference/triton/fused_add_rms_norm_cast.md) |
+| [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [`fused_qknorm_rope`](../../../docs/source/developer_guide/operator_reference/triton/fused_qknorm_rope.md) |
+| [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [`update_decode`](../../../docs/source/developer_guide/operator_reference/triton/update_decode.md), [`update_verify`](../../../docs/source/developer_guide/operator_reference/triton/update_verify.md), [`update_prefill`](../../../docs/source/developer_guide/operator_reference/triton/update_prefill.md), [`build_prefill_groups`](../../../docs/source/developer_guide/operator_reference/triton/build_prefill_groups.md), [`append_current_region`](../../../docs/source/developer_guide/operator_reference/triton/append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |
 | [turboquant_finalize.py](turboquant_finalize.py) | Model/attention primitive or shared utility |

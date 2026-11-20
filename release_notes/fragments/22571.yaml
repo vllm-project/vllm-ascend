@@ -1,0 +1,4 @@
+pr: 22571
+entries:
+  - category: documentation
+    text: Developers can look up Triton operators by callable name in the Developer Guide and follow links to their implementations, production callers, and tests.

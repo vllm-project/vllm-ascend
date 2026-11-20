@@ -4,9 +4,15 @@
 
 - [ ] PR description.
 - [ ] Source files.
-- [ ] Markdown operator document: `vllm_ascend/ops/triton/docs/<operator>.md`.
+- [ ] A reference page for the callable wrapper and an alphabetical entry in the [Triton operator index](../operator_reference/triton/index.md).
 - [ ] Test files: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/`; warmup unit tests, when applicable: `tests/ut/model_executor/warmup/`.
 - [ ] Repository-wide deliverables: see the [contribution guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html) and [release note guide](https://github.com/vllm-project/vllm-ascend/blob/main/release_notes/README.md).
+
+## Documenting an operator
+
+Create one page per independently callable operation under `docs/source/developer_guide/operator_reference/triton/`. Start with the [operator template](triton_operator_template.md). Use the wrapper name as the filename, with a module qualifier if needed to distinguish independent interfaces. Record the production caller or registration, the returned tensors, in-place writes, constraints and tests.
+
+Keep private kernels, hardware variants and lifecycle helpers with their wrapper. Give independently callable operations distinct pages even when they currently share a Python module. Record a production site that directly launches a kernel without an operator wrapper as a caller follow-up. When a contract changes, update its reference page in the same PR.
 
 ## Overall objectives
 
@@ -27,7 +33,7 @@ Contributors must provide the following content in the deliverables before merge
     - [ ] Functionality, inputs and outputs, production callers, and whether the operator is framework-wide or model-specific.
     - [ ] Motivation, such as model support, a bug fix, performance optimization, or temporary compatibility. Temporary implementations include a replacement and removal plan.
     - [ ] Cross-device compatibility and actual validation results. Operators should not be restricted to one particular device; device-specific optimization preserves functionality and correctness on other applicable devices.
-- [ ] The Markdown document follows the [operator template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md), describing functionality, algorithm, parameters, constraints, origin and differences, and test entry points.
+- [ ] The Markdown document follows the [operator template](triton_operator_template.md), describing functionality, algorithm, parameters, constraints, origin and differences, and test entry points.
 - [ ] The implementation matches the documented inputs, outputs, and behavior.
 - [ ] The operator is integrated into the corresponding model or shared operator call path in vLLM-Ascend.
 

@@ -23,22 +23,10 @@ strided caches both use the PR's byte-pointer copy algorithm with a startup-prec
 batch-memcpy launcher. The fallback uses Torch clearing to avoid a second lazy Triton kernel.
 Invalid inner layouts remain rejected by the strided fallback, as in the PR.
 
-## Numerical contract
+## Operator contracts
 
-- Fused gather produces zero for invalid indices and false initial-state flags.
-  Missing flags mean all valid rows are gathered. Repeated gather indices work.
-- Fused/byte-copy scatter skips invalid indices; valid destinations must be
-  unique. Initial-state flags do not suppress final writes.
-- Cache page gaps and layer storage offsets are not copied or overwritten.
-  Address arithmetic widens to INT64 before multiplication, including INT32
-  index inputs and pages more than 4 GiB apart.
-- Packed outputs have the cache dtype. Final states are converted to that dtype
-  and contiguous storage before scatter, as in PR #17301.
-- Empty selections validate metadata and do not launch a copy kernel.
-- Cache/packed storage must not overlap. Concurrent writers require upstream
-  coordination. These are caller preconditions, not synchronizing host scans.
-- The fallback gathers invalid indices as zero and skips invalid scatter
-  destinations, including contiguous unsupported caches.
+- [Gather selected pages](../../../../docs/source/developer_guide/operator_reference/triton/kda_state_gather.md)
+- [Scatter final states](../../../../docs/source/developer_guide/operator_reference/triton/kda_state_scatter.md)
 
 ## Registry compilation and prepared launches
 

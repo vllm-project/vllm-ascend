@@ -13,6 +13,10 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 - **[Contributing Triton operators](contribution/triton_operators.md)** — Deliverables and operator quality requirements
 
+## Operator Reference
+
+- [Triton operators](operator_reference/triton/index.md)
+
 ## Design Documents
 
 Explore the design documents covering patch architecture, CPU binding, model runner internals, disaggregated prefill, EPLB, ACL Graph, KV Cache Pool, custom operators, context parallel, quantization, and NPUGraph.

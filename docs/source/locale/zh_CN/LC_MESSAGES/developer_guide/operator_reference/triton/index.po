@@ -1,0 +1,9 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "# Triton operators"
+msgstr "# Triton 算子"
+
+msgid "| Operator | Purpose |"
+msgstr "| 算子 | 用途 |"
