@@ -223,12 +223,14 @@ jobs:
               # ready-precise is not escalated to the full suite.
               - '.github/workflows/scripts/test_selector.py'
               - '!**/*.md'
-              # CI pipeline files still require a run-enabling label in ci-gate.
-              # ready-precise keeps the coverage recommendation; it is not
-              # escalated to the full suite. estimated_times.yaml is omitted
-              # because it only affects load-balanced partitioning.
-              # test_selector.py is listed under src: a label is required,
-              # and ready-precise keeps the precise path.
+              # CI pipeline files: a ready-precise PR that touches the test
+              # selection or execution pipeline itself must run the full
+              # suite, because the precise-selection result can no longer be
+              # trusted. estimated_times.yaml is intentionally omitted: it
+              # only affects load-balanced partitioning, not which tests are
+              # recommended, so timing-only PRs keep ready-precise.
+              # test_selector.py is listed under src instead: a label is
+              # required, and ready-precise keeps the precise path.
             ci_pipeline:
               - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'
@@ -529,8 +531,10 @@ jobs:
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - ready-precise, or no run-enabling label, with coverage
-    #                 paths, including a PR that changes the CI pipeline files
-    #   all         - main2main
+    #                 paths. A ready-precise PR that changes the CI pipeline
+    #                 files is not this mode.
+    #   all         - main2main, or ready-precise when the PR changes the CI
+    #                 pipeline itself
     #   none        - ready-precise or unlabeled, and the diff recommends no tests
     if: >-
       ${{
@@ -615,9 +619,8 @@ jobs:
           # does not run E2E.
           HAS_NO_RUN_LABEL: ${{ !contains(github.event.pull_request.labels.*.name, 'main2main') && !contains(github.event.pull_request.labels.*.name, 'ready-precise') && !contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
           # Reported by the paths-filter step in the pre-commit job; this job
-          # does not run its own filter. Both are diagnostic only here (they
-          # decide which modes are *allowed* in ci-gate), the labels above
-          # decide which mode *runs*.
+          # does not run its own filter. src only decides what ci-gate allows.
+          # ci_pipeline also selects the mode for a ready-precise PR.
           SRC: ${{ needs.pre-commit.outputs.src }}
           CI_PIPELINE: ${{ needs.pre-commit.outputs.ci_pipeline }}
           RECOMMEND_RESULT: ${{ needs.recommend-tests.result }}
@@ -628,6 +631,13 @@ jobs:
             # The main2main label requests the full suite on both the verified
             # vLLM main commit and the release tag, so the coverage-based
             # recommendation cannot be used: select the whole suite instead.
+            MODE="all"
+          elif [ "${HAS_READY_PRECISE}" = "true" ] && [ "${CI_PIPELINE}" = "true" ]; then
+            # The PR changes the test selection/execution pipeline itself,
+            # so the precise recommendation can no longer be trusted even
+            # though ready-precise was set. Escalate to the full suite.
+            # An unlabeled PR keeps the recommendation: ci-gate still requires
+            # the label before E2E, and this path only runs CPU UT.
             MODE="all"
           elif [ "${HAS_READY_PRECISE}" = "true" ] || [ "${HAS_NO_RUN_LABEL}" = "true" ]; then
             if [ "${RECOMMEND_RESULT}" != "success" ]; then
