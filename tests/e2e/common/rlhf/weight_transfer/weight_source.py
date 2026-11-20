@@ -308,7 +308,7 @@ class FixedRandomWeightSource(WeightSource):
         from safetensors.torch import save_file
 
         if envs.VLLM_USE_MODELSCOPE:
-            from modelscope import model_file_download as download_config
+            from modelscope import model_file_download as download_config  # type: ignore[import-untyped]
         else:
             from huggingface_hub import hf_hub_download as download_config
 

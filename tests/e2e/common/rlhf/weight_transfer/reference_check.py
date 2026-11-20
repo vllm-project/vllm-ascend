@@ -5,8 +5,10 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.utils.network_utils import get_open_port
@@ -274,11 +276,18 @@ def assert_weight_update_matches_reference(
 class WeightUpdateTestWorkerExtension:
     """Read real worker parameters through the development collective RPC."""
 
+    if TYPE_CHECKING:
+        # Supplied by the worker class when the extension is composed at runtime.
+        get_model: Callable[[], torch.nn.Module]
+        get_draft_model: Callable[[], torch.nn.Module | None]
+
     def draft_model_architecture(self):
         return type(self.get_draft_model()).__name__
 
     def snapshot_draft_context_projections(self):
-        model = self.get_draft_model().model
+        draft_model = self.get_draft_model()
+        assert draft_model is not None, "Draft model is missing"
+        model = draft_model.model
         return {
             name: hashlib.sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
             for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight")

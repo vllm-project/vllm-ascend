@@ -184,7 +184,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
             server_port=port,
             env_dict=env_dict,
         ) as server:
-            signature = generation_signature(server.get_client(), case.id)
+            signature = generation_signature(server.get_client(), case.id, prompts=case.prompts)
             projections = post_control(
                 server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
             ).json()["results"]
@@ -212,7 +212,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
         try:
             # Reuse HCCL for warmup and all updates; capture graphs before
             # recording the addresses which live updates must preserve.
-            generation_signature(client, case.id)
+            generation_signature(client, case.id, prompts=case.prompts)
             architectures = post_control(server, "collective_rpc", json={"method": "draft_model_architecture"}).json()[
                 "results"
             ]
@@ -244,7 +244,7 @@ def run_draft_hccl_weight_transfer(tmp_path, monkeypatch, packed: bool, enforce_
                 projections = post_control(
                     server, "collective_rpc", json={"method": "snapshot_draft_context_projections"}
                 ).json()["results"]
-                signature = generation_signature(client, case.id)
+                signature = generation_signature(client, case.id, prompts=case.prompts)
                 observation = {
                     "parameters": parameter_digests(after),
                     "generation": signature,
