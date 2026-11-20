@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_draft_config_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -411,7 +411,10 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
 
             return AscendHiSparseImpl
-        if get_ascend_config().sparse_kv_offload_config.enabled:
+        # Draft layers keep their KV in HBM even when target layers offload.
+        # Select the implementation while the existing draft-load context is
+        # active, before the upstream runner tags the loaded attention layers.
+        if get_ascend_config().sparse_kv_offload_config.enabled and not is_draft_config_context():
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             return AscendSFAKVOffloadImpl

@@ -142,6 +142,66 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     assert metadata.num_decode_tokens == 0
 
 
+def _make_draft_decode_metadata(max_query_len: int):
+    common = _make_boundary_decode_metadata()
+    common.max_query_len = max_query_len
+    common.num_actual_tokens = max_query_len
+    common.query_start_loc_cpu = torch.tensor([0, max_query_len])
+    common.is_prefilling = torch.tensor([False])
+    # attn_utils derives a per-layer variant for the MTP draft layers and marks
+    # it with copy_sfa_draft_index so the offload keeps the reuse path.
+    common.copy_sfa_draft_index = 0
+    return common
+
+
+@pytest.mark.parametrize(
+    ("max_query_len", "expected_state"),
+    [
+        (1, AscendAttentionState.DecodeOnly),
+        (4, AscendAttentionState.SpecDecoding),
+    ],
+)
+def test_draft_decode_batch_is_never_classified_as_prefill(max_query_len, expected_state):
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
+    builder.decode_threshold = 4
+    builder.is_pd_decode_consumer = True
+    builder.copy_sfa_metadata_steps = 4
+    # build_attn_state labels a 1+num_spec token draft batch ChunkedPrefill.
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill)
+
+    with patch(
+        "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+        return_value=False,
+    ):
+        builder._populate_offload_metadata(metadata, _make_draft_decode_metadata(max_query_len))
+
+    assert metadata.num_prefills == 0
+    assert metadata.num_decodes == 1
+    assert metadata.attn_state is expected_state
+    assert AscendSFAKVOffloadImpl._is_decode_only(metadata)
+
+
+def test_prefill_batch_keeps_its_attention_state():
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.use_fused_copy_sfa = False
+    builder.decode_threshold = 4
+    builder.is_pd_decode_consumer = True
+    builder.copy_sfa_metadata_steps = 4
+    metadata = SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill)
+    common = _make_draft_decode_metadata(8)
+    del common.copy_sfa_draft_index
+
+    with patch(
+        "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
+        return_value=False,
+    ):
+        builder._populate_offload_metadata(metadata, common)
+
+    assert metadata.num_prefills == 1
+    assert metadata.attn_state is AscendAttentionState.ChunkedPrefill
+
+
 def _make_fused_overlap_impl() -> AscendSFAKVOffloadImpl:
     impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
     impl.block_size = 4
@@ -268,6 +328,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         _get_offload_layer_id=lambda _: 0,
         get_fused_overlap_cpu_kv_inputs=lambda _: (full_kv_cpu, full_rope_cpu),
         allocate_fused_overlap_membership_map=allocate_membership,
+        is_fused_membership_storage=lambda tensor: tensor.dtype == torch.int16,
         prepare_fused_overlap_external_plan=prepare_plan,
         inject_current_kv_into_selection=inject_current,
         wait_for_current_kv_writeback=wait_for_writeback,

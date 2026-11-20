@@ -95,6 +95,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Skip process-wide NUMA page migration for backend-owned host memory.
     # CPU thread binding remains enabled.
     "VLLM_ASCEND_SKIP_MIGRATEPAGES": lambda: bool(int(os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES", "0"))),
+    # Non-sensitive V1 fused-overlap hot-buffer scatter: 1 (default) combines
+    # K/RoPE writes; 0 uses two native scatters. Unsupported layouts fall back.
+    "VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER", "1"))
+    ),
 }
 
 # end-env-vars-definition
