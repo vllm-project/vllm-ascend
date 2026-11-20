@@ -200,9 +200,6 @@ def test_factory_maps_legacy_scaling_to_the_active_native_contract(scale_output,
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
         patch.object(patch_fused_moe, "get_ascend_config", return_value=config),
-        patch.object(
-            patch_fused_moe, "get_current_vllm_config", return_value=SimpleNamespace(use_v2_model_runner=True)
-        ),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
     ):
         patch_fused_moe._ascend_FusedMoE(
@@ -248,9 +245,6 @@ def test_factory_preserves_native_scaling_modes(mode_name):
     with (
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
         patch.object(patch_fused_moe, "get_ascend_config", return_value=config),
-        patch.object(
-            patch_fused_moe, "get_current_vllm_config", return_value=SimpleNamespace(use_v2_model_runner=True)
-        ),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
     ):
         patch_fused_moe._ascend_FusedMoE(num_experts=8, top_k=2, routed_scaling_factor=2.0, **scaling)
