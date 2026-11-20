@@ -275,6 +275,7 @@ class NPUModelRunner(GPUModelRunner):
             self.speculator = init_speculator(self.vllm_config, self.device, self.req_states)
             # Share the update stream between the target and draft graph managers.
             self.speculator.update_stream = self.update_stream
+        self._is_diffusion_gemma = self.model_config.architecture == "DiffusionGemmaForBlockDiffusion"
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -282,7 +283,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        if self.model_config.is_diffusion:
+        if self._is_diffusion_gemma:
             # Diffusion uses upstream input preparation rather than the FIA
             # synthetic-request padding path.
             self.input_buffers.query_start_loc = self.input_buffers.query_start_loc[: self.max_num_reqs + 1]
@@ -300,7 +301,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
-        bonus_tokens = 0 if self.model_config.is_diffusion else 1
+        bonus_tokens = 0 if self._is_diffusion_gemma else 1
         self.decode_query_len = self.num_speculative_steps + bonus_tokens
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
@@ -1186,7 +1187,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> InputBatch:
         # vLLM #56456 added num_active_loras to prepare_inputs on main; it
         # only feeds FastPrefillHelper, which this Ascend path does not use.
-        if self.model_config.is_diffusion:
+        if self._is_diffusion_gemma:
             # Preserve upstream canvas allocation and its zero bonus tokens.
             return super().prepare_inputs(scheduler_output, batch_req_state, batch_desc, num_active_loras)
         return self._prepare_inputs_impl(scheduler_output, batch_req_state, batch_desc)
