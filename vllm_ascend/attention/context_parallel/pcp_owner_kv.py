@@ -22,31 +22,17 @@ PCP_KV_SHARING_OWNER = "owner"
 PCP_KV_SHARING_MODES = (PCP_KV_SHARING_REPLICATED, PCP_KV_SHARING_OWNER)
 
 
-def get_pcp_kv_sharing_mode() -> str:
-    """Return the requested PCP KV sharing mode (default: replicated)."""
-    from vllm_ascend import envs
-
-    return normalize_pcp_kv_sharing_mode(envs.VLLM_ASCEND_PCP_KV_SHARING)
-
-
-def normalize_pcp_kv_sharing_mode(raw: str | None) -> str:
-    mode = (raw or PCP_KV_SHARING_REPLICATED).strip().lower()
-    if mode not in PCP_KV_SHARING_MODES:
-        raise ValueError(f"pcp_kv_sharing must be one of {PCP_KV_SHARING_MODES}, got {raw!r}")
-    return mode
-
-
 def pcp_kv_sharing_mode_from_config(vllm_config) -> str:
-    """Read ``additional_config.pcp_kv_sharing``, then the env override."""
-    additional = getattr(vllm_config, "additional_config", None) or {}
-    if "pcp_kv_sharing" in additional:
-        return normalize_pcp_kv_sharing_mode(additional["pcp_kv_sharing"])
-    return get_pcp_kv_sharing_mode()
+    """Return the typed ``additional_config.pcp_config.kv_sharing`` value."""
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+    return pcp_config_from_vllm_config(vllm_config).kv_sharing
 
 
 def owner_sharding_enabled(vllm_config=None) -> bool:
+    """Whether ``pcp_config.kv_sharing == "owner"`` (default: replicated)."""
     if vllm_config is None:
-        return get_pcp_kv_sharing_mode() == PCP_KV_SHARING_OWNER
+        return False
     return pcp_kv_sharing_mode_from_config(vllm_config) == PCP_KV_SHARING_OWNER
 
 

@@ -24,45 +24,29 @@ direct peer reads.  Results are identical either way.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from vllm.logger import logger
 
-from vllm_ascend import envs
+if TYPE_CHECKING:
+    from vllm_ascend.ascend_config import PcpConfig
 
 DEFAULT_STAGE_BUDGET_BYTES = 1024 * 1024 * 1024
 DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES = 256 * 1024 * 1024
 
 
-def _env_flag(value: object) -> bool:
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+def _pcp_config(pcp_config: PcpConfig | None) -> PcpConfig:
+    from vllm_ascend.ascend_config import PcpConfig
+
+    return PcpConfig() if pcp_config is None else pcp_config
 
 
-def owner_stage_enabled() -> bool:
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE)
+def owner_stage_enabled(pcp_config: PcpConfig | None = None) -> bool:
+    return _pcp_config(pcp_config).owner_stage
 
 
-def owner_cpu_plan_enabled() -> bool:
-    """Use the host-side block counts (sync-free) instead of mask indexing.
-
-    Off by default: a 1000-request run with this path hung one worker at the
-    tail (``shm_broadcast`` 60 s stall), so it needs root-causing before it is
-    trusted.  The mask path has completed multiple 1000/1000 runs.
-    """
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_CPUPLAN)
-
-
-def owner_stage_swa_enabled() -> bool:
-    """Stage the sliding-window cache as well (off by default).
-
-    Measured slower than staging the long-KV cache alone: the extra gather
-    fixes the kernel's peer reads but the per-call plan build costs more than
-    it saves until the plan build is sync-free.
-    """
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA)
-
-
-def owner_stage_swa_chunk_enabled() -> bool:
+def owner_stage_swa_chunk_enabled(pcp_config: PcpConfig | None = None) -> bool:
     """Stage only each local chunk's visible SWA window (off by default).
 
     Each prefill request reaches this rank as two virtual segments (one per
@@ -71,35 +55,22 @@ def owner_stage_swa_chunk_enabled() -> bool:
     bounded range instead of the whole live prefix keeps the fabric movement
     proportional to ``local_tokens + 2 * window``.
     """
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK)
+    return _pcp_config(pcp_config).owner_stage_swa_chunk
 
 
-def swa_chunk_debug_enabled() -> bool:
-    """Print the rank-local chunk layout once, for assumption checks."""
-    return _env_flag(envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_DEBUG)
-
-
-def _swa_chunk_stage_budget_bytes() -> int:
-    raw = envs.VLLM_ASCEND_PCP_OWNER_STAGE_SWA_CHUNK_BYTES
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES
-    return value if value > 0 else DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES
-
-
-def owner_stage_reserve_bytes() -> int:
+def owner_stage_reserve_bytes(pcp_config: PcpConfig | None = None) -> int:
     """Scratch the enabled staging paths may allocate after the KV pool is sized.
 
     The staging caches allocate their budget lazily on the first staged step,
     so the KV planner has to keep this much HBM out of the block count when it
     turns owner-sharded savings into capacity.
     """
+    config = _pcp_config(pcp_config)
     total = 0
-    if owner_stage_enabled() or owner_stage_swa_enabled():
-        total += _stage_budget_bytes()
-    if owner_stage_swa_chunk_enabled():
-        total += _swa_chunk_stage_budget_bytes()
+    if config.owner_stage:
+        total += config.owner_stage_bytes
+    if config.owner_stage_swa_chunk:
+        total += config.owner_stage_swa_chunk_bytes
     return total
 
 
@@ -174,17 +145,6 @@ def plan_swa_chunk_segments(
             )
         )
     return segments
-
-
-def _stage_budget_bytes() -> int:
-    raw = envs.VLLM_ASCEND_PCP_OWNER_STAGE_BYTES
-    if not raw:
-        return DEFAULT_STAGE_BUDGET_BYTES
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_STAGE_BUDGET_BYTES
-    return value if value > 0 else DEFAULT_STAGE_BUDGET_BYTES
 
 
 def build_stage_tables_fixed(
@@ -278,7 +238,7 @@ class PcpOwnerStageCache:
         self.block_elements = int(source_cache[0].numel())
         self.slot_elements = slot_elements
         slot_bytes = slot_elements * source_cache.element_size()
-        budget = self._budget_bytes if self._budget_bytes is not None else _stage_budget_bytes()
+        budget = self._budget_bytes if self._budget_bytes is not None else DEFAULT_STAGE_BUDGET_BYTES
         capacity = max(1, budget // max(1, slot_bytes))
         self._scratch = torch.empty((capacity, slot_elements), dtype=source_cache.dtype, device=self.device)
         self.capacity_blocks = capacity
@@ -303,6 +263,7 @@ class PcpOwnerStageCache:
         block_size: int | None = None,
         counts: list[int] | None = None,
         prepared: tuple[torch.Tensor, torch.Tensor, int] | None = None,
+        enable_timing: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Return ``(local_cache, staged_table)`` or ``None`` when it overflows.
 
@@ -314,7 +275,7 @@ class PcpOwnerStageCache:
         from .pcp_owner_timing import enter as timing_enter
         from .pcp_owner_timing import exit as timing_exit
 
-        timing = timing_enter("stage_tables")
+        timing = timing_enter("stage_tables", enable_timing)
         if prepared is not None:
             staged_table, flat, total = prepared
         elif counts is not None:
@@ -339,7 +300,7 @@ class PcpOwnerStageCache:
                 )
             return None
         slot_rows = scratch[:total]
-        timing = timing_enter("stage_copy")
+        timing = timing_enter("stage_copy", enable_timing)
         source_slots = torch.as_strided(
             source_cache,
             (source_cache.shape[0], self.slot_elements),
@@ -372,7 +333,9 @@ class PcpOwnerStageCache:
 _stage_caches: dict[tuple, PcpOwnerStageCache] = {}
 
 
-def get_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpOwnerStageCache:
+def get_stage_cache(
+    device: torch.device, source_cache: torch.Tensor, budget_bytes: int | None = None
+) -> PcpOwnerStageCache:
     """One scratch per (device, dtype, per-block shape, page stride).
 
     Layers with different compression ratios expose different block shapes;
@@ -389,12 +352,14 @@ def get_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpOwne
     )
     cache = _stage_caches.get(key)
     if cache is None:
-        cache = PcpOwnerStageCache(device)
+        cache = PcpOwnerStageCache(device, budget_bytes=budget_bytes)
         _stage_caches[key] = cache
     return cache
 
 
-def get_swa_chunk_stage_cache(device: torch.device, source_cache: torch.Tensor) -> PcpOwnerStageCache:
+def get_swa_chunk_stage_cache(
+    device: torch.device, source_cache: torch.Tensor, budget_bytes: int | None = None
+) -> PcpOwnerStageCache:
     """Bounded scratch dedicated to per-chunk SWA staging.
 
     The chunk view only needs ``local_tokens + 2 * window`` rows per layer, so
@@ -410,6 +375,9 @@ def get_swa_chunk_stage_cache(device: torch.device, source_cache: torch.Tensor) 
     )
     cache = _stage_caches.get(key)
     if cache is None:
-        cache = PcpOwnerStageCache(device, budget_bytes=_swa_chunk_stage_budget_bytes())
+        cache = PcpOwnerStageCache(
+            device,
+            budget_bytes=DEFAULT_SWA_CHUNK_STAGE_BUDGET_BYTES if budget_bytes is None else budget_bytes,
+        )
         _stage_caches[key] = cache
     return cache

@@ -797,12 +797,13 @@ def _allocate_deepseek_v41_shared_cache(
     *,
     owner_allocator=None,
     require_owner_slab: bool = False,
+    pcp_config=None,
 ) -> dict[str, torch.Tensor]:
     """Allocate DSV4 shared-slot backings, owner-sharded when requested.
 
     A V4.1 layer tuple keeps long KV, the compressed indexer, compressor state
     and every SWA alias in one shared page, so a tuple can only be
-    owner-sharded as a whole. ``VLLM_ASCEND_PCP_LOCAL_INDEX`` gives the
+    owner-sharded as a whole. ``pcp_config.local_index`` gives the
     indexer K plane its own tuple; that tuple is emitted with a different
     backing size and stays replicated, because the index reads would otherwise
     run against peer pages.
@@ -820,7 +821,7 @@ def _allocate_deepseek_v41_shared_cache(
         # single-backing contract for every other DeepSeek-V4 layout.
         from vllm_ascend.models.deepseek_v41.cache_config import local_index_copy_enabled
 
-        if not local_index_copy_enabled():
+        if not local_index_copy_enabled(pcp_config):
             raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
 
     tensors: dict[str, torch.Tensor] = {}
@@ -831,17 +832,18 @@ def _allocate_deepseek_v41_shared_cache(
         backing = None
         if require_owner_slab and not index_only and owner_allocator is None:
             raise RuntimeError(
-                "VLLM_ASCEND_PCP_OWNER_CAPACITY sized the KV pool for owner sharding, but the "
+                "additional_config.pcp_config.owner_capacity sized the KV pool for owner sharding, but the "
                 f"owner slab allocator is unavailable; refusing to allocate a replicated {names[:1]} "
-                "slab that no longer fits. Disable VLLM_ASCEND_PCP_OWNER_CAPACITY or fix the VMM failure."
+                "slab that no longer fits. Disable additional_config.pcp_config.owner_capacity or fix the "
+                "VMM failure."
             )
         if owner_allocator is not None and not index_only:
             backing = owner_allocator.allocate_slab(names, backing_size)
             if backing is None and require_owner_slab:
                 raise RuntimeError(
-                    "VLLM_ASCEND_PCP_OWNER_CAPACITY sized the KV pool for owner sharding, but the "
+                    "additional_config.pcp_config.owner_capacity sized the KV pool for owner sharding, but the "
                     f"owner slab allocator could not map {names[:1]}. Disable "
-                    "VLLM_ASCEND_PCP_OWNER_CAPACITY or fix the VMM failure."
+                    "additional_config.pcp_config.owner_capacity or fix the VMM failure."
                 )
         if backing is None:
             backing = _allocate_int8_cache_tensor(backing_size, alignment, device)
