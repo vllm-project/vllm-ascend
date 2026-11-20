@@ -61,6 +61,12 @@ jobs:
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Download gate result artifact
+        # May legitimately not exist: a "CI Gate Refresh" run that concluded
+        # success without re-running anything (comment-only or non-owner
+        # review, already-green run, CI still in flight) ships no artifact.
+        # Tolerate the miss here so the step below can skip gracefully; a
+        # hard failure here turned every such no-op into a red bot run.
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
