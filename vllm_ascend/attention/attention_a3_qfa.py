@@ -32,6 +32,7 @@ import torch
 import torch_npu
 from vllm.v1.attention.backend import AttentionType  # type: ignore[import-not-found]
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionState,
@@ -303,8 +304,12 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
       :func:`qfa_int8_paged_cache_views`.
     - Write path (reshape_and_cache): Q/K per-token-head dynamic
       quantization (``npu_dynamic_quant``), V static per-head
-      (layer.v_cache_scale, the fa_v.scale calibration channel);
-      payloads scattered via index_put over the packet views.
+      (layer.v_cache_scale, the fa_v.scale calibration channel); K/V
+      payloads written by the fused ``npu_scatter_pa_kv_cache`` operator
+      directly over the strided packet views (ScatterPaKvCache scenario 1,
+      the C8-MXFP pattern; ``VLLM_ASCEND_QFA_SCATTER_WRITE=0`` falls back
+      to the strided index_put_ A/B reference, which materializes the
+      whole per-layer pool per call).
     - Read path: one QFA call per step for the whole batch (decode and
       prefill alike; the causal mask covers decode rows too).
 
@@ -320,7 +325,12 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             logger.info(
                 "A3 QFA INT8 KV cache attention enabled "
                 "(--kv-cache-dtype int8_qfa); one QFA call per step for "
-                "decode and prefill alike."
+                "decode and prefill alike. KV write path: %s "
+                "(VLLM_ASCEND_QFA_SCATTER_WRITE=%d).",
+                "fused ScatterPaKvCache over the packet views"
+                if envs.VLLM_ASCEND_QFA_SCATTER_WRITE
+                else "strided index_put_ reference",
+                int(envs.VLLM_ASCEND_QFA_SCATTER_WRITE),
             )
             AscendQFA3Int8Impl._logged = True
         # Capture-safe constants: created lazily on first use (the eager
@@ -428,35 +438,58 @@ class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
             QFA_INT8_SCALE_LEVEL,
         ).to(torch.int8)
 
-        pages, pos = self._step_slot_index(
-            attn_metadata, attn_metadata.slot_mapping[:num_actual_tokens]
-        )
+        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        pages, pos = self._step_slot_index(attn_metadata, slot_mapping)
         num_tokens = pages.shape[0]
         n_heads = self.num_kv_heads
         head_dim = self.head_size
         nz_last = QFA_INT8_NZ_DIM_FRAG
 
-        # Scatter payloads into the NZ views. A token's K/V payload is the
-        # [Df, 32] tail at (page, n, :, pos, :): index the leading four dims
-        # with (page, n, df, pos) tensors broadcast to [T, N, Df] and leave
-        # the 32-wide fragment axis implicit. The 3-index form leaves
-        # (Bs, 32) as the trailing dims and mismatches the [T, N, Df, 32]
-        # payload (probe v2 verified index_put on the 4-D BNBD layout, not
-        # this 5-D NZ one). The index constants come from the cached
-        # capture-safe set (torch.arange inside capture may host-generate).
-        _, idx_n, idx_df = self._capture_safe_constants(pages.device)
-        num_frags = idx_df.numel()  # head_dim // 32, kept in the cached set
-        nz_index = (
-            pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
-            idx_n.expand(num_tokens, n_heads, num_frags),
-            idx_df.expand(num_tokens, n_heads, num_frags),
-            pos.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
-        )
-        payload_src = k_int8.view(num_tokens, n_heads, num_frags, nz_last)
-        k_nz.index_put_(nz_index, payload_src)
-        payload_src_v = v_int8.view(num_tokens, n_heads, num_frags, nz_last)
-        v_nz.index_put_(nz_index, payload_src_v)
+        if envs.VLLM_ASCEND_QFA_SCATTER_WRITE:
+            # Fused ScatterPaKvCache, contract scenario 1 (the C8-MXFP
+            # backend's pattern): the operator's tiling reads the packet
+            # views' dim0 stride as the block stride, so the per-page packet
+            # layout is consumed in place -- no sectioning, and none of the
+            # strided index_put_ materialization of the whole per-layer pool
+            # (~8.5 ms/layer). INT8 is accepted on all targets (FP8 payload
+            # would be 950-only), and PAD_SLOT_ID rows are skipped in-kernel,
+            # keeping shapes static for aclgraph capture.
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=k_int8.view(num_tokens, n_heads, head_dim),
+                value=v_int8.view(num_tokens, n_heads, head_dim),
+                key_cache=k_nz,
+                value_cache=v_nz,
+                slot_mapping=slot_mapping,
+                cache_mode="PA_NZ",
+            )
+        else:
+            # A/B reference: scatter payloads into the NZ views via strided
+            # index_put_. A token's K/V payload is the [Df, 32] tail at
+            # (page, n, :, pos, :): index the leading four dims with
+            # (page, n, df, pos) tensors broadcast to [T, N, Df] and leave
+            # the 32-wide fragment axis implicit. The 3-index form leaves
+            # (Bs, 32) as the trailing dims and mismatches the [T, N, Df, 32]
+            # payload (probe v2 verified index_put on the 4-D BNBD layout,
+            # not this 5-D NZ one). The index constants come from the cached
+            # capture-safe set (torch.arange inside capture may
+            # host-generate).
+            _, idx_n, idx_df = self._capture_safe_constants(pages.device)
+            num_frags = idx_df.numel()  # head_dim // 32, kept in the cached set
+            nz_index = (
+                pages.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+                idx_n.expand(num_tokens, n_heads, num_frags),
+                idx_df.expand(num_tokens, n_heads, num_frags),
+                pos.view(num_tokens, 1, 1).expand(num_tokens, n_heads, num_frags),
+            )
+            payload_src = k_int8.view(num_tokens, n_heads, num_frags, nz_last)
+            k_nz.index_put_(nz_index, payload_src)
+            payload_src_v = v_int8.view(num_tokens, n_heads, num_frags, nz_last)
+            v_nz.index_put_(nz_index, payload_src_v)
+
         # K descale [T, N] -> (Bn, N, Bs): the 3-D view is fully indexed.
+        # Its strided materialization is only ~17.9 MB (~24 us measured), so
+        # index_put stays even on the fused-scatter path.
+        _, idx_n, _ = self._capture_safe_constants(pages.device)
         idx_page = pages.view(num_tokens, 1).expand(num_tokens, n_heads)
         idx_n_2d = idx_n.view(1, n_heads).expand(num_tokens, n_heads)
         idx_pos = pos.view(num_tokens, 1).expand(num_tokens, n_heads)
