@@ -47,7 +47,6 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     C8_MXFP_KV_CACHE_DTYPE,
     calc_split_factor,
-    is_deepseek_v41,
 )
 
 from ..methods import get_scheme_class
@@ -76,19 +75,6 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
     ".fa_q.offset",
     ".fa_k.offset",
 )
-
-
-def _is_deepseek_v4_family(hf_config: Any) -> bool:
-    """Whether this config is DeepSeek V4 or V4.1, including a nested text config."""
-    if is_deepseek_v41(hf_config):
-        return True
-    text_config = getattr(hf_config, "text_config", None)
-    model_types = {
-        getattr(hf_config, "model_type", None),
-        getattr(type(hf_config), "model_type", None),
-        getattr(text_config, "model_type", None) if text_config is not None else None,
-    }
-    return "deepseek_v4" in model_types
 
 
 def _map_modelslim_moe_weight_name(weight_name: str) -> str:
@@ -872,7 +858,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
-            layer_type = "ds_linear" if _is_deepseek_v4_family(vllm_config.model_config.hf_config) else "linear"
+            layer_type = "ds_linear" if model_type in ("deepseek_v4", "deepseek_v41") else "linear"
             scheme = create_scheme_for_layer(quant_type, prefix, layer_type)
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
