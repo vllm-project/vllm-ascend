@@ -13,10 +13,14 @@ from unittest.mock import Mock
 
 import msgspec
 import pytest
+import torch
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from tests.ut.kvpp_utils import indexer_name, layer_name, make_cache_config, make_kvpp_config, make_kvpp_specs
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeMetadataThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -148,13 +152,15 @@ def worker(monkeypatch, request):
     spec.sliding_window = None
     spec.is_circular = False
     config = SimpleNamespace(
-        speculative_config=None, model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test"))
+        speculative_config=None,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="test")),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
 
     def initialize(self, *args):
         self.engine_id = "p"
         self.vllm_config = config
-        self.pp_rank = self.pcp_rank = self.tp_rank = 0
+        self.pp_rank = self.pcp_rank = self.tp_rank = self.dcp_rank = 0
         self.pp_size = self.pcp_size = self.tp_size = self.dcp_size = 1
         self.side_channel_host = "127.0.0.1"
         self.handshake_port = 0
@@ -162,6 +168,7 @@ def worker(monkeypatch, request):
             is_kv_producer=True, get_from_extra_config=lambda name, default: default
         )
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+        self.kvpp_layer_owners = {}
         self.transfer_metadata = descriptor()
         layout = getattr(request, "param", None)
         if layout is not None:
@@ -209,8 +216,24 @@ def worker(monkeypatch, request):
     assert obj._zmq_context is None
 
 
-def test_proxy_destinations_and_two_chunks(worker):
-    worker.start_load_kv(source_meta())
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
+    worker.dcp_size = worker.tp_size = dcp
+    worker.kv_cache_specs[0].dcp_sharded = False
+    worker.transfer_metadata.dcp_sharded[:] = [False]
+    remote = replace(remote_metadata(tp_size=dcp), dcp_size=dcp)
+    remote.metadata_by_pp_rank[0].dcp_sharded[:] = [False]
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda _: remote)
+
+    def chunk(computed=0):
+        meta = source_meta(computed, 4)
+        meta.push_send_requests["p-request"] = replace(
+            meta.push_send_requests["p-request"],
+            remote_worker_addresses=tuple((0, 0, rank, f"tcp://127.0.0.1:{9001 + rank}") for rank in range(dcp)),
+        )
+        return meta
+
+    worker.start_load_kv(chunk())
     # Deferred finalization may collect results before all cache hooks run.
     # Polling must not publish unfinished caches or reset this step's state.
     assert not worker.get_transfer_results().finished_sending
@@ -220,12 +243,13 @@ def test_proxy_destinations_and_two_chunks(worker):
     worker.wait_for_save()
     drive(worker, lambda: worker.engine.batch_transfer_sync_write.call_count == 1)
     worker.wait_for_save()
-    assert not worker._send_done.called
+    # This P rank can finish D workers whose TP head slices it does not own.
+    assert worker._send_done.call_count == dcp - 1
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1032], [10320], [32])
-    worker.start_load_kv(source_meta(4, 4))
+    worker.start_load_kv(chunk(4))
     worker.save_kv_layer("model.layers.0.attn")
     worker.wait_for_save()
-    drive(worker, lambda: worker._send_done.called)
+    drive(worker, lambda: worker._send_done.call_count == dcp)
     assert worker.engine.batch_transfer_sync_write.call_count == 2
     assert worker.engine.batch_transfer_sync_write.call_args.args[1:] == ([1064], [10352], [32])
     # Sending DONE does not retire a request until scheduler reports its end.
@@ -422,13 +446,6 @@ def test_done_socket_timeout_is_bounded(worker, monkeypatch):
         assert not push_worker.MooncakePushConnectorWorker._send_done(worker, message, "failed")
 
 
-def test_dcp_is_rejected_before_initialization():
-    with pytest.raises(ValueError, match="DCP=1"):
-        push_worker.MooncakePushConnectorWorker(
-            SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2)), "p", None
-        )
-
-
 @pytest.mark.parametrize("write_fails", [False, True])
 def test_metadata_query_and_done_real_sockets(worker, monkeypatch, write_fails):
     """Run P's actual metadata query and completion against D protocol servers."""
@@ -551,6 +568,108 @@ def test_head_split_copies_correct_bytes(worker, monkeypatch):
     assert destination.raw[16:32] == source.raw[48:64]
     assert destination.raw[32:48] == source.raw[80:96]
     assert destination.raw[48:64] == b"\xff" * 16
+
+
+def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch):
+    target_layers = [layer_name(i) for i in (9, 10, 11, 12)]
+    indexer = indexer_name(11)
+    mtp = layer_name(17)
+    names = [*target_layers, indexer, mtp]
+    all_specs = make_kvpp_specs()
+    specs = {name: all_specs[name] for name in names}
+    cache_config = make_cache_config(specs)
+    p_config = make_kvpp_config(tp=2, pcp=2)
+    d_config = make_kvpp_config(tp=2)
+    d_config.additional_config["enable_kvpp"] = False
+    for config in (p_config, d_config):
+        config.model_config.hf_text_config = SimpleNamespace(model_type="glm_moe_dsa")
+        config.parallel_config.cp_kv_cache_interleave_size = 2
+
+    def initialize(self, config, engine_id, kv_cache_config):
+        self.engine_id, self.vllm_config, self.kv_cache_config = engine_id, config, kv_cache_config
+        self.pp_rank, self.pp_size = 0, 1
+        self.tp_size = config.parallel_config.tensor_parallel_size
+        self.pcp_size = config.parallel_config.prefill_context_parallel_size
+        self.dcp_size = config.parallel_config.decode_context_parallel_size
+        self.dcp_rank = 0
+        self.ascend_config = SimpleNamespace(kvpp_config=KVPPConfig.from_vllm_config(config))
+        self.kv_transfer_config = SimpleNamespace(is_kv_producer=engine_id == "p")
+        self.block_size, self.side_channel_host, self.handshake_port = 2, "127.0.0.1", 0
+        self.te_rpc_port = 1
+
+    def make_caches(fill: int) -> dict[str, tuple[torch.Tensor, ...]]:
+        caches: dict[str, tuple[torch.Tensor, ...]] = {}
+        for i, name in enumerate(names):
+            spec = specs[name]
+            rows = (cache_config.num_blocks, spec.block_size, 1)
+            caches[name] = (torch.full((*rows, spec.head_size), fill + i, dtype=spec.dtype),)
+            if name == indexer:
+                caches[name] += (torch.full((*rows, spec.scale_dim), fill + i, dtype=spec.scale_dtype),)
+        return caches
+
+    monkeypatch.setattr(base_worker, "global_te", Mock())
+    monkeypatch.setattr(MooncakeBaseConnectorWorker, "__init__", initialize)
+    monkeypatch.setattr(
+        push_worker,
+        "torch",
+        SimpleNamespace(npu=SimpleNamespace(current_device=lambda: 0, set_device=lambda device: None, Event=Event)),
+    )
+    d_caches = {tp: make_caches(-30) for tp in range(2)}
+    d_metadata = {}
+    for tp, caches in d_caches.items():
+        d = MooncakeBaseConnectorWorker(d_config, "d", cache_config)
+        d.pcp_rank, d.tp_rank = 0, tp
+        d.te_rpc_port = 9001 + tp
+        d.register_kv_caches(caches)
+        d_metadata[tp] = d.transfer_metadata
+    thread = MooncakeMetadataThread("127.0.0.1", 9000, "d", d_metadata, 2, 1, 1, 1, False, threading.Event())
+    remote = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    target = destination_message()
+    target.update(block_ids=[[2]], num_external_tokens=2)
+    params = target_params(target)
+    params["remote_worker_addresses"] = [(0, 0, tp, f"tcp://127.0.0.1:{9001 + tp}") for tp in d_caches]
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1],), 2, 0, 2, params)
+    writes = []
+    producers = {}
+    for pcp in range(2):
+        for tp in range(2):
+            p = push_worker.MooncakePushConnectorWorker(p_config, "p", cache_config)
+            p.pcp_rank, p.tp_rank = pcp, tp
+            caches = make_caches(10 * (pcp * 2 + tp))
+            producers[pcp, tp] = caches
+
+            def copy(session, src, dst, lengths):
+                for src_addr, dst_addr, size in zip(src, dst, lengths, strict=True):
+                    writes.append(dst_addr)
+                    ctypes.memmove(dst_addr, src_addr, size)
+                return 0
+
+            p.engine = SimpleNamespace(batch_transfer_sync_write=copy)
+            p._get_remote_metadata = Mock(return_value=remote)
+            p._send_done = Mock(return_value=True)
+            try:
+                p.register_kv_caches(caches)
+                p.start_load_kv(meta)
+                for name in (*target_layers, mtp):
+                    p.save_kv_layer(name)
+                p.wait_for_save()
+                assert p._send_done.call_count == len(d_caches)
+                assert all(call.args[1] is None for call in p._send_done.call_args_list)
+            finally:
+                p.shutdown()
+
+    # Target ownership uses PCP-major ranks; replicated MTP keeps TP-major routing.
+    source_rank = dict(zip(target_layers, ((0, 0), (0, 1), (1, 0), (1, 1)), strict=True))
+    source_rank[indexer] = source_rank[target_layers[2]]
+    for tp, caches in d_caches.items():
+        source_rank[mtp] = (tp, 0)
+        for name, tensors in caches.items():
+            source = producers[source_rank[name]][name]
+            for dst, src in zip(tensors, source, strict=True):
+                assert torch.equal(dst[2], src[1]), (tp, name)
+                assert writes.count(dst[2].data_ptr()) == 1, (tp, name)
 
 
 def test_mamba_final_chunk_merges_pcp_conv_projections_and_state(worker, monkeypatch):

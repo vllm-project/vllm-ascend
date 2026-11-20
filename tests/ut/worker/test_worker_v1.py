@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config.attention import AttentionConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -88,6 +89,7 @@ class TestNPUWorker(TestBase):
         self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
+        self.parallel_config_mock.enable_fault_tolerance = False
 
         self.vllm_config_mock = MagicMock(spec=VllmConfig)
         self.vllm_config_mock.cache_config = self.cache_config_mock
@@ -103,6 +105,8 @@ class TestNPUWorker(TestBase):
         self.vllm_config_mock.kernel_config.ir_op_priority = MagicMock()
         self.vllm_config_mock.kernel_config.ir_op_priority.set_default = MagicMock()
         self.vllm_config_mock.profiler_config = MagicMock()
+        self.vllm_config_mock.profiler_config.profiler = None
+        self.vllm_config_mock.use_v2_model_runner = False
         self.vllm_config_mock.quant_config = MagicMock()
         self.vllm_config_mock.speculative_config = None
         self.vllm_config_mock.observability_config = None
@@ -348,7 +352,7 @@ class TestNPUWorker(TestBase):
             )
         ]
         worker = NPUWorker.__new__(NPUWorker)
-        worker.vllm_config = SimpleNamespace()
+        worker.vllm_config = SimpleNamespace(attention_config=AttentionConfig())
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
 
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
@@ -377,6 +381,7 @@ class TestNPUWorker(TestBase):
         cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
+            attention_config=AttentionConfig(),
             cache_config=cache_config,
             # Connector identity must not change standardized shared-backing
             # allocation or its corresponding budget calculation.
@@ -422,6 +427,7 @@ class TestNPUWorker(TestBase):
         ]
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
+            attention_config=AttentionConfig(),
             cache_config=SimpleNamespace(
                 get_resolved_kv_cache_layout=lambda: SimpleNamespace(
                     is_layer_compact=True,
@@ -872,12 +878,16 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.5
 
             # Test _init_device
-            with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
+            with (
+                patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint,
+                patch("vllm_ascend.worker.worker.set_random_seed") as seed,
+            ):
                 result = worker._init_device()
 
             # Both calls must use the mapped visible ordinal, not local_rank.
             mock_set_device.assert_called_once_with(torch.device("npu:1"))
             setup_endpoint.assert_called_once_with(1, worker.vllm_config.kv_transfer_config)
+            seed.assert_called_once_with(42)
             self.assertEqual(worker.local_rank, 0)
 
             mock_init_dist_env.assert_called_once()
@@ -912,6 +922,20 @@ class TestNPUWorker(TestBase):
         mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
         self.assertIs(worker.model_runner, mm_encoder_runner.return_value)
         report_usage_stats.assert_not_called()
+
+    def test_memory_utilization_resolves_default_and_preserves_explicit_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = CacheConfig(gpu_memory_utilization=0.5)
+        self.assertEqual(worker._get_gpu_memory_utilization(), 0.5)
+        worker.cache_config = CacheConfig()
+        expected = worker.cache_config.gpu_memory_utilization
+        if expected is None:
+            worker.cache_config.enable_extensible_kv_cache = False
+            expected = worker.cache_config.DEFAULT_GPU_MEMORY_UTILIZATION
+        self.assertEqual(worker._get_gpu_memory_utilization(), expected)
+        self.assertEqual(2000 * worker._get_gpu_memory_utilization(), 2000 * expected)
 
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
@@ -1135,6 +1159,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
+            mock_model_runner.decode_query_len = mock_uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
@@ -1251,7 +1276,7 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
-        worker.vllm_config = MagicMock(kv_transfer_config=None)
+        worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
         worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
@@ -1279,7 +1304,7 @@ class TestNPUWorker(TestBase):
 
         worker = NPUWorker.__new__(NPUWorker)
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
-        worker.vllm_config = MagicMock(kv_transfer_config=None)
+        worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
         worker.model_runner = MagicMock()
         worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
@@ -1346,7 +1371,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker._kvpp_cache_allocation_plan = None
-            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
@@ -1391,7 +1416,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker._kvpp_cache_allocation_plan = None
-            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.kv_cache_memory_bytes = None
             worker.init_snapshot = MagicMock(free_memory=8 << 30)
@@ -1452,7 +1477,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker._kvpp_cache_allocation_plan = None
-            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
@@ -1506,7 +1531,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
-            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1561,7 +1586,7 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker._kvpp_cache_allocation_plan = None
-            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig(), kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
@@ -1903,7 +1928,7 @@ class TestNPUWorker(TestBase):
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.vllm_config = MagicMock()
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig())
             worker.model_config = MagicMock()
             worker.model_config.enforce_eager = True
             worker.model_config.seed = 12345
@@ -1969,7 +1994,7 @@ class TestNPUWorker(TestBase):
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.vllm_config = MagicMock()
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig())
             worker.model_config = MagicMock()
             worker.model_config.enforce_eager = False  # Enable graph capture
             worker.model_config.seed = 67890
@@ -2031,7 +2056,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = model_memory
             worker.model_runner.capture_model.return_value = npugraph_memory
-            worker.vllm_config = MagicMock()
+            worker.vllm_config = MagicMock(attention_config=AttentionConfig())
             worker.vllm_config.compilation_config.compile_sizes = []
             worker.vllm_config.compilation_config.cudagraph_capture_sizes = []
             worker.vllm_config.compilation_config.get_compile_ranges.return_value = []
@@ -2389,7 +2414,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
 
-        worker.finish_weight_update()
+        with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
+            worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
         worker.model_runner.reset_lora_state.assert_called_once_with()

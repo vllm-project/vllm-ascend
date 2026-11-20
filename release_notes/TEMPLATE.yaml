@@ -7,7 +7,10 @@ pr: 12345
 entries:
   # category: feature | hardware | performance | dependency | breaking | config | documentation | bugfix | other
   - category: feature
-    # One or two English sentences from the user's point of view.
+    # One to three short English sentences for users of the released artifact, not reviewers.
+    # What changed for them and what they must do. Perf: scenario + effect (no invented
+    # numbers). Breaking/config: old -> new, exact switch, migration step. Bugfix: the
+    # user-visible symptom, not the root cause. Full rules: release_notes/README.md.
     # Do not append the PR link; the release tooling adds it automatically.
     text: Added support for ...
     # Optional: mark as a candidate for the release Highlights section.

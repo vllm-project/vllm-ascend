@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.2.1-a3-ubuntu22.04-py3.12
+FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.3.0_20261113161300-a3-ubuntu22.04-py3.12
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -60,6 +60,12 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend910_9391"
 ENV DEBIAN_FRONTEND=noninteractive
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). CI passes --build-arg MAX_JOBS=32 /
+# CARGO_BUILD_JOBS=32; leaving them unset keeps the default nproc parallelism.
+ARG MAX_JOBS
+ARG CARGO_BUILD_JOBS
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
@@ -76,15 +82,15 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # ===== Install FLA and flash_attn_npu =====
-ARG FLA_VERSION="26.9.1"
+ARG FLA_VERSION="26.10.0+feature"
 ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.3.14rc3"
+ARG MOONCAKE_VERSION="0.3.14"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \
     export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     # Install memfabric_hybrid kernels
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install --force-reinstall --no-deps \
         "flash-linear-attention-npu-a3===${FLA_VERSION}" && \

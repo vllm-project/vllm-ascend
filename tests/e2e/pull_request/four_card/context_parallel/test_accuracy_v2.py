@@ -31,6 +31,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import run_pd_disaggregation
+from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
@@ -325,28 +326,6 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
     },
 )
 
-DSV3_2_SFA_PCP_CPP_CASE = InferenceCase(
-    model=DSV3_2_MODEL,
-    prompts=ACCURACY_PROMPTS,
-    max_tokens=5,
-    runner_kwargs={
-        **DSV3_2_SFA_PCP_CASE.runner_kwargs,
-        # ProfilingChunk requires PP > 1. Keep this in the four-card suite with
-        # TP1 x PP2 x PCP2 while preserving the baseline SFA/PCP graph setup.
-        "tensor_parallel_size": 1,
-        "pipeline_parallel_size": 2,
-        "additional_config": {
-            "scheduler_config": {
-                "profiling_chunk_config": {
-                    "enabled": True,
-                    "smooth_factor": 1.0,
-                    "min_chunk": 1024,
-                }
-            }
-        },
-    },
-)
-
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
     name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
@@ -431,31 +410,6 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
     """Guard MRV2 SFA PCP full-decode-only graph execution."""
     _run_inference_case(DSV3_2_SFA_PCP_CASE)
-
-
-@pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="sfa_pcp,profiling",
-    parallel="EP,PCP,PP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "HCCL_BUFFSIZE": "768",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_cpp_model_runner_v2_graph() -> None:
-    """Guard MRV2 CPP startup profiling followed by SFA PCP inference."""
-    _run_inference_case(DSV3_2_SFA_PCP_CPP_CASE)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
@@ -583,7 +537,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
             "model": EAGLE3_PCP_DRAFT_MODEL,
             "num_speculative_tokens": 3,
             "draft_tensor_parallel_size": 2,
-            "disable_padded_drafter_batch": False,
+            **({"disable_padded_drafter_batch": False} if vllm_version_is("0.33.0") else {}),
         },
     },
 )

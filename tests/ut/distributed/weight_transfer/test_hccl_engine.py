@@ -30,7 +30,10 @@ from vllm_ascend.utils import vllm_version_is
 def _npu_context():
     with (
         patch.object(
-            torch, "npu", SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock()), create=True
+            torch,
+            "npu",
+            SimpleNamespace(device=lambda _: nullcontext(), current_stream=MagicMock(), empty_cache=MagicMock()),
+            create=True,
         ),
         patch("torch.accelerator.current_device_index", return_value=0),
     ):
@@ -43,13 +46,18 @@ def _make_engine():
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._last_hccl_update_info = {}
+    # Match the upstream constructor's disabled load-plan state.
+    engine._plan_metadata = None
+    engine._plan_manifest = None
+    engine._plan = None
     return engine
 
 
 def test_start_weight_update_initializes_layerwise_reload():
     engine = _make_engine()
 
-    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as initialize:
+    start = "initialize_layerwise_reload" if vllm_version_is("0.33.0") else "start_reload"
+    with patch(f"vllm.model_executor.model_loader.reload.{start}") as initialize:
         engine.start_weight_update()
 
     initialize.assert_called_once_with(engine.model)
@@ -58,10 +66,14 @@ def test_start_weight_update_initializes_layerwise_reload():
 def test_finish_weight_update_finalizes_layerwise_reload():
     engine = _make_engine()
 
-    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as finalize:
+    finish = "finalize_layerwise_reload" if vllm_version_is("0.33.0") else "finish_reload"
+    with patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize:
         engine.finish_weight_update()
 
-    finalize.assert_called_once_with(engine.model, engine.model_config)
+    args: tuple[Any, ...] = (engine.model, engine.model_config)
+    if not vllm_version_is("0.33.0"):
+        args += (engine.device,)
+    finalize.assert_called_once_with(*args)
 
 
 def test_shutdown_closes_session_once():
@@ -109,7 +121,10 @@ def test_init_info_preserves_upstream_payload_contract():
 
     assert isinstance(init_info, NCCLWeightTransferInitInfo)
     assert HCCLWeightTransferEngine.init_info_cls is HCCLWeightTransferInitInfo
-    assert worker_init_payload(init_info) == dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    expected = dict(master_address="host", master_port=1234, rank_offset=1, world_size=2)
+    if not vllm_version_is("0.33.0"):
+        expected["use_load_plan"] = False
+    assert worker_init_payload(init_info) == expected
     restored = HCCLWeightTransferInitInfo(**worker_init_payload(init_info))
     assert restored == init_info
     assert restored.packed is None

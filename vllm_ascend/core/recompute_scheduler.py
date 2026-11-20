@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, fields
+from typing import Any
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -46,7 +47,11 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config
+from vllm_ascend.core.scheduler_output import make_cached_request_data
+from vllm_ascend.utils import get_ascend_config, vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.core.sched.output import IterationDetails
 
 
 def _normalize_encoder_schedule_result(
@@ -214,6 +219,13 @@ class RecomputeScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+
+        iteration_details = None
+        if not vllm_version_is("0.33.0") and (
+            (self.log_stats and self.observability_config.enable_logging_iteration_details)
+            or self.vllm_config.profiler_config.profiler is not None
+        ):
+            iteration_details = IterationDetails()
         self._recomputed_reqs: list[RecomputeReqInfo] = []
 
         self._apply_load_balance_modifications()
@@ -230,6 +242,7 @@ class RecomputeScheduler(Scheduler):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -417,6 +430,8 @@ class RecomputeScheduler(Scheduler):
                                     preempted_req.get_num_encoder_embeds(i) for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
+                                if iteration_details is not None:
+                                    num_scheduled_encoder_inputs -= len(preempted_encoder_inputs)
                     else:
                         preempted_req = self.running.pop()
 
@@ -469,6 +484,8 @@ class RecomputeScheduler(Scheduler):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                if iteration_details is not None:
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -869,6 +886,8 @@ class RecomputeScheduler(Scheduler):
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
+                    if iteration_details is not None:
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -901,19 +920,11 @@ class RecomputeScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
         }
-        if self.use_v2_model_runner:
+        if not vllm_version_is("0.33.0") or self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
             new_reqs_data = [
@@ -936,16 +947,34 @@ class RecomputeScheduler(Scheduler):
             ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            cached_reqs_data = self._make_cached_request_data(
+            cached_reqs_data = make_cached_request_data(
+                self,
                 scheduled_running_reqs,
                 scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                iteration_details=iteration_details,
             )
 
+        schedule_metadata: dict[str, Any] = {}
+        if not vllm_version_is("0.33.0"):
+            if iteration_details is not None:
+                iteration_details.num_prefill_requests = (
+                    len(num_scheduled_tokens) - iteration_details.num_decode_requests
+                )
+                iteration_details.num_prefill_tokens = total_num_scheduled_tokens - iteration_details.num_decode_tokens
+                iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
+                iteration_details.num_encoder_output_tokens = self.max_num_encoder_input_tokens - encoder_compute_budget
+            schedule_metadata = {
+                "iteration_details": iteration_details,
+                "encoder_input_updates": self._get_encoder_input_updates(
+                    num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+                ),
+            }
+
         # Record the request ids that were scheduled in this step (MRV1-only).
-        if not self.use_v2_model_runner:
+        if vllm_version_is("0.33.0") and not self.use_v2_model_runner:
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
@@ -977,9 +1006,11 @@ class RecomputeScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduled_encoder_input_stats = None
-        if self.log_stats and self.observability_config.enable_logging_iteration_details:
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+        if vllm_version_is("0.33.0"):
+            scheduled_encoder_input_stats = None
+            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+                scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+            schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 
         scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -988,8 +1019,7 @@ class RecomputeScheduler(Scheduler):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
+            **schedule_metadata,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1000,7 +1030,11 @@ class RecomputeScheduler(Scheduler):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            **(
+                {"ec_manager_metadata": self.encoder_cache_manager.get_manager_metadata()}
+                if vllm_version_is("0.33.0")
+                else {}
+            ),
             recomputed_reqs=self._recomputed_reqs or None,
             has_sync_kv_loads=has_sync_kv_loads,
             kv_connector_block_state=kv_connector_block_state,

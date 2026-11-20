@@ -26,6 +26,8 @@ PCP support is experimental. The following table shows the basic backend support
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeConnectorV1`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (MTP and DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 | DSA V4.1 | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (FULL not supported) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeHybridConnector`, `MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA/KPool (GLM-5.3-Flash) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (MTP) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
+| KDA + SFA (Kimi-K3.1-Pro) | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | Unverified | 🟠 Partial compatibility (`FULL_DECODE_ONLY`) | 🟠 Partial compatibility (DSpark) | ✅ Full compatibility (`MooncakeConnectorV2`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ✅ Full compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
@@ -171,5 +173,7 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --cp-kv-cache-interleave-size 128 \
         --kv-transfer-config '{...}'
     ```
+
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. For GQA/MQA, `tensor_parallel_size // num_key_value_heads` must be at least the DCP size. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

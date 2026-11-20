@@ -199,6 +199,7 @@ def _make_vllm_config(
     if num_speculative_tokens > 0:
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
             enable_adaptive_verification=enable_adaptive_verification,
             use_eagle_block_drop=lambda: False,
@@ -383,7 +384,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
 
     fused_backend = AscendGatedDeltaNetAttention.get_attn_backend(object())  # type: ignore[arg-type]
-    kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(object())  # type: ignore[arg-type]
+    kimi_attention = SimpleNamespace(use_recoverssm=False)
+    kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(kimi_attention)  # type: ignore[arg-type]
     glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
     assert fused_backend is AscendGDNFusedAttentionBackend
     assert kimi_backend is KimiKDAHostMetadataBackend

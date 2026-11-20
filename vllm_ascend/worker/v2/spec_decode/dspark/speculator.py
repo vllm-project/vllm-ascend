@@ -54,7 +54,6 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
-    disable_profiling_chunk_for_draft,
 )
 
 
@@ -99,8 +98,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -392,13 +390,24 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Match FULL-graph query lengths to the padded request count."""
+        """Match padded Q lengths and align KV rows only for the FIA backend."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
+        for layer_name, metadata in attn_metadata.items():
             if getattr(metadata, "external_flashmla", None) is not None:
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # Backend subclasses can use different metadata contracts (e.g.
+            # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
+            if self.attn_backends[layer_name] is not AscendAttentionBackend:
+                continue
+            # The builder may append a synthetic request for the padded Q tail.
+            # Uniform Q already covers that tail, so discard its extra KV row.
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens_list[:num_reqs_padded]
+            decode_metadata.seq_lens = decode_metadata.seq_lens[:num_reqs_padded]
+            decode_metadata.seq_lens_cpu = decode_metadata.seq_lens_cpu[:num_reqs_padded]
+            if decode_metadata.block_tables is not None:
+                decode_metadata.block_tables = decode_metadata.block_tables[:num_reqs_padded]
         return attn_metadata
 
     def propose(
