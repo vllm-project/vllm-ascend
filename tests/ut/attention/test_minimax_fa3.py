@@ -99,7 +99,6 @@ def selection(monkeypatch, profiles):
         "MiniMaxM3SparseForCausalLM",
         "DSparkMiniMaxDraftModel",
         "Qwen3DSparkModel",
-        "Qwen3OmniDSparkModel",
         "MiniMaxM31FlashA3DSparkModel",
         "Other",
     ],

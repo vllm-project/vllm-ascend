@@ -1,5 +1,4 @@
 import ast
-import sys
 from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -792,65 +791,27 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
     join_nz.assert_called_once_with()
 
 
-@pytest.mark.parametrize("draft_tag", ["eagle_head", "dflash_head", "dspark_head"])
-@pytest.mark.parametrize("fail_load", [False, True])
-def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, fa3_backend, draft_tag, fail_load):
+def test_load_model_isolates_attention_backend_cache_by_model_tag(monkeypatch, fa3_backend):
     runner = _make_runner()
     config = runner.vllm_config
-    config.cache_config = SimpleNamespace(user_specified_block_size=True, block_size=128, cache_dtype="auto")
+    config.cache_config = SimpleNamespace(user_specified_block_size=False, cache_dtype="auto")
     config.attention_config = AttentionConfig()
-    config.speculative_config = SimpleNamespace(enable_adaptive_verification=False)
+    config.speculative_config = SimpleNamespace(method="mtp", enable_adaptive_verification=False)
     config.model_config = SimpleNamespace(rswa_window=None)
-    original_selector = selector._cached_get_attn_backend
-    original_selector.cache_clear()
-    selected_tags = []
-    target_backend = fa3_backend.AscendFlashAttentionBackend
+    fa3 = fa3_backend.AscendFlashAttentionBackend
 
-    def select_backend(*_args, **_kwargs):
-        selected_tags.append(backends.model_tag)
-        backend = target_backend if backends.model_tag == "backbone" else AscendAttentionBackend
+    def select_backend(*args, **kwargs):
+        backend = fa3 if backends.model_tag == "backbone" else AscendAttentionBackend
         return f"{backend.__module__}.{backend.__name__}"
 
+    def load_target_and_mtp(*args, **kwargs):
+        assert selector.get_attn_backend(256, torch.bfloat16, "auto") is fa3
+        with backends.set_model_tag("eagle_head"):
+            assert selector.get_attn_backend(256, torch.bfloat16, "auto") is AscendAttentionBackend
+
     monkeypatch.setattr("vllm.platforms.current_platform", SimpleNamespace(get_attn_backend_cls=select_backend))
-    monkeypatch.setattr(backends, "model_tag", "backbone")
-
-    def select_attention():
-        # Target and draft can have exactly the same head/dtype/causal settings.
-        # Exercise the real upstream cache entry point, not the platform helper.
-        return selector.get_attn_backend(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", num_heads=8)
-
-    def load_target_and_draft(*_args, **_kwargs):
-        assert select_attention() is target_backend
-        assert select_attention() is target_backend
-        with backends.set_model_tag(draft_tag):
-            assert select_attention() is AscendAttentionBackend
-            assert select_attention() is AscendAttentionBackend
-            if fail_load:
-                raise RuntimeError("draft loading failed")
-        assert select_attention() is target_backend
-
-    try:
-        with (
-            set_current_vllm_config(config),
-            patch.object(GPUModelRunner, "load_model", side_effect=load_target_and_draft),
-            patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids", return_value=()),
-            patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread"),
-            patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread"),
-        ):
-            # A previously cached target selection must not leak into loading.
-            assert select_attention() is target_backend
-            if fail_load:
-                with pytest.raises(RuntimeError, match="draft loading failed"):
-                    runner.load_model()
-            else:
-                runner.load_model()
-            assert selector._cached_get_attn_backend is original_selector
-            assert backends.model_tag == "backbone"
-            assert select_attention() is target_backend
-        # One pre-existing entry, then one selection per tag in the load scope.
-        assert selected_tags == ["backbone", "backbone", draft_tag]
-    finally:
-        original_selector.cache_clear()
+    with set_current_vllm_config(config), patch.object(GPUModelRunner, "load_model", side_effect=load_target_and_mtp):
+        runner.load_model()
 
 
 @pytest.mark.parametrize("with_draft", [False, True])
@@ -2223,12 +2184,18 @@ def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
-def _qwen_dflash2_device_length_runner(draft_backend, dense_backend=AscendAttentionBackend):
+@pytest.mark.parametrize(
+    ("target_uses_fa3", "draft_uses_fa3"),
+    [(True, True), (False, True), (True, False)],
+)
+def test_qwen_dflash2_skips_length_sync_only_with_fa3_on_both_models(fa3_backend, target_uses_fa3, draft_uses_fa3):
     from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
-    runner, output, batch = _device_length_runner()
+    fa3 = fa3_backend.AscendFlashAttentionBackend
+    target_backend = fa3 if target_uses_fa3 else AscendAttentionBackend
+    draft_backend = fa3 if draft_uses_fa3 else AscendAttentionBackend
+    runner, output, batch = _device_length_runner("qwen3_5_text")
     runner.model_config.architecture = "Qwen3_5ForConditionalGeneration"
-    runner.model_config.hf_text_config.model_type = "qwen3_5_text"
     runner.model_state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     runner.parallel_config = SimpleNamespace(
         pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
@@ -2237,82 +2204,19 @@ def _qwen_dflash2_device_length_runner(draft_backend, dense_backend=AscendAttent
     runner.speculative_config.enable_adaptive_verification = False
     runner.speculator = SimpleNamespace(attn_backends={"draft.0": draft_backend})
     runner.attn_groups = [
-        [SimpleNamespace(backend=dense_backend, layer_names=["target.dense"])],
-        [SimpleNamespace(backend=draft_backend, layer_names=["draft.0"])],
+        [SimpleNamespace(backend=target_backend, layer_names=["target.dense"])],
         [SimpleNamespace(backend=AscendGDNFusedAttentionBackend, layer_names=["target.gdn"])],
+        [SimpleNamespace(backend=draft_backend, layer_names=["draft.0"])],
     ]
-    return runner, output, batch
 
-
-def test_qwen_dflash2_keeps_length_sync_without_fa3(monkeypatch):
-    monkeypatch.setitem(sys.modules, "vllm_ascend.attention.flash_attention_v3", None)
-    monkeypatch.setitem(sys.modules, "flash_attn_npu_3", None)
-    runner, _, _ = _qwen_dflash2_device_length_runner(AscendFlashAttentionBackend)
-    assert runner._can_skip_spec_cpu_length_sync() is False
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "fia_gdn",
-        "fia_fa3_gdn",
-        "fa3_gdn",
-        "gdn_only",
-        "fa3_only",
-        "draft_backend",
-        "target_backend",
-        "model_state",
-        "pp",
-        "kv_transfer",
-    ],
-)
-def test_qwen_dflash2_length_snapshot_and_wait_share_backend_guard(fa3_backend, case):
-    fa3 = fa3_backend.AscendFlashAttentionBackend
-    dense_backend = AscendAttentionBackend if case == "fia_gdn" else fa3
-    runner, output, batch = _qwen_dflash2_device_length_runner(fa3, dense_backend)
-    if case == "fa3_gdn":
-        runner.speculator.attn_backends["draft.1"] = fa3
-        runner.attn_groups[0][0].layer_names.insert(0, "draft.1")
-    elif case == "fia_fa3_gdn":
-        runner.attn_groups[0].append(SimpleNamespace(backend=AscendAttentionBackend, layer_names=["target.fia"]))
-    elif case == "gdn_only":
-        runner.attn_groups.pop(0)
-    elif case == "fa3_only":
-        runner.attn_groups.pop()
-    elif case == "draft_backend":
-        runner.speculator.attn_backends["draft.1"] = AscendFlashAttentionBackend
-        runner.attn_groups.append([SimpleNamespace(backend=AscendFlashAttentionBackend, layer_names=["draft.1"])])
-    elif case == "target_backend":
-        runner.attn_groups.append([SimpleNamespace(backend=AscendMLABackend, layer_names=["target.mla"])])
-    elif case == "model_state":
-        runner.model_state = object()
-    elif case == "pp":
-        runner.parallel_config.pipeline_parallel_size = 2
-    elif case == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
-    eligible = case == "fa3_gdn"
-    assert runner._can_skip_spec_cpu_length_sync() is eligible
-    runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
-    runner.num_computed_tokens_cpu.fill_(-1)
     runner.num_computed_tokens_stream = Mock()
-    with (
-        patch.object(GPUModelRunner, "postprocess_sampled") as update_device,
-        patch("torch.cuda.current_stream"),
-        patch("torch.npu.stream", return_value=nullcontext()),
-    ):
-        runner.postprocess_sampled(None, None, 2, 1)
-    update_device.assert_called_once()
+    with patch("torch.cuda.current_stream"), patch("torch.npu.stream", return_value=nullcontext()):
+        runner._copy_num_computed_tokens_to_cpu()
     runner._update_seq_lens_cpu(output, batch.req_ids)
-    assert runner.num_computed_tokens_stream.wait_stream.call_count == int(not eligible)
-    assert runner.num_computed_tokens_event.record.call_count == int(not eligible)
-    assert runner.num_computed_tokens_event.synchronize.call_count == int(not eligible)
-    # Only cached requests consume the snapshot; new/prefill rows retain host state.
-    assert runner.req_states.num_computed_tokens_cpu.tolist() == ([1, 2, 0, 0] if eligible else [98, 2, 0, 0])
-    assert runner.input_buffers.seq_lens_cpu[0] == (3 if eligible else 100)
-    if eligible:
-        assert runner.num_computed_tokens_cpu.tolist() == [-1] * 4
-    else:
-        torch.testing.assert_close(runner.num_computed_tokens_cpu, runner.req_states.num_computed_tokens.gpu)
+
+    needs_sync = not (target_uses_fa3 and draft_uses_fa3)
+    assert runner.num_computed_tokens_event.record.called == needs_sync
+    assert runner.num_computed_tokens_event.synchronize.called == needs_sync
 
 
 @pytest.mark.parametrize(

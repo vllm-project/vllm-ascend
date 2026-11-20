@@ -313,7 +313,7 @@ def fa3_backend(monkeypatch):
     operators = types.ModuleType("flash_attn_npu_3")
     operators.__spec__ = importlib.util.spec_from_loader(operators.__name__, loader=None)
     operators.get_scheduler_metadata = MagicMock(side_effect=lambda **_: torch.zeros(8, dtype=torch.uint8))
-    operators.flash_attn_with_kvcache = MagicMock(side_effect=lambda query, *_args, **_kwargs: query + 1)
+    operators.flash_attn_with_kvcache = MagicMock()
     monkeypatch.setitem(sys.modules, operators.__name__, operators)
 
     spec = PathFinder.find_spec("vllm_ascend.attention.flash_attention_v3", attention.__path__)

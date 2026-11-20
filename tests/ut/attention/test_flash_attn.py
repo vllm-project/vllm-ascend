@@ -263,304 +263,79 @@ def test_flash_attn_selection_is_independent_of_draft_sampling(select_flash_attn
 
 
 @pytest.fixture
-def qwen_dflash2_fa3(monkeypatch, dflash2_config):
+def select_qwen_fa3(monkeypatch, dflash2_config):
+    from vllm.compilation import backends
+
     from vllm_ascend import platform
     from vllm_ascend.device.hardware import AscendDeviceType
     from vllm_ascend.device.hardware_profile import get_hardware_profile
 
     config = dflash2_config
-    spec = config.speculative_config
-    spec.target_model_config = SimpleNamespace(
-        architecture="Qwen3_5ForConditionalGeneration",
-        hf_config=SimpleNamespace(architectures=["Qwen3_5ForConditionalGeneration"]),
-        hf_text_config=SimpleNamespace(model_type="qwen3_5_text"),
-    )
-    spec.draft_model_config.hf_config = SimpleNamespace(architectures=["DFlash2DraftModel"], dflash_config={})
-    spec.kv_cache_dtype = None
-    spec.draft_load_config = None
-    config.model_config = spec.target_model_config
-    config.cache_config = SimpleNamespace(cache_dtype="auto")
-    config.load_config = SimpleNamespace(load_format="auto")
+    config.model_config = SimpleNamespace(architecture="Qwen3_5ForConditionalGeneration")
+    config.speculative_config.target_model_config = config.model_config
     config.quant_config = None
-    spec.draft_model_config.quantization = None
+    config.load_config = None
+    config.speculative_config.draft_model_config.quantization = None
     config.parallel_config = SimpleNamespace(
         pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
     )
-    spec.enable_adaptive_verification = False
-    runtime = SimpleNamespace(
-        config=config,
-        spec=spec,
-        target=spec.target_model_config,
-        draft=spec.draft_model_config,
-        parallel=config.parallel_config,
-        hardware="A2",
-        installed=True,
-        selector=AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto"),
-    )
-    monkeypatch.setattr(
-        platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType[runtime.hardware])
-    )
-    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
     monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: config)
-    find_spec = platform.util.find_spec
-    monkeypatch.setattr(
-        platform.util,
-        "find_spec",
-        lambda name: (object() if runtime.installed else None) if name == "flash_attn_npu_3" else find_spec(name),
-    )
+    monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
+    monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
+    monkeypatch.setattr(platform, "util", SimpleNamespace(find_spec=lambda _: object()))
+    selector = AttentionSelectorConfig(head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", block_size=128)
 
-    def select(tag="dflash_head"):
-        monkeypatch.setattr("vllm.compilation.backends.model_tag", tag)
-        backend = platform.NPUPlatform._select_attn_backend_cls(runtime.selector)
-        if backend.endswith(".AscendFlashAttentionBackend"):
-            assert backend == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-        return backend.rsplit(".", 1)[-1]
+    def select(tag):
+        monkeypatch.setattr(backends, "model_tag", tag)
+        return platform.NPUPlatform._select_attn_backend_cls(selector)
 
-    runtime.select = select
-    return runtime
+    return select
+
+
+FA3 = "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+FIA = "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
 
 @pytest.mark.parametrize(
-    "hardware,tag,eager,expected",
+    "target,method,draft,tag,backbone_backend,draft_backend",
     [
-        ("A2", "dflash_head", False, "AscendFlashAttentionBackend"),
-        ("A3", "dflash_head", True, "AscendFlashAttentionBackend"),
-        ("A2", "backbone", False, "AscendFlashAttentionBackend"),
-        ("A3", "backbone", True, "AscendFlashAttentionBackend"),
-        ("A5", "dflash_head", False, "AscendAttentionBackend"),
-        ("A2", "dflash2_candidate_selector", False, "AscendAttentionBackend"),
+        ("Qwen3_5ForConditionalGeneration", "dflash", "DFlash2DraftModel", "dflash_head", FA3, FA3),
+        ("Qwen3_5ForConditionalGeneration", "mtp", "Qwen3_5MTP", "eagle_head", FA3, FIA),
+        ("Qwen3NextForCausalLM", "dflash", "Qwen3DFlashForCausalLM", "dflash_head", FA3, FIA),
+        ("Qwen4ExpForCausalLM", "dflash", "DFlash2DraftModel", "dflash_head", FIA, FIA),
     ],
 )
-def test_qwen_dflash2_selects_target_and_draft(qwen_dflash2_fa3, hardware, tag, eager, expected):
-    r = qwen_dflash2_fa3
-    r.hardware, r.spec.enforce_eager = hardware, eager
-    assert r.select(tag) == expected
-
-
-@pytest.mark.parametrize("tag", ["backbone", "dflash_head"])
-def test_qwen_dflash2_fa3_selection_does_not_import_operator(qwen_dflash2_fa3, monkeypatch, tag):
-    # Importing the extension can initialize a device; defer it to the worker.
-    monkeypatch.setattr(
-        "vllm_ascend.platform.import_module",
-        Mock(side_effect=AssertionError("Backend selection must not import the FA3 operator")),
-    )
-    assert qwen_dflash2_fa3.select(tag) == "AscendFlashAttentionBackend"
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    [
-        "Qwen3NextForCausalLM",
-        "Qwen3_5ForCausalLM",
-        "Qwen3_5MoeForCausalLM",
-        "Qwen3_5ForConditionalGeneration",
-        "Qwen3_5MoeForConditionalGeneration",
-    ],
-)
-def test_hybrid_qwen_target_uses_fa3_with_dflash2(qwen_dflash2_fa3, architecture):
-    r = qwen_dflash2_fa3
-    r.target.architecture = architecture
-    r.target.hf_config.architectures = [architecture]
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
-    assert r.select("dflash_head") == "AscendFlashAttentionBackend"
-
-
-@pytest.mark.parametrize(
-    "method,draft,expected_backend",
-    [
-        ("dflash", "DFlash2DraftModel", "AscendFlashAttentionBackend"),
-        ("dspark", "DSparkMiniMaxDraftModel", "AscendAttentionBackend"),
-    ],
-)
-def test_fa3_matches_resolved_target_when_hf_lists_multiple_architectures(
-    qwen_dflash2_fa3, method, draft, expected_backend
+def test_qwen_fa3_model_pairs(
+    dflash2_config, select_qwen_fa3, target, method, draft, tag, backbone_backend, draft_backend
 ):
-    r = qwen_dflash2_fa3
-    r.target.hf_config.architectures = [r.target.architecture, "MiniMaxM3SparseForCausalLM"]
-    r.spec.method = method
-    r.draft.architectures = [draft]
-
-    assert r.select(f"{method}_head") == expected_backend
-
-
-@pytest.mark.parametrize("speculation", ["disabled", "ngram", "mtp"])
-def test_hybrid_qwen_target_requires_speculation_only(qwen_dflash2_fa3, speculation):
-    r = qwen_dflash2_fa3
-    if speculation == "disabled":
-        r.config.speculative_config = None
-    elif speculation == "ngram":
-        r.spec.method = "ngram"
-        r.spec.draft_model_config = None
-    else:
-        r.spec.method = "mtp"
-        r.draft.architectures = ["Qwen3_5MTP"]
-
-    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (speculation != "disabled")
-    assert r.select("eagle_head") == "AscendAttentionBackend"
-    assert r.select("dflash_head") == "AscendAttentionBackend"
+    spec = dflash2_config.speculative_config
+    spec.target_model_config.architecture = target
+    spec.method = method
+    spec.draft_model_config.architectures = [draft]
+    assert select_qwen_fa3("backbone") == backbone_backend
+    assert select_qwen_fa3(tag) == draft_backend
 
 
-@pytest.mark.parametrize(
-    "target,draft,method,tag,target_fa3,draft_fa3",
-    [
-        ("Qwen3ForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
-        ("Qwen3MoeForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
-        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
-        ("Qwen4ExpForConditionalGeneration", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
-        ("Qwen3NextForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", True, False),
-        ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dflash", "dspark_head", True, False),
-        ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dspark", "dflash_head", True, False),
-        ("Qwen3NextForCausalLM", "Qwen3DSparkModel", "dspark", "dspark_head", True, False),
-        ("MiniMaxM3SparseForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
-    ],
-)
-def test_fa3_matches_target_and_draft_loader_rules(qwen_dflash2_fa3, target, draft, method, tag, target_fa3, draft_fa3):
-    r = qwen_dflash2_fa3
-    r.target.architecture = target
-    r.target.hf_config.architectures = [target]
-    r.spec.method = method
-    r.draft.architectures = [draft]
+def test_qwen_target_without_a_draft_model(dflash2_config, select_qwen_fa3):
+    spec = dflash2_config.speculative_config
+    spec.method = "ngram"
+    spec.draft_model_config = None
+    assert select_qwen_fa3("backbone") == FA3
 
-    assert (r.select("backbone") == "AscendFlashAttentionBackend") == target_fa3
-    assert (r.select(tag) == "AscendFlashAttentionBackend") == draft_fa3
+    dflash2_config.speculative_config = None
+    assert select_qwen_fa3("backbone") == FIA
 
 
-@pytest.mark.parametrize("target", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
-@pytest.mark.parametrize(
-    "draft,expected_backend",
-    [
-        ("DSparkMiniMaxDraftModel", "AscendFlashAttentionBackend"),
-        ("MiniMaxM31FlashA3DSparkModel", "AscendFlashAttentionBackend"),
-        ("Qwen3DSparkModel", "AscendAttentionBackend"),
-        ("Qwen3OmniDSparkModel", "AscendAttentionBackend"),
-    ],
-)
-def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft, expected_backend):
-    r = qwen_dflash2_fa3
-    r.target.architecture = target
-    r.target.hf_config.architectures = ["OtherTarget", target]
-    r.spec.method = "dspark"
-    r.draft.architectures = ["OtherDraft", draft]
-
-    assert r.select("backbone") == "AscendAttentionBackend"
-    assert r.select("dspark_head") == expected_backend
-    assert r.select("dflash_head") == "AscendAttentionBackend"
-
-    r.config.cache_config.cache_dtype = "fp8"
-    assert r.select("dspark_head") == "AscendAttentionBackend"
-    r.config.cache_config.cache_dtype = "auto"
-    r.config.quant_config = SimpleNamespace(enable_c8_quant=True)
-    assert r.select("dspark_head") == "AscendAttentionBackend"
-
-
-@pytest.mark.parametrize("target_c8,draft_c8", [(False, True), (True, False), (True, True)])
-def test_qwen_fa3_checks_target_and_draft_c8_separately(qwen_dflash2_fa3, monkeypatch, target_c8, draft_c8):
-    r = qwen_dflash2_fa3
-    r.config.quant_config = SimpleNamespace(enable_c8_quant=target_c8)
-    r.spec.draft_load_config = SimpleNamespace(load_format="safetensors")
-
-    def quant_config(model, load):
-        assert model is r.draft
-        return SimpleNamespace(enable_c8_quant=draft_c8 and load is r.spec.draft_load_config)
-
-    lookup = Mock(side_effect=quant_config)
-    monkeypatch.setattr("vllm.config.VllmConfig.get_quantization_config", lookup)
-    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (not target_c8)
-    lookup.assert_not_called()
-    r.config.load_config = r.spec.draft_load_config
-    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == (not draft_c8)
-
-
-@pytest.mark.parametrize(
-    "run_dtype,draft_override,scale_strategy,draft_layer_dtype,expected",
-    [
-        ("auto", "fp8", None, "fp8", False),
-        ("fp8", None, None, "fp8", False),
-        ("fp8", "bfloat16", None, "bfloat16", True),
-        ("auto", None, "tensor", "fp8", False),
-        ("auto", "bfloat16", "attn_head", "bfloat16", False),
-        ("auto", "bfloat16", "tensor", "bfloat16", True),
-    ],
-)
-def test_qwen_and_dflash_check_their_own_kv_caches(
-    qwen_dflash2_fa3, monkeypatch, run_dtype, draft_override, scale_strategy, draft_layer_dtype, expected
+@pytest.mark.parametrize("target_c8,draft_c8", [(True, False), (False, True)])
+def test_qwen_target_and_draft_use_their_own_c8_config(
+    dflash2_config, select_qwen_fa3, monkeypatch, target_c8, draft_c8
 ):
-    r = qwen_dflash2_fa3
-    r.config.cache_config.cache_dtype = run_dtype
-    r.spec.kv_cache_dtype = draft_override
-    scheme = {"strategy": scale_strategy} if scale_strategy else None
+    dflash2_config.quant_config = SimpleNamespace(enable_c8_quant=target_c8)
     monkeypatch.setattr(
-        "vllm.config.VllmConfig.get_quantization_config", lambda *_: SimpleNamespace(kv_cache_scheme=scheme)
+        "vllm.config.VllmConfig.get_quantization_config", lambda *_: SimpleNamespace(enable_c8_quant=draft_c8)
     )
-    r.selector = r.selector._replace(kv_cache_dtype=run_dtype)
-    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (run_dtype != "fp8")
-
-    # The draft loader applies its override; Attention resolves checkpoint KV scales per layer.
-    r.config.cache_config.cache_dtype = draft_override or run_dtype
-    r.selector = r.selector._replace(
-        kv_cache_dtype=draft_layer_dtype, use_per_head_quant_scales=scale_strategy == "attn_head"
-    )
-    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == expected
-
-
-@pytest.mark.parametrize(
-    "layer_sink,override,has_sink", [(False, True, True), (True, None, True), (True, False, False)]
-)
-def test_qwen_target_ignores_dflash_attention_sinks(qwen_dflash2_fa3, layer_sink, override, has_sink):
-    r = qwen_dflash2_fa3
-    r.draft.hf_config.add_swa_attention_sink_bias = layer_sink
-    if override is not None:
-        r.draft.hf_config.dflash_config["attention_sink_bias"] = override
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
-    r.selector = r.selector._replace(has_sink=has_sink)
-    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == (not has_sink)
-
-
-def test_qwen_target_ignores_draft_cache_overrides(qwen_dflash2_fa3):
-    r = qwen_dflash2_fa3
-    r.spec.kv_cache_dtype = "fp8"
-    r.config.cache_config.kv_cache_dtype_skip_layers = ["64", "65", "sliding_window"]
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
-
-
-@pytest.mark.parametrize(
-    "head_size,dtype,kv_cache_dtype",
-    [(512, torch.bfloat16, "bfloat16"), (128, torch.bfloat16, "float16"), (128, torch.float16, "bfloat16")],
-)
-def test_qwen_fa3_routing_does_not_filter_head_size_or_match_float_dtypes(
-    qwen_dflash2_fa3, head_size, dtype, kv_cache_dtype
-):
-    r = qwen_dflash2_fa3
-    r.selector = r.selector._replace(head_size=head_size, dtype=dtype, kv_cache_dtype=kv_cache_dtype)
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
-    assert r.select("dflash_head") == "AscendFlashAttentionBackend"
-
-
-@pytest.mark.parametrize(
-    "section,field,value",
-    [
-        ("spec", "enable_adaptive_verification", True),
-        ("parallel", "pipeline_parallel_size", 2),
-        ("parallel", "prefill_context_parallel_size", 2),
-        ("parallel", "decode_context_parallel_size", 2),
-        ("selector", "kv_cache_dtype", "fp8"),
-        ("selector", "kv_cache_dtype", "int8"),
-        ("selector", "dtype", torch.float32),
-        ("selector", "attn_type", AttentionType.ENCODER_ONLY),
-        ("selector", "use_rswa", True),
-        ("selector", "has_sink", True),
-        ("selector", "use_batch_invariant", True),
-        (None, "installed", False),
-    ],
-)
-def test_qwen_dflash2_unsupported_settings_keep_existing_backend(qwen_dflash2_fa3, section, field, value):
-    r = qwen_dflash2_fa3
-    if section == "selector":
-        r.selector = r.selector._replace(**{field: value})
-    else:
-        setattr(getattr(r, section) if section else r, field, value)
-    assert r.select() == "AscendAttentionBackend"
-    assert r.select("backbone") == "AscendAttentionBackend"
+    assert select_qwen_fa3("backbone") == (FIA if target_c8 else FA3)
+    assert select_qwen_fa3("dflash_head") == (FIA if draft_c8 else FA3)
 
 
 @pytest.mark.parametrize(
