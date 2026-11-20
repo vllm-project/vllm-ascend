@@ -13,7 +13,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-from vllm_ascend import envs
+from vllm_ascend.ascend_config import PcpConfig, pcp_config_from_vllm_config
 from vllm_ascend.attention import dsa_v41 as v41
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.dsa_cp import (
@@ -23,7 +23,6 @@ from vllm_ascend.attention.context_parallel.pcp_owner_kv import (
     PCP_KV_SHARING_OWNER,
     PCP_KV_SHARING_REPLICATED,
     log_owner_sharing_fallback,
-    pcp_kv_sharing_mode_from_config,
     resolve_owner_sharing,
 )
 from vllm_ascend.attention.dsa_v41 import (
@@ -274,7 +273,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         # transport falls back to replicated instead of addressing pages that
         # do not exist on this rank.
         self.pcp_kv_sharing_mode = PCP_KV_SHARING_REPLICATED
-        if pcp_kv_sharing_mode_from_config(vllm_config) == PCP_KV_SHARING_OWNER:
+        if pcp_config_from_vllm_config(vllm_config).kv_sharing == PCP_KV_SHARING_OWNER:
             supported, reason = resolve_owner_sharing(vllm_config)
             if supported:
                 self.pcp_kv_sharing_mode = PCP_KV_SHARING_OWNER
@@ -666,11 +665,7 @@ class AscendDSAV41PCPFoldedIndexMetadataBuilder(
     _global_metadata_builder_cls = AscendDSAV41FoldedIndexMetadataBuilder
 
 
-def _env_flag(value: Any) -> bool:
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _local_cache_writes_enabled() -> bool:
+def _local_cache_writes_enabled(pcp_config: PcpConfig | None = None) -> bool:
     """Opt-in: let non-source layers write caches without the hidden gather.
 
     Correct only when the cache is owner-sharded: under owner placement the
@@ -679,14 +674,15 @@ def _local_cache_writes_enabled() -> bool:
     would lose the other ``(pcp_size - 1) / pcp_size`` rows, so the switch is
     ignored unless an owner slab mapped successfully.
     """
-    if not _env_flag(envs.VLLM_ASCEND_PCP_LOCAL_KV_WRITE):
+    config = PcpConfig() if pcp_config is None else pcp_config
+    if not config.local_kv_write:
         return False
     from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_runtime_active
 
     return owner_slab_runtime_active()
 
 
-def _local_source_writes_enabled() -> bool:
+def _local_source_writes_enabled(pcp_config: PcpConfig | None = None) -> bool:
     """Opt-in: write the compressed source planes from local tokens too.
 
     Needs the local metadata builder to emit compressor (C2) state metadata;
@@ -694,20 +690,21 @@ def _local_source_writes_enabled() -> bool:
     plane has its own replicated tensor: the index rows then have to be the
     complete global rows, which only the gathered path produces.
     """
-    if not _local_cache_writes_enabled():
+    config = PcpConfig() if pcp_config is None else pcp_config
+    if not _local_cache_writes_enabled(config):
         return False
     from vllm_ascend.models.deepseek_v41.cache_config import local_index_copy_enabled
 
-    if local_index_copy_enabled():
+    if local_index_copy_enabled(config):
         return False
-    return _env_flag(envs.VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE)
+    return config.local_kv_write_source
 
 
 def _tensor_is_owner_backed(tensor) -> bool:
     """Whether this exact cache plane lives in a mapped owner slab.
 
-    The runtime is process-wide, but a diagnostic ``OWNER_MAX_SLABS`` limit (or
-    a partially mapped group) can leave some planes on replicated tensors.
+    The runtime is process-wide, but a partially mapped group can leave some
+    planes on replicated tensors.
     Deciding from ``owner_slab_runtime_active()`` alone would then skip the
     gather for a replicated plane and drop every other rank's rows.
     """
@@ -796,9 +793,9 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         return latent
 
     @staticmethod
-    def _write_swa_cache(attn, metadata, value):
+    def _write_swa_cache(attn, metadata, value, pcp_config: PcpConfig | None = None):
         if isinstance(metadata, AscendDSAV41PCPMetadata):
-            if _local_cache_writes_enabled() and _swa_cache_is_owner_backed(attn):
+            if _local_cache_writes_enabled(pcp_config) and _swa_cache_is_owner_backed(attn):
                 # The rank-local slot mapping addresses this rank's own slab
                 # pages; SWA has one entry per token and no cross-chunk state,
                 # so the local write is exact and needs no gather.
@@ -822,7 +819,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
                 prepared_indexer=prepared_indexer,
             )
         self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
-        local_source = _local_source_writes_enabled() and _long_kv_cache_is_owner_backed(attn)
+        local_source = _local_source_writes_enabled(self.pcp_config) and _long_kv_cache_is_owner_backed(attn)
         write_metadata = local_metadata if local_source else global_metadata
         if self.role.compress_ratio == 2:
             latent = self._compress_local_c2(attn, hidden_states, local_metadata, global_metadata)

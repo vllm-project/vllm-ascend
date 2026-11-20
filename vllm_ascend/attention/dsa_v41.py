@@ -29,7 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import PcpConfig, get_ascend_config
 from vllm_ascend.attention.context_parallel.pcp_owner_timing import enter as _timing_enter
 from vllm_ascend.attention.context_parallel.pcp_owner_timing import exit as _timing_exit
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
@@ -350,18 +350,6 @@ def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     return indices.unsqueeze(1).contiguous().int()
 
 
-def _swa_stage_enabled() -> bool:
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_stage_swa_enabled
-
-    return owner_stage_swa_enabled()
-
-
-def _swa_stage_chunk_enabled() -> bool:
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_stage_swa_chunk_enabled
-
-    return owner_stage_swa_chunk_enabled()
-
-
 class _SwaChunkPlan:
     """Immutable per-step view shared by the four layers of one SWA group.
 
@@ -395,45 +383,6 @@ class _SwaChunkPlan:
         self.smla_cache: dict[int, torch.Tensor | bool] = {}
 
 
-_SWA_CHUNK_DEBUG_PRINTED = False
-
-
-def _maybe_log_swa_chunk_layout(metadata, segments, num_reqs, block_size, window):
-    """Print the rank-local chunk layout once so the row assumption is visible."""
-    global _SWA_CHUNK_DEBUG_PRINTED
-    if _SWA_CHUNK_DEBUG_PRINTED:
-        return
-    from vllm.logger import logger
-
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import swa_chunk_debug_enabled
-
-    if not swa_chunk_debug_enabled():
-        return
-    _SWA_CHUNK_DEBUG_PRINTED = True
-    starts = metadata.query_start_loc_cpu.tolist()[: num_reqs + 1]
-    seqs = metadata.seq_lens_cpu.tolist()[:num_reqs]
-    logger.info(
-        "PCP SWA chunk layout: rows=%d block=%d window=%d query_start_loc=%s seq_lens=%s",
-        num_reqs,
-        block_size,
-        window,
-        starts,
-        seqs,
-    )
-    for row, segment in enumerate(segments):
-        chunk_len = int(starts[row + 1] - starts[row])
-        logger.info(
-            "PCP SWA chunk row=%d chunk_start=%d chunk_len=%d chunk_end=%d replay_start=%d replay_len=%d blocks=%d",
-            row,
-            int(seqs[row]) - chunk_len,
-            chunk_len,
-            int(seqs[row]),
-            segment.replay_start,
-            segment.replay_seq_len,
-            segment.num_blocks,
-        )
-
-
 def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, num_blocks):
     """Build (and memoize) the bounded SWA view for this step.
 
@@ -459,8 +408,6 @@ def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, n
         block_size,
         window,
     )
-    if segments is not None:
-        _maybe_log_swa_chunk_layout(metadata, segments, num_reqs, block_size, window)
     if segments is not None and block_table.shape[1] > 0:
         max_blocks = max((segment.num_blocks for segment in segments), default=0)
         if max_blocks > 0 and max_blocks <= int(block_table.shape[1]):
@@ -560,7 +507,7 @@ def _build_swa_chunk_smla_metadata(
 
 
 def _maybe_stage_owner_cmp_cache(
-    source_cache, block_table, metadata, num_reqs, seq_lens=None, block_size=None, ratio=1
+    source_cache, block_table, metadata, num_reqs, pcp_config, seq_lens=None, block_size=None
 ):
     """Copy a pure-prefill batch's long-KV blocks into local scratch.
 
@@ -578,12 +525,9 @@ def _maybe_stage_owner_cmp_cache(
     # mixed step keeps direct peer reads for every row.
     if getattr(metadata, "num_prefills", 0) <= 0 or getattr(metadata, "num_decodes", 0) > 0:
         return None
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
-        get_stage_cache,
-        owner_stage_enabled,
-    )
+    from vllm_ascend.attention.context_parallel.pcp_owner_stage import get_stage_cache
 
-    if not owner_stage_enabled():
+    if not pcp_config.owner_stage:
         return None
     from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
 
@@ -597,40 +541,16 @@ def _maybe_stage_owner_cmp_cache(
     memo = getattr(metadata, "_pcp_stage_memo", None)
     if memo is not None and memo[0] == source_cache.data_ptr():
         return memo[1]
-    counts = _stage_block_counts(metadata, num_reqs, block_table, block_size, ratio=ratio)
-    result = get_stage_cache(source_cache.device, source_cache).stage(
-        source_cache, block_table, seq_lens=seq_lens, block_size=block_size, counts=counts
+    result = get_stage_cache(source_cache.device, source_cache, budget_bytes=pcp_config.owner_stage_bytes).stage(
+        source_cache,
+        block_table,
+        seq_lens=seq_lens,
+        block_size=block_size,
+        enable_timing=pcp_config.enable_timing,
     )
     if result is not None:
         metadata._pcp_stage_memo = (source_cache.data_ptr(), result)
     return result
-
-
-def _stage_block_counts(metadata, num_reqs, block_table, block_size, ratio=1):
-    """Per-request live-block counts from the CPU sequence lengths.
-
-    Returning ``None`` keeps the mask-based path, which needs one D2H sync per
-    call; the CPU path is the fast one.  Counts are clamped to the block-table
-    width and may over-approximate the live prefix (padding rows copy block 0
-    and are never addressed by the kernel).
-    """
-    from vllm_ascend.attention.context_parallel.pcp_owner_stage import owner_cpu_plan_enabled
-
-    if not block_size or not owner_cpu_plan_enabled():
-        return None
-    seq_lens_cpu = getattr(metadata, "seq_lens_cpu", None)
-    if seq_lens_cpu is None:
-        return None
-    values = seq_lens_cpu[:num_reqs].tolist()
-    width = int(block_table.shape[1])
-    ratio = max(1, int(ratio or 1))
-    counts = []
-    for value in values:
-        # Match the builder: cache positions are ``seq_len // ratio`` and the
-        # block table is indexed in those positions.
-        cache_len = int(value) // ratio
-        counts.append(min(width, (cache_len + block_size - 1) // block_size))
-    return counts
 
 
 class AscendDSAV41Impl:
@@ -643,7 +563,9 @@ class AscendDSAV41Impl:
     """
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
-        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        ascend_config = get_ascend_config()
+        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        self._pcp_config = getattr(ascend_config, "pcp_config", None) or PcpConfig()
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -654,6 +576,15 @@ class AscendDSAV41Impl:
         self.compressor_state_prefix = (
             f"{prefix}.compressor.state_cache" if role.is_kv_source and role.compress_ratio == 2 else None
         )
+
+    @property
+    def pcp_config(self) -> PcpConfig:
+        """Typed PCP settings; tests that bypass ``__init__`` get the defaults."""
+        config = getattr(self, "_pcp_config", None)
+        if config is None:
+            config = PcpConfig()
+            self._pcp_config = config
+        return config
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
@@ -678,7 +609,7 @@ class AscendDSAV41Impl:
         )
 
     @staticmethod
-    def _write_swa_cache(attn, metadata, value):
+    def _write_swa_cache(attn, metadata, value, pcp_config: PcpConfig | None = None):
         if not value.shape[0]:
             return
         cache = attn.dsa_attn.swa_cache_layer.kv_cache
@@ -714,7 +645,7 @@ class AscendDSAV41Impl:
             return
         cos, sin = metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
         kv = self._project_kv(attn, hidden_states, cos, sin)
-        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv)
+        AscendDSAV41Impl._write_swa_cache(attn, metadata.swa, kv, self.pcp_config)
         if self.role.is_kv_source:
             self._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata)
 
@@ -744,7 +675,7 @@ class AscendDSAV41Impl:
                 q = qr = None
                 kv = hidden_states.new_empty((0, attn.head_dim))
             # Empty PCP ranks still participate in the replicated-cache gather.
-            self._write_swa_cache(attn, local_metadata.swa, kv)
+            self._write_swa_cache(attn, local_metadata.swa, kv, self.pcp_config)
         prepared_indexer = None
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
@@ -1023,15 +954,15 @@ class AscendDSAV41Impl:
             cmp_residual = metadata.attention.cmp_residual
             cmp_topk = self.topology.index_topk
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
-            timing = _timing_enter("stage")
+            timing = _timing_enter("stage", self.pcp_config.enable_timing)
             staged = _maybe_stage_owner_cmp_cache(
                 source_cache,
                 cmp_block_table,
                 metadata.attention,
                 num_reqs,
+                self.pcp_config,
                 seq_lens=cmp_seq_lens,
                 block_size=getattr(metadata.attention, "storage_block_size", None),
-                ratio=getattr(self.role, "compress_ratio", 1),
             )
             _timing_exit(timing)
             if staged is not None:
@@ -1047,13 +978,13 @@ class AscendDSAV41Impl:
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
-            timing = _timing_enter("swa_gather")
+            timing = _timing_enter("swa_gather", self.pcp_config.enable_timing)
             swa_cache = swa_cache[metadata.swa.replay_cache_blocks, metadata.swa.replay_cache_offsets]
             _timing_exit(timing)
             swa_cache = swa_cache.reshape(-1, metadata.swa.storage_block_size, 1, swa_cache.shape[-1])
             ori_block_table = metadata.swa.replay_block_table
             seq_lens = metadata.swa.replay_seq_lens
-        elif _swa_stage_chunk_enabled():
+        elif self.pcp_config.owner_stage_swa_chunk:
             # Each rank-local row is already one DualChunkSwap chunk, so the
             # kernel only needs ``[chunk_start - window, chunk_end)`` of the
             # owner slab. Stage that bounded range and rebase the operator
@@ -1079,7 +1010,7 @@ class AscendDSAV41Impl:
                 )
 
                 if owner_slab_for_tensor(swa_cache) is not None:
-                    timing = _timing_enter("stage_swa_chunk")
+                    timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
                     plan = _build_swa_chunk_plan(
                         metadata.swa,
                         ori_block_table,
@@ -1104,34 +1035,23 @@ class AscendDSAV41Impl:
                             num_reqs=num_reqs,
                         )
                         if rebuilt is not None:
-                            staged = get_swa_chunk_stage_cache(swa_cache.device, swa_cache).stage(
+                            staged = get_swa_chunk_stage_cache(
+                                swa_cache.device,
+                                swa_cache,
+                                budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
+                            ).stage(
                                 swa_cache,
                                 plan.window_block_table,
                                 counts=plan.counts,
                                 prepared=plan.prepared,
+                                enable_timing=self.pcp_config.enable_timing,
                             )
                     _timing_exit(timing)
                     if staged is not None:
                         swa_cache, ori_block_table = staged
                         seq_lens = plan.replay_seq_lens
                         op_metadata = rebuilt
-        elif _swa_stage_enabled():
-            # The kernel reads the sliding-window cache through
-            # ``ori_block_table``; on an owner slab those reads are peer reads
-            # at per-token granularity. Stage the live prefix locally.
-            timing = _timing_enter("stage_swa")
-            staged = _maybe_stage_owner_cmp_cache(
-                swa_cache,
-                ori_block_table,
-                metadata.swa,
-                num_reqs,
-                seq_lens=seq_lens,
-                block_size=getattr(metadata.swa, "storage_block_size", None),
-            )
-            _timing_exit(timing)
-            if staged is not None:
-                swa_cache, ori_block_table = staged
-        timing = _timing_enter("kernel")
+        timing = _timing_enter("kernel", self.pcp_config.enable_timing)
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,
             ori_kv=swa_cache,

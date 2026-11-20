@@ -44,35 +44,42 @@ def uses_a5_packed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
 
 
-def local_index_copy_enabled() -> bool:
+def _pcp_config(pcp_config=None):
+    from vllm_ascend.ascend_config import PcpConfig
+
+    return PcpConfig() if pcp_config is None else pcp_config
+
+
+def local_index_copy_enabled(pcp_config=None) -> bool:
     """Whether the indexer K plane gets its own replicated tensor."""
-    from vllm_ascend import envs
-
-    return str(envs.VLLM_ASCEND_PCP_LOCAL_INDEX).strip().lower() in ("1", "true", "yes", "on")
+    return _pcp_config(pcp_config).local_index
 
 
-def owner_capacity_enabled() -> bool:
+def owner_capacity_enabled(pcp_config=None) -> bool:
     """Whether owner-sharding savings are converted into extra KV blocks."""
-    from vllm_ascend import envs
-
-    return str(envs.VLLM_ASCEND_PCP_OWNER_CAPACITY).strip().lower() in ("1", "true", "yes", "on")
+    return _pcp_config(pcp_config).owner_capacity
 
 
 def owner_capacity_shard_size(vllm_config: VllmConfig | None) -> int:
     """Per-block physical divisor for owner-sharded tuples (1 = replicated).
 
     Only owner-sharded tuples get ``page_size / pcp_size``. The index-only
-    tuple created by ``VLLM_ASCEND_PCP_LOCAL_INDEX`` stays replicated, as does
+    tuple created by ``pcp_config.local_index`` stays replicated, as does
     everything when owner sharing is not a supported configuration.
     """
-    if vllm_config is None or not owner_capacity_enabled():
+    if vllm_config is None:
+        return 1
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+    pcp_config = pcp_config_from_vllm_config(vllm_config)
+    if not owner_capacity_enabled(pcp_config):
         return 1
     from vllm_ascend.attention.context_parallel.pcp_owner_kv import (
-        owner_sharding_enabled,
+        PCP_KV_SHARING_OWNER,
         validate_owner_sharing,
     )
 
-    if not owner_sharding_enabled(vllm_config):
+    if pcp_config.kv_sharing != PCP_KV_SHARING_OWNER:
         return 1
     supported, _ = validate_owner_sharing(vllm_config)
     if not supported:
@@ -82,7 +89,7 @@ def owner_capacity_shard_size(vllm_config: VllmConfig | None) -> int:
 
 
 def _is_index_only_tuple(layer_names) -> bool:
-    """True for the replicated tuple created by ``VLLM_ASCEND_PCP_LOCAL_INDEX``."""
+    """True for the replicated tuple created by ``pcp_config.local_index``."""
     names = list(layer_names)
     return bool(names) and all(".indexer.k_cache" in name for name in names)
 
@@ -101,7 +108,7 @@ def _physical_page_sizes(page_sizes, layer_tuples, shard_size: int) -> list[int]
         if page_size % shard_size:
             raise ValueError(
                 f"Cannot split a {page_size}-byte KV page across pcp_size={shard_size}; "
-                "disable VLLM_ASCEND_PCP_OWNER_CAPACITY."
+                "disable additional_config.pcp_config.owner_capacity."
             )
         physical.append(page_size // shard_size)
     return physical
@@ -216,7 +223,7 @@ def _draft_layer_number(name):
     return int(("." + name).rsplit(".mtp.", 1)[1].split(".", 1)[0])
 
 
-def get_layer_tuples(specs):
+def get_layer_tuples(specs, pcp_config=None):
     """Return DSV4-style ordered layer tuples and their physical page sizes."""
     mla = {name for name, spec in specs.items() if isinstance(spec, AscendMLAAttentionSpec)}
     state = sorted((name for name, spec in specs.items() if isinstance(spec, CircularBufferSpec)), key=_layer_number)
@@ -247,7 +254,7 @@ def get_layer_tuples(specs):
         folded_bytes = folded_spec.unpadded_page_size_bytes if folded_spec is not None else 0
         if slot_idx < len(draft_swa):
             aliases.append(draft_swa[slot_idx])
-        if local_index_copy_enabled():
+        if local_index_copy_enabled(pcp_config):
             # The indexer K plane leaves the owner-sharded tuple and gets its
             # own replicated tensor. Its page is the unpadded index footprint,
             # so no page padding from the long-KV aliases applies.
@@ -266,11 +273,11 @@ def get_layer_tuples(specs):
     return page_sizes, layer_tuples
 
 
-def group_cache_specs(specs):
+def group_cache_specs(specs, pcp_config=None):
     """Merge full-context resources and pad layer tuples without mutating inputs."""
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
         return [UniformTypeKVCacheSpecs.from_specs({name: spec}) for name, spec in specs.items()]
-    page_sizes, layer_tuples = get_layer_tuples(specs)
+    page_sizes, layer_tuples = get_layer_tuples(specs, pcp_config)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
         names = list(layer_tuple)
@@ -290,7 +297,7 @@ def group_cache_specs(specs):
             if has_folded:
                 padded[folded_name] = replace(specs[folded_name], page_size_padded=page_size - kv_bytes - index_bytes)
         elif index_name is not None:
-            # Index-only tuple (VLLM_ASCEND_PCP_LOCAL_INDEX): its own page is
+            # Index-only tuple (pcp_config.local_index): its own page is
             # the unpadded index footprint, with the folded alias sharing it.
             index_bytes = specs[index_name].unpadded_page_size_bytes
             padded[index_name] = replace(specs[index_name], page_size_padded=index_bytes)
@@ -321,7 +328,7 @@ def group_cache_specs(specs):
     ]
     # Stage-local SWA counts need not be divisible by the number of KV sources.
     # zip_longest also absorbs the empty column contributed by an index-only
-    # tuple (VLLM_ASCEND_PCP_LOCAL_INDEX).
+    # tuple (pcp_config.local_index).
     for names in zip_longest(*swa_columns):
         groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names if name is not None}))
 
@@ -351,21 +358,21 @@ def _specs_from_groups(groups):
     return specs
 
 
-def _get_worker_layer_tuples(groups):
+def _get_worker_layer_tuples(groups, pcp_config=None):
     """Pack scheduler groups whose width may exceed the stage's KV source count."""
     specs = _specs_from_groups(groups)
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
         # Preserve main's independent slots for SWA-only backbones and drafts.
-        _, slots = get_layer_tuples(specs)
+        _, slots = get_layer_tuples(specs, pcp_config)
         return [max(specs[name].page_size_bytes for name in names) for names in slots], slots
-    _, source_tuples = get_layer_tuples(specs)
+    _, source_tuples = get_layer_tuples(specs, pcp_config)
     # A column's entries need distinct slots; different columns may alias.
     columns = [[]]
     index_slots: list[tuple[str, ...]] = []
     for names in source_tuples:
         mla_names = tuple(name for name in names if isinstance(specs[name], AscendMLAAttentionSpec))
         if _is_index_only_tuple(names):
-            # VLLM_ASCEND_PCP_LOCAL_INDEX keeps the indexer K plane on its own
+            # pcp_config.local_index keeps the indexer K plane on its own
             # replicated backing. It must not take SWA/state aliases from the
             # positional packing below, which would make it a sharded slot.
             index_slots.append(mla_names)
@@ -388,7 +395,10 @@ def _get_worker_layer_tuples(groups):
 
 
 def get_deepseek_v41_pool_bytes_per_block(groups, vllm_config: VllmConfig | None = None) -> int:
-    page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+    pcp_config = pcp_config_from_vllm_config(vllm_config)
+    page_sizes, layer_tuples = _get_worker_layer_tuples(groups, pcp_config)
     shard_size = owner_capacity_shard_size(vllm_config)
     return sum(_physical_page_sizes(page_sizes, layer_tuples, shard_size))
 
@@ -399,8 +409,11 @@ def get_deepseek_v41_kv_cache_config(
     available_memory: int,
 ) -> KVCacheConfig:
     """Place stage-local resource pages within one shared backing pool."""
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+    pcp_config = pcp_config_from_vllm_config(vllm_config)
     specs = _specs_from_groups(groups)
-    page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
+    page_sizes, layer_tuples = _get_worker_layer_tuples(groups, pcp_config)
     shard_size = owner_capacity_shard_size(vllm_config)
     physical_page_sizes = _physical_page_sizes(page_sizes, layer_tuples, shard_size)
     capacity = max(available_memory // sum(physical_page_sizes), 0)
@@ -420,10 +433,10 @@ def get_deepseek_v41_kv_cache_config(
             shard_size,
             sum(page_sizes),
             sum(physical_page_sizes),
-            owner_stage_reserve_bytes() / (1024**3),
+            owner_stage_reserve_bytes(pcp_config) / (1024**3),
             available_memory / (1024**3),
         )
-    # VLLM_ASCEND_PCP_LOCAL_INDEX gives the indexer K plane its own tuple so it
+    # pcp_config.local_index gives the indexer K plane its own tuple so it
     # can stay replicated while long KV is owner-sharded. A replicated tuple
     # must not share the owner slab, so put index-only tuples in their own
     # backing: descriptors carry the size of the backing they address and the

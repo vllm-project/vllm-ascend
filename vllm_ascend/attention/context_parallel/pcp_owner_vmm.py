@@ -631,22 +631,12 @@ class PcpOwnerSlabRuntime:
         backend: AclVmmBackend | None = None,
         dist_module: object | None = None,
         placement: str = SLAB_PLACEMENT_CONTIGUOUS,
-        local_only: bool = False,
     ) -> None:
         if device.type != "npu":
             raise PcpOwnerVmmUnavailable(f"owner slabs require an NPU device, got {device}")
         if placement not in SLAB_PLACEMENTS:
             raise ValueError(f"placement must be one of {SLAB_PLACEMENTS}, got {placement!r}")
         self.placement = placement
-        # Control mode: same VMM allocation, no peer export/import.  Every
-        # rank maps the full slab locally, so HBM use matches replicated KV.
-        self.local_only = bool(local_only)
-        # Diagnostic knob: shard only the first N slabs, keep the rest
-        # replicated, to measure the HBM/latency tradeoff curve.
-        from vllm_ascend import envs
-
-        raw_limit = str(envs.VLLM_ASCEND_PCP_OWNER_MAX_SLABS or "").strip()
-        self.max_slabs = int(raw_limit) if raw_limit else None
         self.device = device
         self.device_index = int(device.index or 0)
         self.pcp_group = pcp_group
@@ -986,63 +976,6 @@ class PcpOwnerSlabRuntime:
             end = min(start + CANN_VMM_GRANULARITY_BYTES // 8, words.numel())
             words[start:end].zero_()
 
-    def _allocate_local_slab(self, names: tuple[str, ...], size_bytes: int) -> torch.Tensor | None:
-        """Control path: reserve and map the full slab on this rank only.
-
-        Used to separate "VMM allocation" from "peer mapping" when explaining
-        a performance delta.  It keeps the same virtual reservation and the
-        same external-tensor binding as owner mode, but allocates all physical
-        memory locally and never exports or imports a handle.
-        """
-        plan = SlabChunkPlan(size_bytes=size_bytes, pcp_size=1, rank=0, placement=self.placement)
-        base_address: int | None = None
-        physical: AclPhysicalHandle | None = None
-        started = time.perf_counter()
-        try:
-            self._backend.set_device(self.device_index)
-            base_address = self._backend.reserve_address(size_bytes=plan.virtual_bytes, device_index=self.device_index)
-            physical = self._backend.malloc_physical(size_bytes=plan.virtual_bytes, device_index=self.device_index)
-            self._backend.map(
-                base_address=base_address,
-                size_bytes=plan.virtual_bytes,
-                offset_bytes=0,
-                handle=physical,
-                device_index=self.device_index,
-            )
-            external = bind_external_tensor(
-                base_address=base_address,
-                size_bytes=size_bytes,
-                device_index=self.device_index,
-            )
-            external.tensor.zero_()
-        except BaseException as error:  # noqa: BLE001 - fail closed to replicated
-            logger.error(
-                "PCP local VMM slab failed for %s (%s: %s); falling back to replicated KV",
-                names[:1],
-                type(error).__name__,
-                error,
-            )
-            return None
-        self.map_calls += 1
-        self.map_seconds += time.perf_counter() - started
-        self._slabs.append(
-            _OwnerSlab(
-                layer_names=names,
-                plan=plan,
-                base_address=base_address,
-                virtual_bytes=plan.virtual_bytes,
-                external=external,
-            )
-        )
-        _register_slab(base_address, plan.virtual_bytes, self)
-        self._active = True
-        logger.info(
-            "PCP local VMM slab mapped (control): layers=%s size=%.3f GiB, full physical per rank",
-            list(names)[:2],
-            plan.virtual_bytes / (1024**3),
-        )
-        return external.tensor
-
     def allocate_slab(self, layer_names: Sequence[str], size_bytes: int) -> torch.Tensor | None:
         """Allocate one owner slab or return ``None`` if the group falls back.
 
@@ -1052,15 +985,6 @@ class PcpOwnerSlabRuntime:
         names = tuple(str(name) for name in layer_names)
         if size_bytes <= 0:
             raise ValueError(f"slab size must be positive, got {size_bytes}")
-        if self.local_only:
-            return self._allocate_local_slab(names, size_bytes)
-        if self.max_slabs is not None and len(self._slabs) >= self.max_slabs:
-            logger.info_once(
-                "PCP owner-slab limit VLLM_ASCEND_PCP_OWNER_MAX_SLABS=%d reached; %s stays replicated.",
-                self.max_slabs,
-                names[:1],
-            )
-            return None
         try:
             self._prepare()
         except BaseException as error:  # noqa: BLE001 - fail closed to replicated
@@ -1275,9 +1199,9 @@ def owner_slab_for_tensor(tensor: torch.Tensor | None) -> PcpOwnerSlabRuntime | 
 
 def get_owner_slab_allocator(vllm_config, device: torch.device) -> PcpOwnerSlabRuntime | None:
     """Return this worker's owner-slab runtime when owner mode is usable."""
-    from .pcp_owner_kv import PCP_KV_SHARING_OWNER, pcp_kv_sharing_mode_from_config, validate_owner_sharing
+    from .pcp_owner_kv import owner_sharding_enabled, validate_owner_sharing
 
-    if pcp_kv_sharing_mode_from_config(vllm_config) != PCP_KV_SHARING_OWNER:
+    if not owner_sharding_enabled(vllm_config):
         return None
     supported, reason = validate_owner_sharing(vllm_config)
     if not supported:
@@ -1295,33 +1219,16 @@ def get_owner_slab_allocator(vllm_config, device: torch.device) -> PcpOwnerSlabR
 
     from vllm.distributed import get_pcp_group
 
-    additional = getattr(vllm_config, "additional_config", None) or {}
-    placement = str(additional.get("pcp_owner_placement", SLAB_PLACEMENT_CONTIGUOUS)).strip().lower()
-    if placement not in SLAB_PLACEMENTS:
-        logger.warning_once(
-            "Unknown pcp_owner_placement %r; using %s.",
-            placement,
-            SLAB_PLACEMENT_CONTIGUOUS,
-        )
-        placement = SLAB_PLACEMENT_CONTIGUOUS
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
 
-    from vllm_ascend import envs
-
-    local_only = str(envs.VLLM_ASCEND_PCP_OWNER_LOCAL_VMM).strip().lower() in ("1", "true", "yes", "on")
-    if local_only:
-        logger.warning(
-            "PCP owner KV control mode: full local VMM slab per rank "
-            "(VLLM_ASCEND_PCP_OWNER_LOCAL_VMM=1); no HBM saving, no peer mapping."
-        )
+    placement = pcp_config_from_vllm_config(vllm_config).owner_placement
 
     global _runtime
     with _runtime_lock:
         if _runtime is not None:
             return _runtime
         try:
-            _runtime = PcpOwnerSlabRuntime(
-                device=device, pcp_group=get_pcp_group(), placement=placement, local_only=local_only
-            )
+            _runtime = PcpOwnerSlabRuntime(device=device, pcp_group=get_pcp_group(), placement=placement)
         except BaseException as error:  # noqa: BLE001 - fail closed to replicated
             logger.warning_once(
                 "PCP owner-sharded KV could not be prepared (%s: %s); using the replicated cache path.",

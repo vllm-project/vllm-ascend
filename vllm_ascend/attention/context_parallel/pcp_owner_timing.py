@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Device-time attribution for the DSV4.1 attention forward.
 
-Enabled with ``VLLM_ASCEND_PCP_TIMING=1``.  Regions are timed with NPU events;
-events are only synchronized in batches so the measurement itself does not
+Enabled with ``additional_config.pcp_config.enable_timing``.  Regions are timed
+with NPU events; events are only synchronized in batches so the measurement
+itself does not
 serialize every layer.  Every ``flush`` logs the accumulated per-region share,
 which is what separates "prepare (writes + collectives)", "select (indexer)"
 and "attention (kernel)" costs between the replicated and owner builds.
@@ -21,14 +22,9 @@ _FLUSH_EVERY = 512
 _logged = 0
 
 
-def timing_enabled() -> bool:
-    from vllm_ascend import envs
-
-    return str(envs.VLLM_ASCEND_PCP_TIMING).strip().lower() in ("1", "true", "yes", "on")
-
-
-def enter(name: str):
-    if not timing_enabled():
+def enter(name: str, enabled: bool = False):
+    """Start timing ``name`` when the typed config enables timing."""
+    if not enabled:
         return None
     event = torch.npu.Event(enable_timing=True)
     event.record()

@@ -103,7 +103,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
-            return make_cache_groups(group_cache_specs(kv_cache_spec))
+            from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+
+            return make_cache_groups(group_cache_specs(kv_cache_spec, pcp_config_from_vllm_config(vllm_config)))
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is not None and len(grouped_specs) >= 2:
