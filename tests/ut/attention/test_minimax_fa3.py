@@ -98,6 +98,7 @@ def selection(monkeypatch, profiles):
         "MiniMaxM3SparseForCausalLM",
         "DSparkMiniMaxDraftModel",
         "Qwen3DSparkModel",
+        "Qwen3OmniDSparkModel",
         "MiniMaxM31FlashA3DSparkModel",
         "Other",
     ],
@@ -108,7 +109,7 @@ def test_hardware_and_model_routing(selection, device, installed, arch):
     r.installed = installed
     r.config.model_config = NS(hf_config=NS(architectures=[arch]))
     actual = r.select()
-    if device in ("A2", "A3") and installed and arch not in ("Other", "MiniMaxM3SparseForCausalLM"):
+    if device in ("A2", "A3") and installed and arch in ("DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"):
         assert actual == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
     else:
         assert "flash_attention_v3" not in actual

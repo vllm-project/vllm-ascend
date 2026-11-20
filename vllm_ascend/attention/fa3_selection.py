@@ -22,9 +22,7 @@ _FA3_TARGET_ARCHITECTURES = frozenset(
 MINIMAX_M3_ARCHITECTURES = frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"})
 # Each target family opts in only its listed DSpark drafts.
 _FA3_DSPARK_DRAFT_ARCHITECTURES = {
-    MINIMAX_M3_ARCHITECTURES: frozenset(
-        {"DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel", "Qwen3DSparkModel", "Qwen3OmniDSparkModel"}
-    ),
+    MINIMAX_M3_ARCHITECTURES: frozenset({"DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"}),
 }
 _FA3_DFLASH_DRAFT_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 

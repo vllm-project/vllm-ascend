@@ -403,9 +403,15 @@ def test_fa3_target_and_draft_use_separate_allowlists(
 
 @pytest.mark.parametrize("target", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"])
 @pytest.mark.parametrize(
-    "draft", ["DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel", "Qwen3DSparkModel", "Qwen3OmniDSparkModel"]
+    "draft,expected_backend",
+    [
+        ("DSparkMiniMaxDraftModel", "AscendFlashAttentionBackend"),
+        ("MiniMaxM31FlashA3DSparkModel", "AscendFlashAttentionBackend"),
+        ("Qwen3DSparkModel", "AscendAttentionBackend"),
+        ("Qwen3OmniDSparkModel", "AscendAttentionBackend"),
+    ],
 )
-def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft):
+def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft, expected_backend):
     r = qwen_dflash2_fa3
     r.target.architecture = target
     r.target.hf_config.architectures = ["OtherTarget", target]
@@ -413,7 +419,7 @@ def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft):
     r.draft.architectures = ["OtherDraft", draft]
 
     assert r.select("backbone") == "AscendAttentionBackend"
-    assert r.select("dspark_head") == "AscendFlashAttentionBackend"
+    assert r.select("dspark_head") == expected_backend
     assert r.select("dflash_head") == "AscendAttentionBackend"
 
     r.config.cache_config.cache_dtype = "fp8"
