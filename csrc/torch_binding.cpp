@@ -1506,9 +1506,6 @@ at::Tensor npu_quant_sparse_lightning_indexer_metadata_npu(
                 "QSLI candidate_block_length must have shape [T, 1]");
     TORCH_CHECK(candidate_block_length.is_contiguous(), "QSLI candidate lengths must be contiguous");
     at::Tensor output = torch::empty({1024}, candidate_block_length.options().dtype(torch::kInt32));
-    if (candidate_block_length.is_meta()) {
-        return output;
-    }
     const auto output_device = candidate_block_length.device();
     TORCH_CHECK(output_device.type() == c10::DeviceType::PrivateUse1, "QSLI lengths must be on NPU");
     for (const auto* tensor : {&cu_seqlens_q, &cu_seqlens_k, &seqused_q, &seqused_k, &cmp_residual_k}) {
@@ -3220,8 +3217,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int mask_mode=3, int cmp_ratio=1) -> Tensor"
     );
     ops.impl("npu_quant_sparse_lightning_indexer_metadata", torch::kPrivateUse1,
-             &vllm_ascend::npu_quant_sparse_lightning_indexer_metadata_npu);
-    ops.impl("npu_quant_sparse_lightning_indexer_metadata", torch::kMeta,
              &vllm_ascend::npu_quant_sparse_lightning_indexer_metadata_npu);
 
     ops.def(
