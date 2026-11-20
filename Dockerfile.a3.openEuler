@@ -16,15 +16,14 @@
 #
 # 基于空白麒麟 V10 SP3（glibc 2.28）自建 vLLM v0.23.0 + vllm-ascend 0.23.0 环境。
 #
-# 构建上下文要求：
-#   ./ascend/Ascend-cann-9.1.0_linux-aarch64.run        （toolkit）
-#   ./ascend/Ascend-cann-nnal_9.1.0_linux-aarch64.run
-#   ./ascend/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run （可选）
+# 构建上下文要求：无（CANN 安装包在镜像内下载，无需额外目录）
 #
 # mooncake 与客户环境一致：不做 pip 安装，从源码编译 0.3.12.post1
 #
-# 必要条件：--build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>
-#   麒麟 init 镜像带 dnf，但没有 repo 配置、没有 gcc，缺此参数第 1 步直接失败。
+# 可选参数：
+#   --build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>   基础镜像无源时必填
+#   --build-arg CANN_BASE_URL=<内网 CANN 包地址>          外网不可达时改为内网镜像
+#   --build-arg MAX_JOBS=32
 #
 # 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
 
@@ -33,7 +32,6 @@ FROM ${OS_IMAGE}
 
 ARG PYTHON_VERSION=3.12.4
 ARG KYLIN_REPO_URL=""
-ARG CANN_PKG_DIR=ascend
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.23.0
 ARG VLLM_COMMIT=""
@@ -45,6 +43,12 @@ ARG FLASH_ATTN_NPU_VERSION="0.5.0"
 ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
 ARG MOONCAKE_TAG=v0.3.12.post1
 ARG MAX_JOBS
+
+# CANN 9.1.0 官方包（内网可整体替换 CANN_BASE_URL）
+ARG CANN_BASE_URL=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0
+ARG CANN_TOOLKIT_PKG=Ascend-cann-toolkit_9.1.0_linux-aarch64.run
+ARG CANN_NNAL_PKG=Ascend-cann-nnal_9.1.0_linux-aarch64.run
+ARG CANN_OPS_PKG=Ascend-cann-A3-ops_9.1.0_linux-aarch64.run
 
 WORKDIR /workspace
 SHELL ["/bin/bash", "-c"]
@@ -77,17 +81,21 @@ RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTH
     python3 -V && python3 -m pip install -U pip setuptools wheel
 
 ENV PATH=/usr/local/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    LD_LIBRARY_PATH=/usr/local/lib
 
-# 3) 安装 CANN 9.1.0（驱动由宿主机提供，不打进镜像）
-COPY ${CANN_PKG_DIR} /tmp/cann/
-RUN set -e && chmod +x /tmp/cann/*.run && \
-    /tmp/cann/Ascend-cann-9.1.0_linux-aarch64.run --install && \
-    /tmp/cann/Ascend-cann-nnal_9.1.0_linux-aarch64.run --install && \
-    if [ -f /tmp/cann/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run ]; then \
-        /tmp/cann/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run --install; \
-    fi && \
-    rm -rf /tmp/cann
+# 3) 下载并安装 CANN 9.1.0（toolkit 必装；nnal、A3-ops 存在则装；驱动由宿主机提供）
+RUN set -e; cd /tmp; \
+    wget -q --header="Referer: https://www.hiascend.com/" \
+        "${CANN_BASE_URL}/${CANN_TOOLKIT_PKG}"; \
+    wget -q --header="Referer: https://www.hiascend.com/" \
+        "${CANN_BASE_URL}/${CANN_NNAL_PKG}"; \
+    wget -q --header="Referer: https://www.hiascend.com/" \
+        "${CANN_BASE_URL}/${CANN_OPS_PKG}" || echo "WARN: ops 包下载失败，跳过"; \
+    chmod +x /tmp/*.run; \
+    /tmp/${CANN_TOOLKIT_PKG} --install; \
+    /tmp/${CANN_NNAL_PKG} --install; \
+    if [ -f "/tmp/${CANN_OPS_PKG}" ]; then /tmp/${CANN_OPS_PKG} --install; fi; \
+    rm -f /tmp/*.run
 
 # 4) modelscope / ray（多机） / protobuf
 RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
