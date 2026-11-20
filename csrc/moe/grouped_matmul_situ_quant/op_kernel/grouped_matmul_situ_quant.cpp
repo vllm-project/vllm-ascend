@@ -1,44 +1,70 @@
-/*
- * gmm_situ_vcv_dev — graph-capturable device-group_list entry for the n3-A
- * fused gmm_situ_vcv datapath (round_3/parallel_4, n11_graph).
- *
- * Same single-launch fused kernel body as gmm_situ_vcv (shared controller in
- * op_kernel/gmsq_vcv_controller.h); differences are confined to the group
- * table source and the launch grid:
- *   - group_list arrives as a DEVICE tensor and is consumed on-device: an
- *     in-kernel preamble segment (per-core 28-entry running cumsum) builds the
- *     equivalent of the eager X14 active table — NOT an independent cumsum
- *     device kernel, so the contract red line is respected.
- *   - grid = full AIC core count (static "28-expert 满配" launch): no host
- *     dependence on the active-expert table, so the launch config is identical
- *     for every replay of a captured graph; cores with no basic blocks exit
- *     after the preamble (the +1~3% low-activity cost bucket).
- * Replay semantics: the kernel re-reads the group_list device buffer on every
- * launch, so an in-place updated router output is honored by each graph
- * replay (no frozen host copy).
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "gmsq_vcv_controller.h"
 
-// Namespace-free alias so the REGISTER_TILING_DEFAULT metadata section name
-// stays simple, matching the mla_prolog_v3 / situ_mx_quant pattern.
-using GmmSituTilingData = gmm_situ::SituTilingHeader;
-
-// NOTE: the kernel entry and its metadata macros (KERNEL_TASK_TYPE_DEFAULT /
-// REGISTER_TILING_DEFAULT) must stay OUTSIDE any __NPU_ARCH__ guard — the
-// AscendC feature-precompile pass that extracts the tiling struct does not
-// run with __NPU_ARCH__==3510 and would miss them entirely ("do not register
-// tiling struct" / capacity-8 tiling buffer at runtime).
-extern "C" __global__ __aicore__ void grouped_matmul_situ_quant(
-    GM_ADDR x, GM_ADDR xScale, GM_ADDR w, GM_ADDR wScale, GM_ADDR groupList,
-    GM_ADDR y, GM_ADDR yScale, GM_ADDR workspace, GM_ADDR tiling)
-{
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-    REGISTER_TILING_DEFAULT(GmmSituTilingData);
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
-    AscendC::AscendCUtils::SetOverflow(1);
-    TPipe tPipe;
-    gmm_situ::GmmSituController op;
-    op.InitDev(x, xScale, w, wScale, groupList, y, yScale, tiling);
-    op.Process();
+/*!
+ * \file grouped_matmul_situ_quant.cpp
+ * \brief GroupedMatmulSituQuant arch35 (Ascend950) 融合算子入口。
+ *
+ * 单 launch 完成 GroupedMatmul(MXFP8 x MXFP4) -> SiTU(gate/up) -> 动态 MX 量化，
+ * 替代拆链 npu_grouped_matmul + situ_mx_quant。
+ *
+ * 实现策略：本算子自带一份 MxA8W4 数据通路（op_kernel/weight_quant_basic_block/，
+ * 由 arch35 的 GMMSQWeightQuant 实现复制而来，与本算子同目录编译，不依赖其它算子），
+ * 唯一差异是激活策略模板实参为 GmmVecActivationSitu（见 situ_activation.h）：
+ *   - 调度、L1/L0 搬运、per-32 max-exp 归约、e8m0 scale 与 fp8 量化全部与 MxA8W4 通路一致；
+ *   - 激活在 UB 内以寄存器 VF 完成，不引入额外 GM 往返。
+ *
+ * 入参顺序与本仓库算子原型保持一致（weight/weight_scale 在 group_list 之前），
+ * 与 ops-transformer 侧的入口仅差 group_list 的位置；arch35 不读取
+ * weight_assist_matrix / bias / smooth_scale 三个槽位（它们是 A2/A3 的 A8W4 MSD 通路需要的）。
+ */
+#include "kernel_tiling/kernel_tiling.h"
+#if ASC_DEVKIT_MAJOR >= 9
+#include "kernel_basic_intf.h"
+#else
+#include "kernel_operator.h"
 #endif
+#include "lib/matmul_intf.h"
+
+#include "weight_quant_basic_block/grouped_matmul_swiglu_quant_v2_weight_quant_tiling_data.h"
+#include "weight_quant_basic_block/gmmsq_weight_quant_resplit_controller.h"
+#include "grouped_matmul_situ_quant_tiling_key.h"
+#include "situ_activation.h"
+
+#define FLOAT_OVERFLOW_MODE_CTRL 60
+
+using namespace AscendC;
+
+template <int8_t QUANT_B_TRANS, int8_t QUANT_A_TRANS, bool IS_SINGLE_MULTI_SINGLE>
+__global__ __aicore__ void grouped_matmul_situ_quant(
+    GM_ADDR x, GM_ADDR xScale, GM_ADDR weight, GM_ADDR weightScale, GM_ADDR groupList,
+    GM_ADDR weightAssistMatrix, GM_ADDR bias, GM_ADDR smoothScale, GM_ADDR y, GM_ADDR yScale,
+    GM_ADDR workspace, GM_ADDR tiling)
+{
+    (void)weightAssistMatrix;
+    (void)bias;
+    (void)smoothScale;
+    AscendC::InitSocState();
+    int64_t oriOverflowMode = AscendC::GetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>();
+    // enable overflow mode to avoid nan/inf value
+    AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    REGISTER_TILING_DEFAULT(GMMSQArch35Tiling::GMMSQWeightQuantTilingData);
+    GET_TILING_DATA_WITH_STRUCT(GMMSQArch35Tiling::GMMSQWeightQuantTilingData, tilingDataIn, tiling);
+
+    GMMSQWeightQuant::GMMSQWeightQuantResplitController<
+        DTYPE_X, DTYPE_WEIGHT, DTYPE_WEIGHT_SCALE, DTYPE_X_SCALE, DTYPE_Y, DTYPE_Y_SCALE, GMMSQWeightQuant::MXA8W4_NZNK,
+        GMMSQWeightQuant::VEC_ANTIQUANT_CONFIG_DYNAMIC, IS_SINGLE_MULTI_SINGLE, GMMSQWeightQuant::GmmVecActivationSitu>
+        controller;
+
+    controller.Init(x, weight, weightScale, groupList, xScale, y, yScale, &tilingDataIn);
+    controller.Process();
+    AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(oriOverflowMode);
 }

@@ -174,6 +174,8 @@ class HardwareCapability(Enum):
     RMS_NORM_CAST = auto()
     # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
     RMS_NORM_DYNAMIC_QUANT = auto()
+    # Fused GMM + SiTU + per-token quantization on the A2/A3 W4A8 MoE path.
+    GROUPED_MATMUL_SITU_QUANT = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -385,6 +387,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
+    HardwareCapability.GROUPED_MATMUL_SITU_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -413,6 +416,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
                 HardwareCapability.FLASH_ATTN_NPU_3,
+                HardwareCapability.GROUPED_MATMUL_SITU_QUANT,
             },
         ),
         AscendDeviceType.A3: HardwareProfile(

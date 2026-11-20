@@ -295,10 +295,16 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
 
 
 class TestW4A8SituPath(unittest.TestCase):
-    def test_situ_gmm1_uses_per_channel_scale_layout(self):
+    @staticmethod
+    def _make_method(fuse_gmm_situ_quant=False):
         method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
         method.use_expert_weight_list = False
-        layer = SimpleNamespace(
+        method._fuse_gmm_situ_quant = fuse_gmm_situ_quant
+        return method
+
+    @staticmethod
+    def _situ_layer():
+        return SimpleNamespace(
             w13_weight=torch.randn(1, 8, 16),
             w13_weight_scale=torch.randn(1, 8),
             w13_scale_bias=torch.randn(1, 8),
@@ -306,7 +312,10 @@ class TestW4A8SituPath(unittest.TestCase):
             w2_weight_scale=torch.randn(1, 16),
             activation="situ",
         )
-        mlp_compute_input = _mlp_compute_input(
+
+    @staticmethod
+    def _situ_input(layer):
+        return _mlp_compute_input(
             layer=layer,
             fusion=False,
             activation=MoEActivation.SITU,
@@ -314,6 +323,11 @@ class TestW4A8SituPath(unittest.TestCase):
             activation_situ_linear_beta=25.0,
             quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
         )
+
+    def test_situ_gmm1_uses_per_channel_scale_layout(self):
+        method = self._make_method()
+        layer = self._situ_layer()
+        mlp_compute_input = self._situ_input(layer)
         with (
             patch("torch_npu.npu_dynamic_quant", return_value=("qx", torch.ones(2)), create=True),
             patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
@@ -337,6 +351,73 @@ class TestW4A8SituPath(unittest.TestCase):
         mock_situ.assert_called_once()
         self.assertEqual(mock_situ.call_args.kwargs["beta"], 4.0)
         self.assertEqual(mock_situ.call_args.kwargs["linear_beta"], 25.0)
+
+    def test_situ_gmm1_fused_op_path(self):
+        method = self._make_method(fuse_gmm_situ_quant=True)
+        layer = self._situ_layer()
+        layer.w13_weight = torch.zeros(1, 64, 16, dtype=torch.int32)
+        layer.w13_weight_scale = torch.ones(1, 128, dtype=torch.int64)
+        layer.w13_scale_bias = torch.ones(1, 128)
+        qx = torch.zeros(4, 64, dtype=torch.int8)
+        mlp_compute_input = self._situ_input(layer)
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=(qx, torch.ones(4)), create=True),
+            patch("torch_npu.get_npu_format", return_value=2, create=True),
+            patch(
+                "torch.ops._C_ascend.grouped_matmul_situ_quant",
+                return_value=("y", "yscale"),
+                create=True,
+            ) as mock_fused,
+            patch("torch_npu.npu_grouped_matmul", create=True) as mock_gmm,
+            patch("torch.ops._C_ascend.dequant_situ_quant", create=True) as mock_situ,
+        ):
+            out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
+
+        # The A2/A3 capability bit routes GMM1 + SiTU + quant into a single op,
+        # so the two-op (gmm + dequant_situ_quant) fallback must not run.
+        self.assertEqual((out, scale), ("y", "yscale"))
+        mock_fused.assert_called_once()
+        mock_gmm.assert_not_called()
+        mock_situ.assert_not_called()
+        kwargs = mock_fused.call_args.kwargs
+        self.assertIs(kwargs["x"], qx)
+        self.assertIsNotNone(kwargs["x_scale"])
+        self.assertIs(kwargs["weight_assist_matrix"], layer.w13_scale_bias)
+        self.assertIsNone(kwargs["bias"])
+        self.assertIsNone(kwargs["smooth_scale"])
+        self.assertEqual(kwargs["dequant_mode"], 0)
+        self.assertEqual(kwargs["quant_mode"], 0)
+        self.assertEqual(kwargs["group_list"].dtype, torch.int64)
+        self.assertEqual(kwargs["beta"], 4.0)
+        self.assertEqual(kwargs["linear_beta"], 25.0)
+
+    def test_situ_gmm1_fused_op_requires_scale_bias(self):
+        method = self._make_method(fuse_gmm_situ_quant=True)
+        layer = self._situ_layer()
+        del layer.w13_scale_bias
+        mlp_compute_input = self._situ_input(layer)
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=("qx", torch.ones(2)), create=True),
+            patch(
+                "torch.ops._C_ascend.grouped_matmul_situ_quant",
+                return_value=("y", "yscale"),
+                create=True,
+            ) as mock_fused,
+            patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
+            patch(
+                "torch.ops._C_ascend.dequant_situ_quant",
+                return_value=("qout", "oscale"),
+                create=True,
+            ) as mock_situ,
+        ):
+            out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
+
+        # The compensation matrix is reused from w13_scale_bias; without it the
+        # fused op is skipped instead of silently dropping the correction term.
+        self.assertEqual((out, scale), ("qout", "oscale"))
+        mock_fused.assert_not_called()
+        mock_gmm.assert_called_once()
+        mock_situ.assert_called_once()
 
 
 class TestW4A16FusedMoEMethod(unittest.TestCase):
@@ -441,7 +522,38 @@ class TestApplyMoeMlp(unittest.TestCase):
         quant_method.apply_gmm1.return_value = "gmm1_out"
         quant_method.apply_act_quant.return_value = ("act_quant_out", "act_scale")
         quant_method.apply_gmm2.return_value = "final_out"
+        quant_method.try_apply_fused_mlp.return_value = None
         return quant_method
+
+    def test_fully_fused_mlp_skips_event_when_overlap_is_disabled(self):
+        quant_method = self._quant_method(fused=True)
+        quant_method.try_apply_fused_mlp.return_value = "fully_fused_out"
+        mlp_compute_input = _mlp_compute_input()
+        with (
+            patch(
+                f"{MOE_MLP}.get_ascend_config", return_value=SimpleNamespace(multistream_overlap_shared_expert=False)
+            ),
+            patch(f"{MOE_MLP}.torch.npu.current_stream") as stream,
+        ):
+            out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
+        self.assertEqual((out, evt), ("fully_fused_out", None))
+        quant_method.try_apply_fused_mlp.assert_called_once_with(mlp_compute_input)
+        quant_method.apply_gmm2.assert_not_called()
+        stream.assert_not_called()
+
+    def test_fully_fused_mlp_is_skipped_when_shared_experts_overlap(self):
+        quant_method = self._quant_method(fused=True)
+        mlp_compute_input = _mlp_compute_input()
+        stream = MagicMock()
+        stream.record_event.return_value = "evt"
+        with (
+            patch(f"{MOE_MLP}.get_ascend_config", return_value=SimpleNamespace(multistream_overlap_shared_expert=True)),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+        ):
+            out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
+        self.assertEqual((out, evt), ("final_out", "evt"))
+        quant_method.try_apply_fused_mlp.assert_not_called()
+        quant_method.apply_gmm2.assert_called_once()
 
     def test_fused_path_skips_separate_activation(self):
         quant_method = self._quant_method(fused=True)

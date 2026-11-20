@@ -1,0 +1,9 @@
+pr: 22297
+entries:
+  - category: feature
+    hardware: [A2, A3]
+    text: >-
+      Added a fused W4A8 SiTU MoE path for supported Atlas A2/A3 shapes,
+      combining grouped matmul, activation, and per-token quantization. Some
+      stacked-NZ shapes can also fuse both MoE projections; unsupported cases
+      retain the existing path.
