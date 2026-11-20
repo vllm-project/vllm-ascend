@@ -1,4 +1,0 @@
-pr: 21789
-entries:
-  - category: feature
-    text: Added optional Dev Container configurations for Ascend 310P, A2, A3, A5 and CPU, so contributors can start a reproducible vLLM Ascend development environment in VS Code without manually setting up CANN, torch_npu and the build toolchain.
