@@ -24,6 +24,10 @@ def _make_runner(quant_type: QuantType) -> AscendSharedExperts:
     runner._megamoe_shared_fusion_disabled = False
     runner._megamoe_shared_parts = {}
     runner._megamoe_shared_quant_type = QuantType.NONE
+    runner._megamoe_shared_fusion = shared_experts_module.MegamoeSharedExpertFusion()
+    # Mirror the remaining __init__ fields so this helper cannot drift again.
+    runner._megamoe_shared_weight_dtype = None
+    runner._megamoe_shared_fusion_platform = "A3/INT8"
     return runner
 
 
