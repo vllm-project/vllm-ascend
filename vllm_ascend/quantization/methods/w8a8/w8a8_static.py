@@ -123,7 +123,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         if isinstance(x, PreparedLinearInput):
             x = x.quantized
         elif qa is not None:
-            logger.info_once("quanted has do...")
+            logger.info_once("quanted has done...")
             x = x.data
         elif x.dtype != torch.int8:
             # quant
