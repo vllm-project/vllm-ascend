@@ -61,6 +61,10 @@ def _sum_metrics(
     num_accepted_tokens_per_pos = [0] * num_speculative_tokens
     for endpoint in metrics_endpoints(server):
         endpoint_drafts, endpoint_accepted = analysis_metrics(fetch_metrics(endpoint), num_speculative_tokens)
+
+        # TODO: temporary smoke diagnostics, remove before merging
+        print(f"[debug] endpoint={endpoint.host}:{endpoint.port} drafts={endpoint_drafts} accepted={endpoint_accepted}")
+
         num_drafts += endpoint_drafts
         for position, accepted in enumerate(endpoint_accepted):
             num_accepted_tokens_per_pos[position] += accepted
@@ -94,7 +98,7 @@ def measure_acceptance_rate(
     num_drafts, num_accepted_tokens_per_pos = _sum_metrics(server, num_speculative_tokens)
 
     # TODO: temporary smoke diagnostics, remove before merging
-    print(f"[debug] base_drafts={base_drafts} final_drafts={num_drafts} positions={num_speculative_tokens}")
+    print(f"[debug] total base_drafts={base_drafts} final_drafts={num_drafts} positions={num_speculative_tokens}")
 
     num_drafts -= base_drafts
     for i in range(len(num_accepted_tokens_per_pos)):
