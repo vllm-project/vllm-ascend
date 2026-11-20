@@ -310,7 +310,7 @@ def test_candidate_topk_composes_standard_tp(monkeypatch, rank):
         quant_method=UnquantizedEmbeddingMethod(),
         parallel_mode=VocabParallelMode.FINE_GRAINED,
         # The composed layout publishes the group that completes the TP columns.
-        tp_gather_group=SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather),
+        output_gather_group=SimpleNamespace(world_size=tp_world, all_gather=tp_all_gather),
         num_embeddings_padded=fg_world * tp_world * shard_size,
         shard_indices=SimpleNamespace(num_org_vocab_padding=0, org_vocab_start_index=rank * shard_size),
     )
