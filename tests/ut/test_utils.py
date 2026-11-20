@@ -966,6 +966,52 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
     assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is (input_proj_tp_size == 1)
 
 
+@pytest.mark.parametrize("recompute_enabled", [False, True])
+@pytest.mark.parametrize("is_draft", [False, True])
+@pytest.mark.parametrize("mc2_method", [MoECommType.MC2, MoECommType.FUSED_MC2])
+@pytest.mark.parametrize(
+    "decode_tokens,prefill_tokens,separate_routine,expected_skip",
+    [
+        # Local prefill can cross MC2 capacity while decode still fits.
+        (128, 193, False, False),
+        # FULL_DECODE_ONLY can select eager prefill and captured decode/dummy
+        # independently on different DP ranks, even below MC2 capacity.
+        (128, 192, True, False),
+        # A uniform graph mode and a range that fits MC2 retain the fast path.
+        (128, 192, False, True),
+        (128, 191, False, True),
+        # Decode must fit MC2 as well as prefill.
+        (193, 192, False, False),
+    ],
+)
+def test_local_prefill_requires_safe_dp_coordination(
+    monkeypatch, recompute_enabled, is_draft, mc2_method, decode_tokens, prefill_tokens, separate_routine, expected_skip
+):
+    mc2_capacity = 192
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=prefill_tokens),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: separate_routine)),
+    )
+    ascend = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "fullmesh",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute_enabled),
+        finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=1),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: False)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "is_drafter_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: decode_tokens)
+    monkeypatch.setattr(ascend_forward_context, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(
+        ascend_forward_context,
+        "select_moe_comm_method",
+        lambda n, _: mc2_method if n <= mc2_capacity else MoECommType.ALLTOALL,
+    )
+    assert utils.should_skip_allreduce_across_dp_group(config, is_draft_model=is_draft) is expected_skip
+
+
 @pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("lmhead", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
