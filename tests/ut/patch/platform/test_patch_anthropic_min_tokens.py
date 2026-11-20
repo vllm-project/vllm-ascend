@@ -66,9 +66,9 @@ def test_count_tokens_conversion_is_unchanged():
 
 
 def test_native_or_repeated_patch_preserves_converter(patch_module):
-    converter = AnthropicServingMessages._build_base_request.__func__
+    converter = AnthropicServingMessages.__dict__["_build_base_request"].__func__
     patch_module.apply_patch()
-    assert AnthropicServingMessages._build_base_request.__func__ is converter
+    assert AnthropicServingMessages.__dict__["_build_base_request"].__func__ is converter
     request = AnthropicMessagesRequest(
         model="test-model", max_tokens=64, messages=[{"role": "user", "content": "Hello"}], min_tokens=16
     )
