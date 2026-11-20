@@ -7,13 +7,16 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder
-from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
+from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder, Glm5NextPCPMetadataMixin
+from vllm_ascend.models.glm5next.recoverssm_metadata import (
+    AscendKDARecoverSSMMetadataBuilder,
+    Glm5NextRecoverSSMMetadataBuilder,
+)
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
-def _make_permutation_builder(builder_cls):
+def _make_permutation_builder(builder_cls=Glm5NextPCPMetadataMixin):
     builder = builder_cls.__new__(builder_cls)
     builder._pcp_size = 2
     builder._is_pcp_decode_sharded = True
@@ -31,7 +34,6 @@ def _make_permutation_context(local_tokens, global_tokens):
     )
 
 
-@pytest.mark.parametrize("builder_cls", [Glm5NextGDNHostMetadataBuilder, Glm5NextRecoverSSMMetadataBuilder])
 @pytest.mark.parametrize(
     "local_tokens,global_tokens,expected",
     [
@@ -40,10 +42,8 @@ def _make_permutation_context(local_tokens, global_tokens):
         (3, 3, [0, 1, 2, 0, 1, 2]),
     ],
 )
-def test_glm_metadata_refreshes_capture_indices_without_mutating_pcp(
-    builder_cls, local_tokens, global_tokens, expected
-):
-    builder = _make_permutation_builder(builder_cls)
+def test_glm_metadata_refreshes_capture_indices_without_mutating_pcp(local_tokens, global_tokens, expected):
+    builder = _make_permutation_builder()
     capture_context = _make_permutation_context(local_tokens, global_tokens)
     captured = builder._attach_pcp_permutation(SimpleNamespace(pcp_context=capture_context))
     indices = captured.pcp_context.padded_gather_idx
@@ -65,7 +65,7 @@ def test_glm_metadata_refreshes_capture_indices_without_mutating_pcp(
 
 @pytest.mark.parametrize("invalid", ["missing-layout", "short-layout", "capacity", "empty-local", "empty-global"])
 def test_glm_metadata_rejects_invalid_permutations(invalid):
-    builder = _make_permutation_builder(Glm5NextGDNHostMetadataBuilder)
+    builder = _make_permutation_builder()
     context = _make_permutation_context(2, 4)
     if invalid == "missing-layout":
         context.global_batch.is_dummy = False
@@ -81,18 +81,29 @@ def test_glm_metadata_rejects_invalid_permutations(invalid):
         builder._attach_pcp_permutation(SimpleNamespace(pcp_context=context))
 
 
-def test_native_glm_build_attaches_model_owned_permutation():
-    builder = _make_permutation_builder(Glm5NextGDNHostMetadataBuilder)
+@pytest.mark.parametrize(
+    "builder_cls,base_cls",
+    [
+        pytest.param(Glm5NextGDNHostMetadataBuilder, AscendGDNHostMetadataBuilder, id="gdn"),
+        pytest.param(Glm5NextRecoverSSMMetadataBuilder, AscendKDARecoverSSMMetadataBuilder, id="recoverssm"),
+    ],
+)
+def test_glm_build_attaches_model_owned_permutation(builder_cls, base_cls):
+    builder = _make_permutation_builder(builder_cls)
     context = _make_permutation_context(2, 4)
-    with patch.object(AscendGDNHostMetadataBuilder, "build", return_value=SimpleNamespace(pcp_context=context)):
-        metadata = builder.build(0, SimpleNamespace())
+    common = SimpleNamespace()
+    base_metadata = SimpleNamespace(pcp_context=context)
+    with patch.object(base_cls, "build", return_value=base_metadata) as build:
+        metadata = builder.build(0, common)
+    build.assert_called_once_with(0, common)
+    assert metadata is base_metadata
     assert metadata.pcp_context.padded_gather_idx.data_ptr() == builder._pcp_gather_indices.data_ptr()
+    assert metadata.pcp_context.padded_gather_idx.tolist() == [0, 1, 2, 3]
     assert context.padded_gather_idx is None
 
 
-@pytest.mark.parametrize("builder_cls", [Glm5NextGDNHostMetadataBuilder, Glm5NextRecoverSSMMetadataBuilder])
-def test_replicated_decode_skips_permutation_until_prefill(builder_cls):
-    builder = _make_permutation_builder(builder_cls)
+def test_replicated_decode_skips_permutation_until_prefill():
+    builder = _make_permutation_builder()
     builder._is_pcp_decode_sharded = False
     builder._pcp_gather_indices.fill_(-1)
     source = torch.tensor([0, 1, 0, 1])

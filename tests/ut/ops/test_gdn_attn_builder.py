@@ -234,10 +234,9 @@ def _make_vllm_config(
     )
 
 
-@pytest.mark.parametrize("builder_cls", [Glm5NextGDNHostMetadataBuilder, Glm5NextRecoverSSMMetadataBuilder])
 @pytest.mark.parametrize("pcp_size", [2, 8, 32])
 @pytest.mark.parametrize("num_spec", [0, 5])
-def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec, builder_cls):
+def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec):
     config = _make_vllm_config(
         max_num_seqs=32, num_speculative_tokens=num_spec, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
     )
@@ -249,7 +248,8 @@ def test_kpool_capture_uses_global_gdn_capacity(pcp_size, num_spec, builder_cls)
     local_tokens = 2 * query_len
     config.compilation_config.max_cudagraph_capture_size = local_tokens
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+    # Both GLM builders share capacity preparation; cover the full matrix once.
+    builder = Glm5NextGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     global_reqs = min(2 * pcp_size, config.scheduler_config.max_num_seqs)
     global_tokens = global_reqs * query_len
     assert builder.decode_cudagraph_max_bs == global_tokens
@@ -288,9 +288,8 @@ def test_generic_gdn_keeps_local_capture_capacity(capture_limit):
     assert builder.decode_cudagraph_max_bs == (16 if capture_limit is None else capture_limit)
 
 
-@pytest.mark.parametrize("builder_cls", [Glm5NextGDNHostMetadataBuilder, Glm5NextRecoverSSMMetadataBuilder])
 @pytest.mark.parametrize("excluded", ["mrv1", "pcp1", "dcp", "eager", "unbounded"])
-def test_glm_global_capture_capacity_respects_configuration(builder_cls, excluded):
+def test_glm_global_capture_capacity_respects_configuration(excluded):
     config = _make_vllm_config(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
     config.use_v2_model_runner = excluded != "mrv1"
     config.cache_config.use_kda_recoverssm = True
@@ -301,7 +300,7 @@ def test_glm_global_capture_capacity_respects_configuration(builder_cls, exclude
     if excluded == "eager":
         config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
-    builder = builder_cls(spec, ["layer0"], config, torch.device("cpu"))
+    builder = Glm5NextGDNHostMetadataBuilder(spec, ["layer0"], config, torch.device("cpu"))
     if excluded != "unbounded":
         assert builder.vllm_config is config
     assert config.compilation_config.max_cudagraph_capture_size == (None if excluded == "unbounded" else 4)

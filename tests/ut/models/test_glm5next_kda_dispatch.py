@@ -88,11 +88,24 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
     assert backend.get_builder_cls() is model_kda.Glm5NextGDNHostMetadataBuilder
 
 
-@pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
-@pytest.mark.parametrize("is_prefilling", [[False], [True], [False, True]], ids=["decode", "prefill", "mixed"])
+@pytest.mark.parametrize(
+    "pcp_size,pcp_rank,is_prefilling,decode_sharded",
+    [
+        pytest.param(
+            pcp_size,
+            pcp_rank,
+            is_prefilling,
+            decode_sharded,
+            id=f"pcp{pcp_size}-rank{pcp_rank}-{batch_kind}-sharded{decode_sharded}",
+        )
+        for pcp_size, pcp_rank in ((1, 0), (2, 0), (2, 1))
+        for batch_kind, is_prefilling in (("decode", [False]), ("prefill", [True]), ("mixed", [False, True]))
+        # The flag only changes execution for PCP decode and mixed batches.
+        for decode_sharded in ((False, True) if pcp_size > 1 and batch_kind != "prefill" else (False,))
+    ],
+)
 @pytest.mark.parametrize("needs_output_buffer", [False, True])
 @pytest.mark.parametrize("pcp_projection", [False, True])
-@pytest.mark.parametrize("decode_sharded", [False, True])
 def test_kda_pcp_restores_global_order_and_returns_local_output(
     monkeypatch, pcp_size, pcp_rank, is_prefilling, needs_output_buffer, pcp_projection, decode_sharded
 ):
