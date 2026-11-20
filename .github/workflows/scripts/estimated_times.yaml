@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  # Initial scheduling estimate: one small-model startup and two API requests.
+  tests/e2e/pull_request/one_card/test_anthropic_min_tokens.py: 90
   # Initial scheduling estimate for the checkpoint-free FULL replay regression.
   tests/e2e/pull_request/one_card/test_dsv41_adaptive_graph.py: 60
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600
