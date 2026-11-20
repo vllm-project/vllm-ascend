@@ -303,9 +303,7 @@ def _gather_lm_head_candidates(
         values.dtype in (torch.float16, torch.bfloat16, torch.float32)
         and lm_head.num_embeddings_padded <= _MAX_EXACT_FP32_TOKEN_ID
     )
-    # With standard TP composed into the head, the exchange below covers only
-    # this TP column's candidates; the same (packed) exchange joins the other
-    # columns.
+    # Packed scores and IDs complete this TP column's candidates in one exchange.
     completion_group = getattr(lm_head, "tp_gather_group", None)
     if packed:
         score_dtype = values.dtype

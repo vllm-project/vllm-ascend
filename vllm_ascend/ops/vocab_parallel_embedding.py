@@ -90,8 +90,7 @@ class VocabParallelPlan:
     shard_world_size: int
     token_exchange_group: GroupCoordinator | None = None
     output_reduce_group: GroupCoordinator | None = None
-    # Set when a fine-grained LM head composes with standard TP: the exchange
-    # covers one TP column, so this group joins the remaining columns.
+    # Joins the other TP columns when a fine-grained LM head composes with TP.
     tp_gather_group: GroupCoordinator | None = None
 
 
@@ -230,9 +229,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
 
         self.num_embeddings = num_embeddings
-        # The padded vocabulary must divide evenly across the shard count
-        # (P*T when fine-grained TP composes with standard TP), so raise the
-        # padding granularity to the lcm.
+        # Pad to a multiple of the shard count (P*T when composed).
         self.padding_size = lcm(padding_size, self.tp_size)
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
@@ -413,8 +410,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         output = reduce_scatter_output[:num_tokens].view(num_tokens, self.embedding_dim)
         reduce_group = self.output_reduce_group
         if reduce_group is not None and reduce_group.world_size > 1:
-            # The exchange reduce-scatter (PCP or fine-grained) only sums this
-            # TP column's shards; this all-reduce adds the other columns'.
+            # The reduce-scatter covers this TP column only; add the rest.
             output = torch.ops.vllm.all_reduce(output, reduce_group.unique_name)
         return output
 
@@ -547,10 +543,9 @@ def gather_lm_head_outputs(
 
     Dim 0 contains token rows and dim 1 vocabulary entries or candidates.
     Fine-grained TP routes rows to their DP owner; PCP/standard TP joins
-    vocabulary shards for identical rows. For fine-grained TP composed with
-    standard TP, the all-to-all covers this TP column only, so a non-None
-    ``tp_gather_group`` joins the remaining columns in the same exchange. This
-    helper does not select TopK.
+    vocabulary shards for identical rows. ``tp_gather_group`` completes a
+    composed fine-grained exchange over the other TP columns. This helper does
+    not select TopK.
     """
     if parallel_mode is VocabParallelMode.FINE_GRAINED:
         group = get_lmhead_tp_group()
@@ -631,10 +626,8 @@ class AscendLogitsProcessor(LogitsProcessor):
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = gather_lm_head_hidden_states(hidden_states)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
-        # Gather logits for tensor parallel. A composed head (fine-grained TP
-        # stacked with standard TP) carries the group that joins the remaining
-        # TP columns; running it after the all-to-all keeps that collective on
-        # the local token rows.
+        # Gather logits for tensor parallel; a composed head also joins the other
+        # TP columns after the all-to-all, so that collective moves local rows only.
         logits = gather_lm_head_outputs(logits, lm_head.parallel_mode, getattr(lm_head, "tp_gather_group", None))
 
         # Remove paddings in vocab (if any)
