@@ -34,7 +34,11 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     reference_signature,
     weight_transfer_servers,
 )
-from tests.e2e.common.rlhf.weight_transfer.reload_probe import assert_reload_reuses_runtime, reload_snapshots
+from tests.e2e.common.rlhf.weight_transfer.reload_probe import (
+    assert_reload_reuses_runtime,
+    assert_sleep_allocations,
+    reload_snapshots,
+)
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     make_weight_source,
     packed_buffer_size_for,
@@ -213,12 +217,16 @@ def run_npu_ipc_weight_transfer_transaction(
                 # a JSON body is ignored.
                 if sleep_level is not None:
                     post_control(server, "sleep", params={"level": sleep_level})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=("weights", "kv_cache"))
                 # Level 2 unmapped the weights pool and `send_weights`' layerwise
                 # reload copies the payload back into exactly those buffers, so the
                 # weights allocation has to be mapped again before the transaction.
                 # The KV cache stays asleep until the update is finished.
                 if sleep_level is not None:
                     post_control(server, "wake_up", params={"tags": ["weights"]})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=("kv_cache",))
                 # send_weights owns the complete START -> LOAD -> FINISH transaction.
                 dist.barrier()
                 transfer_started = time.monotonic()
@@ -242,6 +250,8 @@ def run_npu_ipc_weight_transfer_transaction(
                 # its own and no explicit `/resume` is needed.
                 if sleep_level is not None:
                     post_control(server, "wake_up", params={"tags": ["kv_cache"]})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=())
                 else:
                     post_control(server, "resume")
                 signature = generation_signature(client, case.model)
