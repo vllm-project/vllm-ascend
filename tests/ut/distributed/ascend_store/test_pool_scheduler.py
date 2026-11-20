@@ -22,6 +22,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 import torch
@@ -47,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import get_zmq_rpc_path_lookup
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -1410,12 +1412,13 @@ class TestKVPoolSchedulerResetStore(unittest.TestCase):
     def test_reset_store_rejects_inflight_sends(self):
         scheduler = self._scheduler()
         tracker = scheduler._in_flight_save_blocks
-        tracker.sending_events = {1: 0}
-        tracker.sending_blocks = {1: [10, 11]}
+        event_id = uuid4().int
+        tracker.sending_events = {event_id: 0}
+        tracker.sending_blocks = {event_id: [10, 11]}
         self.assertFalse(scheduler.reset_store())
         scheduler.client.reset.assert_not_called()
-        self.assertEqual(tracker.sending_events, {1: 0})
-        self.assertEqual(tracker.sending_blocks, {1: [10, 11]})
+        self.assertEqual(tracker.sending_events, {event_id: 0})
+        self.assertEqual(tracker.sending_blocks, {event_id: [10, 11]})
 
     def test_reset_store_rejects_loading_while_blocks_held(self):
         scheduler = self._scheduler()
@@ -1486,24 +1489,21 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         return scheduler
 
     def test_completed_event_frees_blocks(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
         for pcp_size in (1, 2, 4):
             with self.subTest(pcp_size=pcp_size):
                 scheduler = self._make_scheduler(pcp_size=pcp_size)
                 tracker = scheduler._in_flight_save_blocks
-                tracker.sending_events = {1: 0}
-                tracker.sending_blocks = {1: [10, 20]}
+                event_id = uuid4().int
+                tracker.sending_events = {event_id: 0}
+                tracker.sending_blocks = {event_id: [10, 20]}
+                output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({event_id: 1}))
                 for _ in range(2 * pcp_size - 1):
-                    output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({1: 1}))
                     scheduler.update_connector_output(output)
                     scheduler._block_pool.free_blocks.assert_not_called()
-                    self.assertIn(1, tracker.sending_blocks)
+                    self.assertIn(event_id, tracker.sending_blocks)
                 scheduler.update_connector_output(output)
                 scheduler._block_pool.free_blocks.assert_called_once()
-                self.assertNotIn(1, tracker.sending_blocks)
+                self.assertNotIn(event_id, tracker.sending_blocks)
 
     def test_sync_swa_blocks_uses_current_request_table(self):
         scheduler = self._make_scheduler()
@@ -1528,18 +1528,16 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
 
         scheduler.retain_blocks_for_save(req_meta)
 
-        self.assertEqual(req_meta.event_id, 0)
+        event_id = req_meta.event_id
+        assert event_id is not None
+        self.assertEqual(UUID(int=event_id).version, 4)
         # Neither the null block nor speculative scratch may be pinned.
         pinned_blocks = scheduler._block_pool.blocks[1:3]
         scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
-        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {0: [1, 2]})
+        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {event_id: [1, 2]})
         self.assertTrue(scheduler.has_pending_push_work())
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
-        output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 1}))
+        output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({event_id: 1}))
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
         self.assertTrue(scheduler.has_pending_push_work())
@@ -1547,16 +1545,39 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         self.assertFalse(scheduler.has_pending_push_work())
         scheduler._block_pool.free_blocks.assert_called_once_with(list(reversed(pinned_blocks)))
 
+    def test_colliding_save_event_ids_are_retried(self):
+        scheduler = self._make_scheduler()
+        scheduler.use_hybrid = True
+        scheduler.num_speculative_blocks_by_group = {0: 1}
+        scheduler._block_pool.blocks = [MagicMock() for _ in range(5)]
+        first = ReqMeta("r1", block_ids_by_group=[[1, 2]], can_save=True)
+        second = ReqMeta("r1", block_ids_by_group=[[3, 4]], can_save=True)
+        first_uuid = UUID("11223344-5566-4788-99aa-bbccddeeff01")
+        second_uuid = UUID("11223344-5566-4788-99aa-bbccddeeff02")
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks.uuid.uuid4",
+            side_effect=[first_uuid, first_uuid, first_uuid, second_uuid],
+        ):
+            scheduler.retain_blocks_for_save(first)
+            scheduler.retain_blocks_for_save(second)
+
+        self.assertEqual(first.event_id, first_uuid.int)
+        self.assertEqual(second.event_id, second_uuid.int)
+        worker_meta = AscendStoreKVConnectorWorkerMetadata({second_uuid.int: 1})
+        scheduler.update_connector_output(
+            KVConnectorOutput(kv_connector_worker_meta=worker_meta.aggregate(worker_meta))
+        )
+
+        scheduler._block_pool.free_blocks.assert_called_once_with([scheduler._block_pool.blocks[3]])
+        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {first_uuid.int: [1]})
+        self.assertTrue(scheduler.has_pending_push_work())
+
     def test_invalid_event_id(self):
         scheduler = self._make_scheduler()
         scheduler._in_flight_save_blocks.sending_events = {}
         scheduler._in_flight_save_blocks.sending_blocks = {}
 
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-            AscendStoreKVConnectorWorkerMetadata,
-        )
-
-        meta = AscendStoreKVConnectorWorkerMetadata({99: 1})
+        meta = AscendStoreKVConnectorWorkerMetadata({uuid4().int: 1})
         output = MagicMock()
         output.kv_connector_worker_meta = meta
         scheduler.update_connector_output(output)
@@ -1613,12 +1634,13 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler = self._make_scheduler()
         scheduler._async_loading_req_ids = {"r1"}
         tracker = scheduler._in_flight_save_blocks
-        tracker.sending_events = {7: 1}
-        tracker.sending_blocks = {7: [1, 2, 3]}
+        event_id = uuid4().int
+        tracker.sending_events = {event_id: 1}
+        tracker.sending_blocks = {event_id: [1, 2, 3]}
         scheduler.update_connector_output(KVConnectorOutput(finished_recving={"r1"}))
         self.assertFalse(scheduler._async_loading_req_ids)
-        self.assertEqual(tracker.sending_events, {7: 1})
-        self.assertEqual(tracker.sending_blocks, {7: [1, 2, 3]})
+        self.assertEqual(tracker.sending_events, {event_id: 1})
+        self.assertEqual(tracker.sending_blocks, {event_id: [1, 2, 3]})
         scheduler._block_pool.free_blocks.assert_not_called()
 
 

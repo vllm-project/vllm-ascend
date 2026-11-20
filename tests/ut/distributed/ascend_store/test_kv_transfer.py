@@ -18,6 +18,7 @@
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import numpy as np
 
@@ -787,7 +788,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             token_len_chunk=16,
             block_ids=[0],
             block_hashes=[b"old"],  # type: ignore[arg-type]
-            event_id=1,
+            event_id=uuid4().int,
             store_job_id=1,
         )
         t.add_stored_request(stale)
@@ -797,7 +798,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             token_len_chunk=16,
             block_ids=[1],
             block_hashes=[b"new"],  # type: ignore[arg-type]
-            event_id=2,
+            event_id=uuid4().int,
             store_job_id=2,
         )
         t.add_stored_request(fresh)
@@ -808,7 +809,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(store.put_calls, [])
         self.assertEqual(t.stored_requests["reused"], {2})
         self.assertEqual(t.get_saved_offset("reused"), 0)
-        self.assertEqual(t.get_completed_events(), {1: 1})
+        self.assertEqual(t.get_completed_events(), {stale.event_id: 1})
 
     def test_consumer_prefill_pp_lookup_requires_every_partition(self):
         t, _ = self._make_thread([1, 0, 1, 1], kv_role="kv_consumer")
@@ -826,8 +827,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_unexpected_dispatch_error_releases_pinned_job(self):
         t, _ = self._make_thread([0])
-        first = ReqMeta("r1", event_id=7, store_job_id=7)
-        second = ReqMeta("r2", event_id=8, store_job_id=8)
+        first = ReqMeta("r1", event_id=uuid4().int, store_job_id=7)
+        second = ReqMeta("r2", event_id=uuid4().int, store_job_id=8)
         save_batch = t.add_save_batch([first, second])
 
         t._handle_request = MagicMock(side_effect=RuntimeError("dispatch failed"))
@@ -837,33 +838,36 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
         self.assertFalse(t.is_stored_request("r2"))
-        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertEqual(t.get_completed_events(), {first.event_id: 1, second.event_id: 1})
         self.assertTrue(save_batch.done.is_set())
 
     def test_dispatch_cleanup_does_not_acknowledge_request_twice(self):
         t, _ = self._make_thread([0])
-        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        event_id = uuid4().int
+        req = ReqMeta("r1", event_id=event_id, store_job_id=7)
         t.add_stored_request(req)
         t.request_queue.put(req)
         self.assertIs(t.request_queue.get_nowait(), req)
         self.assertEqual(t.finish_store_job(req), 0)
-        t.completed_events[7] = 1
+        t.completed_events[event_id] = 1
         t.request_queue.task_done()
 
         t._handle_request_exception(req)
 
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertFalse(t.is_stored_request("r1"))
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {event_id: 1})
 
     def test_dispatch_cleanup_keeps_queued_acknowledgements_after_current_was_done(self):
         t, _ = self._make_thread([0])
-        current = ReqMeta("r1", event_id=7, store_job_id=7)
-        queued = ReqMeta("r2", event_id=8, store_job_id=8)
+        current_event_id = uuid4().int
+        queued_event_id = uuid4().int
+        current = ReqMeta("r1", event_id=current_event_id, store_job_id=7)
+        queued = ReqMeta("r2", event_id=queued_event_id, store_job_id=8)
         batch = t.add_save_batch([current, queued])
         self.assertIs(t.request_queue.get_nowait(), current)
         self.assertEqual(t.finish_store_job(current), 0)
-        t.completed_events[7] = 1
+        t.completed_events[current_event_id] = 1
         t.request_queue.task_done()
         acknowledge = t.request_queue.task_done
 
@@ -881,17 +885,17 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertTrue(t.request_queue.empty())
         self.assertTrue(batch.done.is_set())
         self.assertFalse(t.is_stored_request("r2"))
-        self.assertEqual(t.get_completed_events(), {7: 1, 8: 1})
+        self.assertEqual(t.get_completed_events(), {current_event_id: 1, queued_event_id: 1})
 
     def test_add_save_batch_rejects_job_after_fatal_error(self):
         t, _ = self._make_thread([0])
-        req = ReqMeta("r1", event_id=7, store_job_id=7)
+        req = ReqMeta("r1", event_id=uuid4().int, store_job_id=7)
         t._fatal_error = RuntimeError("dispatch failed")
 
         with self.assertLogs("vllm", level="ERROR"):
             batch = t.add_save_batch([req])
         self.assertTrue(batch.done.is_set())
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {req.event_id: 1})
         self.assertEqual(t.get_saved_offset("r1"), 0)
 
         self.assertFalse(t.is_stored_request("r1"))
@@ -918,7 +922,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                     block_hashes=[b"h0", b"h1"],
                     token_ids=list(range(32)),
                     original_block_size=16,
-                    event_id=7,
+                    event_id=uuid4().int,
                 )
                 t.add_stored_request(req)
                 t.request_queue.put(req)
@@ -928,7 +932,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 self.assertEqual(t._retry_token_ids["r1"], (0, list(range(32))))
                 self.assertFalse(t.is_stored_request("r1"))
                 self.assertEqual(t.request_queue.unfinished_tasks, 0)
-                self.assertEqual(t.get_completed_events(), {7: 1})
+                self.assertEqual(t.get_completed_events(), {req.event_id: 1})
                 self.assertEqual(t.kv_events, [])
                 self.assertIsNone(t._fatal_error)
 
@@ -936,13 +940,13 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t, _ = self._make_thread(enable_kv_event=True)
         t.worker = MagicMock(tp_mismatch=True)
         t.worker._store_kv_tp_mismatch.return_value = False
-        req = ReqMeta("r1", token_len_chunk=16, token_ids=list(range(16)), event_id=7)
+        req = ReqMeta("r1", token_len_chunk=16, token_ids=list(range(16)), event_id=uuid4().int)
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(t.get_saved_offset("r1"), 0)
         self.assertEqual(t._retry_token_ids["r1"], (0, list(range(16))))
-        self.assertEqual(t.get_completed_events(), {7: 1})
+        self.assertEqual(t.get_completed_events(), {req.event_id: 1})
         self.assertFalse(t.is_stored_request("r1"))
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
@@ -1265,9 +1269,9 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                                 token_len_chunk=16,
                                 block_ids=[1],
                                 block_hashes=[b"h0"],
-                                event_id=chunk,
+                                event_id=uuid4().int,
                             )
-                            for chunk in range(2)
+                            for _ in range(2)
                         ]
                         for req in requests:
                             thread.add_stored_request(req)
@@ -1275,7 +1279,8 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             thread.request_queue.put(req)
                             thread._handle_request(req)
                             self.assertEqual(thread.request_queue.unfinished_tasks, 0)
-                            self.assertEqual(thread.completed_events[chunk], 1)
+                            assert req.event_id is not None
+                            self.assertEqual(thread.completed_events[req.event_id], 1)
                             self.assertEqual("r1" in thread.stored_requests, chunk == 0)
                             self.assertEqual("r1" in thread.finished_requests, chunk == 1)
                         # Identical successful saves reuse the durable offset;
