@@ -307,10 +307,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._kv_cache_events.increment_workers(kv_cache_events.get_number_of_workers())
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        """Take the unique events collected since the previous call."""
+        """
+        Take the KV cache events from the connector.
+
+        Yields:
+            New KV cache events since the last call.
+        """
         if self._kv_cache_events is not None:
             self._kv_cache_events.aggregate()
-            yield from self._kv_cache_events.get_all_events()
+            kv_cache_events = self._kv_cache_events.get_all_events()
+            yield from kv_cache_events
             self._kv_cache_events.clear_events()
             self._kv_cache_events = None
 
@@ -469,14 +475,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
-        """Collect CPU KV events through the worker's existing event channel."""
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        """
         assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
-        result = AscendStoreKVEvents(num_workers=1)
-        result.add_events(events)
-        return result
+
+        ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
+        ascend_store_kv_events.add_events(events)
+        return ascend_store_kv_events
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         assert self.connector_scheduler is not None
