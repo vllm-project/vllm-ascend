@@ -1,0 +1,8 @@
+pr: 22595
+entries:
+  - category: hardware
+    text: Enabled the MegaMoe route on A2 (910B) for the validated DeepSeek V4.1-Flash W4A8 prefill topology.
+    model: deepseek-v4.1-flash
+    hardware: [A2]
+  - category: config
+    text: Added `VLLM_ASCEND_PROFILER_DIR` to enable Ascend torch profiling when launch scripts cannot pass `--profiler-config`.
