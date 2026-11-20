@@ -11,6 +11,7 @@ import torch
 from tests.e2e.common.rlhf.weight_transfer.reload_probe import (
     ReloadProbeWorkerExtension,
     assert_reload_reuses_runtime,
+    assert_sleep_allocations,
     reload_snapshots,
 )
 
@@ -86,3 +87,44 @@ def test_snapshot_refuses_disabled_direct_or_missing_record(configuration):
         pytest.raises(AssertionError),
     ):
         reload_snapshots(MagicMock(), execution_mode="eager")
+
+
+@pytest.mark.parametrize("sleep_level", [1, 2])
+@pytest.mark.parametrize("asleep_tags", [("weights", "kv_cache"), ("kv_cache",), ()])
+def test_sleep_probe_accepts_staged_wake_policy(sleep_level, asleep_tags):
+    allocations = [
+        {
+            "tag": tag,
+            "bytes": 1024,
+            "asleep": tag in asleep_tags,
+            "offloaded": sleep_level == 1 and tag == "weights" and tag in asleep_tags,
+        }
+        for tag in ("weights", "kv_cache")
+    ]
+    response = MagicMock()
+    response.json.return_value = {"results": [allocations]}
+    with patch("tests.e2e.common.rlhf.weight_transfer.reload_probe.post_control", return_value=response):
+        assert_sleep_allocations(MagicMock(), sleep_level=sleep_level, asleep_tags=asleep_tags)
+
+
+@pytest.mark.parametrize("failure", ["missing_rank", "missing_pool", "zero_bytes", "no_sleep", "no_backup"])
+def test_sleep_probe_rejects_noop_sleep_or_wrong_backup(failure):
+    allocations = [
+        {"tag": "weights", "bytes": 1024, "asleep": True, "offloaded": True},
+        {"tag": "kv_cache", "bytes": 2048, "asleep": True, "offloaded": False},
+    ]
+    if failure == "missing_pool":
+        allocations.pop()
+    elif failure == "zero_bytes":
+        allocations[0]["bytes"] = 0
+    elif failure == "no_sleep":
+        allocations[0]["asleep"] = False
+    elif failure == "no_backup":
+        allocations[0]["offloaded"] = False
+    response = MagicMock()
+    response.json.return_value = {"results": [] if failure == "missing_rank" else [allocations]}
+    with (
+        patch("tests.e2e.common.rlhf.weight_transfer.reload_probe.post_control", return_value=response),
+        pytest.raises(AssertionError),
+    ):
+        assert_sleep_allocations(MagicMock(), sleep_level=1, asleep_tags=("weights", "kv_cache"))

@@ -23,7 +23,11 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     reference_signature,
     weight_transfer_servers,
 )
-from tests.e2e.common.rlhf.weight_transfer.reload_probe import assert_reload_reuses_runtime, reload_snapshots
+from tests.e2e.common.rlhf.weight_transfer.reload_probe import (
+    assert_reload_reuses_runtime,
+    assert_sleep_allocations,
+    reload_snapshots,
+)
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     make_weight_source,
     packed_buffer_size_for,
@@ -46,9 +50,17 @@ def run_hccl_weight_transfer_transaction(
     execution_mode: str = "graph",
     cold_start: bool = False,
     enable_sleep: bool = True,
+    sleep_level: int | None = None,
     tensor_parallel_size: int = INFERENCE_WORLD_SIZE,
     gpu_memory_utilization: float = GPU_MEMORY_UTILIZATION,
 ):
+    """Compare each reload with cold loading, optionally between staged wakes.
+
+    Wake only weights before transfer, keeping KV asleep until reload finishes.
+    Probe allocator policy as well as runtime storage and original graph reuse.
+    """
+    if sleep_level not in (None, 1, 2):
+        raise ValueError(f"Unsupported sleep level: {sleep_level}")
     if tensor_parallel_size < 1:
         raise ValueError("tensor_parallel_size must be positive")
     trainer_device_index = INFERENCE_DEVICE_INDEX + tensor_parallel_size
@@ -70,7 +82,7 @@ def run_hccl_weight_transfer_transaction(
         gpu_memory_utilization=gpu_memory_utilization,
         env_dict=env_dict,
         execution_mode=execution_mode,
-        enable_sleep=enable_sleep,
+        enable_sleep=enable_sleep or sleep_level is not None,
     )
     seed_a = source.seed
     seeds = (seed_a,) * UPDATE_ROUNDS
@@ -115,8 +127,20 @@ def run_hccl_weight_transfer_transaction(
                 source.seed = seed
                 print(f"[trainer] {case.id}: {reload_mode} update round={update_round} seed={seed}", flush=True)
                 post_control(server, "pause")
+                if sleep_level is not None:
+                    post_control(server, "sleep", params={"level": sleep_level})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=("weights", "kv_cache"))
+                    post_control(server, "wake_up", params={"tags": ["weights"]})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=("kv_cache",))
                 engine.send_weights()
-                post_control(server, "resume")
+                if sleep_level is not None:
+                    post_control(server, "wake_up", params={"tags": ["kv_cache"]})
+                    if snapshots is not None:
+                        assert_sleep_allocations(server, sleep_level=sleep_level, asleep_tags=())
+                else:
+                    post_control(server, "resume")
                 assert generation_signature(client, case.model) == references[seed], (
                     f"{case.id}: {reload_mode} round {update_round} differs from cold loading seed {seed}"
                 )

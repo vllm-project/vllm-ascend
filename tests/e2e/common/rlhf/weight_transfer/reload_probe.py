@@ -10,6 +10,20 @@ from tests.e2e.common.rlhf.common import post_control
 class ReloadProbeWorkerExtension:
     """Attach through --worker-extension-cls only in Direct matrix tests."""
 
+    def direct_sleep_allocations(self) -> list[dict]:
+        from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+        # Inspect allocator metadata without touching unmapped model storage.
+        return [
+            {
+                "tag": data.tag,
+                "bytes": data.handle[1],
+                "asleep": data.is_asleep,
+                "offloaded": data.cpu_backup_tensor is not None,
+            }
+            for data in CaMemAllocator.get_instance().pointer_to_data.values()
+        ]
+
     def direct_reload_configuration(self) -> dict:
         from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 
@@ -70,6 +84,22 @@ class ReloadProbeWorkerExtension:
             "graphs": {} if manager is None else {repr(desc): id(graph) for desc, graph in manager.graphs.items()},
             **self._direct_probe_counts,
         }
+
+
+def assert_sleep_allocations(server, *, sleep_level: int, asleep_tags: tuple[str, ...]) -> None:
+    states = post_control(server, "collective_rpc", json={"method": "direct_sleep_allocations"}).json()["results"]
+    assert states, "no worker returned sleep allocator observations"
+    for rank, allocations in enumerate(states):
+        for tag in ("weights", "kv_cache"):
+            pool = [allocation for allocation in allocations if allocation["tag"] == tag]
+            assert pool and sum(allocation["bytes"] for allocation in pool) > 0, f"rank {rank}: empty {tag} pool"
+            asleep = tag in asleep_tags
+            offloaded = asleep and tag == "weights" and sleep_level == 1
+            assert all(allocation["asleep"] == asleep for allocation in pool), f"rank {rank}: {tag} sleep mismatch"
+            assert all(allocation["offloaded"] == offloaded for allocation in pool), (
+                f"rank {rank}: {tag} offload policy mismatch for sleep{sleep_level}"
+            )
+    print(f"[sleep-proof] level={sleep_level} asleep_tags={asleep_tags} workers={states}", flush=True)
 
 
 def reload_snapshots(server, *, execution_mode: str) -> list[dict]:

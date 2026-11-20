@@ -21,3 +21,11 @@ from tests.e2e.common.rlhf.weight_transfer.direct import run_direct_reload_trans
 )
 def test_direct_reload_transport_matrix(case: WeightUpdateModelCase, backend: str, packed: bool, execution_mode: str):
     run_direct_reload_transaction(case, backend, packed, execution_mode)
+
+
+@pytest.mark.e2e_model(DIRECT_QWEN_CASES[0].model)
+@pytest.mark.parametrize("sleep_level", [1, 2], ids=["sleep1", "sleep2"])
+@pytest.mark.parametrize("execution_mode", ["eager", "graph"])
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_direct_reload_dense_hccl_sleep(packed: bool, execution_mode: str, sleep_level: int):
+    run_direct_reload_transaction(DIRECT_QWEN_CASES[0], "hccl", packed, execution_mode, sleep_level=sleep_level)
