@@ -32,8 +32,10 @@ from typing import Any
 
 import regex as re
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
+from vllm import envs
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
+from vllm.transformers_utils.config import AutoConfig
 
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 
@@ -300,12 +302,16 @@ class FixedRandomWeightSource(WeightSource):
         through server arguments. The independently loaded draft config includes
         its own case overrides in the draft checkpoint directory.
         """
-        from huggingface_hub import hf_hub_download
         from safetensors.torch import save_file
+
+        if envs.VLLM_USE_MODELSCOPE:
+            from modelscope import model_file_download as download_config
+        else:
+            from huggingface_hub import hf_hub_download as download_config
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        shutil.copyfile(download_config(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
         if self.draft_source is not None:

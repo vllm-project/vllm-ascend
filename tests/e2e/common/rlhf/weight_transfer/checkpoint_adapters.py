@@ -193,21 +193,31 @@ def qwen3_draft_parameters(config, parameters):
     return result
 
 
-def qwen3_next_mtp_parameters(config, parameters):
-    """Use a full-attention Next decoder for the checkpoint's MTP module.
+def deepseek_v4_mtp_parameters(config, parameters):
+    """Use one V4 decoder and the classic MTP projections in ``mtp.0.*``.
 
-    The target's ``mtp.`` namespace is also accepted by Qwen3NextMTP's loader.
-    Its embedding/head are shared, so the payload contains only MTP weights.
+    Embedding and output weights are shared with the target and omitted.
     """
-    result = [
-        (name.replace("model.layers.0.", "mtp.layers.0.", 1), shape, dtype)
-        for name, shape, dtype in parameters
-        if name.startswith("model.layers.0.")
-    ]
-    hidden = config.hidden_size
-    result.append(("mtp.fc.weight", (hidden, 2 * hidden), torch.bfloat16))
+    result = []
+    for name, shape, dtype in parameters:
+        name = name.removeprefix("model.")
+        if not name.startswith("layers.0."):
+            continue
+        name = "mtp.0." + name.removeprefix("layers.0.")
+        name = name.replace(".self_attn.", ".attn.").replace(".mlp.", ".ffn.")
+        name = name.replace(".input_layernorm.", ".attn_norm.").replace(".post_attention_layernorm.", ".ffn_norm.")
+        result.append((name, shape, dtype))
+    hidden, hc = config.hidden_size, config.hc_mult
     result.extend(
-        (f"mtp.{name}.weight", (hidden,), torch.bfloat16)
-        for name in ("norm", "pre_fc_norm_hidden", "pre_fc_norm_embedding")
+        [
+            ("mtp.0.e_proj.weight", (hidden, hidden), torch.bfloat16),
+            ("mtp.0.h_proj.weight", (hidden, hidden), torch.bfloat16),
+            ("mtp.0.enorm.weight", (hidden,), torch.bfloat16),
+            ("mtp.0.hnorm.weight", (hidden,), torch.bfloat16),
+            ("mtp.0.norm.weight", (hidden,), torch.bfloat16),
+            ("mtp.0.hc_head_fn", (hc, hc * hidden), torch.float32),
+            ("mtp.0.hc_head_base", (hc,), torch.float32),
+            ("mtp.0.hc_head_scale", (1,), torch.float32),
+        ]
     )
     return result

@@ -231,6 +231,8 @@
 /tests/ @wenjun91
 # RLHF e2e tests
 /tests/e2e/common/rlhf/ @Ronald1995 @Liccol
+# Target and draft HCCL runners share this module.
+/tests/e2e/common/rlhf/weight_transfer/hccl.py @Ronald1995 @Liccol
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n

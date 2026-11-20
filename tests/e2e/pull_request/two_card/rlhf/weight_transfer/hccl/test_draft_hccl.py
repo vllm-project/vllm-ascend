@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.e2e.common.rlhf.weight_transfer.case import DRAFT_MODEL_CASES, PACKED_LANE_SKIP_REASON
-from tests.e2e.common.rlhf.weight_transfer.draft_hccl import run_draft_hccl_weight_transfer
+from tests.e2e.common.rlhf.weight_transfer.hccl import run_draft_hccl_weight_transfer
 
 
 @pytest.mark.skipif(torch.npu.device_count() < 2, reason="HCCL draft updates require two NPUs.")
