@@ -587,13 +587,23 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         if needs_global_metadata and local_common.num_actual_tokens == 0:
             local_metadata = self._build_empty_local_metadata(local_common)
         else:
+            # Rank-local SWA writes address the local slice of the slot
+            # mapping, so that slice must be built even though the other cache
+            # planes still write through the global metadata. Building every
+            # SWA plane locally would add unused work when the switch is off.
+            local_kv_write = pcp_config_from_vllm_config(self.vllm_config).local_kv_write
             local_kwargs = dict(kwargs)
             local_kwargs.update(
                 num_actual_reqs=local_common.num_reqs if num_actual_reqs is None else num_actual_reqs,
                 build_query=True,
                 # C2 needs each local chunk's start, length and ring page;
-                # token cache writes still use the global metadata.
-                update_cache=not needs_global_metadata or self._cache_kind == "compressor_state",
+                # token cache writes still use the global metadata unless the
+                # rank-local SWA write is selected.
+                update_cache=(
+                    not needs_global_metadata
+                    or self._cache_kind == "compressor_state"
+                    or (self._cache_kind == "swa" and local_kv_write)
+                ),
                 build_compressor_metadata=True,
             )
             for name in ("common_v41_metadata", "common_v41_batch_metadata"):

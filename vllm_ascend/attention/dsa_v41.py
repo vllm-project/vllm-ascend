@@ -790,6 +790,10 @@ class AscendDSAV41Impl:
 
         # Part 3: Q_b matmul (Cube) overlaps KV norm and RoPE (Vector).
         # A5 prefill/mixed cache publication follows the stream join below.
+        # Forward the typed PCP config: every rank in a PCP group must make the
+        # same local-vs-gathered write decision. Omitting it here would force
+        # this rank to gather while an empty or non-multistream peer writes
+        # locally, leaving the cache collectives unmatched.
         write_cache_on_main = self._write_swa_cache_on_main_stream(attn, swa_metadata)
         part3_start = main_stream.record_event()
         main_stream.wait_event(kv_matmul_done)
@@ -798,11 +802,11 @@ class AscendDSAV41Impl:
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
             self._apply_rotary(attn, kv, cos, sin)
             if not write_cache_on_main:
-                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1), self.pcp_config)
         q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
         main_stream.wait_stream(aux_stream)
         if write_cache_on_main:
-            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1), self.pcp_config)
         return q, qr
 
     def _compress_and_write_caches(

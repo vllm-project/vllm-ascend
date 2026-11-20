@@ -1763,3 +1763,48 @@ class TestOwnerLocalKvWrites:
         assert len(writes) == 1
         assert writes[0][0] is metadata.global_metadata
         assert writes[0][1] is gathered
+
+    def test_multistream_swa_write_forwards_the_typed_config(self, runtime):
+        """Every rank must reach the same local-vs-gathered decision.
+
+        ``_preprocess`` hands its typed config to the empty/non-multistream
+        write. The overlapped QKV path must do the same: a peer that takes the
+        local branch while this rank defaults to ``pcp_config=None`` would
+        gather alone and hang the PCP cache collectives.
+        """
+        from vllm_ascend.ascend_config import PcpConfig
+
+        state = runtime(overlap=True)
+        impl = state.impl
+        config = PcpConfig(local_kv_write=True)
+        impl._pcp_config = config
+        writes = []
+        impl._write_swa_cache = lambda attn, metadata, value, pcp_config=None: writes.append(pcp_config)
+        swa_metadata = SimpleNamespace(global_metadata=object())
+        hidden_states = torch.arange(8, dtype=torch.float32).view(2, 4)
+        zeros = torch.zeros(2, 1, 1, 2)
+        impl._multistream_qkv(state.attn, hidden_states, zeros, zeros, swa_metadata)
+        assert writes == [config]
+
+    def test_local_write_builds_rank_local_swa_slots(self, builders, monkeypatch):
+        """Local SWA writes need the local slot slice, not the global view.
+
+        Prefill normally skips the local cache-slot build because every write
+        goes through the gathered metadata. Enabling the rank-local write must
+        build the local SWA plane, otherwise the write scatters through stale
+        rows and corrupts attention.
+        """
+        owners = builders(2, rank=1, specialized=True)
+        swa_builder = owners["swa"]
+        config = swa_builder.vllm_config
+        built = []
+        monkeypatch.setattr(swa_builder, "_build_swa_cache", lambda *args, **kwargs: built.append(1))
+        batch = _batch(2, 1, "prefill")
+
+        config.additional_config = {}
+        _build_planes(owners, batch)
+        assert built == []
+
+        config.additional_config = {"pcp_config": {"local_kv_write": True}}
+        _build_planes(owners, batch)
+        assert built
