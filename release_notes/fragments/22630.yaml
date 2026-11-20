@@ -1,0 +1,5 @@
+pr: 22630
+entries:
+  - category: other
+    text: Restored Qwen3.8-Flash-Next QSA preparation behavior from before the fused preparation update, removing the preparation performance optimizations introduced by that update. No configuration change is required.
+    model: Qwen3.8-Flash-Next
