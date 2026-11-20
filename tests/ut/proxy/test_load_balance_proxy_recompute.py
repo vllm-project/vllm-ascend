@@ -1,6 +1,7 @@
 """Native API recompute tests with real HTTPX errors and the shared scheduler."""
 
 import asyncio
+import copy
 import json
 
 import httpx
@@ -314,19 +315,30 @@ def _assert_no_load(scheduler):
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("after_output", [False, True])
-def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monkeypatch, api, streaming, after_output):
+@pytest.mark.parametrize("affinity", [False, True])
+def test_recompute_selects_new_pd_and_preserves_request(
+    installed_runtime, monkeypatch, api, streaming, after_output, affinity
+):
     """Shift load before recompute and verify the second P/D pair sees the original request."""
     runtime = proxy.get_runtime()
     scheduler = proxy.SharedProxyScheduler(
         [("127.0.0.1", port) for port in (8100, 8101)], [("127.0.0.1", port) for port in (8200, 8201)]
     )
     runtime.scheduler = scheduler
-    proxy.global_args.enable_prefill_affinity = True
-    monkeypatch.setattr(proxy, "conversation_affinity_key", lambda request: "same-session")
-    affinity_hosts = [proxy.server_key("127.0.0.1", port) for port in (8100, 8101)]
-    first_prefill = scheduler.reserve_prefill_kv(1.0, "same-session")["key"]
+    proxy.global_args.enable_prefill_affinity = affinity
+    session_key = proxy.conversation_affinity_key({"model": "m", "user": "session-2"})
+    first_prefill = scheduler.reserve_prefill_kv(1.0, session_key if affinity else None)["key"]
     scheduler.release_prefill_kv(first_prefill, 1.0)
-    other_prefill = next(key for key in affinity_hosts if key != first_prefill)
+    releases = []
+    release = scheduler._release_load
+
+    def record_release(role, key, load, **kwargs):
+        if key and load != other_load:
+            releases.append((role, key, load))
+        return release(role, key, load, **kwargs)
+
+    monkeypatch.setattr(scheduler, "_release_load", record_release)
+    retry_prefill = first_prefill if affinity else next(key for key in scheduler.prefillers if key != first_prefill)
     routes = []
     old_stream = None
     original = native_request(api, streaming)
@@ -346,14 +358,17 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
         if port < 8200:
             key = proxy.server_key("127.0.0.1", port)
             is_retry = len(routes) > 1
-            assert key == (other_prefill if is_retry else first_prefill)
+            assert key == (retry_prefill if is_retry else first_prefill)
             assert scheduler.prefillers[key].active_kv_cache > 0
             if is_retry:
                 assert scheduler.decoders[proxy.server_key("127.0.0.1", 8200)].active_tokens == pytest.approx(
                     other_load
                 )
                 assert scheduler.decoders[proxy.server_key("127.0.0.1", 8201)].active_tokens == 0
-                assert scheduler.prefillers[first_prefill].active_kv_cache == pytest.approx(other_load)
+                if affinity:
+                    assert scheduler.prefillers[first_prefill].active_kv_cache > other_load
+                else:
+                    assert scheduler.prefillers[first_prefill].active_kv_cache == pytest.approx(other_load)
                 assert old_stream is not None and old_stream.closed
             return httpx.Response(
                 200,
@@ -368,7 +383,7 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
         assert scheduler.decoders[proxy.server_key("127.0.0.1", port)].active_tokens > 0
         if port == 8200:
             err = _error(api, proxy.PD_RECOMPUTE_RETRY, streaming=streaming)
-            scheduler.begin_request(other_load, "same-session")
+            assert scheduler.begin_request(other_load, session_key if affinity else "session-2")["key"] == first_prefill
             busy_decoder = scheduler.pick_decoder(other_load)
             assert busy_decoder["port"] == 8201
             assert scheduler.pick_decoder(other_load)["port"] == 8200
@@ -400,7 +415,9 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
                     base_url=f"http://127.0.0.1:{port}/v1", transport=transport
                 )
         try:
-            result = await proxy.handle_completions_impl(api, _request(original))
+            incoming = _request(original)
+            incoming.scope["headers"].append((b"x-session-id", b"session-2"))
+            result = await proxy.handle_completions_impl(api, incoming)
             assert result.status_code == 200, (result.body, [port for port, _, _ in routes])
             return await _body(result)
         finally:
@@ -410,12 +427,14 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
     assert [port for port, _, _ in routes] == [
         int(first_prefill.rsplit(":", 1)[1]),
         8200,
-        int(other_prefill.rsplit(":", 1)[1]),
+        int(retry_prefill.rsplit(":", 1)[1]),
         8201,
     ]
+    expected_keys = [proxy.server_key("127.0.0.1", port) for port, _, _ in routes]
+    assert [key for _, key, _ in releases] == expected_keys
     first_p, first_d, retry_p, retry_d = routes
     assert first_p[1] == first_d[1] == "client-request"
-    assert retry_p[1] == retry_d[1] != first_d[1]
+    assert retry_p[1] == retry_d[1] == first_d[1]
     budget_key = "max_tokens" if api == "/messages" else "max_output_tokens"
     history_key = "messages" if api == "/messages" else "input"
     for index, (prefill, decode) in enumerate(((first_p, first_d), (retry_p, retry_d))):
@@ -439,12 +458,18 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
         assert decode[2]["kv_transfer_params"]["remote_block_ids"] == [prefill[0]]
         assert decode[2]["vllm_xargs"]["existing"] == 4
         assert decode[2]["vllm_xargs"][proxy.PD_RECOMPUTE_ARG] == proxy.PD_RECOMPUTE_VERSION
-        assert decode[2]["vllm_xargs"][proxy.PD_RECOMPUTE_RESUME] == proxy.PD_RECOMPUTE_VERSION
     assert b"discarded-attempt" not in data
     assert b"ascend_pd_recompute" not in data
     if after_output:
         events = _events(data) if streaming else None
         usage = _assert_resumed_response(api, events, data, "第一段 第二段", ("第一段 ", "第二段"))
+        if streaming:
+            envelope = "message" if api == "/messages" else "response"
+            start = "message_start" if api == "/messages" else "response.created"
+            ids = [event[envelope]["id"] for event in events if event["type"] == start]
+            assert ids == [partial["id"], final["id"]]
+            terminal = "message_stop" if api == "/messages" else "response.completed"
+            assert [event["type"] for event in events].count(terminal) == 1
         if streaming and api == "/responses":
             assert next(e for e in events if e["type"] == "response.output_text.done")["backend_marker"] == final["id"]
         assert usage["output_tokens"] == 2
@@ -475,39 +500,16 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
 def _assert_resumed_response(api, events, raw, text, deltas, *, incomplete=False, response_id="first-attempt"):
     if events is None:
         result = json.loads(raw)
-    elif api == "/messages":
-        kinds = [event["type"] for event in events]
-        assert kinds == [
-            "message_start",
-            "content_block_start",
-            *["content_block_delta"] * len(deltas),
-            "content_block_stop",
-            "message_delta",
-            "message_stop",
-        ]
-        assert events[0]["message"]["id"] == response_id
-        assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == list(deltas)
-        return events[-2]["usage"]
     else:
-        kinds = [event["type"] for event in events]
-        assert kinds == [
-            "response.created",
-            "response.in_progress",
-            "response.output_item.added",
-            "response.content_part.added",
-            *["response.output_text.delta"] * len(deltas),
-            "response.output_text.done",
-            "response.content_part.done",
-            "response.output_item.done",
-            "response.incomplete" if incomplete else "response.completed",
-        ]
-        assert [event["sequence_number"] for event in events] == list(range(len(events)))
-        assert [event["delta"] for event in events if event["type"] == "response.output_text.delta"] == list(deltas)
-        assert {event["item_id"] for event in events if "item_id" in event} == {f"item-{response_id}"}
-        assert events[-4]["text"] == events[-3]["part"]["text"] == text
-        result = events[-1]["response"]
-        assert result["id"] == response_id
-        assert result["output"][0]["id"] == events[-2]["item"]["id"] == f"item-{response_id}"
+        assert [delta for event in events if (delta := proxy._delta_text(event))] == list(deltas)
+        start = "message_start" if api == "/messages" else "response.created"
+        assert sum(event["type"] == start for event in events) >= 2
+        if api == "/messages":
+            assert events[-1]["type"] == "message_stop"
+            return events[-2]["usage"]
+        assert events[-1]["type"] == ("response.incomplete" if incomplete else "response.completed")
+        assert events[-1]["response"]["id"] != response_id
+        return events[-1]["response"]["usage"]
     if api == "/responses":
         (item,) = result["output"]
         assert item["type"] == "message"
@@ -524,6 +526,24 @@ def _assert_resumed_response(api, events, raw, text, deltas, *, incomplete=False
     return result["usage"]
 
 
+@pytest.mark.parametrize("api", ["/messages", "/responses"])
+def test_continuation_preserves_existing_assistant_blocks(api):
+    kind = api[1:]
+    if kind == "messages":
+        blocks = [{"type": "tool_use", "id": "call", "name": "search", "input": {}}, {"type": "text", "text": "old"}]
+        history = [{"role": "assistant", "content": blocks}]
+        retry = proxy._continue_native_prompt(kind, history, " new")
+        assert retry[-1]["content"] == [*blocks, {"type": "text", "text": " new"}]
+    else:
+        blocks = [{"type": "output_text", "text": t, "annotations": []} for t in ("one", "two")]
+        history = [{"role": "assistant", "type": "message", "status": "incomplete", "id": "msg_old", "content": blocks}]
+        retry = proxy._continue_native_prompt(kind, history, " new")
+        assert retry[:-1] == history
+        assert retry[-1]["status"] == "in_progress"
+        assert retry[-1]["content"][0]["text"] == " new"
+    assert len(history[-1]["content"]) == 2
+
+
 @pytest.mark.parametrize(
     "api,suffix",
     [(api, suffix) for api in ("/messages", "/responses") for suffix in ("", "third")]
@@ -533,8 +553,10 @@ def _assert_resumed_response(api, events, raw, text, deltas, *, incomplete=False
 def test_two_recomputes_preserve_one_request_and_its_budget(installed_runtime, api, streaming, suffix):
     scheduler, prefill, _ = installed_runtime
     runtime = proxy.get_runtime()
-    proxy.global_args.max_retries = 2
+    # Transport retries and scheduler recomputes are independent, as in Chat.
+    proxy.global_args.max_retries = 1
     request = native_request(api, streaming)
+    request.pop("request_id")  # Exercise generated IDs as well as the client-supplied IDs above.
     if api == "/messages":
         request["tools"] = [{"name": "search", "input_schema": {"type": "object"}}]
     else:
@@ -614,12 +636,17 @@ def test_two_recomputes_preserve_one_request_and_its_budget(installed_runtime, a
 
 
 @pytest.mark.parametrize(
-    "api,case",
-    [(api, case) for api in ("/messages", "/responses") for case in ("schema", "reasoning", "client-tool")]
-    + [("/responses", "mcp")],
+    "api,case,streaming,omit_closers",
+    [
+        (api, case, stream, 0)
+        for api in ("/messages", "/responses")
+        for case in ("schema", "reasoning", "client-tool")
+        for stream in (False, True)
+    ]
+    + [("/responses", "mcp", stream, 0) for stream in (False, True)]
+    + [("/responses", "schema", True, missing) for missing in (1, 2)],
 )
-@pytest.mark.parametrize("streaming", [False, True])
-def test_recompute_with_structured_output(installed_runtime, api, case, streaming):
+def test_recompute_with_structured_output(installed_runtime, api, case, streaming, omit_closers):
     scheduler, prefill, _ = installed_runtime
     runtime = proxy.get_runtime()
     options = _structured_options(api, case)
@@ -645,7 +672,7 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
             error = _recompute_error(api, progress, streaming=streaming)
             if streaming:
                 tail = 2 if api == "/messages" else 1
-                emitted = first_events[: -(tail + int(not resume_text))]
+                emitted = first_events[: -(tail + int(not resume_text) + omit_closers)]
                 chunks = _frame_chunks(api, [*emitted, error])
             else:
                 first["kv_transfer_params"] = {proxy.PD_RECOMPUTE_ARG: proxy.PD_RECOMPUTE_INTERRUPTED, **progress}
@@ -664,7 +691,12 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
             return await _body(response)
 
     raw = asyncio.run(run())
-    if resume_text:
+    if resume_text and streaming and api == "/responses":
+        events = _events(raw)
+        assert events[-1]["response"]["output"] == result["output"]
+        assert [e["response"]["id"] for e in events if e["type"] == "response.created"] == ["abandoned", "winner"]
+        assert "".join(proxy._delta_text(e) for e in events) == '{"key":"done"}'
+    elif resume_text:
         _assert_resumed_response(
             api,
             _events(raw) if streaming else None,
@@ -674,14 +706,16 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
             response_id="abandoned",
         )
     else:
-        assert b"abandoned" not in raw
+        key = "content" if api == "/messages" else "output"
         if streaming:
-            assert [ev["type"] for ev in _events(raw)] == [ev["type"] for ev in final_events]
+            events = _events(raw)
+            assert b"abandoned" in raw
+            assert events[-1]["type"] == final_events[-1]["type"]
+            if api == "/responses":
+                assert events[-1]["response"]["output"] == result[key]
         else:
-            assert (
-                json.loads(raw)["content" if api == "/messages" else "output"]
-                == result["content" if api == "/messages" else "output"]
-            )
+            assert json.loads(raw)[key] == result[key]
+            assert b"abandoned" not in raw
     assert b"ascend_pd_recompute" not in raw
     assert len(prefill.posts) == len(reserved) == 2
     assert [entry["headers"]["X-Request-Id"] for entry in prefill.posts] == [entry[0] for entry in reserved]
@@ -706,9 +740,12 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
     [(api, case) for api in ("/messages", "/responses") for case in ("client-tool", "reasoning")]
     + [("/responses", "mcp")],
 )
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("text_first", [True, False])
-def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming, text_first):
+@pytest.mark.parametrize(
+    "streaming,layout",
+    [(s, order) for s in (False, True) for order in ("text-first", "tool-first")] + [(True, "unfinished-tool")],
+)
+def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming, layout):
+    text_first = layout == "text-first"
     scheduler, prefill, _ = installed_runtime
     runtime = proxy.get_runtime()
     native = {**native_request(api, streaming), **_structured_options(api, case)}
@@ -724,7 +761,9 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     for event in structured if text_first else text_events:
         if index_key in event:
             event[index_key] += 1
-    events = opening + (text_events + structured if text_first else structured + text_events)
+    if layout == "unfinished-tool":
+        structured = structured[:-1]
+    events = opening + (text_events if text_first else structured + text_events)
     first[key] = first[key] + typed[key] if text_first else typed[key] + first[key]
     first["kv_transfer_params"] = {proxy.PD_RECOMPUTE_ARG: proxy.PD_RECOMPUTE_INTERRUPTED, **progress}
     final, final_events = _structured_attempt(api, case, "winner", interrupted=False)
@@ -756,20 +795,14 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     content = requests[1][history][-1]["content"]
     assert (content if api == "/messages" else content[0]["text"]) == "prefix "
     assert b"winner" in raw
-    assert (b"closed" in raw) == streaming
     if streaming:
         received = _events(raw)
+        assert (b"closed" in raw) == (layout != "text-first")
         if api == "/messages":
             assert received[-1]["type"] == "message_stop"
-            assert [e["index"] for e in received if e["type"] == "content_block_stop"] == [0, 1, 2]
-            assert (
-                "".join(e["delta"]["text"] for e in received if e.get("delta", {}).get("type") == "text_delta")
-                == "prefix "
-            )
         else:
-            assert [e["sequence_number"] for e in received] == list(range(len(received)))
-            assert received[-1]["type"] == "response.completed"
-            assert received[-1]["response"]["output"] == [*first[key], *final[key]]
+            assert received[-1]["response"]["output"] == final[key]
+        assert "".join(proxy._delta_text(e) for e in received) == "prefix "
     else:
         blocks = json.loads(raw)[key]
         assert blocks[1:] == final[key]
@@ -777,7 +810,7 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     _assert_no_load(scheduler)
 
 
-def test_interleaved_response_tools_publish_with_consistent_indices(installed_runtime):
+def test_interleaved_response_tools_preserve_backend_order(installed_runtime):
     scheduler, _, _ = installed_runtime
     api = "/responses"
     first, left = _structured_attempt(api, "client-tool", "first", interrupted=False)
@@ -800,10 +833,8 @@ def test_interleaved_response_tools_publish_with_consistent_indices(installed_ru
 
     received = asyncio.run(run())
     assert [e["sequence_number"] for e in received] == list(range(len(received)))
-    done = [e for e in received if e["type"] == "response.output_item.done"]
-    assert [e["output_index"] for e in done] == [0, 1]
-    assert [e["item"]["id"] for e in done] == ["tool-second", "tool-first"]
-    assert received[-1]["response"]["output"] == [e["item"] for e in done]
+    assert received[:-1] == events[:-1]
+    assert received[-1]["response"]["output"] == first["output"]
     _assert_no_load(scheduler)
 
 
@@ -821,6 +852,13 @@ def test_text_stream_sends_delta_before_backend_finishes(installed_runtime, api,
         for event in events:
             if key in event:
                 event[key] += 1
+        argument = tool[starts + 1]
+        field = "partial_json" if api == "/messages" else "delta"
+        payload = argument["delta"] if api == "/messages" else argument
+        rest = copy.deepcopy(argument)
+        tail_payload = rest["delta"] if api == "/messages" else rest
+        payload[field], tail_payload[field] = payload[field][:2], payload[field][2:]
+        tool.insert(starts + 2, rest)
         events[starts:starts] = tool[starts:-tail_size]
         if api == "/responses":
             events[-1]["response"]["output"].insert(0, tool[-2]["item"])
@@ -844,14 +882,7 @@ def test_text_stream_sends_delta_before_backend_finishes(installed_runtime, api,
             async def __aiter__(self):
                 start = 0
                 if tool_first:
-                    start = (
-                        next(
-                            i
-                            for i, e in enumerate(events)
-                            if e["type"] in ("content_block_stop", "response.output_item.done")
-                        )
-                        + 1
-                    )
+                    start = starts + 2
                     yield b"".join(map(_event, events[:start]))
                     await release_text.wait()
                 yield b"".join(map(_event, events[start:split]))
@@ -866,11 +897,7 @@ def test_text_stream_sends_delta_before_backend_finishes(installed_runtime, api,
             frames = []
             async for raw in response.body_iterator:
                 frames.append(raw)
-                if (
-                    tool_first
-                    and raw != tail
-                    and _events(raw)[0]["type"] in ("content_block_stop", "response.output_item.done")
-                ):
+                if tool_first and raw != tail and _events(raw)[0] == events[starts + 1]:
                     release_text.set()
                 if raw != tail and _events(raw)[0] == events[split - 1]:
                     if tool_first:
@@ -883,34 +910,6 @@ def test_text_stream_sends_delta_before_backend_finishes(installed_runtime, api,
             await asyncio.wait_for(forward(), timeout=2)
 
     asyncio.run(run())
-    _assert_no_load(scheduler)
-
-
-@pytest.mark.parametrize("api", ["/messages", "/responses"])
-def test_text_retry_limit_ends_sse_after_visible_output(installed_runtime, api):
-    scheduler, prefill, _ = installed_runtime
-    runtime = proxy.get_runtime()
-    calls = 0
-
-    async def backend(request):
-        nonlocal calls
-        calls += 1
-        partial = _text_result(api, f"attempt-{calls}", "partial ", 5)
-        progress = {"output_tokens": 5, "remaining_tokens": 117 - 5 * calls}
-        return httpx.Response(200, stream=Chunks(_text_stream(api, partial, recompute=progress)))
-
-    async def run():
-        request = native_request(api, True)
-        async with httpx.AsyncClient(base_url="http://decoder/v1", transport=httpx.MockTransport(backend)) as client:
-            runtime._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = client
-            response = await proxy.handle_completions_impl(api, _request(request))
-            assert response.status_code == 200
-            return await _body(response)
-
-    raw = asyncio.run(run())
-    assert b"attempt-1" in raw and b"attempt-2" not in raw and b"remaining_tokens" not in raw
-    assert _events(raw)[-1]["type"] == "error"
-    assert len(prefill.posts) == calls == 2
     _assert_no_load(scheduler)
 
 
@@ -947,7 +946,7 @@ def test_partial_recompute_stream_failure_is_terminal(installed_runtime, api, ca
     if api == "/responses":
         assert [event["sequence_number"] for event in events] == list(range(len(events)))
     assert len(prefill.posts) == (2 if case.startswith("retry-") else 1)
-    assert len(opened) == (2 if case == "retry-truncated" else 1)
+    assert len(opened) == (1 if case == "budget-exhausted" else 2)
     assert all(stream.closed for stream in opened)
     _assert_no_load(scheduler)
 
@@ -958,7 +957,7 @@ def test_partial_recompute_stream_failure_is_terminal(installed_runtime, api, ca
         (api, streaming, case)
         for api in ("/messages", "/responses")
         for streaming in (False, True)
-        for case in ("after-tokens", "retry-limit", "missing-retry-kv", "ordinary-error")
+        for case in ("after-tokens", "missing-retry-kv", "ordinary-error")
     ]
     + [(api, True, "committed-before-retry") for api in ("/messages", "/responses")],
 )
@@ -975,6 +974,9 @@ def test_recompute_failure_is_not_a_success(installed_runtime, api, streaming, c
     async def backend(request):
         nonlocal calls
         calls += 1
+        if calls == 2 and case == "missing-retry-kv":
+            assert "kv_transfer_params" not in json.loads(request.content)
+            return httpx.Response(200, stream=Chunks(_success_chunks(api, streaming)))
         err = _error(api, signal, streaming=streaming)
         if case == "missing-retry-kv":
             prefill.payload = {"usage": {}}
@@ -1010,14 +1012,15 @@ def test_recompute_failure_is_not_a_success(installed_runtime, api, streaming, c
         assert events[-1]["type"] == "error"
         assert b"cannot resume" in data
         assert not any(event["type"] in ("message_stop", "response.completed") for event in events)
+    elif case == "missing-retry-kv":
+        assert status == 200
     elif case == "ordinary-error":
         assert status == (200 if streaming else 500)
         assert signal.encode() in data
     else:
-        assert status == (503 if case == "retry-limit" else 502)
+        assert status == 502
         assert "error" in json.loads(data)
-    assert calls == (2 if case == "retry-limit" else 1)
-    assert len(prefill.posts) == (2 if case in ("retry-limit", "missing-retry-kv") else 1)
+    assert calls == len(prefill.posts) == (2 if case == "missing-retry-kv" else 1)
     assert all(stream.closed for stream in opened)
     _assert_no_load(scheduler)
 

@@ -487,6 +487,30 @@ def test_recompute(proxy_server):
     assert b"recomputed" not in body
 
 
+@pytest.mark.parametrize("chat", [True, False])
+def test_nonstream_openai_recompute_preserves_prompt_and_budget(proxy_server, chat):
+    api = "chat/completions" if chat else "completions"
+    request = {"model": MODEL, "max_tokens": 10, "stream": False}
+    request.update({"messages": [{"role": "user", "content": "hello"}]} if chat else {"prompt": "hello"})
+    field = "message" if chat else "text"
+
+    def result(text, reason):
+        choice = {field: {"content": text} if chat else text, "stop_reason": reason}
+        return {"kind": "json", "body": {"choices": [choice], "usage": {"completion_tokens": 3}}}
+
+    _set_script(MOCK_DECODE_PORT, [result(" first", "recomputed"), result(" second", None)])
+    with httpx.Client(timeout=5) as client:
+        response = client.post(f"{proxy_server}/v1/{api}", json=request)
+        attempts = client.get(f"http://127.0.0.1:{MOCK_DECODE_PORT}/__requests__").json()
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert (choice[field]["content"] if chat else choice[field]) == " first second"
+    assert len(attempts) == 2
+    retry = attempts[1]["body"]
+    assert retry["max_tokens"] == 8
+    assert (retry["messages"][0]["content"] if chat else retry["prompt"]) == "hello first"
+
+
 def test_mid_stream_error(proxy_server):
     """Mid-stream error: proxy does not crash, partial content forwarded."""
     _set_script(
@@ -627,9 +651,6 @@ def test_native_text_recompute_continues_over_http(proxy_server, api, streaming)
     _assert_resumed_response(api, events, result.content, "prefix suffix", ("prefix ", "suffix"))
     assert len(prefill) == len(decode) == 2
     assert all(attempt["path"] == path for attempt in prefill + decode)
-    assert [entry["request_id"] for entry in prefill] == [entry["request_id"] for entry in decode]
-    assert decode[0]["request_id"] != decode[1]["request_id"]
-    assert [attempt["body"]["kv_transfer_params"]["remote_block_ids"] for attempt in decode] == [[1], [2]]
 
 
 @pytest.mark.parametrize("streaming", [False, True])

@@ -19,7 +19,6 @@ from vllm_ascend.core.pd_recompute import (
     PD_CONTINUE_MESSAGE,
     PD_RECOMPUTE_ARG,
     PD_RECOMPUTE_INTERRUPTED,
-    PD_RECOMPUTE_RESUME,
     PD_RECOMPUTE_RETRY,
     PD_RECOMPUTE_VERSION,
 )
@@ -69,10 +68,9 @@ def _wrap_generate(
         outputs = generate(self, prompt, sampling_params, *args, **kwargs)
         extra_args = sampling_params.extra_args or {}
         if extra_args.get(PD_RECOMPUTE_ARG) == PD_RECOMPUTE_VERSION:
-            resume = extra_args.get(PD_RECOMPUTE_RESUME) == PD_RECOMPUTE_VERSION
             return _check_pd_recompute(
                 outputs,
-                return_partial=resume and sampling_params.output_kind == RequestOutputKind.FINAL_ONLY,
+                return_partial=sampling_params.output_kind == RequestOutputKind.FINAL_ONLY,
             )
         return outputs
 

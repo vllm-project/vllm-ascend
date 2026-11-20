@@ -26,7 +26,6 @@ from vllm_ascend.core.pd_recompute import (
     PD_CONTINUE_MESSAGE,
     PD_RECOMPUTE_ARG,
     PD_RECOMPUTE_INTERRUPTED,
-    PD_RECOMPUTE_RESUME,
     PD_RECOMPUTE_RETRY,
     PD_RECOMPUTE_VERSION,
 )
@@ -102,8 +101,7 @@ def test_messages_serializer_keeps_scheduler_signal():
 
 
 @pytest.mark.parametrize("output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("serialize_partial", [False, True])
-def test_native_resume_preserves_partial_text_and_budget(output_kind, serialize_partial):
+def test_native_resume_preserves_partial_text_and_budget(output_kind):
     progress = {"output_tokens": 3, "remaining_tokens": 7}
 
     async def generate(self, prompt, sampling_params, request_id):
@@ -111,15 +109,13 @@ def test_native_resume_preserves_partial_text_and_budget(output_kind, serialize_
 
     async def exercise():
         extra_args = {PD_RECOMPUTE_ARG: PD_RECOMPUTE_VERSION}
-        if serialize_partial:
-            extra_args[PD_RECOMPUTE_RESUME] = PD_RECOMPUTE_VERSION
         params = SamplingParams(output_kind=output_kind, extra_args=extra_args)
         iterator = _wrap_generate(generate)(None, "hello", params, "native")
         output = await anext(iterator)
         assert output.outputs[0].text == "Text with /tmp/example"
         assert output.outputs[0].stop_reason is None
         metadata = {PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED, **progress}
-        if output_kind == RequestOutputKind.FINAL_ONLY and serialize_partial:
+        if output_kind == RequestOutputKind.FINAL_ONLY:
             assert output.finished
             assert output.outputs[0].finish_reason == "length"
             assert output.kv_transfer_params == metadata
