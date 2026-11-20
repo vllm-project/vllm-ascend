@@ -1903,7 +1903,7 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     from vllm_ascend.attention.fa3_selection import supports_fa3_model
 
     tag = backends.model_tag
-    if not supports_fa3_model(spec, tag, _MINIMAX_M3_ARCHITECTURES):
+    if not supports_fa3_model(spec, tag):
         return False
     # FA3 does not support C8 KV caches for either target or draft attention.
     # DSpark installs the draft quant_config in its own loader context.
