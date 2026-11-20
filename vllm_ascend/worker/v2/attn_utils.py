@@ -283,7 +283,7 @@ def _collect_cache_layouts(vllm_config: VllmConfig):
             if vllm_version_is("0.33.0"):
                 spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
             else:
-                config = customize_layer_config(attn_module.get_attn_backend(), configs[layer_name])
+                config = customize_layer_config(attn_module.get_attn_backend(), configs[layer_name], layer_name)
                 configs[layer_name] = config
                 spec = config.spec
         full_attention = (
