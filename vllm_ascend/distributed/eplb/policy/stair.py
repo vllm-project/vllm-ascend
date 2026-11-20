@@ -28,7 +28,7 @@ from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_r
 if TYPE_CHECKING:
     from vllm.distributed.eplb.policy import EplbStats
 
-_EPLB_STATS_TYPE = getattr(upstream_policy, "EplbStats", ())
+_EPLB_STATS_TYPE = getattr(upstream_policy, "EplbStats", None)
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 _PLANNER_THREAD_ENV = {
@@ -227,7 +227,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_node_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
         """Plan from upstream EPLB stats or Ascend's prepared load samples."""
-        if isinstance(stats, _EPLB_STATS_TYPE):
+        if _EPLB_STATS_TYPE is not None and isinstance(stats, _EPLB_STATS_TYPE):
             if old_global_expert_indices is None:
                 assert num_replicas is None or isinstance(num_replicas, torch.Tensor)
                 old_global_expert_indices = num_replicas

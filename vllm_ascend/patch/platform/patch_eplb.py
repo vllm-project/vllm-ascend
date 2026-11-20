@@ -241,8 +241,8 @@ def resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config) -> Any
     return _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config)
 
 
-def _select_ascend_eplb_communicator(eplb_config: _parallel_config.EPLBConfig) -> None:
-    if eplb_config.communicator is not None:
+def _select_ascend_eplb_communicator(eplb_config: _parallel_config.EPLBConfig | None) -> None:
+    if eplb_config is None or eplb_config.communicator is not None:
         return
     binding, reason = _probe_local_hixl_binding()
     eplb_config.communicator = "hixl" if binding != "none" else "torch_gloo"
@@ -256,6 +256,8 @@ def _select_ascend_eplb_communicator(eplb_config: _parallel_config.EPLBConfig) -
 
 def check_and_update_eplb_config(parallel_config: _parallel_config.ParallelConfig) -> None:
     eplb_config = parallel_config.eplb_config
+    if eplb_config is None:
+        return
     if eplb_config.policy is None:
         eplb_config.policy = "stair"
     if eplb_config.policy not in _ASCEND_EPLB_POLICIES:

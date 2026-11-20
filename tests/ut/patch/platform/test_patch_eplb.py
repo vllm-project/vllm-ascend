@@ -109,6 +109,24 @@ def test_eplb_communicator_config_supports_hixl():
         assert EPLBConfig(communicator="hixl").communicator == "hixl"
 
 
+def test_eplb_communicator_selection_skips_missing_config(monkeypatch):
+    probe = MagicMock()
+    monkeypatch.setattr(patch_eplb, "_probe_local_hixl_binding", probe)
+
+    patch_eplb._select_ascend_eplb_communicator(None)
+
+    probe.assert_not_called()
+
+
+def test_native_eplb_hook_skips_missing_config(monkeypatch):
+    select_communicator = MagicMock()
+    monkeypatch.setattr(patch_eplb, "_select_ascend_eplb_communicator", select_communicator)
+
+    NPUPlatform.check_and_update_eplb_config(MagicMock(eplb_config=None))
+
+    select_communicator.assert_not_called()
+
+
 @pytest.mark.skipif(not hasattr(Platform, "check_and_update_eplb_config"), reason="Native EPLB platform validation")
 @pytest.mark.parametrize(
     ("policy", "communicator", "message"),
