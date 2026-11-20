@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
@@ -501,11 +502,21 @@ def test_greedy_walk_contract_reference():
 @pytest.mark.parametrize("num_reqs_padded", [2, 4])
 def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.attn_backends = {name: AscendAttentionBackend for name in ("draft.0", "draft.1")}
     speculator.input_batch = SimpleNamespace(num_reqs=2)
     speculator.num_query_per_req = 3
     speculator._group_causal = {0: False}
     seq_lens = torch.tensor([10, 20])
-    metadata = {name: SimpleNamespace(actual_seq_lengths_q=[3, 6]) for name in ("draft.0", "draft.1")}
+    metadata = {
+        name: SimpleNamespace(
+            actual_seq_lengths_q=[3, 6],
+            seq_lens_list=[10, 20] + [0] * (num_reqs_padded - 1),
+            seq_lens=torch.tensor([10, 20] + [0] * (num_reqs_padded - 1), dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([10, 20] + [0] * (num_reqs_padded - 1), dtype=torch.int32),
+            block_tables=torch.arange((num_reqs_padded + 1) * 2, dtype=torch.int32).reshape(-1, 2),
+        )
+        for name in ("draft.0", "draft.1")
+    }
     speculator._build_uniform_attn_metadata = MagicMock(return_value=metadata)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
 
@@ -520,6 +531,12 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
     assert kwargs["batch_desc"].num_reqs == num_reqs_padded
     for layer in metadata.values():
         assert layer.actual_seq_lengths_q == list(range(3, num_reqs_padded * 3 + 1, 3))
+        assert layer.seq_lens_list == [10, 20] + [0] * (num_reqs_padded - 2)
+        torch.testing.assert_close(layer.seq_lens, torch.tensor(layer.seq_lens_list, dtype=torch.int32))
+        torch.testing.assert_close(layer.seq_lens_cpu, layer.seq_lens)
+        torch.testing.assert_close(
+            layer.block_tables, torch.arange(num_reqs_padded * 2, dtype=torch.int32).reshape(-1, 2)
+        )
 
 
 @pytest.mark.parametrize("num_reqs_padded", [1, 4])
@@ -527,6 +544,7 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
     from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
 
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.attn_backends = {"draft": AscendAttentionBackend}
     speculator.input_batch = SimpleNamespace(num_reqs=8)
     speculator.num_query_per_req = 8
     speculator._group_causal = {0: False}
@@ -546,7 +564,15 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
     )
     speculator.attn_groups = []
     speculator.kv_cache_config = object()
-    metadata = {"draft": SimpleNamespace(actual_seq_lengths_q=[])}
+    metadata = {
+        "draft": SimpleNamespace(
+            actual_seq_lengths_q=[],
+            seq_lens_list=[18] + [0] * (num_reqs_padded - 1),
+            seq_lens=torch.tensor([18] + [0] * (num_reqs_padded - 1), dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([18] + [0] * (num_reqs_padded - 1), dtype=torch.int32),
+            block_tables=torch.zeros(num_reqs_padded, 1, dtype=torch.int32),
+        )
+    }
     build = MagicMock(return_value=metadata)
     monkeypatch.setattr(upstream_speculator, "build_attn_metadata", build)
     monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)

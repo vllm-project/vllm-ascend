@@ -7,7 +7,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.device import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.glm5_next_cann_keypool import write_keypool_caches
@@ -76,7 +75,7 @@ def _assert_cache_writes(storage, dtype, page_bytes, pooled, slots):
         pytest.param(
             torch.float8_e4m3fn,
             marks=pytest.mark.skipif(
-                not get_current_hardware_profile().supports(HardwareCapability.POOL_KEY_INDEXER_FP8),
+                get_ascend_device_type() != AscendDeviceType.A5,
                 reason="FP8 LI cache requires Ascend 950",
             ),
         ),

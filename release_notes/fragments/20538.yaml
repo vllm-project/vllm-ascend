@@ -1,0 +1,7 @@
+pr: 20538
+entries:
+    - category: bugfix
+      text: KV Pool store setup is now deferred to the first put for models on the packed C8
+        cache path (sparse-indexer models with fp8/int8 KV, plus the existing compressed-model
+        case) on fabric-memory Mooncake/Memcache deployments, matching the deferral compressed
+        models already use. This avoids a vLLM startup hang on those deployments.

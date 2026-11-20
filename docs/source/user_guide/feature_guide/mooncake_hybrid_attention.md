@@ -84,7 +84,7 @@ can restore committed data using their current local block allocations.
 
 ### Transfer and Cache Updates
 
-Future-layer loads can overlap the current attention computation. Device events
+Future-layer loads can overlap the current attention computation. Host events
 ensure that transfers access cache data after the relevant updates and that
 attention waits for its required loads.
 

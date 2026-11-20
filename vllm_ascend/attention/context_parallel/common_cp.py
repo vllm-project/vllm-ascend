@@ -69,7 +69,7 @@ def use_history_current_split_decode(
     is_draft_model_prefill: bool = False,
     use_spec_decode: bool = False,
 ) -> bool:
-    """Choose one split policy for MLA and GQA decode attention."""
+    """Choose the history/current split policy for MLA decode attention."""
     if not attn_metadata.causal or attn_metadata.decode is None:
         return False
     # Preserve the task layout of speculative target and draft-prefill graphs.

@@ -132,13 +132,23 @@ def test_load_draft_model_calls_remove_d2t():
     draft_model = MagicMock()
     target_attn_layer_names = {"layer.0"}
     speculator._maybe_remove_d2t = MagicMock()
+    target_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
+    speculator.vllm_config = target_config
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+
+    def load_with_draft_topology(*args):
+        assert speculator.vllm_config.parallel_config.decode_context_parallel_size == 1
+        return draft_model
+
     with patch.object(
-        TargetDependentARSpeculator, "load_draft_model", return_value=draft_model
+        TargetDependentARSpeculator, "load_draft_model", side_effect=load_with_draft_topology
     ) as parent_load_draft_model:
         result = speculator.load_draft_model(target_model, target_attn_layer_names)
     parent_load_draft_model.assert_called_once_with(target_model, target_attn_layer_names)
     speculator._maybe_remove_d2t.assert_called_once_with(draft_model)
     assert result is draft_model
+    assert speculator.vllm_config is target_config
+    assert target_config.parallel_config.decode_context_parallel_size == 2
 
 
 def test_init_cudagraph_manager_enforce_eager():
@@ -527,7 +537,12 @@ def test_build_fia_params_prefill():
     """Test building FIA parameters for prefill."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     block_table = torch.arange(12).reshape(4, 3)
-    metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
+    metadata = SimpleNamespace(
+        block_tables=block_table,
+        actual_seq_lengths_q=[1, 2],
+        seq_lens_list=[10, 20],
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20]),
+    )
     speculator.use_dcp = False
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
@@ -536,6 +551,8 @@ def test_build_fia_params_prefill():
     assert result[0]["layer_name"] == "draft"
     assert result[0]["actual_seq_lengths"] == [1, 2]
     assert result[0]["actual_seq_lengths_kv"] == [10, 20]
+    assert result[0]["actual_seq_qlen"] == [1, 2]
+    assert result[0]["actual_seq_kvlen"] == [10, 20]
     assert result[0]["block_table"].shape == (4, 3)
 
 
@@ -543,7 +560,10 @@ def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.use_dcp = False
-    metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
+    metadata = SimpleNamespace(
+        block_tables=torch.arange(12).reshape(4, 3),
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2, 3], seq_lens_list=[10, 29]),
+    )
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
@@ -553,6 +573,8 @@ def test_build_fia_params_decode():
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
     assert result[0]["actual_seq_lengths_kv"] == [11, 30, 0]
+    assert result[0]["actual_seq_qlen"] == [1, 2, 3]
+    assert result[0]["actual_seq_kvlen"] == [11, 30, 0]
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
 
 
@@ -566,7 +588,8 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-        speculator.vllm_config = object()
+        speculator.vllm_config = SimpleNamespace()
+        speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
         speculator.attn_groups = object()
         speculator.speculative_config = SimpleNamespace(  # type: ignore[assignment]
             moe_backend=None, attention_backend=None, kv_cache_dtype=None
@@ -710,6 +733,7 @@ def test_init_dcp_disabled():
     speculator._init_dcp()
 
     assert speculator.use_dcp is False
+    assert speculator.dcp_size == 1
     assert speculator.dcp_manager is None
 
 
@@ -733,6 +757,7 @@ def test_init_dcp_enabled():
         speculator._init_dcp()
 
     assert speculator.use_dcp is True
+    assert speculator.dcp_size == 2
     assert speculator.dcp_manager is dcp_manager_cls.return_value
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
