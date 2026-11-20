@@ -1,0 +1,6 @@
+pr: 22335
+entries:
+  - category: bugfix
+    text: Fixed incorrect or off-topic answers from DeepSeek V4.1 on Ascend A5 after a prefix-cache hit with SWA bounded replay enabled.
+    model: deepseek-v4.1
+    hardware: [A5]

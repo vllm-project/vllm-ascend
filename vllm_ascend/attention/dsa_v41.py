@@ -115,12 +115,13 @@ def build_replay_swa_visible_lens(
     request's data, it would read phantom keys that score zero and take weight
     in the replayed token's softmax.
 
-    This operator bounds a window with one scalar for the whole call
+    The band-mode operator bounds a window with one scalar for the whole call
     (``ori_win_left``), which cannot express a per-token floor, so the floor
     travels through ``ori_topk_length`` in band mode: "the number of ori KV
     entries this query token may see". Entries are counted back from the token's
     own right edge, so a count of ``position - floor + 1`` is exactly "keep the
-    window ending here, but not past the floor".
+    window ending here, but not past the floor". A5 uses an explicit list
+    and builds its indices with the same count.
 
     Positions are derived the way the operator derives its own, from
     ``seqused_ori_kv - actS1Size + s1``, so the two coordinate systems cannot
@@ -1206,41 +1207,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             indices_view.copy_(ori_sparse_indices)
             lengths_view.copy_(ori_topk_length)
             ori_sparse_indices, ori_topk_length = indices_view, lengths_view
-        if (
-            not noncausal
-            and ori_sparse_indices is None
-            and self._a5_causal_swa_indices is not None
-            and positions is not None
-        ):
-            cache_key = f"a5-causal-swa:w{window_size}"
-            cached_window = batch_shared.get(cache_key)
-            if cached_window is None:
-                assert self._device_backend is not None
-                cached_window = self._device_backend.build_window_indices(
-                    positions[:num_input_tokens],
-                    window_size,
-                    indices_output=self._a5_causal_swa_indices[:num_input_tokens],
-                    lengths_output=self._a5_causal_swa_lengths[:num_input_tokens],
-                )
-                batch_shared[cache_key] = cached_window
-            ori_sparse_indices, ori_topk_length = cached_window
-        if ori_topk_length is None and ori_sparse_indices is not None and noncausal:
-            ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-
-        # SWA bounded replay (vLLM #56227): a prefill admission that hit the
-        # prefix cache recomputes the hit's last window, and only the
-        # sliding-window group is rebuilt by it. That group's window is the one
-        # that can reach below ``replay_start`` into the region it does not hold,
-        # so the floor rides ``ori_topk_length``, the operator's per-token
-        # channel for "how many ori KV entries this query may see". The window's
-        # width stays a scalar (``ori_win_left``) and still bounds it from above,
-        # so this only ever narrows the mask, and only for the requests that are
-        # replaying.
-        #
-        # Only the sliding-window group carries it, because
-        # ``_forward_attention`` reads the mask and this length from
-        # ``metadata.swa`` whichever group's loop ranges it was handed, and those
-        # ranges come from the same band -- so they stay a superset of the window.
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and cache_kind == "swa":
@@ -1248,7 +1214,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # independently of physical KV blocks. Share only within this build.
             replay_key = (
                 window_size,
-                num_reqs,
+                num_actual_reqs,
                 num_actual_tokens,
                 common.query_start_loc.data_ptr(),
                 seq_lens.data_ptr(),
@@ -1259,7 +1225,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if cached_replay is None:
                 replay_visible_lens = build_replay_swa_visible_lens(
                     window_size,
-                    common.query_start_loc[: num_reqs + 1],
+                    common.query_start_loc[: num_actual_reqs + 1],
                     seq_lens,
                     replay_start,
                     num_actual_tokens,
@@ -1268,11 +1234,32 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 replay_masks[replay_key] = (replay_visible_lens, common.query_start_loc, seq_lens, replay_start)
             else:
                 replay_visible_lens = cached_replay[0]
-        # In band mode this tensor is the per-token visible length; the sparse
-        # path above is its other producer, and that one pairs it with an index
-        # list. The operator's mask mode is therefore the band in both cases.
-        if replay_visible_lens is not None:
+        if (
+            not noncausal
+            and ori_sparse_indices is None
+            and self._a5_causal_swa_indices is not None
+            and positions is not None
+        ):
+            cache_key = f"a5-causal-swa:w{window_size}"
+            cached_window = batch_shared.get(cache_key) if replay_visible_lens is None else None
+            if cached_window is None:
+                assert self._device_backend is not None
+                # A5 reads the first N sparse indices, so a replay floor changes both tensors.
+                cached_window = self._device_backend.build_window_indices(
+                    positions[:num_input_tokens],
+                    window_size,
+                    visible_lengths=replay_visible_lens,
+                    indices_output=self._a5_causal_swa_indices[:num_input_tokens],
+                    lengths_output=self._a5_causal_swa_lengths[:num_input_tokens],
+                )
+                if replay_visible_lens is None:
+                    batch_shared[cache_key] = cached_window
+            ori_sparse_indices, ori_topk_length = cached_window
+        elif replay_visible_lens is not None:
+            # Scalar-band backends consume a count from the right edge of the window.
             ori_topk_length = replay_visible_lens
+        elif ori_topk_length is None and ori_sparse_indices is not None and noncausal:
+            ori_topk_length = (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)
         ori_win_right = 0
