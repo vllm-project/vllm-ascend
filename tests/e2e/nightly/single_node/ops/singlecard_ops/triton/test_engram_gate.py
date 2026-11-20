@@ -53,7 +53,7 @@ def test_engram_gate(tokens, dim, rotation_kind, dtype):
     mask = (torch.arange(tokens * 2, device="npu") % 3 != 0)[::2]
     rotation = None
     if rotation_kind != "none":
-        shape = (ROTATION_BLOCK, ROTATION_BLOCK)
+        shape: tuple[int, ...] = (ROTATION_BLOCK, ROTATION_BLOCK)
         if rotation_kind == "per_block":
             shape = (dim // ROTATION_BLOCK, *shape)
         rotation = torch.randn(shape, device="npu", dtype=torch.float32) / ROTATION_BLOCK**0.5
