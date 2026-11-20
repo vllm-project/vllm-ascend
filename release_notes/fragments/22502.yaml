@@ -10,6 +10,17 @@ entries:
     hardware: [A3]
   - category: config
     text: >-
-      Added VLLM_ASCEND_PCP_KV_SHARING (default "replicated") and the VLLM_ASCEND_PCP_OWNER_* /
-      VLLM_ASCEND_PCP_LOCAL_* switches (default off) for owner-sharded PCP KV placement, local
-      index placement, prefill staging, and capacity planning. Decode is unchanged.
+      Added `additional_config.pcp_config` (a typed sub-config) to select owner-sharded PCP KV
+      placement, local index placement, local KV writes, prefill staging, capacity planning, and
+      device-time attribution for DeepSeek V4.1. `pcp_config.kv_sharing` defaults to
+      `"replicated"` and every other switch defaults to `false`, so omitting the key preserves the
+      previous behavior. Configure it as
+      `"pcp_config": {"kv_sharing": "owner", "owner_capacity": true, "owner_stage": true}`.
+      MIGRATION: the untyped `VLLM_ASCEND_PCP_KV_SHARING`, `VLLM_ASCEND_PCP_OWNER_*`,
+      `VLLM_ASCEND_PCP_LOCAL_*`, and `VLLM_ASCEND_PCP_TIMING` environment variables and the
+      top-level `pcp_kv_sharing` / `pcp_owner_placement` keys were removed; move each to the
+      matching `pcp_config` field (`owner_capacity`, `local_index`, `local_kv_write`,
+      `local_kv_write_source`, `owner_stage`, `owner_stage_bytes`, `owner_stage_swa_chunk`,
+      `owner_stage_swa_chunk_bytes`, `owner_placement`, `enable_timing`). The diagnostic-only
+      `VLLM_ASCEND_PCP_OWNER_STAGE_SWA`, `_CPUPLAN`, `_SWA_CHUNK_DEBUG`, `_MAX_SLABS`, and
+      `_LOCAL_VMM` switches were removed without a replacement. Decode is unchanged.
