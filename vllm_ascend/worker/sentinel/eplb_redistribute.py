@@ -31,7 +31,6 @@ from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
 __all__ = [
     "densify_routing_table_physical_ids",
     "reload_experts_from_disk",
-    "validate_reload_checkpoint",
 ]
 
 # (layer, expert) pairs per chunk: bigger chunks amortise device rounds but grow the stacked buffer.
@@ -198,15 +197,6 @@ def _resolve_expert_tensor(
     return (key, suffix) if key is not None else None
 
 
-def validate_reload_checkpoint(
-    model_config: ModelConfig,
-    load_config: LoadConfig,
-    model: torch.nn.Module,
-) -> None:
-    """Raise if the reload cannot read this model's checkpoint."""
-    _collect_safetensors_shards(model_config, load_config, model)
-
-
 def _collect_safetensors_shards(
     model_config: ModelConfig,
     load_config: LoadConfig,
@@ -259,7 +249,12 @@ def _resolve_local_slots(
     reassignments: set[tuple[int, int]],
     ep_rank: int,
 ) -> dict[tuple[int, int], int]:
-    """The local slot each reassigned expert lands in on this rank."""
+    """Return the local weight slot of each reassigned expert on this rank.
+
+    An expert can have replicas on several ranks. Keep the replica hosted by
+    this rank, then subtract this rank's first physical expert id to get the
+    slot index used by the local weight tensors.
+    """
     local_slots: dict[tuple[int, int], int] = {}
     for layer_idx, logical_id in reassignments:
         layer_state = getattr(moe_layers[layer_idx], "eplb_state", None)

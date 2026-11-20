@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from datetime import timedelta
-from functools import wraps
 from typing import TYPE_CHECKING
 
 import torch
@@ -39,7 +38,6 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
     densify_routing_table_physical_ids,
     reload_experts_from_disk,
-    validate_reload_checkpoint,
 )
 
 if TYPE_CHECKING:
@@ -65,18 +63,18 @@ def fault_barrier_wrapper(func: Callable):
     retry lifts the quarantine only after the groups are rebuilt.
     """
 
-    @wraps(func)
     def wrapped(self, *args, **kwargs):
         sentinel = _sentinel
         if sentinel is None:
             return func(self, *args, **kwargs)
         if sentinel.worker_faulted:
-            raise RuntimeError(sentinel.faulted_message())
+            raise RuntimeError(f"[FT] worker is quarantined after fault: {sentinel.fault_info}")
         try:
             return func(self, *args, **kwargs)
         except Exception as exc:
             rank = getattr(self, "rank", "worker")
-            sentinel.mark_faulted(exc)
+            sentinel.worker_faulted = True
+            sentinel.fault_info = f"{type(exc).__name__}: {exc}"
             logger.warning("[FT] Quarantining %s after fault: %s", rank, exc)
             try:
                 sentinel.reset_device()
@@ -84,7 +82,7 @@ def fault_barrier_wrapper(func: Callable):
                 logger.exception("[FT] self device reset failed on %s.", rank)
             # Drop the frames that pin device tensors of the broken stream.
             exc.__traceback__ = None
-            raise RuntimeError(sentinel.faulted_message())
+            raise RuntimeError(f"[FT] worker quarantined after fault: {sentinel.fault_info}")
 
     return wrapped
 
@@ -112,14 +110,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.worker_faulted = False
         self.fault_info: str | None = None
         _sentinel = self
-
-    def mark_faulted(self, exc: Exception) -> None:
-        """Record the first device-touching fault for the barrier."""
-        self.worker_faulted = True
-        self.fault_info = f"{type(exc).__name__}: {exc}"
-
-    def faulted_message(self) -> str:
-        return f"[FT] worker is quarantined after fault: {self.fault_info}"
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Report the dead-rank mask (upstream convention: 0=live, 1=dead)."""
@@ -170,16 +160,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.activate_cpu_group_timeouts(ft_request)
         torch.npu.synchronize()
 
-    def _validate_reload_checkpoints(self) -> None:
-        """Reject a checkpoint the reload cannot read before recovery starts."""
-        vllm_config = self.worker.vllm_config
-        sources = [(self.worker.model_runner.model, vllm_config.model_config, vllm_config.load_config)]
-        drafter = self._resolve_drafter()
-        if drafter is not None:
-            sources.append((drafter[0], drafter[2], drafter[3]))
-        for model, model_config, load_config in sources:
-            validate_reload_checkpoint(model_config, load_config, model)
-
     def _validate_scale_down_preconditions(self) -> None:
         model_runner = self.worker.model_runner
         eplb_config = self.worker.parallel_config.eplb_config
@@ -187,6 +167,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down requires EPLB with num_redundant_experts > 0 to re-host the dead rank's experts."
             )
+        self._resolve_drafter()
         ascend_config = get_ascend_config()
         if ascend_config.enable_fused_mc2:
             raise ValueError(
@@ -203,9 +184,6 @@ class WorkerSentinel(GPUWorkerSentinel):
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
             )
-        # Resolve checkpoints last: it may glob or download, so let the cheap
-        # preconditions fail first.
-        self._validate_reload_checkpoints()
 
     def _max_reachable_num_tokens(self) -> int:
         """Largest batch in tokens: max_num_batched_tokens or the largest graph capture size."""
