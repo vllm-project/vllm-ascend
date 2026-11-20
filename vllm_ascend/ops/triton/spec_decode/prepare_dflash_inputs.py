@@ -52,6 +52,7 @@ def _dflash_local_slot(
     req_idx,
     valid,
     block_size,
+    block_stride,
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -77,7 +78,7 @@ def _dflash_local_slot(
         mask=valid & is_local,
         other=0,
     ).to(tl.int64)
-    slot = block_numbers * block_size + local_positions % block_size
+    slot = block_numbers * block_stride + local_positions % block_size
     return tl.where(valid & is_local & (block_numbers != 0), slot, PAD_SLOT_ID)
 
 
@@ -113,6 +114,7 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    block_stride,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -163,6 +165,7 @@ def _prepare_dflash_inputs_kernel(
         req_idx,
         ctx_valid_mask,
         block_size,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -208,6 +211,7 @@ def _prepare_dflash_inputs_kernel(
         req_idx,
         query_mask,
         block_size,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -323,12 +327,16 @@ def prepare_dflash_inputs_triton(
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
+    *,
+    block_stride: int | None = None,
 ) -> None:
     """Prepare DFlash inputs and KV slot mappings for a draft step.
 
     Args:
         block_size: Manager block size shared by block-table lookup, DCP
             rank ownership and rank-local position calculations.
+        block_stride: Physical slot distance between manager blocks,
+            defaulting to block_size for contiguous pages.
         num_reqs_override: Caps the number of processed requests. vLLM main
             (#58984) forwards the DP-synced request count during dummy runs so
             the drafter does not process target request padding; the remaining
@@ -361,6 +369,8 @@ def prepare_dflash_inputs_triton(
 
     if block_size <= 0:
         raise ValueError("Manager block size must be positive.")
+    if block_stride is None:
+        block_stride = block_size
 
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
         input_buffers.input_ids,
@@ -388,6 +398,7 @@ def prepare_dflash_inputs_triton(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
+        block_stride,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
