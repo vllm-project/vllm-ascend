@@ -7,12 +7,8 @@ from vllm.config.model import ModelConfig
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
-    _is_pd_prefill_node,
-    _patch_engine_core,
     _patch_model_config_validation,
     _patch_model_runner_output,
-    _use_pp_ipc_runtime_patch,
-    _use_pp_mtp_runtime_patch,
 )
 
 
@@ -80,41 +76,7 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
         ModelConfig.verify_with_parallel_config(model_config, parallel_config)
 
 
-def test_pp_ipc_runtime_patch_is_disabled_for_model_runner_v2():
-    vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        scheduler_config=SimpleNamespace(async_scheduling=True),
-        speculative_config=object(),
-    )
-
-    assert _use_pp_ipc_runtime_patch(vllm_config, use_pp=True) is False
-
-
-def test_pp_ipc_runtime_patch_skips_pd_prefill_node():
-    vllm_config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            is_kv_producer=True,
-            is_kv_consumer=False,
-        ),
-        scheduler_config=SimpleNamespace(async_scheduling=True),
-        speculative_config=object(),
-    )
-
-    assert _use_pp_ipc_runtime_patch(vllm_config, use_pp=True) is False
-
-
-def test_pp_mtp_helpers_and_patch_reentry():
-    assert _is_pd_prefill_node(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_role="kv_producer"))) is True
-    vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        speculative_config=object(),
-    )
-    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=True) is False
-    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=False) is False
-    vllm_config.speculative_config = None
-    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=True) is False
-
+def test_pp_mtp_patch_reentry():
     _apply_patch()
     _patch_model_runner_output()
-    _patch_engine_core()
     _patch_model_config_validation()
