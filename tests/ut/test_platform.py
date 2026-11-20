@@ -2239,7 +2239,7 @@ class TestNPUPlatform(TestBase):
         with (
             patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
-            patch("vllm_ascend.logger.setup_ascend_file_logging"),
+            patch("vllm_ascend.logger.configure_ascend_file_logging"),
         ):
             self.platform.check_and_update_config(vllm_config)
 

@@ -278,7 +278,7 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
             "vllm_ascend.platform.init_ascend_config",
             return_value=ascend_config,
         ),
-        patch("vllm_ascend.logger.setup_ascend_file_logging"),
+        patch("vllm_ascend.logger.configure_ascend_file_logging"),
     ):
         vllm_config = create_vllm_config(
             max_num_seqs=2,
