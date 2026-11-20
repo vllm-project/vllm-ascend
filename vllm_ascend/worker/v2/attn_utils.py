@@ -231,7 +231,7 @@ def _collect_cache_layouts(vllm_config: VllmConfig):
             if config is None:
                 continue
             spec = config.spec
-            sliding = config.manager_cls is SlidingWindowManager
+            sliding = issubclass(config.manager_cls, SlidingWindowManager)
         if (
             isinstance(attn_module, Attention)
             and attn_module.is_draft_layer
