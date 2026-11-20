@@ -296,7 +296,6 @@ presets:
       GLOO_SOCKET_IFNAME: $IFACE_NAME
       TP_SOCKET_IFNAME: $IFACE_NAME
       HCCL_SOCKET_IFNAME: $IFACE_NAME
-      ASCEND_LOCAL_COMM_RES: $ASCEND_LOCAL_COMM_RES
     roles:
       prefill:
         nodes: 1
@@ -363,9 +362,7 @@ presets:
       href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#950dt-dp8-prefill-and-dp8-decode
       revision: 49007fd8cbcf597d9a1a4e2ebc968c69257045ed
     runbook: >-
-      Set PREFILL_NODE_1, DECODE_NODE_1 and IFACE_NAME for your hosts. Before
-      launching either worker, run `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`
-      so the Docker shell command passes the JSON value intact.
+      Set PREFILL_NODE_1, DECODE_NODE_1 and IFACE_NAME for your hosts.
       The native vLLM supervisor starts eight HTTP endpoints per role on
       ports 7100–7107. The separate DP groups each use RPC port 12321.
       Prefill and Decode start KV transfer at ports 26010 and 27010,
