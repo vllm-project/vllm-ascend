@@ -31,7 +31,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import _get_sparse_flash_mla_ops, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -202,7 +202,9 @@ def sparse_mla(query, cache, indices, metadata, scale):
             cu_seqlens_q,
             topk_length,
         )
-        result = sparse_flash_mla(
+        # SFA supplies its own sparse mask. The DSA adapter strips decode indices.
+        attention_op, _ = _get_sparse_flash_mla_ops()
+        result = attention_op(
             query.contiguous(),
             ori_kv=cache,
             ori_sparse_indices=sorted_indices,
