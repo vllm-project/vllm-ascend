@@ -487,6 +487,10 @@ therefore uses FIA at TP2/TP4. KV NZ and PCP are unsupported. When the target
 KV cache is FP8, set `"kv_cache_dtype": "bfloat16"` in `--speculative-config`
 for a BF16 draft.
 
+On 950DT Products, eligible Kimi K3.1 Pro DSpark C8 drafts can use
+QuantFlashMLA for decode. See [DSpark C8 deployment](../../tutorials/models/Kimi-K3.1-Pro.md#513-dspark-c8)
+for the configuration and P/D requirements.
+
 !!! warning
 
     When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
