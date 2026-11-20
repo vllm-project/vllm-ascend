@@ -5338,6 +5338,7 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
         num_prompt_tokens=count,
         max_tokens=16,
         block_hashes=["old-prompt-hash"],
+        sampling_params=types.SimpleNamespace(ignore_eos=False, _eos_token_id=42),
     )
 
     def update_block_hashes():
@@ -5352,6 +5353,9 @@ def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
         assert request.num_prompt_tokens == len(expected)
         assert request.max_tokens == (1 if should_truncate else 16)
         assert request.block_hashes == (["short-prompt-hash"] if should_truncate else ["old-prompt-hash"])
+        # The placeholder sample must never stop on EOS before the KV handoff.
+        assert request.sampling_params.ignore_eos is should_truncate
+        assert request.sampling_params._eos_token_id == (None if should_truncate else 42)
         if payload == "tokens":
             assert request.prompt_token_ids == expected
         if payload == "embeds":

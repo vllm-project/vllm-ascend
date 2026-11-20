@@ -1935,6 +1935,12 @@ class MooncakeConnectorScheduler:
             # Request already hashed the full prompt. Rebuild for the shortened one.
             request.block_hashes.clear()
             request.update_block_hashes()
+            # The P-side sample exists only to complete the KV handoff. If it
+            # lands on EOS the request finishes STOPPED, the conductor
+            # short-circuits on "stop", and no KV transfer runs. Ignoring EOS
+            # forces the length-based stop so the handoff always completes.
+            request.sampling_params.ignore_eos = True
+            request.sampling_params._eos_token_id = None
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
