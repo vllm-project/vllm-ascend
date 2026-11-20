@@ -728,6 +728,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 decode_metadata = metadata
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            if hasattr(decode_metadata, "fia_single_query"):
+                decode_metadata.fia_max_expand_width = 0
+                decode_metadata.fia_single_query = None
+                decode_metadata.fia_single_query_graph = None
             if dcp_local_seq_lens_cpu is not None:
                 assert self.dcp_manager is not None
                 parallel_config = self.draft_vllm_config.parallel_config

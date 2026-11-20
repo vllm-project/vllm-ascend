@@ -194,6 +194,12 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         assert isinstance(graph, UpdatableGraph)
         resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         self.update_stream.wait_stream(torch.npu.current_stream())
+        for table in {
+            task.kwargs["block_table"]
+            for task in resolved_tasks
+            if getattr(task.provider, "single_query_fia", False) and task.kwargs.get("block_table") is not None
+        }:
+            table.record_stream(self.update_stream)
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
         return ret
