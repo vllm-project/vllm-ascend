@@ -10,7 +10,6 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
-from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextPCPMetadataMixin, prepare_glm_pcp_config
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
@@ -20,6 +19,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     _build_actual_seq_lengths,
     _build_non_spec_chunked_prefill_metadata,
 )
+from vllm_ascend.ops.kda_pcp import Glm5NextPCPMetadataMixin, prepare_glm_pcp_config
 
 
 @contextmanager

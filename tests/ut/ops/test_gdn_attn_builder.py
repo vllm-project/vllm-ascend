@@ -23,7 +23,6 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.models.glm5next.recoverssm_metadata import Glm5NextRecoverSSMMetadataBuilder
 from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
 from vllm_ascend.ops import gdn as ascend_gdn
@@ -36,7 +35,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.kda_pcp import Glm5NextGDNHostMetadataBuilder, KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,

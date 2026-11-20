@@ -38,9 +38,9 @@ from vllm_ascend.distributed.parallel_state import get_qkv_iproj_tp_group
 from vllm_ascend.models.glm5next.kda_input_projection_tp import KDAInputProjectionTP
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
-from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
+from vllm_ascend.ops.kda_pcp import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 
 if TYPE_CHECKING:
