@@ -22,6 +22,7 @@ pytest.importorskip(
 
 from vllm.models.deepseek_v41.common import engram as upstream_engram
 
+from vllm_ascend.device.device_op import ACL_HOST_REG_MAPPED, ACL_HOST_REG_PINNED
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
@@ -135,6 +136,7 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
 
         def aclrtHostRegisterV2(self, pointer, count, flags):
             assert count == size and pointer.value % alignment == 0
+            assert flags == ACL_HOST_REG_MAPPED
             self.registered = pointer.value
             return 1 if failure == "register" else 0
 
@@ -155,6 +157,7 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
 
     lib = Library()
     monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    monkeypatch.setattr(npu.DeviceOperator, "host_register_flags", lambda: ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED)
     shape = (size // torch.empty((), dtype=dtype).element_size(),)
     owner = torch.nn.Module()
     if failure:
@@ -290,6 +293,10 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
                 assert table.dp_size == (1 if shared else 4)
                 assert table._shared_group is (group if shared else None)
                 table.load_checkpoint(tmp_path, key, chunk_rows=7)
+                weight_pointer = table.weight.data_ptr()
+                table.process_weights_after_loading()
+                table.process_weights_after_loading()
+                assert table.weight.data_ptr() == weight_pointer
                 assert torch.equal(table.weight, expected[start:end])
                 if quantized:
                     assert torch.equal(table.weight_scale_inv, scales[start:end])
@@ -418,9 +425,10 @@ def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     torch.testing.assert_close(decoded.float(), expected, rtol=0, atol=0.02)
 
 
-def _fake_host_library(device_offset):
+def _fake_host_library(device_offset, expected_flags):
     class Library:
         def aclrtHostRegisterV2(self, pointer, size, flags):
+            assert flags == expected_flags
             return 0
 
         def aclrtHostGetDevicePointer(self, pointer, out, flags):
@@ -434,11 +442,13 @@ def _fake_host_library(device_offset):
 
 
 @pytest.mark.parametrize("leader_rank", [0, 16])
-def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_rank):
+@pytest.mark.parametrize("register_flags", [ACL_HOST_REG_MAPPED, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED])
+def test_shared_uva_uses_one_python_shared_memory_segment(monkeypatch, leader_rank, register_flags):
     name_ready = threading.Event()
     attached = threading.Barrier(2)
     names: list[str] = []
-    monkeypatch.setattr(npu, "_host_library", lambda: _fake_host_library(1 << 40))
+    monkeypatch.setattr(npu, "_host_library", lambda: _fake_host_library(1 << 40, register_flags))
+    monkeypatch.setattr(npu.DeviceOperator, "host_register_flags", lambda: register_flags)
     monkeypatch.setattr(npu.dist, "get_global_rank", lambda group, rank: leader_rank)
     monkeypatch.setattr(npu.dist, "barrier", lambda group: attached.wait(timeout=10))
     monkeypatch.setattr(npu.dist, "all_gather_object", lambda errors, error, group: None)

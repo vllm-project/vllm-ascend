@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import ACL_HOST_REG_MAPPED, DeviceOperator
 
 SCALE_GROUP = 32
 # A 384M row table overflows the 32 bit offset arithmetic a single Triton tile
@@ -180,7 +180,9 @@ class HostUvaBuffer:
         try:
             self.buffer = (ctypes.c_char * size).from_address(self.pointer.value)
             self.tensor = torch.frombuffer(self.buffer, dtype=dtype).reshape(shape)
-            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, DeviceOperator.host_register_flags())
+            # aclrtMallocHost already provides page-locked memory. PINNED is
+            # for pageable malloc/mmap memory and is rejected here on A3.
+            rc = self.lib.aclrtHostRegisterV2(self.pointer, size, ACL_HOST_REG_MAPPED)
             if rc:
                 raise RuntimeError(f"aclrtHostRegisterV2 failed: rc={rc} size={size}")
             self._registered = True

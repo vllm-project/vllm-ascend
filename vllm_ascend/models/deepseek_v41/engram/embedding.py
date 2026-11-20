@@ -168,6 +168,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         # The upstream constructor queries CUDA properties; keep its parameter
         # contract with Ascend storage and device allocation.
         nn.Module.__init__(self)
+        # Ascend owns its TP/EDP storage; upstream GPU peer-row sharing is unused.
+        self.peer_rows = 0
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
         self.num_embeddings = num_embeddings
