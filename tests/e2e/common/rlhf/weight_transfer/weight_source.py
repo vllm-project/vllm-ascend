@@ -70,14 +70,13 @@ def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
             setattr(config, name, value)
 
 
-# One seed for both sources: the payload has to be reproducible across lanes and
-# runs, and the two sources never share a lane, so a single constant is enough.
+# Default seed shared by the sources; draft updates may select an independent seed.
 FIXED_WEIGHT_SEED = 20260915
 
 
-def _parameter_seed(name: str) -> int:
+def _parameter_seed(name: str, seed: int = FIXED_WEIGHT_SEED) -> int:
     """Stable per-name seed, so a payload does not depend on iteration order."""
-    digest = hashlib.sha256(f"{FIXED_WEIGHT_SEED}:{name}".encode()).digest()
+    digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
     return int.from_bytes(digest[:8], "little") % (2**63 - 1)
 
 
@@ -91,6 +90,7 @@ def _sampled_tensor(
     sample_on_cpu: bool,
     norm_suffixes: tuple[str, ...],
     integer_topk_names: tuple[str, ...] | None,
+    seed: int = FIXED_WEIGHT_SEED,
 ) -> torch.Tensor:
     """Deterministically sample one payload tensor from its name.
 
@@ -105,11 +105,8 @@ def _sampled_tensor(
     router table"; otherwise only tensors with one of those name suffixes are,
     and the rest get a plain bit table.
     """
-    seed = _parameter_seed(name)
-    torch.manual_seed(seed)
-    if not sample_on_cpu:
-        torch.npu.manual_seed(seed)
     sample_device = torch.device("cpu") if sample_on_cpu else device
+    generator = torch.Generator(device=sample_device).manual_seed(_parameter_seed(name, seed))
 
     if not dtype.is_floating_point:
         assert num_experts > 0, f"{name}: integer table needs n_routed_experts"
@@ -126,17 +123,17 @@ def _sampled_tensor(
             # table duplicate-free (#16485).  Sampling top-k over per-expert
             # scores guarantees both invariants while still differing from the
             # model's own table.
-            scores = torch.rand(shape[0], max(num_experts, shape[1]), device=sample_device)
+            scores = torch.rand(shape[0], max(num_experts, shape[1]), device=sample_device, generator=generator)
             return scores.topk(shape[1], dim=1).indices.to(dtype).to(device)
-        return torch.randint(0, 2, shape, dtype=dtype, device=sample_device).to(device)
+        return torch.randint(0, 2, shape, dtype=dtype, device=sample_device, generator=generator).to(device)
 
     # Sample in fp32 on the CPU (one code path for every float storage dtype)
     # or directly in the storage dtype on the device.
     tensor = torch.empty(shape, dtype=torch.float32 if sample_on_cpu else dtype, device=sample_device)
     if name.endswith(norm_suffixes):
-        tensor = tensor.uniform_(0.9, 1.1)
+        tensor = tensor.uniform_(0.9, 1.1, generator=generator)
     else:
-        tensor = tensor.uniform_(-0.02, 0.02)
+        tensor = tensor.uniform_(-0.02, 0.02, generator=generator)
     return tensor.to(device=device, dtype=dtype)
 
 
@@ -236,30 +233,18 @@ class FixedRandomWeightSource(WeightSource):
             return case.checkpoint_name_map(name)
         return name
 
-    @staticmethod
-    def _parameter_seed(name: str, seed: int = FIXED_WEIGHT_SEED) -> int:
-        digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
-        return int.from_bytes(digest[:8], "little") % (2**63 - 1)
-
     def _make_tensor(self, name: str, shape: tuple[int, ...], dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-        seed = self._parameter_seed(name, self._seed)
-        generator = torch.Generator(device=self._device).manual_seed(seed)
-        if not dtype.is_floating_point:
-            # Token -> expert tables (DeepSeek-V4's hash router). Values must
-            # stay inside [0, n_routed_experts) *and* be unique within a row:
-            # the MC2 dispatch/combine kernels assume a token never routes to
-            # the same expert twice, which is also why the served model
-            # initialises this table duplicate-free (#16485). Sampling top-k
-            # over per-expert scores guarantees both invariants while still
-            # differing from the model's own table.
-            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
-            assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
-            scores = torch.rand(shape[0], self._num_experts, device=self._device, generator=generator)
-            return scores.topk(shape[1], dim=1).indices.to(dtype)
-        tensor = torch.empty(shape, dtype=dtype, device=self._device)
-        if name.endswith("norm.weight"):
-            return tensor.uniform_(0.9, 1.1, generator=generator)
-        return tensor.uniform_(-0.02, 0.02, generator=generator)
+        return _sampled_tensor(
+            name,
+            shape,
+            dtype,
+            self._device,
+            num_experts=self._num_experts,
+            sample_on_cpu=False,
+            norm_suffixes=("norm.weight",),
+            integer_topk_names=None,
+            seed=self._seed,
+        )
 
     @cached_property
     def metadata(self) -> list[ParamMeta]:
