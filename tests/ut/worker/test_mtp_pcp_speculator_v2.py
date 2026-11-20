@@ -142,7 +142,12 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     target_cache_config = SimpleNamespace(
         block_size=128,
     )
+    target_model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(rope_parameters=None),
+        max_model_len=128,
+    )
     target_config = SimpleNamespace(
+        model_config=target_model_config,
         scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=target_parallel_config,
         engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True) if engram else None,
@@ -155,7 +160,11 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         cache_config=target_cache_config,
         additional_config={"scheduler_config": {"profiling_chunk_config": {"enabled": True}}},
     )
-    draft_model_config = SimpleNamespace(is_moe=False)
+    draft_model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(max_position_embeddings=128),
+        max_model_len=128,
+        is_moe=False,
+    )
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
