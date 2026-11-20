@@ -4,6 +4,7 @@
 
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import msgspec
 import pytest
@@ -22,6 +23,7 @@ def test_push_executor_uses_configured_max_workers(monkeypatch, options, expecte
     worker.kv_transfer_config = SimpleNamespace(is_kv_producer=True, get_from_extra_config=options.get)
     worker.vllm_config = SimpleNamespace(
         kv_transfer_config=worker.kv_transfer_config,
+        compilation_config=SimpleNamespace(static_forward_context={}),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="llama")),
     )
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
