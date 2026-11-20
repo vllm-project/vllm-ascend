@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Temporary model-load hook backport for configured worker extensions."""
 
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 
 def _load_model(self: WorkerWrapperBase, *, load_dummy_weights: bool = False) -> None:
-    extension_name = self.vllm_config.parallel_config.worker_extension_cls
-    extension_cls = resolve_obj_by_qualname(extension_name) if extension_name else None
-    before_hook = getattr(extension_cls, "before_load_model", None)
+    # A reused worker class can retain a mixin from an earlier instance.
+    has_extension = bool(self.vllm_config.parallel_config.worker_extension_cls)
+    before_hook = getattr(self.worker, "before_load_model", None) if has_extension else None
     if callable(before_hook):
-        before_hook(self.worker, load_dummy_weights=load_dummy_weights)
+        before_hook(load_dummy_weights=load_dummy_weights)
 
     if load_dummy_weights:
         self.worker.load_model(load_dummy_weights=True)
@@ -18,9 +17,9 @@ def _load_model(self: WorkerWrapperBase, *, load_dummy_weights: bool = False) ->
         # NPUWorker supports the default, no-argument model load.
         self.worker.load_model()
 
-    after_hook = getattr(extension_cls, "after_load_model", None)
+    after_hook = getattr(self.worker, "after_load_model", None) if has_extension else None
     if callable(after_hook):
-        after_hook(self.worker, load_dummy_weights=load_dummy_weights)
+        after_hook(load_dummy_weights=load_dummy_weights)
 
 
 # Defer to upstream once the wrapper owns model loading. Remove this backport
