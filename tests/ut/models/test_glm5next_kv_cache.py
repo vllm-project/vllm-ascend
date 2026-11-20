@@ -671,16 +671,30 @@ def _config():
     )
 
 
-def _builder(config):
+def _builder(config, dtype=torch.bfloat16):
     spec = AscendMLAAttentionSpec(
         block_size=config.cache_config.block_size,
         num_kv_heads=1,
         head_size=128,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         model_version="glm5_next",
         **_ratio_kwargs(4),
     )
     return AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    ("main_dtype", "indexer_dtype", "aligned_rows"),
+    [("fp8", torch.float8_e4m3fn, 8064), ("auto", torch.float8_e4m3fn, None), ("fp8", torch.bfloat16, None)],
+)
+def test_aligned_tp8_chunk_requires_fp8_caches(monkeypatch, main_dtype, indexer_dtype, aligned_rows):
+    config = _config()
+    config.cache_config.block_size = 1152
+    config.cache_config.cache_dtype = main_dtype
+    config.scheduler_config.max_num_batched_tokens = 8192
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr("vllm_ascend.attention.indexer_kpool.get_tensor_model_parallel_world_size", lambda: 8)
+    assert _builder(config, indexer_dtype)._aligned_shard_rows == aligned_rows
 
 
 class _Common(SimpleNamespace):
