@@ -205,6 +205,29 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         graph.update(self.update_stream, resolved_tasks)
         return ret
 
+    def _can_capture_fia_replay(self, attn_groups: list[list[AttentionGroup]], kv_cache_config: KVCacheConfig) -> bool:
+        if not fia_graph_replay_available() or len(attn_groups) != 1 or len(attn_groups[0]) != 1:
+            return False
+
+        config = self.vllm_config
+        return (
+            get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
+            and self.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and self.decode_query_len == 1
+            and not self.varlen_decode
+            and self.ubatch_runner is None
+            and self.compilation_config.max_cudagraph_capture_size <= 8
+            and config.parallel_config.world_size_across_dp == 1
+            and config.speculative_config is None
+            and config.lora_config is None
+            and config.model_config.architecture == "Qwen3ForCausalLM"
+            and config.model_config.dtype == torch.bfloat16
+            and config.model_config.quantization is None
+            and config.model_config.max_model_len <= 2048
+            and len(kv_cache_config.kv_cache_groups) == 1
+            and type(kv_cache_config.kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
+        )
+
     def capture(
         self,
         model: nn.Module,
@@ -225,28 +248,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
         legacy_kwargs = {"has_lora": has_lora} if vllm_version_is("0.33.0") else {}
-        config = self.vllm_config
-        capture_fia_replay = (
-            fia_graph_replay_available()
-            and get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
-            and self.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-            and self.decode_query_len == 1
-            and not self.varlen_decode
-            and self.ubatch_runner is None
-            and self.compilation_config.max_cudagraph_capture_size <= 8
-            and config.parallel_config.world_size_across_dp == 1
-            and config.speculative_config is None
-            and config.lora_config is None
-            and config.model_config.architecture == "Qwen3ForCausalLM"
-            and config.model_config.dtype == torch.bfloat16
-            and config.model_config.quantization is None
-            and config.model_config.max_model_len <= 2048
-            and len(kv_cache_config.kv_cache_groups) == 1
-            and type(kv_cache_config.kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
-            and len(attn_groups) == 1
-            and len(attn_groups[0]) == 1
-        )
         try:
+            capture_fia_replay = self._can_capture_fia_replay(attn_groups, kv_cache_config)
             with communicator_switch():
                 while True:
                     token = CAPTURE_FIA_REPLAY.set(capture_fia_replay)
