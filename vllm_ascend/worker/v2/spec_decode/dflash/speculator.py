@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculato
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 from vllm_ascend.ascend_config import draft_config_context
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
@@ -271,8 +272,19 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         ``queryT != last element of actualSequenceLengthQ``.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
+        for layer_name, metadata in attn_metadata.items():
             metadata.actual_seq_lengths_q = query_lens_list
+            # Backend subclasses can use different metadata contracts (e.g.
+            # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
+            if self.attn_backends[layer_name] is not AscendAttentionBackend:
+                continue
+            # The builder may append a synthetic request for the padded Q tail.
+            # Uniform Q already covers that tail, so discard its extra KV row.
+            metadata.seq_lens_list = metadata.seq_lens_list[:num_reqs_padded]
+            metadata.seq_lens = metadata.seq_lens[:num_reqs_padded]
+            metadata.seq_lens_cpu = metadata.seq_lens_cpu[:num_reqs_padded]
+            if metadata.block_tables is not None:
+                metadata.block_tables = metadata.block_tables[:num_reqs_padded]
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
