@@ -48,13 +48,15 @@ DRAM prefetch per the official KV pool guide (activated only on mooncake
 builds exposing ``ExistOptions``; on older builds the DRAM-only tier runs and
 the SSD store stays armed-but-idle).
 
-``memcache_layerwise_tier3`` is skipped when ``TP_SIZE < 2``: UBS IO derives
-``ubsio.standalone.device_count`` from the local_service process count, and with
-a single process the storage-enabled pool stops reporting cross-request hits
-(0 of 16128 expected) even though writes reach the device. With the single-card
-default that scenario therefore always reports as skipped; it needs both two
-UBS IO processes and the raw block device below. See the skip reason in the test
-body for the configurations that were ruled out.
+``memcache_layerwise_tier3`` is skipped when ``TP_SIZE < 2``: with a single
+local_service process the whole layerwise save is pre-allocated on one DRAM
+tier, and the 4GB default tier is smaller than the ~4.5GB a single 16128-token
+prefix needs, so the first save is abandoned and the pool reports 0 of 16128
+hits. Sizing the tier to at least the TP=2 aggregate
+(``KV_POOL_MEMCACHE_DRAM_TIER=8GB``, 16GB recommended) makes TP=1 pass
+(verified on 8GB and 16GB tiers); running it still needs the explicit opt-in
+below plus the raw block device. See the skip reason in the test body for the
+root cause and the configurations that were ruled out.
 
 Environment knobs:
 
@@ -68,6 +70,14 @@ Environment knobs:
   signature);
 - ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
   ``TP_SIZE``, one per DRAM-enabled local service);
+- ``KV_POOL_MEMCACHE_DRAM_TIER``: memcache pool DRAM tier size written to
+  ``ock.mmc.local_service.dram.size`` (default ``4GB``). The tier-3 legs are
+  eviction-free by design, so the tier must hold the whole working set: a TP=1
+  layerwise save pre-allocates ~4.5GB for one 16128-token prefix, so TP=1
+  needs at least 8GB (the TP=2 aggregate; 16GB leaves room for a second
+  disjoint prefix);
+- ``KV_POOL_MEMCACHE_TIER3_ALLOW_TP1``: ``1`` runs the memcache tier-3 leg on
+  TP=1 despite the skip above; pair it with a sized DRAM tier (8GB verified);
 - ``QWEN38_POOL_DEVICE_ROCE``: ``1`` pins the mooncake legs to the device RoCE
   transport (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
   ``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
@@ -355,6 +365,26 @@ TTFT_P95_LIMITS = {
 THROUGHPUT_LIMITS = {"default": 0.70, "memcache_bulk_tier2": 0.55, "memcache_layerwise_tier3": 0.30}
 MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/dev/ubsio0")
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
+MEMCACHE_UBSIO_MEM_GB = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_MEM_GB", "8"))
+MEMCACHE_DRAM_TIER = os.environ.get("KV_POOL_MEMCACHE_DRAM_TIER", DRAM_TIER)
+# Only the keys memcache_hybrid 1.3.0 actually knows are exposed; anything else is
+# dropped by the service silently, which is how an earlier triage lost time on a
+# misspelt watermark. Each is opt-in and written only when set.
+MEMCACHE_UBSIO_EXTRA: dict[str, Any] = {}
+for _env, _key, _cast in (
+    ("KV_POOL_MEMCACHE_UBSIO_FORCE_NEW_DISK", "ubsio.standalone.force_new_disk", bool),
+    ("KV_POOL_MEMCACHE_UBSIO_PARTITION_COUNT", "ubsio.wcache.partition_count", int),
+    ("KV_POOL_MEMCACHE_UBSIO_RCACHE_EVICT", "ubsio.rcache.evict_water_level", int),
+    ("KV_POOL_MEMCACHE_UBSIO_WCACHE_EVICT", "ubsio.wcache.evict_water_level", int),
+):
+    if (raw := os.environ.get(_env)) not in (None, ""):
+        MEMCACHE_UBSIO_EXTRA[_key] = _cast(raw) if _cast is not bool else raw not in ("0", "false")
+# The tier-3 case skips below TP=2: on a single local_service process the 4GB
+# default DRAM tier is smaller than the ~4.5GB a 16128-token layerwise save
+# pre-allocates, so the save is abandoned and every round reports 0 hits. Set
+# this to probe that configuration anyway; pair it with
+# KV_POOL_MEMCACHE_DRAM_TIER>=8GB (verified passing on 8GB and 16GB tiers).
+MEMCACHE_TIER3_ALLOW_TP1 = os.environ.get("KV_POOL_MEMCACHE_TIER3_ALLOW_TP1", "0") == "1"
 
 # Natural-language prompts: random token ids flip under batch-shape
 # differences even with intact KV, so H3/accuracy must use low-entropy text.
@@ -483,9 +513,11 @@ def _memcache_pool_config(tier_ssd: bool) -> MemcacheKVPoolConfig:
         # the defaults never trigger at this utilization and explicit ones
         # only activate the broken eviction path.
         local["ock.mmc.local_service.storage.enabled"] = True
+        local["ock.mmc.local_service.dram.size"] = MEMCACHE_DRAM_TIER
         local["ubsio.disk.path"] = MEMCACHE_UBSIO_DISK
-        local["ubsio.mem.size_in_gb"] = 8
+        local["ubsio.mem.size_in_gb"] = MEMCACHE_UBSIO_MEM_GB
         local["ubsio.standalone.device_count"] = MEMCACHE_UBSIO_DEVICES
+        local.update(MEMCACHE_UBSIO_EXTRA)
     return MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
         config_store_port=get_open_port(),
@@ -1177,25 +1209,44 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
     case = f"qwen38_tp{TP_SIZE}_{backend}_{mode}_{tier}"
 
-    if backend == "memcache" and tier_ssd and TP_SIZE < 2:
-        # ubsio.standalone.device_count is derived from the local_service
-        # process count (== TP_SIZE, per the official UBSIO config guide), so a
-        # single-card run arms the storage tier with a single device. In that
-        # configuration the pool stops reporting cross-request hits: R2 queries
-        # 16388 tokens and gets 0 of the 16128 expected, while tier-2 (storage
-        # disabled) reports the full 16128 on the same card. TP=2 reports 16128
-        # on the same host, image and device.
+    if backend == "memcache" and tier_ssd and TP_SIZE < 2 and not MEMCACHE_TIER3_ALLOW_TP1:
+        # Root cause of the TP=1 0-hit false negative (memcache_hybrid 1.3.0,
+        # traced from the meta debug log on the 80.48.37.148 box): the layerwise
+        # save pre-allocates every layer group before writing any blob, and one
+        # 16128-token prefix needs ~4.53GB (group0 18 x 234881024B plus three
+        # 205258752B groups). The 4GB default DRAM tier overflows on the first
+        # save; CheckAndEvict only finds the request's own in-flight blobs,
+        # which the 300s client write lease protects, and the allocator
+        # force-evicts on fragmentation only (not on plain OOM), so nothing is
+        # evictable. group1-3 fail with error code=-1, pool_worker abandons the
+        # whole save (return False) and R2 reports 0 of 16128. TP=2 passes
+        # because RandomAssign spreads group0 across the two 4GB ranks.
         #
-        # Ruled out on A2 during triage: device type (loop with and without
-        # direct-io, a real raw NVMe, and the reference ubsio image all fail the
-        # same way), ubsio.standalone.device_count 1 and 2,
-        # ubsio.wcache.evict_water_level 0 (L3-primary) and 85 (L2.5),
+        # Fix: size the DRAM tier to at least the TP=2 aggregate. Verified on
+        # the 148 box (loop block device, /dev/loop10): KV_POOL_MEMCACHE_DRAM_TIER
+        # 8GB and 16GB both pass (perf 322560/322560 hits, token_hit_rate=100%,
+        # B-leg prefix reuse 16128); 4GB fails as described. At 8GB a second
+        # disjoint prefix (the R4 must-miss round) only partially allocates,
+        # which is harmless there but worth 16GB when several long prefixes are
+        # saved concurrently.
+        #
+        # Ruled out during the earlier triage (before the tier sizing was
+        # understood): device type (loop with and without direct-io, a real raw
+        # NVMe, and the reference ubsio image), ubsio.standalone.device_count 1
+        # and 2, ubsio.wcache.evict_water_level 0 (L3-primary) and 85 (L2.5),
         # ubsio.mem.size_in_gb 8 and 10, and control-plane connect retries
-        # (the passing tier-2 leg logs the same MetaNetClient retries).
+        # (the passing tier-2 leg logs the same MetaNetClient retries). One
+        # requirement found there stands: ubsio.disk.path must be a *block
+        # device*; a plain file is rejected with "Disk path is not available
+        # for raw cache ... the configured path is not a block device" and the
+        # local service never starts.
         pytest.skip(
-            "memcache tier-3 needs TP>=2: with a single local_service process the "
-            "storage-enabled pool reports 0 of 16128 expected hits (tier-2 on the same "
-            "card reports 16128). Re-enable once memcache fixes the device_count=1 path."
+            "memcache tier-3 needs TP>=2 at the 4GB default DRAM tier: one "
+            "16128-token layerwise save pre-allocates ~4.53GB on the single "
+            "local_service process, the save is abandoned and the pool reports "
+            "0 of 16128 expected hits (tier-2 on the same card reports 16128). "
+            "Run it with KV_POOL_MEMCACHE_TIER3_ALLOW_TP1=1 plus "
+            "KV_POOL_MEMCACHE_DRAM_TIER>=8GB (verified passing at 8GB and 16GB)."
         )
 
     _start_stall_watchdog()
