@@ -58,6 +58,9 @@ class DeepseekV41Compressor(nn.Module):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
         ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
+        # The fused epilogue implements RMSNorm only. Quantized checkpoints
+        # with a loaded Norm bias still need the original normalization path.
+        fuse_norm = not getattr(self.norm, "bias_loaded", False)
         pooled = compressor_from_projected(
             kv,
             scores,
@@ -70,8 +73,10 @@ class DeepseekV41Compressor(nn.Module):
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            norm_w=self.norm.weight if fuse_norm else None,
+            rms_eps=self.norm.variance_epsilon,
         )
-        return self.norm(pooled)
+        return pooled if fuse_norm else self.norm(pooled)
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
