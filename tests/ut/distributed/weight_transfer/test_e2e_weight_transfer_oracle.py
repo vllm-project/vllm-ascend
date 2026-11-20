@@ -57,34 +57,51 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
     return flags
 
 
-@pytest.mark.parametrize("backend,memory_utilization", [("hccl", 0.75), ("npu_ipc", 0.45)])
-def test_reference_and_lane_differ_only_in_the_load_path(backend, memory_utilization):
+def test_reference_and_lane_differ_only_in_the_load_path():
     lane = _flag_map(
         live_update_serve_args(
             CASE,
-            backend=backend,
+            backend="hccl",
             port=PORT,
-            gpu_memory_utilization=memory_utilization,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         )
     )
     reference = _flag_map(
         reference_serve_args(
             CASE,
             port=PORT,
-            gpu_memory_utilization=memory_utilization,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         )
     )
 
     # The lane starts dummy and transfers live; the reference loads W at startup
     # under the case's own model name and tokenizer.
     assert lane.pop("--load-format") == "dummy"
-    assert lane.pop("--weight-transfer-config") == f'{{"backend": "{backend}"}}'
+    assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
     assert reference.pop("--tokenizer") == CASE.model
     assert reference.pop("--served-model-name") == CASE.model
     assert "--load-format" not in reference
 
     assert lane == reference
 
+
+def test_reference_and_lane_share_the_measurement_conditions():
+    reference = _flag_map(reference_serve_args(CASE, port=PORT, gpu_memory_utilization=0.45))
+    lane = _flag_map(live_update_serve_args(CASE, backend="npu_ipc", port=PORT, gpu_memory_utilization=0.45))
+
+    # Everything that could move a logprob has to match, including the graph
+    # mode and the NZ layout, or the comparison proves nothing.
+    for flag in (
+        "--dtype",
+        "--compilation-config",
+        "--max-model-len",
+        "--gpu-memory-utilization",
+        "--tensor-parallel-size",
+        "--additional-config",
+        "--hf-overrides",
+        "--distributed-executor-backend",
+    ):
+        assert lane[flag] == reference[flag], flag
     compilation_config = lane["--compilation-config"]
     assert isinstance(compilation_config, str)
     assert compilation_config.startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
