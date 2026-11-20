@@ -29,7 +29,8 @@ def tensor_parallel_wrap(func):
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
-    if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
+    use_qk_norm = getattr(self, "qk_norm", True)
+    if use_qk_norm and isinstance(self.rotary_emb, AscendMRotaryEmbedding):
         cos_sin = self.rotary_emb.cos_sin_cache[positions]
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
@@ -50,12 +51,9 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
         )
     else:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
+        if use_qk_norm:
+            q = self.q_norm(q.view(*q.shape[:-1], -1, self.head_dim)).view(q.shape)
+            k = self.k_norm(k.view(*k.shape[:-1], -1, self.head_dim)).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
     attn_output = self.attn(q, k, v)
     output, _ = self.o_proj(attn_output)
