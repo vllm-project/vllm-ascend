@@ -1847,6 +1847,34 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     )
 
 
+def _dflash_supports_fa3(config: VllmConfig, model_tag: str) -> bool:
+    from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.utils import get_draft_load_config
+
+    spec = config.speculative_config
+    draft = spec.draft_model_config
+    # DFlash constructs the draft with its own recipe even though the loader
+    # context still holds the target's quant_config.
+    load_config = get_draft_load_config(config) if model_tag == "backbone" else config.load_config
+    quant = VllmConfig.get_quantization_config(draft, load_config)
+    if getattr(quant, "enable_c8_quant", False):
+        return False
+    if model_tag == "dflash_head":
+        return True
+
+    # The target is loaded first. Check the draft's model-wide settings here;
+    # the platform validates each actual attention selector on its normal path.
+    hf = draft.hf_config
+    dflash = getattr(hf, "dflash_config", None) or {}
+    cache_dtype = spec.kv_cache_dtype or config.cache_config.cache_dtype
+    scheme = getattr(quant, "kv_cache_scheme", None)
+    return (
+        not dflash.get("attention_sink_bias", getattr(hf, "add_swa_attention_sink_bias", False))
+        and cache_dtype in ("auto", "float16", "bfloat16")
+        and (scheme is None or (cache_dtype != "auto" and scheme.get("strategy") != "attn_head"))
+    )
+
+
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     """Select the optional A2/A3 FA3 backend for eligible target or draft layers."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
@@ -1858,10 +1886,27 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     from vllm.config import get_current_vllm_config_or_none
     from vllm.v1.attention.backend import AttentionType
 
+    config = get_current_vllm_config_or_none()
+    if config is None or config.model_config is None:
+        return False
+    spec = config.speculative_config
+    if spec is None or spec.draft_model_config is None:
+        return False
+
+    from vllm.compilation import backends
+
     from vllm_ascend.attention.fa3_selection import supports_fa3_model
 
-    config = get_current_vllm_config_or_none()
-    if config is None or config.model_config is None or not supports_fa3_model(config):
+    tag = backends.model_tag
+    if not supports_fa3_model(spec, tag):
+        return False
+    # FA3 does not support C8 KV caches for either target or draft attention.
+    # DSpark installs the draft quant_config in its own loader context.
+    if tag != "dflash_head" and getattr(config.quant_config, "enable_c8_quant", False):
+        return False
+    if tag == "dspark_head" and config.cache_config.cache_dtype not in ("auto", "float16", "bfloat16"):
+        return False
+    if spec.method == "dflash" and not _dflash_supports_fa3(config, tag):
         return False
 
     parallel = config.parallel_config

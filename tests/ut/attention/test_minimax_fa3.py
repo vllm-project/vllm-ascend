@@ -45,6 +45,7 @@ def profiles():
 def selection(monkeypatch, profiles):
     runtime = NS(device=profiles.AscendDeviceType.A2, installed=True)
     target = NS(hf_config=NS(architectures=["MiniMaxM3SparseForConditionalGeneration"]))
+    monkeypatch.setattr("vllm.compilation.backends.model_tag", "dspark_head")
     runtime.config = NS(
         model_config=target,
         speculative_config=NS(
@@ -107,7 +108,7 @@ def test_hardware_and_model_routing(selection, device, installed, arch):
     r = selection
     r.device = getattr(r.profiles.AscendDeviceType, device)
     r.installed = installed
-    r.config.model_config = NS(hf_config=NS(architectures=[arch]))
+    r.config.speculative_config.draft_model_config.architectures = [arch]
     actual = r.select()
     if device in ("A2", "A3") and installed and arch in ("DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"):
         assert actual == "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
@@ -145,7 +146,6 @@ def test_hardware_and_model_routing(selection, device, installed, arch):
 )
 def test_unsupported_configurations_fall_back(selection, fault):
     r = selection
-    r.config.model_config = NS(hf_config=NS(architectures=["DSparkMiniMaxDraftModel"]))
     if fault == "no_config":
         r.config = None
     elif fault == "no_model":
