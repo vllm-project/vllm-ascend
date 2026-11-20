@@ -113,7 +113,6 @@ def rerun_env(monkeypatch, tmp_path):
         ("GITHUB_REPOSITORY", "o/r"),
         ("HEAD_SHA", "abc123"),
         ("GH_TOKEN", "t0ken"),
-        ("GATE_WAIT_SECONDS", "7200"),
         ("REVIEW_STATE", "approved"),
         ("REVIEW_ACTION", "submitted"),
         ("REVIEWER", "alice"),
@@ -140,9 +139,10 @@ def green_jobs():
 
 
 def owner_blocked_jobs():
-    # The pull_request run failed while the owner approval was still missing;
-    # ci-gate is its dependent failure. This is the rescue case.
-    return green_jobs() + [job("codeowner-approval", "failure"), job("ci-gate", "failure")]
+    # The pull_request run failed while the owner approval was still missing.
+    # The CODEOWNERS gate lives inside ci-gate, so the gate-only failure
+    # surfaces as a single ci-gate failure. This is the rescue case.
+    return green_jobs() + [job("ci-gate", "failure")]
 
 
 def run(conclusion="failure", run_id=100, status="completed"):
@@ -183,8 +183,17 @@ class TestApprovedReview:
         assert [kind for kind, _ in fake.posts] == ["failed-jobs"]
 
     def test_green_run_is_untouched(self, rerun_env, monkeypatch):
-        jobs = green_jobs() + [job("ci-gate", "success"), job("codeowner-approval", "success")]
+        jobs = green_jobs() + [job("ci-gate", "success")]
         fake = _FakeGitHub(runs=[run(conclusion="success")], jobs_by_run={100: jobs})
+        fake.install(monkeypatch)
+        assert rerun.main() == 0
+        assert fake.posts == []
+
+    def test_in_flight_run_is_noop(self, rerun_env, monkeypatch):
+        # No waiting: the CODEOWNERS gate lives inside ci-gate, which runs
+        # last in the workflow, so a review submitted mid-CI is judged when
+        # the run finishes. The refresh job must stay fast.
+        fake = _FakeGitHub(runs=[run(status="in_progress")], jobs_by_run={100: owner_blocked_jobs()})
         fake.install(monkeypatch)
         assert rerun.main() == 0
         assert fake.posts == []
@@ -194,7 +203,6 @@ class TestApprovedReview:
             job("pre-commit", "failure"),
             job("select-tests", "skipped"),
             job("ci-gate", "failure"),
-            job("codeowner-approval", "failure"),
         ]
         fake = _FakeGitHub(runs=[run()], jobs_by_run={100: jobs})
         fake.install(monkeypatch)
@@ -206,7 +214,6 @@ class TestApprovedReview:
         jobs = green_jobs()[:3] + [
             job("run-selected-tests (vllm@x) / a2-1 card-part", "failure"),
             job("ci-gate", "failure"),
-            job("codeowner-approval", "failure"),
         ]
         fake = _FakeGitHub(runs=[run()], jobs_by_run={100: jobs})
         fake.install(monkeypatch)
@@ -229,7 +236,7 @@ class TestVetoReview:
         # A veto after everything went green must re-arm the gate: re-run the
         # owner job (plus its ci-gate dependent) without touching UT/E2E.
         monkeypatch.setenv("REVIEW_STATE", "CHANGES_REQUESTED")
-        jobs = green_jobs() + [job("ci-gate", "success"), job("codeowner-approval", "success")]
+        jobs = green_jobs() + [job("ci-gate", "success")]
         fake = _FakeGitHub(runs=[run(conclusion="success")], jobs_by_run={100: jobs})
         fake.install(monkeypatch)
         assert rerun.main() == 0
@@ -237,7 +244,7 @@ class TestVetoReview:
 
     def test_job_rerun_failure_falls_back_to_full_rerun(self, rerun_env, monkeypatch):
         monkeypatch.setenv("REVIEW_STATE", "CHANGES_REQUESTED")
-        jobs = green_jobs() + [job("ci-gate", "success"), job("codeowner-approval", "success")]
+        jobs = green_jobs() + [job("ci-gate", "success")]
         fake = _FakeGitHub(runs=[run(conclusion="success")], jobs_by_run={100: jobs}, post_status={"job-rerun": 422})
         fake.install(monkeypatch)
         assert rerun.main() == 0
@@ -246,7 +253,7 @@ class TestVetoReview:
     def test_dismissed_review_reruns_owner_job(self, rerun_env, monkeypatch):
         monkeypatch.setenv("REVIEW_ACTION", "dismissed")
         monkeypatch.setenv("REVIEW_STATE", "APPROVED")
-        jobs = green_jobs() + [job("ci-gate", "success"), job("codeowner-approval", "success")]
+        jobs = green_jobs() + [job("ci-gate", "success")]
         fake = _FakeGitHub(runs=[run(conclusion="success")], jobs_by_run={100: jobs})
         fake.install(monkeypatch)
         assert rerun.main() == 0
@@ -312,13 +319,7 @@ class TestNoopsAndErrors:
     def test_no_ci_run_fails(self, rerun_env, monkeypatch):
         fake = _FakeGitHub(runs=[])
         fake.install(monkeypatch)
-        assert_refused(rerun_env, rerun.main(), "CI must run first")
-
-    def test_still_running_ci_times_out(self, rerun_env, monkeypatch):
-        monkeypatch.setenv("GATE_WAIT_SECONDS", "0")
-        fake = _FakeGitHub(runs=[run(status="in_progress")], jobs_by_run={100: owner_blocked_jobs()})
-        fake.install(monkeypatch)
-        assert_refused(rerun_env, rerun.main(), "still running")
+        assert_refused(rerun_env, rerun.main(), "no E2E run")
 
 
 class TestHelpers:
@@ -332,16 +333,27 @@ class TestHelpers:
             ("run-selected-tests (vllm@x) / a2-1 card-part", True),
             ("run-selected-tests-upstream (vllm@x) / e2e-upstream_pr", False),
             ("ci-gate", False),
-            ("codeowner-approval", False),
         ],
     )
     def test_is_gate_job(self, name, expected):
         assert rerun.is_gate_job(name) is expected
 
-    def test_owner_gate_blocked_requires_owner_failure(self):
-        jobs = green_jobs() + [job("codeowner-approval", "success"), job("ci-gate", "failure")]
+    def test_owner_gate_blocked_requires_gate_failure(self):
+        # A green run is not blocked, no matter what else happened.
+        jobs = green_jobs() + [job("ci-gate", "success")]
         assert rerun.owner_gate_blocked(jobs) is False
 
-    def test_owner_gate_blocked_tolerates_cancelled_ci_gate(self):
-        jobs = green_jobs() + [job("codeowner-approval", "failure"), job("ci-gate", "cancelled")]
+    def test_owner_gate_blocked_on_gate_only_failure(self):
+        # The CODEOWNERS gate lives inside ci-gate: its red check with every
+        # code/test job green is exactly the rescue case.
+        jobs = green_jobs() + [job("ci-gate", "failure")]
         assert rerun.owner_gate_blocked(jobs) is True
+
+    def test_owner_gate_blocked_rejects_code_failure(self):
+        jobs = green_jobs() + [job("pre-commit", "failure"), job("ci-gate", "failure")]
+        assert rerun.owner_gate_blocked(jobs) is False
+
+    def test_owner_gate_blocked_requires_ci_gate_job(self):
+        # A run without a ci-gate job (e.g. an older workflow shape) must
+        # never be re-run blindly.
+        assert rerun.owner_gate_blocked(green_jobs()) is False

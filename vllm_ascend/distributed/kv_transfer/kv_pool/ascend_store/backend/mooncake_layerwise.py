@@ -14,6 +14,10 @@ from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformType
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config
 
 
 def make_block_key(
@@ -68,14 +72,23 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
             size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
         )
     speculative = vllm_config.speculative_config
+    if vllm_version_is("0.33.0"):
+        model_hash = model.compute_hash()
+        cache_hash = cache.compute_hash()
+        speculative_hash = speculative.compute_hash() if speculative is not None else None
+    else:
+        # Normalized config copies must not use the object-identity hash cache.
+        model_hash = hash_config(model)
+        cache_hash = hash_config(cache)
+        speculative_hash = hash_config(speculative) if speculative is not None else None
     identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
-        model.compute_hash(),
-        cache.compute_hash(),
+        model_hash,
+        cache_hash,
         cache.cache_dtype,
         cache.block_size,
-        speculative.compute_hash() if speculative is not None else None,
+        speculative_hash,
     )
     if kvpp_namespace:
         identity += (kvpp_namespace,)

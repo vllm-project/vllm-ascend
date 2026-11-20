@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -144,7 +145,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                     continue
                 request, block_ids, num_external_tokens = self._reqs_need_send_layerwise[req_id]
                 if new_blocks is not None:
-                    if req_id in cached_reqs.resumed_req_ids:
+                    if vllm_version_is("0.33.0") and req_id in cached_reqs.resumed_req_ids:
                         block_ids = tuple(list(group) for group in new_blocks)
                     else:
                         block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))

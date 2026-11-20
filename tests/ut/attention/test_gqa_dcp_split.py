@@ -436,7 +436,10 @@ def test_draft_builder_owns_history_and_padding(rank):
     builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
-    builder.speculative_config = SimpleNamespace(parallel_drafting=False)
+    builder.speculative_config = SimpleNamespace(
+        parallel_drafting=False,
+        speculator_config=SimpleNamespace(parallel_drafting=False),
+    )
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),

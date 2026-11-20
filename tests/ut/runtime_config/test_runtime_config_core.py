@@ -526,6 +526,10 @@ def test_same_mtime_content_change_reloads_via_digest(tmp_path: Path):
     """Bug #11: same-second equal-size edits must reload via content digest."""
     import os
 
+    from vllm_ascend.observability.runtime_guard.detector.token_repeat import (
+        TokenRepeatDetector,
+    )
+
     cfg_path = tmp_path / "runtime_config.json"
     _write(cfg_path, {})
     cfg = RuntimeConfig(
@@ -540,11 +544,22 @@ def test_same_mtime_content_change_reloads_via_digest(tmp_path: Path):
     assert cfg.detector_get("token_repeat", "window") == 10
     pinned = cfg._mtime
     assert pinned is not None
+    version_before = float(cfg.config_version)
+    det = TokenRepeatDetector(runtime_config=cfg, runner=None)
+    assert det.enabled is False
+    assert det._window == 10
+    applied = det._applied_config_version
 
     _write(cfg_path, {"detector": {"token_repeat": {"enabled": False, "window": 33}}})
     os.utime(cfg_path, (pinned, pinned))
     assert cfg.reload(force=False) is True
     assert cfg.detector_get("token_repeat", "window") == 33
+    # Revision must advance even when file mtime is unchanged.
+    assert float(cfg.config_version) > version_before
+    assert cfg._mtime == pinned
+    det.refresh_from_config()
+    assert det._window == 33
+    assert det._applied_config_version != applied
 
 
 def test_touch_same_content_skips_reload(tmp_path: Path):

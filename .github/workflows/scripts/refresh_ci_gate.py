@@ -25,39 +25,42 @@ as environment variables and are re-validated against live API state below.
 Instead of producing a second, review-event
 verdict, this re-runs the gate jobs inside the original ``pull_request`` run
 so the required ``E2E / ci-gate (pull_request)`` check itself updates in
-place:
+place. The job is always fast: it never waits for an in-flight CI run,
+because the CODEOWNERS gate lives inside the ``ci-gate`` job, which runs
+last in the E2E workflow - reviews submitted while the tests run are
+already visible when the gate judges, so only reviews that arrive after the
+run finished need a re-run:
 
-- APPROVED review on a failed run whose only failures are
-  ``codeowner-approval`` (the approval was missing at the time) and its
-  dependent ``ci-gate``: re-run those failed jobs. The gate re-judges with
+- APPROVED review on a completed run whose failures are gate-only (every
+  code and test job green or skipped, ``ci-gate`` red because an approval
+  was missing at the time): re-run the failed jobs. The gate re-judges with
   the current reviews, so the check turns green without any new check name -
   including for docs-only PRs, whose ``select-tests`` skip is legitimate;
 - CHANGES_REQUESTED or dismissed review on a green run: re-run the
-  ``codeowner-approval`` job (with its ``ci-gate`` dependent, via the
-  re-run-job API, falling back to a full run re-run) so the gate re-arms and
-  the veto lands on the required check instead of being masked by stale
-  green;
+  ``ci-gate`` job (via the re-run-job API, falling back to a full run
+  re-run) so the gate re-arms and the veto lands on the required check
+  instead of being masked by stale green;
+- a review on a run that is still in flight: no-op - the in-workflow gate
+  runs last and will judge with the reviews already submitted;
 - anything else (code or test failures, already-green runs, reviews from
   people outside the changed files' CODEOWNERS pool, COMMENTED and bot
   reviews) cannot change the gate verdict and is a no-op: the original run's
   own failure comment already explains what to do.
 
-This job's own failures - no pull_request run for the commit yet, wait
-timeout, rerun API error - are written to
-``$RUNNER_TEMP/ci_gate_failure_reason.txt``; the ``Package gate result`` step
-ships them to the PR through the failure-comment bot, mirroring the ci-gate
-job's artifact contract.
+This job's own failures - no pull_request run for the commit yet, rerun API
+error - are written to ``$RUNNER_TEMP/ci_gate_failure_reason.txt``; the
+``Package gate result`` step ships them to the PR through the
+failure-comment bot, mirroring the ci-gate job's artifact contract.
 
 Environment inputs: ``GITHUB_REPOSITORY``, ``HEAD_SHA``, ``GH_TOKEN``,
-``GATE_WAIT_SECONDS``, ``REVIEW_STATE``, ``REVIEW_ACTION``, ``REVIEWER``,
-``PR_NUMBER``, ``PR_AUTHOR``, ``BASE_REF`` and ``RUNNER_TEMP``.
+``REVIEW_STATE``, ``REVIEW_ACTION``, ``REVIEWER``, ``PR_NUMBER``,
+``PR_AUTHOR``, ``BASE_REF`` and ``RUNNER_TEMP``.
 """
 
 import base64
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 
@@ -65,12 +68,7 @@ import codeowner_gate as owners_gate
 
 API_ROOT = "https://api.github.com"
 WORKFLOW_NAME = "E2E"
-# Jobs whose failure can be fixed by a re-run triggered from a review: the
-# owner gate (its approval may have arrived since the run failed) and its
-# dependent summary gate. Everything else (pre-commit, UT, selected tests)
-# failed for a code reason no review can fix - re-running it would only
-# churn expensive runners for the same verdict.
-RERUNNABLE_JOBS = ("codeowner-approval", "ci-gate")
+IN_FLIGHT_STATUSES = ("queued", "requested", "waiting", "in_progress")
 
 
 def _get_json(url: str, token: str) -> dict:
@@ -117,28 +115,24 @@ def latest_pull_request_run(repo: str, token: str, sha: str) -> dict | None:
     return runs[0] if runs else None
 
 
-def wait_until_completed(repo: str, token: str, run: dict, wait_seconds: str) -> dict:
-    """Poll while the run is in flight, so a mid-CI review still lands."""
-    deadline = time.time() + float(wait_seconds)
-    while run.get("status") in ("queued", "requested", "waiting", "in_progress"):
-        if time.time() > deadline:
-            return run
-        time.sleep(60)
-        run = latest_pull_request_run(repo, token, run["head_sha"]) or run
-    return run
-
-
 def owner_gate_blocked(jobs: list[dict]) -> bool:
-    """Whether the run failed on the owner gate alone, with all other gate
-    jobs green or skipped (so a re-run can only reproduce the same failures
-    or, once the approval arrived, turn the gate green)."""
-    owner = next((j for j in jobs if j.get("name") == "codeowner-approval"), None)
-    if owner is None or owner.get("conclusion") != "failure":
+    """Whether a completed run failed on the gate alone: ``ci-gate`` itself
+    red while every code and test job is green or skipped, so a re-run can
+    only reproduce the same failures or - once the approval arrived - turn
+    the gate green. The CODEOWNERS check lives inside ``ci-gate``, so its
+    failure surfaces as a ``ci-gate`` failure with no code job red.
+
+    A gate failure caused by a missing test label (not by reviews) also
+    matches; re-running the cheap gate job on an owner review is an
+    acceptable cost of not having to guess the failure reason from the API.
+    """
+    gate = next((j for j in jobs if j.get("name") == "ci-gate"), None)
+    if gate is None or gate.get("conclusion") != "failure":
         return False
     for j in jobs:
         name = j.get("name", "")
         conclusion = j.get("conclusion")
-        if name in RERUNNABLE_JOBS:
+        if name == "ci-gate":
             continue
         if is_gate_job(name) and conclusion not in (None, "skipped", "success"):
             return False
@@ -178,18 +172,17 @@ def reviewer_in_owner_pool(pr_number: int, pr_author: str, reviewer: str, base_r
     return reviewer in pool
 
 
-def failure_message(verdict: str, detail: str, sha: str, wait_seconds: str) -> str:
+def failure_message(verdict: str, detail: str, sha: str) -> str:
     """The actionable PR-comment text when this job itself fails."""
     if verdict == "no-ci":
         return (
-            f"A review was submitted before any pull_request CI run existed for this commit "
-            f"({sha}). CI must run first; no re-review is needed."
-        )
-    if verdict == "ci-still-running":
-        return (
-            f"A review was submitted, but the pull_request CI for this commit ({sha}) was still "
-            f"running after {wait_seconds}s, so the gate could not be re-run. Wait for CI to "
-            "finish, then re-submit the review (no new code push is needed)."
+            f"A review was submitted for commit {sha}, but there is no E2E run for "
+            "this commit to re-run the gate on: pushing a new commit does not start "
+            "CI. A commit is tested when the PR is opened or reopened, when a test "
+            "label is added, or when someone comments `/run` - none of those has "
+            "happened for this commit yet. Fix: comment `/run` on this PR to start "
+            "E2E. When it finishes, the gate judges with the reviews already "
+            "submitted, so no re-review is needed."
         )
     return (
         f"A review was submitted, but re-running the pull_request CI for this commit ({sha}) "
@@ -201,7 +194,6 @@ def main() -> int:
     repo = os.environ["GITHUB_REPOSITORY"]
     sha = os.environ["HEAD_SHA"]
     token = os.environ["GH_TOKEN"]
-    wait_seconds = os.environ["GATE_WAIT_SECONDS"]
     # Event payloads carry lowercase states ("approved"), while the REST API
     # used everywhere below compares uppercase ("APPROVED"). Normalize here.
     action = os.environ["REVIEW_ACTION"].upper()
@@ -209,7 +201,7 @@ def main() -> int:
     failure_file = os.path.join(os.environ["RUNNER_TEMP"], "ci_gate_failure_reason.txt")
 
     def fail(verdict: str, detail: str = "") -> int:
-        message = failure_message(verdict, detail, sha, wait_seconds)
+        message = failure_message(verdict, detail, sha)
         with open(failure_file, "w", encoding="utf-8") as f:
             f.write(message + "\n")
         print(f"::error::{message}")
@@ -247,9 +239,6 @@ def main() -> int:
         run = latest_pull_request_run(repo, token, sha)
         if run is None:
             return fail("no-ci")
-        run = wait_until_completed(repo, token, run, wait_seconds)
-        if run.get("status") in ("queued", "requested", "waiting", "in_progress"):
-            return fail("ci-still-running")
 
         def try_rerun(rerun) -> bool:
             # Another retrigger may already have started the re-run: a conflict
@@ -263,13 +252,23 @@ def main() -> int:
                     return True
                 raise
 
-        # A push that landed while we waited re-runs everything on a new head
+        # A push that landed while CI ran re-runs everything on a new head
         # anyway; re-running the stale head would only churn runners.
         pull = owners_gate.gh_api("repos/{owner}/{repo}/pulls/{pr}", pr=pr_number)
         current_head = (pull.get("head") or {}).get("sha")
         if current_head and current_head != run.get("head_sha"):
             print(
                 "A new commit was pushed while waiting for CI; the fresh pull_request run covers it. Nothing to re-run."
+            )
+            return 0
+
+        # Never wait for an in-flight run: the CODEOWNERS gate lives inside
+        # the ci-gate job, which runs last in the workflow, so reviews
+        # submitted before the run finishes are judged when it finishes.
+        if run.get("status") in IN_FLIGHT_STATUSES:
+            print(
+                "The pull_request run is still in flight; its gate runs last "
+                "and will judge with this review. Nothing to re-run."
             )
             return 0
 
@@ -280,16 +279,16 @@ def main() -> int:
         jobs = _get_json(run["jobs_url"] + "?per_page=100", token).get("jobs", [])
 
         if veto:
-            owner_job = next((j for j in jobs if j.get("name") == "codeowner-approval"), None)
+            gate_job = next((j for j in jobs if j.get("name") == "ci-gate"), None)
             if run.get("conclusion") == "success":
-                # Re-run just the owner gate and its dependent ci-gate so the
-                # veto lands on the required check without churning UT/E2E
-                # runners.
+                # Re-run just the ci-gate job (which contains the CODEOWNERS
+                # gate) so the veto lands on the required check without
+                # churning UT/E2E runners.
                 try:
-                    if owner_job is None:
+                    if gate_job is None:
                         try_rerun(lambda: rerun_run(repo, token, run["id"]))
                     else:
-                        try_rerun(lambda: rerun_job(repo, token, owner_job["id"]))
+                        try_rerun(lambda: rerun_job(repo, token, gate_job["id"]))
                 except urllib.error.HTTPError:
                     # Some job states cannot be re-run individually; a full
                     # run re-run always can.
@@ -299,9 +298,9 @@ def main() -> int:
         elif run.get("conclusion") == "success":
             print("The pull_request run is already green; nothing to re-run.")
         elif owner_gate_blocked(jobs):
-            # The only failures are the owner gate and its dependent ci-gate:
-            # the approval arrived after the run failed, so re-running those
-            # jobs turns the required check green in place.
+            # The run failed on the gate alone: the approval arrived after it
+            # finished, so re-running the failed jobs turns the required
+            # check green in place.
             try_rerun(lambda: rerun_failed_jobs(repo, token, run["id"]))
             print(f"Re-running the gate jobs of run {run['id']} with the current reviews.")
         else:

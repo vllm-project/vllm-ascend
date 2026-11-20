@@ -71,6 +71,7 @@ def selection(monkeypatch, profiles):
         "torch": torch,
         "HardwareCapability": profiles.HardwareCapability,
         "AttentionBackendFamily": profiles.AttentionBackendFamily,
+        "FlashAttentionNpu3Model": profiles.FlashAttentionNpu3Model,
         "get_current_hardware_profile": lambda: profiles.get_hardware_profile(runtime.device),
         "util": NS(find_spec=lambda _: object() if runtime.installed else None),
         "_MINIMAX_M3_ARCHITECTURES": frozenset(
@@ -80,7 +81,7 @@ def selection(monkeypatch, profiles):
         "_validate_flash_attn_backend": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
-    execute_nodes(path, {"_validate_flash_attn_npu_3", "_uses_minimax_fa3"}, namespace)
+    execute_nodes(path, {"_validate_flash_attn_npu_3", "_uses_minimax_fa3", "_uses_step5_fa3"}, namespace)
     cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_select_attn_backend_cls")
     method.decorator_list = []

@@ -56,9 +56,9 @@ jobs:
     # review replaced it) is covered by the replacing run.
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: linux-amd64-cpu-2-hk
-    # May wait for an in-flight pull_request CI run to finish before
-    # re-running its failed gate jobs (see refresh_ci_gate.py).
-    timeout-minutes: 360
+    # Purely API-bound and fast (refresh_ci_gate.py never waits for CI); the
+    # short timeout keeps a hung runner call from pinning a pool machine.
+    timeout-minutes: 15
     steps:
       - name: Download review payload
         uses: actions/download-artifact@v4
@@ -89,7 +89,7 @@ jobs:
           # The job only needs refresh_ci_gate.py, under
           # .github/workflows/scripts/: skip the rest of the tree to keep this
           # high-frequency job off the CPU pool as briefly as possible (same
-          # pattern as the codeowner-approval job).
+          # pattern as the ci-gate job's CODEOWNERS checkout).
           sparse-checkout: .github
           fetch-depth: 1
 
@@ -97,9 +97,6 @@ jobs:
         id: rerun
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Maximum time (seconds) to wait for an in-flight pull_request CI
-          # run to complete before giving up.
-          GATE_WAIT_SECONDS: "7200"
         run: |
           # Rollout window only: until the PR that introduces this bot is
           # itself merged, the script is not on the default branch yet and
@@ -111,10 +108,10 @@ jobs:
           python3 .github/workflows/scripts/refresh_ci_gate.py
 
       - name: Package gate result
-        # Only this job's own failures (no CI run yet, wait timeout, rerun API
-        # error) need a PR comment; a successful retrigger hands the verdict
-        # back to the re-run pull_request run, whose own packaging step feeds
-        # the comment bot.
+        # Only this job's own failures (no CI run yet, rerun API error) need
+        # a PR comment; a successful retrigger hands the verdict back to the
+        # re-run pull_request run, whose own packaging step feeds the comment
+        # bot.
         if: ${{ failure() }}
         env:
           CHECK_OUTCOME: ${{ steps.rerun.outcome }}

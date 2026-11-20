@@ -14,7 +14,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 ## Current Status on Ascend
 
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
-- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
+- **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in every graph mode (`NONE` disables it). It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.
 - In context parallel scenarios, `cudagraph_mode="FULL"` is not sufficiently supported yet.
 
@@ -33,14 +33,14 @@ The default graph path on Ascend involves two stages: **compile-time optimizatio
 
 - **FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy. The compile-time path follows PIECEWISE compilation, while the runtime may still use full-graph behavior for uniform decode batches.
 - **FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via npugraph_ex (`force_eager=True`, compile-time only, no capture). The optimized callable is then captured and replayed by ACLGraph at runtime.
-- **PIECEWISE**: Npugraph_ex is disabled. Only basic FX fusion passes are applied at compile-time. ACLGraph captures and replays the resulting callable at runtime.
+- **PIECEWISE**: Npugraph_ex compiles each piece (`force_eager=True`, compile-time only, no capture) and applies the FX fusion passes per piece. ACLGraph captures and replays each piece at runtime.
 - **NONE**: No compilation or graph capture. The model runs in eager mode.
 
 | `cudagraph_mode` | Compile-time | Runtime | Npugraph_ex |
 |---|---|---|---|
-| FULL_AND_PIECEWISE | Piecewise compilation path | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Disabled |
+| FULL_AND_PIECEWISE | Piecewise compilation path (per-piece Npugraph_ex) | Mixed: PIECEWISE for mixed batches, FULL-capable for uniform decode batches | Enabled |
 | FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
-| PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
+| PIECEWISE | Per-piece Npugraph_ex + fusion passes | ACLGraph capture/replay per piece | Enabled |
 | NONE | None | Eager execution | Disabled |
 
 Ascend sets `use_inductor=False` and selects its own compilation backend. That backend applies npugraph_ex optimizations or FX fusion passes according to the configuration.
@@ -130,14 +130,14 @@ As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/47
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** on supported hardware when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes.
+Npugraph_ex is **enabled by default** on supported hardware in every graph mode. Under `FULL`/`FULL_DECODE_ONLY` it optimizes the whole FX graph; under `PIECEWISE`/`FULL_AND_PIECEWISE` it compiles each piece with `force_eager=True`. It is automatically disabled in `NONE` mode.
 
-Select a full graph mode to use this default:
+For example, with a full graph mode:
 
 ```python
 from vllm import LLM
 
-# Npugraph_ex is enabled by default in FULL/FULL_DECODE_ONLY mode
+# Npugraph_ex is enabled by default in every graph mode
 llm = LLM(model="path/to/Qwen2-7B-Instruct", compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"})
 outputs = llm.generate("Hello, how are you?")
 ```
@@ -179,6 +179,8 @@ vllm serve Qwen/Qwen2-7B-Instruct \
 ### Static kernel compilation
 
 Static kernel compilation is an **optional** feature that pre-compiles operator binaries with fixed shapes at compile time, reducing runtime overhead for networks with static or near-static shapes. It is **disabled by default** and must be explicitly enabled.
+
+Under `PIECEWISE` and `FULL_AND_PIECEWISE`, static kernels are compiled for the cudagraph capture sizes (pieces are captured and replayed exactly at those shapes); on newer vllm the prefill token grid and the decode request grid are resolved separately and both are covered. Under other modes, the compile set covers decode batch sizes.
 
 !!! note
 

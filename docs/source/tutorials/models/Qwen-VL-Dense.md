@@ -400,7 +400,7 @@ There are three `vllm bench` subcommands:
 The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 ```shell
-vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After several minutes, you can get the performance evaluation result.

@@ -29,6 +29,9 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
 
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
+
 
 def test_calc_next_seq_lens_cpu():
     """Test calculation of the next CPU sequence lengths."""
@@ -800,7 +803,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
     speculator.input_buffers = SimpleNamespace(is_padding=torch.zeros(8, dtype=torch.bool))
     speculator._eplb_source_is_padding = None
     speculator._eplb_dummy_run = False
-    speculator.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace(compute_hash=lambda: "draft"))
+    speculator.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(compute_hash=lambda: "draft", compile_factors=lambda: {"identity": "draft"})
+    )
     layer_state = SimpleNamespace()
     state = SimpleNamespace(
         allgather_record_tensor=torch.tensor(-1),
@@ -808,6 +813,12 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
+    model_config = speculator.speculative_config.draft_model_config
+    if vllm_version_is("0.33.0"):
+        key = model_config.compute_hash()
+    else:
+        key = hash_config_cached(model_config)
+    state.model_states[key] = state.model_states["draft"]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)

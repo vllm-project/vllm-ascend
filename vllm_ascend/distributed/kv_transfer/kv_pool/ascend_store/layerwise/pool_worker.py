@@ -118,6 +118,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
         )
+        self.dflash_draft_layer_names = (
+            frozenset(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
+            if self.use_layerwise_transfer
+            else frozenset()
+        )
+        self._dflash_save_pending = False
         if (
             self.backend_name != "memcache"
             and not self.use_block_key_layerwise
@@ -147,8 +153,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _init_key_head_config(self, model_config, parallel_config) -> None:
-        super()._init_key_head_config(model_config, parallel_config)
+    def _init_key_head_config(self, model_config) -> None:
+        super()._init_key_head_config(model_config)
         if self.tp_mismatch:
             raise ValueError(
                 f"TP mismatch (local_tp={self.tp_size}, peer_tp={self.peer_tp_size}) "
@@ -185,6 +191,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
         self._recurrent_layers: set[int] = set()
+        dflash_draft_names: frozenset[str] = getattr(self, "dflash_draft_layer_names", frozenset())
+        self._dflash_draft_start_layer: int | None = None
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -223,7 +231,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             if self.use_layerwise_transfer:
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
-                    target_specs,
+                    {name: spec for name, spec in target_specs.items() if name not in dflash_draft_names},
                     base_layers,
                     self._extra_config,
                 )
@@ -264,6 +272,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
+                self._init_dflash_draft_layers(target_specs.keys() & dflash_draft_names)
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 if group_id not in self.cacheable_group_ids:
@@ -326,6 +335,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     self.independent_layers = layout.independent_layers
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
+            if self._dflash_draft_start_layer is not None:
+                self.independent_layers.extend(range(self._dflash_draft_start_layer, self.num_layers))
         else:
             self.num_prefetch_layers = 2
             if self.use_layerwise:
@@ -346,6 +357,15 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.num_kv_cache_groups,
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
+
+    def _init_dflash_draft_layers(self, draft_names: set[str]) -> None:
+        draft_layers = {self._global_to_local_layer[self._extract_physical_layer_index(name)] for name in draft_names}
+        if not draft_layers:
+            return
+        first_draft_layer = min(draft_layers)
+        if draft_layers != set(range(first_draft_layer, self.num_layers)):
+            raise ValueError("DFlash draft layers must follow target layers in the pool")
+        self._dflash_draft_start_layer = first_draft_layer
 
     @staticmethod
     def _remap_layout_to_stage_local(
@@ -646,6 +666,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
             get_tp_group().barrier()
         self.current_layer = 0
+        self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
@@ -1594,6 +1615,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         else:
             window_end = self.current_layer + self.num_prefetch_layers
         window_end = min(window_end, self.num_layers - 1)
+        draft_start = getattr(self, "_dflash_draft_start_layer", None)
+        if draft_start is not None:
+            # Draft context load runs after target attention has stopped creating gates.
+            if self.current_layer < draft_start:
+                window_end = min(window_end, draft_start - 1)
+            else:
+                window_end = self.current_layer
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1
@@ -1620,6 +1648,31 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if self._layer_load_aborted.is_set():
                 raise RuntimeError("Layerwise load aborted before KVPP broadcast")
         self.kv_recv_thread.raise_if_failed()
+
+    def load_dflash_draft_kv(self) -> None:
+        # Finish draft reads before post_forward releases the step's pool leases.
+        first_draft_layer = self._dflash_draft_start_layer
+        if first_draft_layer is None:
+            return
+        # no_forward also calls finish_forward, without running any layer hooks.
+        if self.current_layer == 0 and self.next_layer_to_submit == 0:
+            return
+        if self.current_layer != first_draft_layer:
+            raise RuntimeError("Target KV hooks did not reach the DFlash draft layer boundary")
+        for layer_id in range(first_draft_layer, self.num_layers):
+            self.current_layer = layer_id
+            self.wait_for_layer_load()
+        self.current_layer = first_draft_layer
+        self._dflash_save_pending = self.can_put
+
+    def save_dflash_draft_kv(self, metadata: AscendConnectorMetadata) -> None:
+        if not self._dflash_save_pending:
+            return
+        # This runs after the speculator has written its context KV.
+        self._dflash_save_pending = False
+        while self.current_layer < self.num_layers:
+            self.save_kv_layer(metadata)
+        self._drain_deferred_last_save()
 
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:

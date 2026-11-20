@@ -229,10 +229,10 @@ def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
         layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
     assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
-    for name in ("f_b_proj", "g_b_proj", "q_conv1d", "k_conv1d", "v_conv1d"):
+    for name in ("f_b_proj", "g_b_proj", "conv1d"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
-        assert projection.weight.shape[0] == 1024 // size
+        assert projection.weight.shape[0] == (3 if name == "conv1d" else 1) * 1024 // size
     projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
     assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
     assert layer.o_proj.weight.shape == (16, 1024 // size)

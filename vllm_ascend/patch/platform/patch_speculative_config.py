@@ -124,6 +124,18 @@ def _normalize_legacy_qwen3_dspark_config(
     legacy_qwen3_dspark = hf_config.model_type == "qwen3" and "DSparkDraftModel" in (hf_config.architectures or ())
     hf_config = _orig_hf_config_override(hf_config)
     _normalize_kimi_dflash_rope(hf_config)
+    # Plain glm5_next MTP remapping is handled natively by upstream
+    # SpeculativeConfig.hf_config_override since v0.32.0; the VL
+    # glm5_next_text wrapper is not.
+    if hf_config.model_type == "glm5_next_text":
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.model_type = "glm5_next_mtp"
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["Glm5NextMTPModel"],
+            }
+        )
     if legacy_qwen3_dspark:
         dflash_config = hf_config.dflash_config
         hf_config.update(
@@ -131,15 +143,6 @@ def _normalize_legacy_qwen3_dspark_config(
                 "architectures": ["Qwen3DSparkModel"],
                 "mask_token_id": dflash_config["mask_token_id"],
                 "target_layer_ids": dflash_config["target_layer_ids"],
-            }
-        )
-    if hf_config.model_type in ("glm5_next", "glm5_next_text"):
-        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-        hf_config.model_type = "glm5_next_mtp"
-        hf_config.update(
-            {
-                "n_predict": n_predict,
-                "architectures": ["Glm5NextMTPModel"],
             }
         )
     return hf_config

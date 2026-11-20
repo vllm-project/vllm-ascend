@@ -50,8 +50,8 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
-        if indexer_kv_dtype not in ("auto", "bf16", "fp8"):
-            raise ValueError(f"GLM KPool indexer_kv_dtype must be auto, bf16 or fp8, got {indexer_kv_dtype!r}.")
+        if indexer_kv_dtype not in ("auto", "bf16", "fp8", "int8"):
+            raise ValueError(f"GLM KPool indexer_kv_dtype must be auto, bf16, fp8 or int8, got {indexer_kv_dtype!r}.")
         if indexer_kv_dtype == "fp8":
             kv_transfer_config = vllm_config.kv_transfer_config
             if kv_transfer_config is not None and any(
@@ -103,16 +103,15 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # KeyPool projects in BF16; completed pools optionally store FP8 keys
-        # with a per-pool FP32 descale for CANN PoolKeyIndexer.
+        # Completed pools store BF16, FP8 with FP32 scales, or INT8 with FP16 scales.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
-            dtype=(torch.float8_e4m3fn if indexer_kv_dtype == "fp8" else torch.bfloat16),
+            dtype={"fp8": torch.float8_e4m3fn, "int8": torch.int8}.get(indexer_kv_dtype, torch.bfloat16),
             cache_role="indexer",
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
@@ -264,14 +263,18 @@ class Glm5NextMLAAttention(nn.Module):
             self.rotary_emb = None
 
         self.is_v32 = config.index_topk is not None
+        self.indexer_rope_emb: RotaryEmbedding | None = None
 
         if self.is_v32:
-            self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
-                qk_rope_head_dim,
-                max_position=max_position_embeddings,
-                rope_parameters=rope_parameters,
-                is_neox_style=not config.indexer_rope_interleave,
-            )
+            # MLA's skip_rope flag does not control the indexer. Only omit
+            # the indexer embedding when its rotary dimension is zero.
+            if qk_rope_head_dim != 0:
+                self.indexer_rope_emb = get_rope(
+                    qk_rope_head_dim,
+                    max_position=max_position_embeddings,
+                    rope_parameters=rope_parameters,
+                    is_neox_style=not config.indexer_rope_interleave,
+                )
             # The sparse indexer projects from the MLA q-lora rank, which is
             # always set for v32 MLA configs; narrow away the `int | None`.
             assert q_lora_rank is not None
@@ -287,7 +290,6 @@ class Glm5NextMLAAttention(nn.Module):
             )
 
         else:
-            self.indexer_rope_emb = None
             self.indexer = None
 
         mla_modules = MLAModules(
