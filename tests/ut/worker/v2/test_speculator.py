@@ -29,6 +29,9 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
 
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
+
 
 def test_calc_next_seq_lens_cpu():
     """Test calculation of the next CPU sequence lengths."""
@@ -129,13 +132,23 @@ def test_load_draft_model_calls_remove_d2t():
     draft_model = MagicMock()
     target_attn_layer_names = {"layer.0"}
     speculator._maybe_remove_d2t = MagicMock()
+    target_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
+    speculator.vllm_config = target_config
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+
+    def load_with_draft_topology(*args):
+        assert speculator.vllm_config.parallel_config.decode_context_parallel_size == 1
+        return draft_model
+
     with patch.object(
-        TargetDependentARSpeculator, "load_draft_model", return_value=draft_model
+        TargetDependentARSpeculator, "load_draft_model", side_effect=load_with_draft_topology
     ) as parent_load_draft_model:
         result = speculator.load_draft_model(target_model, target_attn_layer_names)
     parent_load_draft_model.assert_called_once_with(target_model, target_attn_layer_names)
     speculator._maybe_remove_d2t.assert_called_once_with(draft_model)
     assert result is draft_model
+    assert speculator.vllm_config is target_config
+    assert target_config.parallel_config.decode_context_parallel_size == 2
 
 
 def test_init_cudagraph_manager_enforce_eager():
@@ -563,7 +576,8 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-        speculator.vllm_config = object()
+        speculator.vllm_config = SimpleNamespace()
+        speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
         speculator.attn_groups = object()
         speculator.speculative_config = SimpleNamespace(  # type: ignore[assignment]
             moe_backend=None, attention_backend=None, kv_cache_dtype=None
@@ -707,6 +721,7 @@ def test_init_dcp_disabled():
     speculator._init_dcp()
 
     assert speculator.use_dcp is False
+    assert speculator.dcp_size == 1
     assert speculator.dcp_manager is None
 
 
@@ -730,6 +745,7 @@ def test_init_dcp_enabled():
         speculator._init_dcp()
 
     assert speculator.use_dcp is True
+    assert speculator.dcp_size == 2
     assert speculator.dcp_manager is dcp_manager_cls.return_value
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
@@ -800,7 +816,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
     speculator.input_buffers = SimpleNamespace(is_padding=torch.zeros(8, dtype=torch.bool))
     speculator._eplb_source_is_padding = None
     speculator._eplb_dummy_run = False
-    speculator.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace(compute_hash=lambda: "draft"))
+    speculator.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(compute_hash=lambda: "draft", compile_factors=lambda: {"identity": "draft"})
+    )
     layer_state = SimpleNamespace()
     state = SimpleNamespace(
         allgather_record_tensor=torch.tensor(-1),
@@ -808,6 +826,12 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
+    model_config = speculator.speculative_config.draft_model_config
+    if vllm_version_is("0.33.0"):
+        key = model_config.compute_hash()
+    else:
+        key = hash_config_cached(model_config)
+    state.model_states[key] = state.model_states["draft"]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)

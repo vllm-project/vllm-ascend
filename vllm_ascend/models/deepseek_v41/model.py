@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4.1 text model and source-shared hybrid-cache graph."""
+"""[Role] DeepSeek V4.1 text model and source-shared hybrid-cache graph.
+[Invariants] Projection weights follow their linear method's layout policy.
+[Timeouts & Locks] Model runner owns execution synchronization.
+[Side-Effect Policy] Parameters are prepared at load time.
+"""
 
 from __future__ import annotations
 
@@ -91,14 +95,50 @@ from .engram import (
 from .engram.common import load_engram_rotation_block
 from .engram.embedding import (
     AscendParallelEngramEmbedding,
+    EngramSharedLoadError,
     engram_storage_dtype,
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
+from .engram.local_shared_vmm import (
+    EngramSharedInitError,
+    EngramSharedReleaseError,
+    LocalSharedVmmBuffer,
+    retain_failed_initialization,
+)
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
+
+
+def _retain_local_engram_tables(model):
+    """Keep earlier buffers reachable without starting a collective."""
+    for module in reversed(list(model.modules())):
+        if isinstance(module, AscendParallelEngramEmbedding) and module.local_vmm:
+            for name in ("_scales_uva", "_codes_uva"):
+                buffer = getattr(module, name, None)
+                if isinstance(buffer, LocalSharedVmmBuffer):
+                    retain_failed_initialization(buffer)
+
+
+def _rollback_local_engram_tables(model, error):
+    """Close local VMM tables after their sharing group agrees on a failure."""
+    errors = []
+    for module in reversed(list(model.modules())):
+        if isinstance(module, AscendParallelEngramEmbedding) and module.local_vmm:
+            try:
+                module.close_host_offload()
+            except EngramSharedReleaseError as cleanup_error:
+                errors.append(str(cleanup_error))
+            except Exception as cleanup_error:
+                # Rank synchronization is unknown; another collective may hang.
+                _retain_local_engram_tables(model)
+                message = f"{error}; Engram VMM cleanup failed: {cleanup_error}"
+                raise RuntimeError(message) from cleanup_error
+    if errors:
+        _retain_local_engram_tables(model)
+        raise RuntimeError(f"{error}; Engram VMM cleanup failed: {'; '.join(errors)}")
 
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
@@ -433,10 +473,6 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
         prefix=f"{prefix}.wo_a",
         return_bias=False,
     )
-    # Every DSA o_proj path consumes wo_a.weight directly via
-    # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
-    # so the weight must remain ND.
-    self.wo_a.skip_weight_nz_conversion = True
     self.wo_b = RowParallelLinear(
         self.n_groups * config.o_lora_rank,
         self.dim,
@@ -1007,8 +1043,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
         self.hc_mult = config.hc_mult
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        # DSpark consumes auxiliary hidden states, not the full HC residual.
+        needs_mtp_hidden_states = (
+            spec_config is not None
+            and not spec_config.use_dspark()
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
         self._mtp_hidden_buffer = (
             torch.empty(
@@ -1119,19 +1158,36 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                             storage_dtype = torch.int8
                     elif native_mxfp8 and vllm_config.quant_config is not None:
                         storage_dtype = torch.float8_e4m3fn
-                    embed = AscendParallelEngramEmbedding(
-                        rows,
-                        config.engram_head_dim,
-                        head_sizes,
-                        slot,
-                        storage_dtype=storage_dtype,
-                        cpu_offload=cpu_offload,
-                        dp_shared_memory=self.engram_dp_shared_memory,
-                        remote_reader=remote_reader,
-                        shared_pool_endpoint=shared_pool_endpoint,
-                        shared_pool_identity=shared_pool_identity,
-                        shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_endpoint else None,
+                    local_vmm = (
+                        cpu_offload
+                        and self.engram_dp_shared_memory
+                        and shared_config is None
+                        and vllm_config.load_config.load_format != "dummy"
+                        and storage_dtype == torch.int8
+                        and get_current_hardware_profile().supports(HardwareCapability.ENGRAM_LOCAL_HOST_VMM)
                     )
+                    try:
+                        embed = AscendParallelEngramEmbedding(
+                            rows,
+                            config.engram_head_dim,
+                            head_sizes,
+                            slot,
+                            storage_dtype=storage_dtype,
+                            cpu_offload=cpu_offload,
+                            dp_shared_memory=self.engram_dp_shared_memory,
+                            local_vmm=local_vmm,
+                            remote_reader=remote_reader,
+                            shared_pool_endpoint=shared_pool_endpoint,
+                            shared_pool_identity=shared_pool_identity,
+                            shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_endpoint else None,
+                        )
+                    except EngramSharedInitError as init_error:
+                        _rollback_local_engram_tables(self, init_error)
+                        raise
+                    except Exception:
+                        if local_vmm:
+                            _retain_local_engram_tables(self)
+                        raise
                     if shared_pool_endpoint:
                         rollback.callback(rollback_shared_engram, embed.close_host_offload)
                     embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
@@ -1922,7 +1978,15 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if not self.model.has_engram:
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
-        loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
+        try:
+            loaded = self._load_model_weights(
+                (name, tensor) for name, tensor in weights if self._is_milestone_weight(name)
+            )
+        except EngramSharedLoadError as load_error:
+            # Every rank in the sharing group observed the error before this
+            # path; release all of that group's preallocated tables together.
+            _rollback_local_engram_tables(self, load_error)
+            raise
         return loaded
 
     def set_moe_parameters(self):

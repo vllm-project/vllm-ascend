@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
 from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
@@ -102,7 +103,7 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
-        self._init_key_head_config(model_config, parallel_config)
+        self._init_key_head_config(model_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -155,12 +156,19 @@ class BaseKVPoolWorker(ABC):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
-        # Global layer addressing for layerwise keys under pipeline parallel:
-        # get_num_layers returns the per-stage layer count, so record the
-        # stage's global layer offset and the model-wide total layers used by
-        # the layerwise key space.
         self.pp_layer_offset = 0
         self.total_layers = None
+        if self.pp_size > 1 and self.pcp_size > 1:
+            # vLLM 0.33.0 derives the PP stage without the PCP rank dimension.
+            # Fixed upstream: https://github.com/vllm-project/vllm/pull/65539
+            # TODO: Remove once vLLM 0.33.0 support is dropped and PP/PCP
+            # layer-range regression tests pass with the v0.34.0 baseline.
+            self.total_layers = model_config.get_total_num_hidden_layers()
+            start, end = get_pp_indices(self.total_layers, self.pp_rank, self.pp_size)
+            self.pp_layer_offset = start
+            self.num_layers = end - start
+            return
+
         try:
             start, _ = model_config.get_layers_start_end_indices(parallel_config)
             self.pp_layer_offset = start
@@ -178,6 +186,7 @@ class BaseKVPoolWorker(ABC):
             )
             self.pp_layer_offset = 0
             self.total_layers = None
+        self.num_layers = model_config.get_num_layers(parallel_config)
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
@@ -238,9 +247,8 @@ class BaseKVPoolWorker(ABC):
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
 
-    def _init_key_head_config(self, model_config, parallel_config) -> None:
+    def _init_key_head_config(self, model_config) -> None:
         self.current_layer = 0
-        self.num_layers = model_config.get_num_layers(parallel_config)
 
         if self.use_mla:
             self.num_kv_head = 1

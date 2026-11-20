@@ -76,8 +76,8 @@ class HardwareCapability(Enum):
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
     DEVICE_LENGTH_FLASH_ATTN = auto()
-    # Optional flash_attn_npu_3 device-tiling ABI for ordinary MiniMax target/draft
-    # attention. Restricted to A2/A3; A5 uses the CANN backend instead.
+    # Optional flash_attn_npu_3 device-tiling ABI on A2/A3/A5.
+    # Model eligibility is checked separately by the attention selector.
     FLASH_ATTN_NPU_3 = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
@@ -95,6 +95,8 @@ class HardwareCapability(Enum):
     ENGRAM_UNROTATED_GATE = auto()
     # Decode native FP8 codes and E8M0 group scales in Engram table lookups.
     ENGRAM_MXFP8 = auto()
+    # Node-local shared INT8 Engram tables can use the A3 Host VMM backend.
+    ENGRAM_LOCAL_HOST_VMM = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -104,11 +106,14 @@ class HardwareCapability(Enum):
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.
     FP8_ATTENTION = auto()
-    # CANN PoolKeyIndexer quant_mode=0 with E4M3 query/key and FP32 descales.
-    POOL_KEY_INDEXER_FP8 = auto()
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
+    # CANN MsaIndexScore ``return_choice`` TopK fusion, which replaces the
+    # separate TopK and sort post-processing. Callers must also check that the
+    # installed CANN package provides the fused output and that the index score
+    # runs with ``pool_block_size=128``.
+    MINIMAX_M3_INDEX_SCORE_TOPK_FUSION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -223,6 +228,16 @@ class AttentionBackendFamily(Enum):
     COMPATIBILITY = auto()
 
 
+class FlashAttentionNpu3Model(Enum):
+    """Model families eligible for the optional flash-attention-npu backend.
+
+    Model architectures and runtime configuration are checked by the selector.
+    """
+
+    MINIMAX = auto()
+    STEP5 = auto()
+
+
 class CPUBindingMode(Enum):
     """CPU binding policies selected for worker processes."""
 
@@ -291,6 +306,9 @@ class HardwareProfile:
     native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
+
+    # Operator availability alone does not determine which model route to use.
+    flash_attn_npu_3_models: frozenset[FlashAttentionNpu3Model] = frozenset()
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
@@ -362,6 +380,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
@@ -374,6 +393,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             # A2 BF16 native verification produced NaNs with 8 drafts (9 queries).
             # Nine is the first observed failing configuration, not a proven
             # universal kernel bound. Remove after native recurrent parity is
@@ -397,6 +417,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -440,6 +461,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            # A5 uses CANN flash_attn by default. Step5 temporarily uses the
+            # ecosystem FA3 operator because CANN flash_attn does not support it.
+            # TODO: Route Step5 back to CANN flash_attn and remove this exception
+            # once CANN supports Step5 and the integration is validated.
+            flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -460,6 +486,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+                    HardwareCapability.FLASH_ATTN_NPU_3,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
@@ -471,7 +498,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
-                    HardwareCapability.POOL_KEY_INDEXER_FP8,
                     HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
@@ -482,6 +508,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+                    HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,

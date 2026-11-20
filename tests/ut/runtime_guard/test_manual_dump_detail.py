@@ -36,7 +36,7 @@ class _WatermarkCfg:
         self._done = done
         self.consume_calls = 0
 
-    def manual_trigger_count(self) -> int:
+    def manual_dump_remaining(self) -> int:
         return max(0, self._target - self._done)
 
     def manual_dumps_done(self) -> int:
@@ -45,13 +45,13 @@ class _WatermarkCfg:
     def manual_dump_target(self) -> int:
         return self._target
 
-    def manual_trigger_continuous(self) -> bool:
+    def manual_dump_continuous(self) -> bool:
         return False
 
     def dump_enabled(self) -> bool:
         return True
 
-    def consume_manual_trigger(self) -> bool:
+    def consume_manual_dump(self) -> bool:
         self.consume_calls += 1
         if self._done >= self._target:
             return False

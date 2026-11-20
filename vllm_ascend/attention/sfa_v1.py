@@ -17,6 +17,7 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
+    AttentionMetadataBuilder,
     MLAAttentionImpl,
     max_decode_query_len,
 )
@@ -79,6 +80,7 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    vllm_version_is,
 )
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 
@@ -534,14 +536,22 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            metadata_cls if metadata_cls is not None else AscendSFAMetadata,
-            supports_dcp_with_varlen,
-        )
+        if vllm_version_is("0.33.0"):
+            super().__init__(
+                kv_cache_spec,
+                layer_names,
+                vllm_config,
+                device,
+                metadata_cls if metadata_cls is not None else AscendSFAMetadata,
+                supports_dcp_with_varlen,
+            )
+        else:
+            # SFA builds its own sparse metadata and never uses the dense MLA
+            # prefill workspace/backend. Native sparse attention has no dense
+            # backend to clone in MLACommonMetadataBuilder.__init__.
+            AttentionMetadataBuilder.__init__(self, kv_cache_spec, layer_names, vllm_config, device)
+            self.metadata_cls = metadata_cls if metadata_cls is not None else AscendSFAMetadata
+            self.model_config = vllm_config.model_config
 
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
@@ -763,6 +773,11 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # Main validates the sparse contract before our custom forward() runs.
+    # SFA consumes top-k indices itself and has no native dense-MHA entrypoint.
+    is_sparse: ClassVar[bool] = not vllm_version_is("0.33.0")
+    supports_dense_mha_prefill: bool = vllm_version_is("0.33.0")
+
     # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
     # through ``replace_parameter``, which is ``setattr``-based and therefore
     # invisible to static analysis. These declarations are what let mypy resolve
@@ -770,6 +785,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     # `Cannot determine type of "W_UK_T"  [has-type]`.
     W_UV: torch.Tensor
     W_UK_T: torch.Tensor
+    weight_dq: torch.Tensor
 
     # A replicated MTP draft may inherit a PCP target's non-trivial interleave
     # value. With DCP disabled it does not change the draft KV-cache layout.
@@ -1136,6 +1152,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.fused_qkv_a_proj.weight.data = self.fused_qkv_a_proj.weight.data.T
 
         fused_weight = self.fused_qkv_a_proj.weight.data
+        if qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8 and self.c8_cache_dtype == torch.int8:
+            # Slice logical ND weights to avoid unsupported INT8 NZ TransData.
+            fused_weight = torch_npu.npu_format_cast(fused_weight, ACL_FORMAT_FRACTAL_ND)
         weight_dq = fused_weight[..., : self.q_lora_rank].contiguous()
         weight_dkv_kr = fused_weight[..., self.q_lora_rank :].contiguous()
         if qt is not None:

@@ -10,6 +10,7 @@ def test_request_config_reasoning_effort(tmp_path: Path, monkeypatch: pytest.Mon
     request_conf = tmp_path / "vllm_api_general_chat.py"
     request_conf.write_text(
         "model='test',\n"
+        "path='',\n"
         "host_port=8000,\n"
         "host_ip='localhost',\n"
         "max_out_len=1024,\n"
@@ -25,6 +26,7 @@ def test_request_config_reasoning_effort(tmp_path: Path, monkeypatch: pytest.Mon
     runner = aisbench.AisbenchRunner.__new__(aisbench.AisbenchRunner)
     runner.__dict__.update(
         model="test-model",
+        model_path="/models/test-model",
         port=8001,
         host_ip="localhost",
         max_out_len=65536,
@@ -47,6 +49,7 @@ def test_request_config_reasoning_effort(tmp_path: Path, monkeypatch: pytest.Mon
     runner._init_request_conf()
 
     content = (tmp_path / "vllm_api_general_chat_custom.py").read_text(encoding="utf-8")
+    assert "path='/models/test-model'," in content
     assert 'chat_template_kwargs={"thinking": True}' in content
     if reasoning_effort is None:
         assert "reasoning_effort=" not in content

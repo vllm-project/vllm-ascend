@@ -12,25 +12,34 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
 
 
+def prepare_kda_pcp_config(vllm_config):
+    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size > 1:
+        # Runner capture sizes count local tokens. KDA runs on the restored
+        # global batch, including requests owned by other decode shards.
+        vllm_config = copy(vllm_config)
+        vllm_config.compilation_config = copy(vllm_config.compilation_config)
+        capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        if capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
+    return vllm_config
+
+
+def init_kda_pcp_buffers(builder, vllm_config, device):
+    builder.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+    builder.pcp_rank = get_pcp_group().rank_in_group if builder.pcp_size > 1 else 0
+    capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, builder.decode_cudagraph_max_bs)
+    builder._pcp_restore_idx = torch.zeros(capacity * builder.pcp_size, dtype=torch.long, device=device)
+    builder._pcp_restore_mask = torch.zeros(capacity * builder.pcp_size, dtype=torch.bool, device=device)
+    builder._pcp_local_idx = torch.zeros(capacity, dtype=torch.long, device=device)
+    builder._pcp_local_mask = torch.zeros(capacity, dtype=torch.bool, device=device)
+
+
 class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
-            # Runner capture sizes count local tokens. KDA runs on the restored
-            # global batch, including requests owned by other decode shards.
-            vllm_config = copy(vllm_config)
-            vllm_config.compilation_config = copy(vllm_config.compilation_config)
-            capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-            if capture_size is not None:
-                vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
+        vllm_config = prepare_kda_pcp_config(vllm_config)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, self.decode_cudagraph_max_bs)
-        self._pcp_restore_idx = torch.zeros(capacity * self.pcp_size, dtype=torch.long, device=device)
-        self._pcp_restore_mask = torch.zeros(capacity * self.pcp_size, dtype=torch.bool, device=device)
-        self._pcp_local_idx = torch.zeros(capacity, dtype=torch.long, device=device)
-        self._pcp_local_mask = torch.zeros(capacity, dtype=torch.bool, device=device)
+        init_kda_pcp_buffers(self, vllm_config, device)
 
     def _attach_pcp(self, metadata, context):
         if context is None:

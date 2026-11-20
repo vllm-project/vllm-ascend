@@ -11,6 +11,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm_ascend.utils import vllm_version_is
+
 ROOT = Path(__file__).resolve().parents[4]
 PREFIX = "vllm_ascend/distributed/kv_transfer/"
 
@@ -125,7 +127,10 @@ def test_push_retains_source_blocks_and_prefix_origin(chosen, num_external_token
     )
     scope = execute(
         "kv_p2p/mooncake/push_scheduler.py",
-        {"MooncakeConnectorMetadata": metadata["MooncakeConnectorMetadata"]},
+        {
+            "MooncakeConnectorMetadata": metadata["MooncakeConnectorMetadata"],
+            "vllm_version_is": vllm_version_is,
+        },
         owner="MooncakePushConnectorScheduler",
         method="build_connector_meta",
     )
