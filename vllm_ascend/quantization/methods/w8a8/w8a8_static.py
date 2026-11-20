@@ -20,6 +20,15 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+    as_quantized_activation,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8StaticTensorSym,
+)
+
 
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
@@ -104,12 +113,16 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | PreparedLinearInput,
+        x: torch.Tensor | PreparedLinearInput | QuantizedActivation,
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        qa = as_quantized_activation(x, self.input_quant_key())
+
         if isinstance(x, PreparedLinearInput):
             x = x.quantized
+        elif qa is not None:
+            x = x.data
         elif x.dtype != torch.int8:
             # quant
             x = torch.ops.vllm.quantize(
@@ -132,6 +145,9 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
             output_dtype=layer.params_dtype,
         )
         return output
+
+    def input_quant_key(self):
+        return kInt8StaticTensorSym
 
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
@@ -162,3 +178,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
                 # FP16 quant_matmul scales encode FP32 bits in the low 32 bits.
                 deq_scale = deq_scale.to(torch.int32).view(torch.float32)
             layer.weight_scale.data = deq_scale.float() / layer.input_scale.data.float()
+        
+        # TODO: Once all supported schemes declare input_quant_key(), hoist this
+        # expose call into the shared AscendLinearMethod path.
+        expose_input_quant_key(layer, self)
