@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Backport vLLM PP + MTP runtime support.
+"""Backport vLLM PP + MTP output support.
 
 The local Eagle/MTP drafter returns the draft tokens that belong to the model
-output being processed. With PP batch_queue, EngineCore schedules a newer batch
-before consuming the older output, so updating ``request.spec_token_ids`` from
-``post_step`` observes live Request state from the newer schedule step.
+output being processed. Supported vLLM revisions do not all carry
+``spec_token_ids`` on the output object, so add it here. The ModelConfig
+validation shim keeps local drafters on an effective PP=1.
 """
 
 from __future__ import annotations
@@ -30,32 +30,6 @@ from functools import wraps
 from vllm.logger import logger
 
 _PATCHED = False
-
-
-def _is_pd_prefill_node(vllm_config) -> bool:
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    if kv_transfer_config is None:
-        return False
-
-    kv_role = getattr(kv_transfer_config, "kv_role", None)
-    if kv_role == "kv_producer":
-        return True
-
-    is_kv_producer = getattr(kv_transfer_config, "is_kv_producer", False)
-    is_kv_consumer = getattr(kv_transfer_config, "is_kv_consumer", False)
-    return is_kv_producer and not is_kv_consumer
-
-
-def _use_pp_mtp_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    if not _use_pp_ipc_runtime_patch(vllm_config, use_pp):
-        return False
-    speculative_config = getattr(vllm_config, "speculative_config", None)
-    return speculative_config is not None
-
-
-def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
-    # The PP IPC runtime patch only applied to Model Runner V1, which was removed.
-    return False
 
 
 def _patch_model_runner_output() -> None:
@@ -80,35 +54,6 @@ def _patch_model_runner_output() -> None:
     empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
     if not hasattr(empty_output, "spec_token_ids"):
         empty_output.spec_token_ids = None
-
-
-def _patch_engine_core() -> None:
-    from vllm.v1.engine.core import EngineCore
-
-    if getattr(EngineCore.post_step, "_vllm_ascend_pp_mtp_patched", False):
-        return
-
-    original_post_step = EngineCore.post_step
-
-    @wraps(original_post_step)
-    def _patched_post_step(self, model_executed: bool) -> None:
-        scheduler = getattr(self, "scheduler", None)
-        use_pp_mtp_runtime_patch = _use_pp_mtp_runtime_patch(
-            getattr(scheduler, "vllm_config", None),
-            getattr(scheduler, "use_pp", False),
-        )
-        if (
-            use_pp_mtp_runtime_patch
-            and getattr(self, "batch_queue", None) is not None
-            and not getattr(self, "async_scheduling", False)
-            and getattr(self, "use_spec_decode", False)
-            and model_executed
-        ):
-            return
-        return original_post_step(self, model_executed)
-
-    _patched_post_step._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-    EngineCore.post_step = _patched_post_step
 
 
 def _patch_model_config_validation() -> None:
