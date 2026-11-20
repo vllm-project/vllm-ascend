@@ -18,13 +18,15 @@ Describe the return value, buffers written in place, aliasing and required call 
 
 Specify supported shapes, layouts, dtypes, execution modes and fallback conditions relevant to this operation. Distinguish implementation checks from configurations exercised by tests. Cite evidence for device and graph support.
 
+If runtime shapes, dtypes or optional arguments select different JIT variants, explain the relevant specialization conditions. For an operator that registers warmup variants, link its registration site, identify the component that opens the registry window, and describe how the serving wrapper reuses the variants. See [Triton JIT warmup on Ascend](../Design_Documents/triton_jit_warmup.md).
+
 ## Origin and differences
 
 Identify the original implementation or explain its origin in this repository. Record Ascend adaptations that affect callers.
 
 ## Test cases
 
-Link to an actual test file and case. State which inputs, boundaries and side effects it checks. If only integration coverage exists, link that path and identify outstanding checks.
+Link to an actual test file and case. Give the test command, reference implementation and comparison criterion. State which inputs, boundaries and side effects the case checks. If only integration coverage exists, link that path and identify outstanding checks.
 
 ## Example
 

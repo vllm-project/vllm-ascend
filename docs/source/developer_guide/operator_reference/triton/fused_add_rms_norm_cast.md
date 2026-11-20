@@ -61,7 +61,7 @@ Fuse optional FP32 residual addition, RMS normalization and BF16 output conversi
 
 ## Test Cases
 
-[Step5 residual normalization tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_add_rms_norm.py)
+[`test_fused_add_rms_norm_matches_decoder_path`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_add_rms_norm.py) compares the fused result with the decoder path across token counts, input dtypes, weight modes and optional residuals.
 
 The reference performs the optional FP32 add, A5 RMSNorm (or the Step5 eager
 formula for plain weights), and a separate BF16 cast. Tests require BF16 output
