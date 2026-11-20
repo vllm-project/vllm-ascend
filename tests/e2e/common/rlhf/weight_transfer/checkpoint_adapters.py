@@ -91,8 +91,8 @@ def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], t
     missing checkpoint entries; it does not allocate or generate weights.
 
     Shapes follow the vision checkpoint: fused ViT gate/up projections,
-    downsampled aligner input and four image-marker vectors. Router biases
-    remain FP32; vision and marker payloads use BF16, including markers whose
+    downsampled aligner input and four image-marker vectors. Vision-only router
+    biases remain FP32; vision and marker payloads use BF16, including markers whose
     served parameters are FP32 and are cast by the loader on copy.
     """
     dim = int(config.vision_dim)
@@ -124,14 +124,12 @@ def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], t
         ("aligner.w2.bias", (hidden,), torch.bfloat16),
     ]
     params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
-    # HF's text meta model omits these real router parameters. A full update
-    # must carry them rather than relying on the previous device allocation.
+    # HF's text meta model omits the vision-only router bias. Its persistent
+    # e_score_correction_bias buffer is already enumerated by the shared source.
     expert_shape = (int(config.n_routed_experts),)
     for layer in range(int(config.num_hidden_layers)):
         prefix = f"model.layers.{layer}.mlp.gate"
         params.append((f"{prefix}.bias_vl", expert_shape, torch.float32))
-        if config.mlp_layer_types[layer] != "hash_moe":
-            params.append((f"{prefix}.e_score_correction_bias", expert_shape, torch.float32))
     return params
 
 

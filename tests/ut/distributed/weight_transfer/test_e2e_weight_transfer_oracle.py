@@ -24,12 +24,15 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer import weight_source
+from tests.e2e.common.rlhf.weight_transfer.case import DEEPSEEK_V4_VISION_CASE, MODEL_CASES
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -219,3 +222,27 @@ def test_generation_signature_preserves_case_prompts_and_optional_image(prompts,
         ]
     else:
         client.chat.completions.create.assert_not_called()
+
+
+def test_vision_weight_source_keeps_text_router_buffer_without_duplicate(monkeypatch):
+    config = SimpleNamespace(
+        hidden_size=8,
+        vision_dim=8,
+        vision_inter_dim=16,
+        vision_patch_size=2,
+        vision_downsample_ratio=2,
+        mlp_layer_types=["hash_moe", "hash_moe", "hash_moe", "moe"],
+    )
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList([torch.nn.Module() for _ in range(4)])
+    model.model.layers[3].mlp = torch.nn.Module()
+    gate = torch.nn.Module()
+    gate.register_buffer("e_score_correction_bias", torch.zeros(8))
+    model.model.layers[3].mlp.gate = gate
+    monkeypatch.setattr(weight_source.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    monkeypatch.setattr(weight_source.AutoModelForCausalLM, "from_config", lambda *args, **kwargs: model)
+
+    source = weight_source.FixedRandomWeightSource(DEEPSEEK_V4_VISION_CASE, torch.device("cpu"))
+
+    assert "model.layers.3.mlp.gate.e_score_correction_bias" in [meta.name for meta in source.metadata]
