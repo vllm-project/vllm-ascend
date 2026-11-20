@@ -42,6 +42,24 @@ ACL_HOST_REG_PINNED = 0x10000000
 INT64_MAX = torch.iinfo(torch.int64).max
 _SFA_MAX_GENERIC_QUERY_GROUP_SIZE = 64
 _SFA_PADDED_QUERY_GROUP_SIZE = 128
+_KIMI_C8_QSFA_QUERY_HEADS = (12, 96)
+_CANN_QSFA_ROPE_HEAD_DIM = 64
+_CANN_QSFA_QUERY_HEAD_DIM = 576
+_CANN_QSFA_PACKED_KV_HEAD_DIM = 656
+_CANN_QSFA_TILE_SIZE = 128
+_CANN_QSFA_PAGE_ALIGNMENT = 16
+_CANN_QSFA_MAX_PAGE_SIZE = 1024
+
+
+@lru_cache(maxsize=1)
+def _load_cann_qsfa():
+    try:
+        ops = import_module("cann_ops_transformer")
+    except ModuleNotFoundError as exc:
+        if exc.name != "cann_ops_transformer":
+            raise
+        return None
+    return getattr(ops, "kv_quant_sparse_flash_attention", None)
 
 
 if HAS_TRITON:
@@ -766,6 +784,32 @@ class BaseDeviceAdaptor:
             value_quant_mode=2,
             rope_head_dim=rope_head_dim,
         )
+        use_cann_qsfa = (
+            sfa_impl.is_kimi_k31
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+            and rope_head_dim == _CANN_QSFA_ROPE_HEAD_DIM
+            and query.shape[1] in _KIMI_C8_QSFA_QUERY_HEADS
+            and query.shape[-1] == _CANN_QSFA_QUERY_HEAD_DIM
+            and query.dtype in (torch.float16, torch.bfloat16)
+            and kv.ndim == 4
+            and kv.shape[-2:] == (1, _CANN_QSFA_PACKED_KV_HEAD_DIM)
+            and kv.dtype == torch.float8_e4m3fn
+            and 0 < kv.shape[1] <= _CANN_QSFA_MAX_PAGE_SIZE
+            and kv.shape[1] % _CANN_QSFA_PAGE_ALIGNMENT == 0
+            and kwargs["tile_size"] == _CANN_QSFA_TILE_SIZE
+            and sparse_mode in (0, 3)
+        )
+        if use_cann_qsfa and (cann_qsfa := _load_cann_qsfa()) is not None:
+            # Kimi skips RoPE rotation but retains its learned 64-wide tail.
+            output, softmax_max, softmax_sum = cann_qsfa(**kwargs, return_softmax_lse=True)
+            # CANN may leave graph padding unwritten. A zero sum gives DCP
+            # zero weight for padding and rows without local candidates.
+            query_ids = torch.arange(query.shape[0], device=query.device, dtype=actual_seq_lengths_query.dtype)
+            invalid = (query_ids >= actual_seq_lengths_query[-1]) | (topk_indices[:, 0, 0] < 0)
+            output.masked_fill_(invalid[:, None, None], 0)
+            softmax_max.masked_fill_(invalid[None, :, None], 0)
+            softmax_sum.masked_fill_(invalid[None, :, None], 0)
+            return output, softmax_max, softmax_sum
         use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
         if use_kimi_path or return_lse or rope_head_dim == 0:
             # Kimi requires the LSE path to trim trailing invalid candidates.

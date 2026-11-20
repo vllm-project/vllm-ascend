@@ -34,6 +34,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_packed_bytes
 from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -559,6 +560,68 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["key_quant_mode"], 2)
         self.assertEqual(call_kwargs["tile_size"], 128)
         self.assertNotIn("return_softmax_lse", call_kwargs)
+
+    def test_kimi_fp8_cann_qsfa_dispatch_and_invalid_rows(self):
+        impl = SimpleNamespace(is_kimi_k31=True, qk_rope_head_dim=64, sfa_qsfa_tile_size=128, scale=0.125)
+        kv = torch.empty((1, 768, 1, 656), dtype=torch.float8_e4m3fn)
+        block_table = torch.zeros((1, 1), dtype=torch.int32)
+        topk = torch.tensor([[[0, -1]], [[-1, -1]], [[0, -1]]], dtype=torch.int32)
+        query_lengths = torch.tensor([2], dtype=torch.int32)
+        key_lengths = torch.tensor([128], dtype=torch.int32)
+
+        for heads in (12, 96):
+            for use_cann in (True, False):
+                with self.subTest(heads=heads, use_cann=use_cann):
+                    query = torch.zeros((3, heads, 576), dtype=torch.bfloat16)
+                    q_nope, q_pe = query.split((512, 64), dim=-1)
+                    output = torch.ones((3, heads, 512), dtype=torch.bfloat16)
+                    softmax_max = torch.ones((1, 3, heads))
+                    softmax_sum = torch.ones((1, 3, heads))
+                    cann_qsfa = MagicMock(return_value=(output, softmax_max, softmax_sum))
+                    with (
+                        patch(
+                            "vllm_ascend.device.device_op.get_current_hardware_profile",
+                            return_value=SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED),
+                        ),
+                        patch(
+                            "vllm_ascend.device.device_op._load_cann_qsfa",
+                            return_value=cann_qsfa if use_cann else None,
+                        ),
+                        patch.object(
+                            torch.ops._C_ascend,
+                            "npu_kv_quant_sparse_flash_attention_vllm",
+                            create=True,
+                            return_value=(output, softmax_max, softmax_sum),
+                        ) as custom_qsfa,
+                    ):
+                        result = BaseDeviceAdaptor._execute_kv_quant_sparse_flash_attention_vllm(
+                            impl,
+                            q_nope,
+                            q_pe,
+                            kv,
+                            block_table,
+                            topk,
+                            query_lengths,
+                            key_lengths,
+                            packed_query=query if heads == 96 else None,
+                        )
+
+                    op = cann_qsfa if use_cann else custom_qsfa
+                    op.assert_called_once()
+                    self.assertTrue(op.call_args.kwargs["return_softmax_lse"])
+                    self.assertIs(op.call_args.kwargs["key"], kv)
+                    self.assertEqual(op.call_args.kwargs["query"].shape, (3, heads, 576))
+                    if use_cann:
+                        custom_qsfa.assert_not_called()
+                        torch.testing.assert_close(result[0][0], torch.ones_like(output[0]))
+                        for stats in result[1:]:
+                            torch.testing.assert_close(stats[:, 0], torch.ones_like(stats[:, 0]))
+                        self.assertEqual(torch.count_nonzero(result[0][1:]), 0)
+                        self.assertEqual(torch.count_nonzero(result[1][:, 1:]), 0)
+                        self.assertEqual(torch.count_nonzero(result[2][:, 1:]), 0)
+                    else:
+                        cann_qsfa.assert_not_called()
+                        torch.testing.assert_close(result[0], torch.ones_like(output))
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         self._check_prolog_v3_enables_packed_kv_cache(AscendW8A8DynamicLinearMethod)
