@@ -448,8 +448,8 @@ class AscendSharedExperts:
         if is_int8:
             # The A3 INT8 shared payload is validated for W8A8 only. A W4A8
             # shared linear materializes int32 packed weights and is rejected by
-            # the dtype check above, so a declared W4A8 here is a mis-declared
-            # checkpoint: keep the separate shared forward.
+            # the dtype check above, so W4A8 declared on an int8 buffer does not
+            # match: keep the separate shared forward.
             if shared_quant_type == QuantType.W4A8:
                 self._disable_megamoe_shared_fusion(
                     "shared quant type W4A8 is not supported by the A3 INT8 shared payload (W8A8 only)"

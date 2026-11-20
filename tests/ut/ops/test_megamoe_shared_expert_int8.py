@@ -64,7 +64,7 @@ def test_collect_rejects_packed_int32_shared_weight() -> None:
 
 
 def test_collect_rejects_w4a8_shared_quant_type() -> None:
-    """An int8 buffer declared as W4A8 is a mis-declared checkpoint: reject it."""
+    """An int8 buffer that declares W4A8 does not match: reject it."""
     runner = _make_runner(QuantType.W8A8)
     runner._collect_megamoe_shared_weight("w1", _shared_linear(torch.int8, QuantType.W4A8))
 
