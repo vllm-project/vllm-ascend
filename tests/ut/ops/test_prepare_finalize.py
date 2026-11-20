@@ -1,8 +1,11 @@
 import unittest
+from contextlib import AbstractContextManager
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.config import set_current_vllm_config
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
@@ -169,6 +172,88 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
+
+    def _runner_padding_context(self, mc2_mask, padded_num_tokens, is_padding):
+        # Use vLLM's actual context and per-forward cache. V1 Ascend extras
+        # are attached to this object by set_ascend_forward_context as well.
+        context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={}, is_padding=is_padding)
+        context.mc2_mask = mc2_mask
+        context.padded_num_tokens = padded_num_tokens
+        context.in_profile_run = False
+        self.enterContext(override_forward_context(context))
+        return context
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank")
+    def test_mc2_masks_runner_padding_and_caches_per_forward(self, mock_tp_rank, mock_tp_size):
+        # 3 real tokens, 3 graph padding rows, 2 DP-alignment rows. The old
+        # mask only drops the last 2; the runner's is_padding drops the 3 too.
+        reserved = torch.arange(8) < 6
+        is_padding = torch.tensor([False, False, False, True, True, True])
+        context = self._runner_padding_context(reserved[:8], 8, is_padding)
+        expected = {0: [True, True, True, False], 1: [False, False, False, False]}
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                context.additional_kwargs.clear()
+                mock_tp_rank.return_value = rank
+                first = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(6, 8), torch.randn(6, 2))
+                self.assertEqual(first.mc2_mask.tolist(), expected[rank])
+                # Later MoE layers reuse the same tensor instead of rebuilding it.
+                second = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(6, 8), torch.randn(6, 2))
+                self.assertIs(second.mc2_mask, first.mc2_mask)
+        # The reserved buffer is shared across steps and must stay untouched.
+        self.assertEqual(reserved.tolist(), [True] * 6 + [False] * 2)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=4)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank")
+    def test_mc2_sp_masks_runner_padding(self, mock_tp_rank, mock_tp_size):
+        from vllm_ascend.models.common.ops.sequence_parallel import _ascend_sp_padding_mask_impl
+
+        # 8 rows after graph padding (5 real), SP chunk of 2 per rank, MC2
+        # stride of 4 per rank. Kimi-K3 already slices is_padding at model
+        # entry; other models leave the global one for prepare to slice.
+        global_is_padding = torch.arange(8) >= 5
+        context = self._runner_padding_context(torch.arange(16) < 8, 16, None)
+        sp_ops = "vllm_ascend.models.common.ops.sequence_parallel"
+        for sliced in (True, False):
+            for rank in range(4):
+                with (
+                    self.subTest(sliced=sliced, rank=rank),
+                    patch(f"{sp_ops}.get_tensor_model_parallel_world_size", return_value=4),
+                    patch(f"{sp_ops}.get_tensor_model_parallel_rank", return_value=rank),
+                    patch("torch.ops.vllm.ascend_sp_padding_mask_impl", side_effect=_ascend_sp_padding_mask_impl),
+                ):
+                    local = global_is_padding[rank * 2 : (rank + 1) * 2]
+                    context.is_padding = local if sliced else global_is_padding
+                    context.additional_kwargs.clear()
+                    mock_tp_rank.return_value = rank
+                    layer = PrepareAndFinalizeWithMC2(self.moe_config)
+                    prepared = layer.prepare(torch.randn(2, 8), torch.randn(2, 2), replace_allreduce=True)
+                    self.assertEqual(prepared.mc2_mask.tolist(), (~local).tolist() + [False, False])
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    def test_mc2_keeps_mask_without_runner_padding(self, mock_tp_rank, mock_tp_size):
+        is_padding = torch.tensor([False, True, True])
+        context = self._runner_padding_context(torch.tensor([True, True, True, False]), 4, is_padding)
+        cases: dict[str, AbstractContextManager[Any]] = {
+            "switch_off": patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.vllm_envs", MagicMock(VLLM_MOE_SKIP_PADDING=False)
+            ),
+            "profile_run": patch.object(context, "in_profile_run", True),
+            "no_is_padding": patch.object(context, "is_padding", None),
+            "pcp": patch.object(self.moe_config, "pcp_size", 2),
+            "no_forward_context": patch(
+                "vllm_ascend.ops.fused_moe.prepare_finalize.is_forward_context_available", return_value=False
+            ),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name), case:
+                context.additional_kwargs.clear()
+                prepared = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(3, 8), torch.randn(3, 2))
+                self.assertEqual(prepared.mc2_mask.tolist(), [True, True, True, False])
+        prepared = PrepareAndFinalizeWithMC2(self.moe_config).prepare(torch.randn(3, 8), torch.randn(3, 2))
+        self.assertEqual(prepared.mc2_mask.tolist(), [True, False, False, False])
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)

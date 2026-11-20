@@ -415,3 +415,8 @@ def prepare_dflash_inputs_triton(
         SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
         QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
     )
+    # Upstream also marks query rows as real before the draft graph reads them.
+    # Capture leaves is_padding all True, so refresh both slices every step.
+    num_query_tokens = num_reqs * num_query_per_req
+    input_buffers.is_padding[:num_query_tokens].fill_(False)
+    input_buffers.is_padding[num_query_tokens:max_num_tokens].fill_(True)
