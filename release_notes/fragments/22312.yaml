@@ -1,0 +1,4 @@
+pr: 22312
+entries:
+  - category: performance
+    text: Reduced new Memcache layerwise object sizes in supported mixed-serving layouts, including pipeline stages with independent object keys.
