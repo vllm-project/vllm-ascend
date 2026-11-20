@@ -10,62 +10,72 @@ from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
 
 
-@pytest.mark.parametrize("layout", ["contiguous", "row_stride", "column_stride"])
-def test_main_fused_norm_rope_requires_contiguous_qkv(layout) -> None:
-    layer = SimpleNamespace(
-        attn_output_gate=True,
-        q_size=512,
-        kv_size=256,
-        num_heads=2,
-        num_kv_heads=1,
-        head_dim=256,
-        rotary_emb=SimpleNamespace(
-            mrope_section=[11, 11, 10],
-            rotary_dim=64,
-            is_neox_style=True,
-            mrope_interleaved=True,
-        ),
-    )
-    width = 2 * layer.q_size + 2 * layer.kv_size
-    if layout == "row_stride":
-        qkv = torch.empty((4, width), dtype=torch.bfloat16)[::2]
-    elif layout == "column_stride":
-        qkv = torch.empty((2, 2 * width), dtype=torch.bfloat16)[:, ::2]
-    else:
-        qkv = torch.empty((2, width), dtype=torch.bfloat16)
-
-    eligible = qsa.AscendQwen4ExpQSAAttention._main_fused_norm_rope_eligible(layer, qkv, torch.arange(2))
-    assert eligible == (layout == "contiguous")
+def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
+    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
+    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
-def test_main_qkv_projection_falls_back_when_fused_abi_is_ineligible(
-    monkeypatch,
-) -> None:
-    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="Packed Indexer arguments are part of the main ABI")
+def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(layer)
-    layer.layer_name = "model.layers.0.self_attn.attn"
-    monkeypatch.setattr(
-        layer,
-        "_main_fused_norm_rope_eligible",
-        Mock(return_value=False),
-    )
-    expected = (
-        torch.empty(1),
-        torch.empty(1),
-        torch.empty(1),
-        torch.empty(1),
-    )
-    fallback = Mock(return_value=expected)
-    monkeypatch.setattr(
-        qsa.upstream_qsa.Qwen4ExpQSAAttention,
-        "_project_qkv_gate",
-        fallback,
-    )
-    qkv = torch.empty((2, 8))
-    positions = torch.arange(2)
+    metadata = SimpleNamespace(num_actual_tokens=2)
+    layer._metadata = Mock(return_value=(metadata, metadata))
+    layer.skip_topk = False
+    query = torch.empty((2, 4, 128))
+    keys = torch.empty((2, 1, 128))
+    layer.project_qk = Mock(return_value=(query, keys))
+    layer._update_and_compress = Mock()
+    selected = torch.zeros((2, 3), dtype=torch.int32)
+    layer._select = Mock(return_value=selected)
+    hidden_states = torch.empty((4, 8))
+    positions = torch.arange(4)
+    gate = torch.full((2, 2, 4), 7.0)
 
-    assert layer._project_qkv_gate(qkv, positions) is expected
-    fallback.assert_called_once_with(qkv, positions)
+    indices, main_outputs = layer(
+        hidden_states,
+        positions,
+        selected,
+        attn=SimpleNamespace(use_fused_qsa_prepare=True),
+        qkv=torch.empty((2, 24)),
+        slot_mapping=torch.arange(2),
+        gate_out=gate,
+    )
+
+    assert indices is selected and main_outputs is None
+    projected_hidden, projected_positions = layer.project_qk.call_args.args
+    torch.testing.assert_close(projected_hidden, hidden_states[:2])
+    torch.testing.assert_close(projected_positions, positions[:2])
+    layer._update_and_compress.assert_called_once_with(keys, projected_positions, metadata, metadata)
+    layer._select.assert_called_once_with(query, metadata, selected)
+    torch.testing.assert_close(gate, torch.full_like(gate, 7.0))
+
+
+@pytest.mark.parametrize("axes", [1, 3])
+def test_indexer_rotary_gathers_clamped_cache_before_kernel(monkeypatch, axes) -> None:
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    cache = torch.arange(5 * 64, dtype=torch.float32).reshape(5, 64)
+    layer.rotary_emb = SimpleNamespace(
+        _match_cos_sin_cache_dtype=Mock(return_value=cache),
+        mrope_section=[11, 11, 10],
+        rotary_dim=64,
+    )
+    positions = torch.tensor([-1, 2, 8])
+    if axes == 3:
+        positions = torch.stack((positions, positions + 1, positions - 1))
+    tensor = torch.empty((3, 4, 128), dtype=torch.bfloat16)
+    norm = SimpleNamespace(weight=torch.ones(128), variance_epsilon=1e-6)
+    kernel = Mock(return_value=tensor)
+    monkeypatch.setattr(torch.ops.vllm, "triton_qsa_rmsnorm_mrope", kernel)
+
+    assert layer._fused_norm_rope(tensor, norm, positions) is tensor
+
+    arguments = kernel.call_args.kwargs
+    torch.testing.assert_close(arguments["cos_sin"], cache[positions.clamp(0, 4)])
+    assert arguments["tensor"] is tensor
+    assert arguments["weight"] is norm.weight
+    assert "positions" not in arguments
 
 
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
