@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
+from vllm.distributed.eplb import policy as upstream_policy
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -47,6 +48,20 @@ class TestStairLoadStatistics(unittest.TestCase):
                 2,
                 torch.tensor([[0, 1, 2, 3]]),
             )
+
+            if stats_type := getattr(upstream_policy, "EplbStats", None):
+                modern_result = policy.rebalance_experts(
+                    stats_type(
+                        global_expert_load_window=torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
+                        num_replicas=4,
+                        num_groups=1,
+                        num_nodes=1,
+                        num_gpus=2,
+                    ),
+                    torch.tensor([[0, 1, 2, 3]]),
+                )
+                torch.testing.assert_close(modern_result, result)
+                np.testing.assert_array_equal(modern_result.source_rank_ids, result.source_rank_ids)
 
         torch.testing.assert_close(result, torch.tensor([[0, 3, 2, 1]]))
         np.testing.assert_array_equal(result.source_rank_ids, plan.source_rank_ids)

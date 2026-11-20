@@ -21,6 +21,7 @@ from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
+from vllm.platforms.interface import Platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -42,6 +43,7 @@ _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # target on its per-model communicator until the last workspace commit.
 _EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
 _ASCEND_EPLB_POLICIES = ("default", "stair")
+_AscendEplbCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"]
 
 
 @dataclass
@@ -239,7 +241,35 @@ def resolve_ascend_eplb_communicator(parallel_config, ascend_eplb_config) -> Any
     return _clamp_stair_limits_for_gloo_fallback(ascend_eplb_config)
 
 
+def _select_ascend_eplb_communicator(eplb_config: _parallel_config.EPLBConfig) -> None:
+    if eplb_config.communicator is not None:
+        return
+    binding, reason = _probe_local_hixl_binding()
+    eplb_config.communicator = "hixl" if binding != "none" else "torch_gloo"
+    _mark_auto_selected(eplb_config)
+    logger.info(
+        "Ascend EPLB provisionally selected %s (%s); pending group-wide consensus at worker init.",
+        eplb_config.communicator,
+        binding if reason is None else reason,
+    )
+
+
+def check_and_update_eplb_config(parallel_config: _parallel_config.ParallelConfig) -> None:
+    eplb_config = parallel_config.eplb_config
+    if eplb_config.policy is None:
+        eplb_config.policy = "stair"
+    if eplb_config.policy not in _ASCEND_EPLB_POLICIES:
+        raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+    _select_ascend_eplb_communicator(eplb_config)
+    if eplb_config.communicator not in get_args(_AscendEplbCommunicatorBackend):
+        raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+    if eplb_config.use_async and eplb_config.communicator in ("torch_nccl", "pynccl"):
+        raise ValueError(f"{eplb_config.communicator} communicator is incompatible with async EPLB.")
+
+
 def _patch_parallel_config() -> None:
+    if hasattr(Platform, "check_and_update_eplb_config"):
+        return
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
@@ -250,29 +280,8 @@ def _patch_parallel_config() -> None:
 
     @wraps(original_post_init)
     def _post_init(config):
-        if (
-            _is_npu_platform(_parallel_config.current_platform)
-            and config.enable_eplb
-            and config.eplb_config.communicator is None
-        ):
-            # Provisional per-process decision; must precede the upstream
-            # auto-selection below so it is not preempted by nixl/gloo.
-            binding, reason = _probe_local_hixl_binding()
-            if binding != "none":
-                config.eplb_config.communicator = "hixl"
-                logger.info(
-                    "Ascend EPLB provisionally selected hixl (%s binding); "
-                    "pending group-wide consensus at worker init.",
-                    binding,
-                )
-            else:
-                config.eplb_config.communicator = "torch_gloo"
-                logger.info(
-                    "Ascend EPLB provisionally selected torch_gloo: HIXL is unavailable (%s); "
-                    "pending group-wide consensus at worker init.",
-                    reason,
-                )
-            _mark_auto_selected(config.eplb_config)
+        if _is_npu_platform(_parallel_config.current_platform) and config.enable_eplb:
+            _select_ascend_eplb_communicator(config.eplb_config)
         original_post_init(config)
 
     setattr(_post_init, _PATCH_MARKER, True)
@@ -320,12 +329,12 @@ def _patch_eplb_communicator_config() -> None:
     communicator_field = getattr(config_cls, "__dataclass_fields__", {}).get("communicator")
     if communicator_field is None:
         raise RuntimeError("Unsupported vLLM EPLB contract: communicator field is missing.")
-    communicator_type = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"] | None
+    communicator_type = _AscendEplbCommunicatorBackend | None
     if communicator_field.type == communicator_type and communicator_field.default is None:
         return
 
     if communicator_field.type != communicator_type:
-        _parallel_config.EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl", "hixl"]
+        _parallel_config.EPLBCommunicatorBackend = _AscendEplbCommunicatorBackend
         config_cls.__annotations__["communicator"] = communicator_type
         communicator_field.type = communicator_type
     communicator_field.default = None
@@ -818,15 +827,15 @@ def _patch_changed_layer_transfer() -> None:
         _async_worker.transfer_run_periodically = _wrap_async_worker(original_worker)
 
 
-def _wrap_move_to_workspace(original_move):
+def _wrap_move_to_workspace(original_move, model_state_parameter: str = "model_state"):
     move_signature = signature(original_move)
-    if not {"model_state", "ep_rank"}.issubset(move_signature.parameters):
+    if not {model_state_parameter, "ep_rank"}.issubset(move_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: async workspace move signature changed.")
 
     @wraps(original_move)
     def _move_to_workspace(*args, **kwargs):
         bound = move_signature.bind(*args, **kwargs)
-        model_state = bound.arguments["model_state"]
+        model_state = bound.arguments[model_state_parameter]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
         is_last_result = (
@@ -897,14 +906,27 @@ def _wrap_move_to_workspace(original_move):
 
 
 def _patch_async_move_to_workspace() -> None:
-    original_move = _eplb_state._move_to_workspace
-    if not getattr(original_move, _PATCH_MARKER, False):
-        _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+    base_state = getattr(_eplb_state.EplbState, "model_state_cls", None)
+    if base_state is None:
+        original_move = _eplb_state._move_to_workspace
+        if not getattr(original_move, _PATCH_MARKER, False):
+            _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+        return
+
+    if getattr(base_state._move_to_workspace, _PATCH_MARKER, False):
+        return
+
+    class AscendEplbModelState(base_state):
+        # Ascend attaches routing and transfer bookkeeping to each model.
+        _move_to_workspace = _wrap_move_to_workspace(base_state._move_to_workspace, model_state_parameter="self")
+
+    _eplb_state.EplbState.model_state_cls = AscendEplbModelState
 
 
-_patch_eplb_policy_config()
-_patch_eplb_communicator_config()
-_patch_parallel_config()
+if not hasattr(Platform, "check_and_update_eplb_config"):
+    _patch_eplb_policy_config()
+    _patch_eplb_communicator_config()
+    _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
 _patch_explicit_transfer_execution()

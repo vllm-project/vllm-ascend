@@ -111,7 +111,11 @@ def test_configured_upstream_policy_registration_is_scoped():
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
 
     with eplb_state._configured_upstream_policy("stair", policy):
-        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
+        registration = upstream_eplb_state.EPLB_POLICIES["stair"]
+        if hasattr(upstream_eplb_state.EplbState, "create_policy"):
+            assert registration() is policy
+        else:
+            assert registration is policy
 
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
 
@@ -473,6 +477,7 @@ def test_from_mapping_requires_release_valid_expert_count(monkeypatch):
 
 def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     parallel_config = MagicMock()
+    parallel_config.eplb_config.policy = "default"
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
     monkeypatch.setattr(upstream_eplb_state, "CpuGpuEvent", MagicMock)
 

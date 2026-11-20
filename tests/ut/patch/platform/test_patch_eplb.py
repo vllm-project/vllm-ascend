@@ -13,16 +13,20 @@ from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.v1.executor.multiproc_executor import WorkerProc
 
 from tests.ut.distributed.eplb.test_hixl_communicator import _shared_models
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.patch.platform import patch_eplb
+from vllm_ascend.platform import NPUPlatform
 
 
 class _FakeNpuPlatform:
     device_type = "npu"
+    supports_eplb = NPUPlatform.supports_eplb
+    check_and_update_eplb_config = NPUPlatform.check_and_update_eplb_config
 
     def __getattr__(self, name):
         return getattr(current_platform, name)
@@ -30,14 +34,11 @@ class _FakeNpuPlatform:
 
 @contextmanager
 def _npu_parallel_config_platform():
-    proxy = parallel_module.current_platform
-    assert isinstance(proxy, patch_eplb._CudaAlikeEplbPlatformProxy)
-    original_platform = proxy._platform
-    proxy._platform = _FakeNpuPlatform()
-    try:
+    platform = _FakeNpuPlatform()
+    if isinstance(parallel_module.current_platform, patch_eplb._CudaAlikeEplbPlatformProxy):
+        platform = patch_eplb._CudaAlikeEplbPlatformProxy(platform)
+    with patch.object(parallel_module, "current_platform", platform):
         yield
-    finally:
-        proxy._platform = original_platform
 
 
 @contextmanager
@@ -72,6 +73,7 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
         vllm_config = VllmConfig(parallel_config=parallel_config)
 
     assert vllm_config.parallel_config.enable_eplb
+    assert vllm_config.parallel_config.eplb_config.policy == "stair"
     # Provisional auto-selection happens at config stage (no HIXL here);
     # the worker-stage consensus may still correct it group-wide.
     assert vllm_config.parallel_config.eplb_config.communicator == "torch_gloo"
@@ -82,6 +84,7 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
     )
 
 
+@pytest.mark.skipif(hasattr(Platform, "check_and_update_eplb_config"), reason="Legacy EPLBConfig validation")
 def test_eplb_policy_config_supports_stair_and_default():
     assert EPLBConfig().policy == "stair"
     assert EPLBConfig(policy="stair", use_async=True).policy == "stair"
@@ -101,8 +104,29 @@ def test_eplb_communicator_config_supports_hixl():
     assert EPLBConfig(communicator="hixl").communicator == "hixl"
     assert EPLBConfig(communicator="torch_gloo").communicator == "torch_gloo"
 
-    patch_eplb._patch_eplb_communicator_config()
-    assert EPLBConfig(communicator="hixl").communicator == "hixl"
+    if not hasattr(Platform, "check_and_update_eplb_config"):
+        patch_eplb._patch_eplb_communicator_config()
+        assert EPLBConfig(communicator="hixl").communicator == "hixl"
+
+
+@pytest.mark.skipif(not hasattr(Platform, "check_and_update_eplb_config"), reason="Native EPLB platform validation")
+@pytest.mark.parametrize(
+    ("policy", "communicator", "message"),
+    [
+        ("invalid", "torch_gloo", "Unknown EPLB policy"),
+        ("default", "invalid", "Unknown EPLB communicator"),
+        ("stair", "torch_nccl", "torch_nccl communicator is incompatible"),
+        ("stair", "pynccl", "pynccl communicator is incompatible"),
+    ],
+)
+def test_native_eplb_hook_rejects_invalid_config(policy, communicator, message):
+    with _npu_parallel_config_platform(), pytest.raises(ValueError, match=message):
+        ParallelConfig(
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(policy=policy, communicator=communicator, use_async=True),
+        )
 
 
 def _resolver_fixtures(communicator=None, auto_selected=False, additional_config=None):
@@ -241,6 +265,16 @@ def test_parallel_config_platform_patch_is_idempotent():
     patch_eplb._patch_parallel_config()
 
     assert parallel_module.current_platform is proxy
+
+
+@pytest.mark.skipif(
+    not hasattr(patch_eplb._eplb_state.EplbState, "model_state_cls"), reason="Upstream EPLB model-state hook"
+)
+def test_async_workspace_patch_is_registered_on_model_state():
+    state = patch_eplb._eplb_state.EplbState.model_state_cls
+    assert getattr(state._move_to_workspace, patch_eplb._PATCH_MARKER)
+    patch_eplb._patch_async_move_to_workspace()
+    assert patch_eplb._eplb_state.EplbState.model_state_cls is state
 
 
 def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
