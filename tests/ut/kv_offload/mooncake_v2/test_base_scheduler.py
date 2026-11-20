@@ -35,7 +35,7 @@ def make_scheduler_config(
             kv_role="kv_consumer" if is_consumer else "kv_producer",
             kv_port=6000,
         ),
-        cache_config=SimpleNamespace(block_size=16),
+        cache_config=SimpleNamespace(block_size=16, prefix_match_unit=None),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=2,
@@ -264,13 +264,16 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
 def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = need_truncate
+    scheduler.hash_block_size = 2
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
         _all_token_ids=[1, 2, 3],
         kv_transfer_params=None if params is None else dict(params),
         max_tokens=8,
-        block_hashes=["full-prompt-hash"],
+        block_hashes=[(1, 2)],
+        update_block_hashes=MagicMock(),
     )
 
     scheduler.on_new_request(request)
@@ -281,12 +284,8 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
     assert request._all_token_ids == request.prompt_token_ids
     assert request.num_prompt_tokens == (2 if truncated else 3)
     assert request.max_tokens == (1 if truncated else 8)
-    # Keep the two list literals in separate statements. A conditional
-    # expression would join list[tuple[int, int]] with list[str] and fail mypy.
-    if truncated:
-        assert request.block_hashes == [(1, 2)]
-    else:
-        assert request.block_hashes == ["full-prompt-hash"]
+    assert request.block_hashes == [(1, 2)]
+    request.update_block_hashes.assert_not_called()
 
 
 @pytest.mark.parametrize(

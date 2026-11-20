@@ -1,0 +1,4 @@
+pr: 20903
+entries:
+  - category: performance
+    text: Mooncake V2 supports per-request KV pulls and preserves valid block hashes when truncating stateful prefill prompts, avoiding redundant full-prompt hashing.

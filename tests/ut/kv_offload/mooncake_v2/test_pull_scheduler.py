@@ -714,6 +714,8 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
 def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = True
+    scheduler.hash_block_size = 2
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     request = make_request(
         prompt_token_ids=[1, 2, 3],
         num_prompt_tokens=3,
@@ -722,7 +724,8 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
         max_tokens=8,
     )
 
-    request.block_hashes = ["full-prompt-hash"]
+    request.block_hashes = [(1, 2)]
+    request.update_block_hashes = MagicMock()
     scheduler._truncate_request_for_prefill(request)
     scheduler._truncate_request_for_prefill(request)
 
@@ -732,11 +735,14 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
     assert request.block_hashes == [(1, 2)]
+    request.update_block_hashes.assert_not_called()
 
 
 def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.need_truncate = True
+    scheduler.hash_block_size = 2
+    scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     prompt_embeds = torch.arange(12).reshape(3, 4)
     request = make_request(
         prompt_token_ids=None,
@@ -843,6 +849,8 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler.hash_block_size = 128
+    result.connector_scheduler.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
     return result
 
 

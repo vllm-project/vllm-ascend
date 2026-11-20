@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
@@ -377,6 +378,7 @@ class MooncakeBaseConnectorScheduler:
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
         self.block_size = vllm_config.cache_config.block_size
+        self.hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)[1]
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config is not None else 0
         )
@@ -528,9 +530,9 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
-        request.update_block_hashes()
+        # Earlier complete blocks are unchanged; only the truncated tail expires.
+        num_hashable_tokens = max(0, len(request._all_token_ids) - self.vllm_config.num_hash_lookahead_tokens)
+        del request.block_hashes[num_hashable_tokens // self.hash_block_size :]
         params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:
