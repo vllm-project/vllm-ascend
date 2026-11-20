@@ -86,7 +86,7 @@ class HostExpertStore:
         import acl  # type: ignore[import-not-found]
         import torch_npu
 
-        prepared = {}
+        prepared: dict[str, PreparedExpertTensor] = {}
         for expert_id in range(self.num_experts):
             expert_weights = adapter.load_experts(self, (expert_id,), device)
             # Loading only: complete format conversion before reading its storage.
@@ -408,9 +408,10 @@ class ExpertOffloadManager:
         from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool, supports_router
 
         bindings = [
-            binding
+            candidate_binding
             for layer in runner.model.modules()
-            if (binding := getattr(layer, "_expert_offload_binding", None)) is not None and supports_router(layer)
+            if (candidate_binding := getattr(layer, "_expert_offload_binding", None)) is not None
+            and supports_router(layer)
         ]
         if not bindings:
             raise ValueError("dspark_expert_pool found no supported target routed expert layer")
