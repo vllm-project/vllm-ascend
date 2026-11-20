@@ -10,6 +10,12 @@ import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
 
 
+def get_cp_max_num_reqs(vllm_config: Any) -> int:
+    """Include PCP's two prefill segments and one graph-padding request."""
+    segments = 2 if vllm_config.parallel_config.prefill_context_parallel_size > 1 else 1
+    return vllm_config.scheduler_config.max_num_seqs * segments + 1
+
+
 def use_dcp_q_replicate(vllm_config) -> bool:
     """Resolve dense MLA Q replication before creating Q projections."""
     parallel = vllm_config.parallel_config
