@@ -4,6 +4,7 @@
 
 import json
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,7 @@ from vllm.config import (
     replace,
 )
 from vllm.config.parallel import EPLBConfig
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -34,6 +36,8 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
+from vllm_ascend.ascend_config import is_draft_config_context
+from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.eagle import (
@@ -338,18 +342,35 @@ def eplb_worker_config(tmp_path):
         )
 
 
+@pytest.fixture
+def validate_eplb_on_cpu(monkeypatch):
+    # CPU platform validation does not run the Ascend EPLB hook. Exercise the
+    # real hook on every VllmConfig reconstruction, without accelerator setup.
+    original_check = current_platform.check_and_update_config
+
+    def check_and_update_config(config):
+        original_check(config)
+        _validate_eplb_config(config)
+
+    monkeypatch.setattr(current_platform, "check_and_update_config", check_and_update_config)
+
+
 @pytest.mark.parametrize(
-    ("tp_size", "pcp_size", "dp_size", "enabled", "redundant", "expected"),
+    ("tp_size", "pcp_size", "dp_size", "enabled", "redundant", "expected", "phase"),
     [
-        (1, 8, 1, True, 0, False),
-        (1, 8, 1, True, 8, False),
-        (2, 8, 1, True, 0, True),
-        (1, 8, 2, True, 0, True),
-        (2, 1, 1, True, 0, True),
-        (1, 8, 1, False, 0, False),
+        (1, 8, 1, True, 0, False, "prefill"),
+        (1, 8, 1, True, 0, False, "decode"),
+        (1, 8, 1, True, 8, False, "prefill"),
+        (2, 8, 1, True, 0, True, "prefill"),
+        (2, 8, 1, True, 0, True, "decode"),
+        (1, 8, 2, True, 0, True, "decode"),
+        (2, 1, 1, True, 0, True, "prefill"),
+        (1, 8, 1, False, 0, False, "all"),
     ],
 )
-def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size, dp_size, enabled, redundant, expected):
+def test_replicated_pcp_draft_eplb_policy(
+    eplb_worker_config, validate_eplb_on_cpu, tp_size, pcp_size, dp_size, enabled, redundant, expected, phase
+):
     config = replace(
         eplb_worker_config,
         parallel_config=replace(
@@ -362,19 +383,28 @@ def test_replicated_pcp_draft_eplb_policy(eplb_worker_config, tp_size, pcp_size,
                 eplb_worker_config.parallel_config.eplb_config, num_redundant_experts=redundant
             ),
         ),
+        additional_config={"eplb_config": {"load_collection_phase": phase, "stair_config": {"load_window_bins": 32}}},
     )
+    original_additional_config = deepcopy(config.additional_config)
     draft, replicated = prepare_replicated_pcp_config(config)
     assert replicated == (pcp_size > 1)
     assert draft.parallel_config.prefill_context_parallel_size == 1
     assert draft.parallel_config.enable_expert_parallel
     assert draft.parallel_config.enable_eplb == expected
     assert draft.parallel_config.eplb_config.num_redundant_experts == (redundant if expected else 0)
+    assert draft.additional_config == config.additional_config == original_additional_config
+    assert not is_draft_config_context()
     assert config.parallel_config.prefill_context_parallel_size == pcp_size
     assert config.parallel_config.enable_eplb == enabled
     assert config.parallel_config.eplb_config.num_redundant_experts == redundant
 
 
-def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_eplb_on_cpu, phase):
+    eplb_worker_config = replace(
+        eplb_worker_config, additional_config={"eplb_config": {"load_collection_phase": phase}}
+    )
+    original_additional_config = deepcopy(eplb_worker_config.additional_config)
     spec_config = eplb_worker_config.speculative_config
     # Exercise every loader override that reconstructs the config.
     spec_config.moe_backend = "auto"
@@ -386,9 +416,15 @@ def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
     speculator.draft_model_config = spec_config.draft_model_config
     speculator.speculative_config = spec_config
     speculator.draft_vllm_config = speculator._create_draft_vllm_config()
+
+    def get_draft_model(*, vllm_config, model_config):
+        assert is_draft_config_context()
+        assert vllm_config.additional_config["eplb_config"]["load_collection_phase"] == phase
+        raise RuntimeError("reached model construction")
+
     with (
         patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
-        patch.object(eagle_utils, "get_model", side_effect=RuntimeError("reached model construction")) as get_model,
+        patch.object(eagle_utils, "get_model", side_effect=get_draft_model) as get_model,
         pytest.raises(RuntimeError, match="reached model construction"),
     ):
         speculator.load_draft_model(torch.nn.Module(), set())
@@ -401,9 +437,22 @@ def test_pcp_only_eplb_draft_reaches_inherited_loader(eplb_worker_config):
     assert loading_config.attention_config.backend == AttentionBackendEnum.CUSTOM
     assert loading_config.load_config.load_format == "auto"
     assert not speculator.draft_vllm_config.parallel_config.enable_eplb
+    assert loading_config.additional_config == eplb_worker_config.additional_config == original_additional_config
+    assert not is_draft_config_context()
     assert eplb_worker_config.parallel_config.enable_eplb
     assert eplb_worker_config.parallel_config.prefill_context_parallel_size == 8
     assert eplb_worker_config.parallel_config.eplb_config.__dict__["_vllm_ascend_eplb_auto_selected"]
+
+
+def test_replicated_pcp_config_restores_marker_after_validation_failure(eplb_worker_config, validate_eplb_on_cpu):
+    eplb_worker_config.additional_config = {"eplb_config": []}
+    with pytest.raises(TypeError, match="must be a dictionary"):
+        prepare_replicated_pcp_config(eplb_worker_config)
+    assert not is_draft_config_context()
+    eplb_worker_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
+    eplb_worker_config.parallel_config.enable_eplb = False
+    with pytest.raises(ValueError, match="requires --enable-eplb"):
+        _validate_eplb_config(eplb_worker_config)
 
 
 def test_eagle_draft_config_disables_profiling_chunk() -> None:

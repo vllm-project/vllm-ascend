@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from vllm.config import VllmConfig, replace
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import validate_additional_config_bool
+from vllm_ascend.ascend_config import draft_config_context, validate_additional_config_bool
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -120,10 +120,15 @@ def disable_target_pcp_for_replicated_draft(
         model_state.pcp_manager = target_pcp_manager
 
 
+@draft_config_context()
 def prepare_replicated_pcp_config(
     vllm_config: VllmConfig,
 ) -> tuple[VllmConfig, bool]:
-    """Return the draft execution config and whether target PCP is replicated."""
+    """Return the draft execution config and whether target PCP is replicated.
+
+    The release runner reconstructs this config before the draft loader runs.
+    Its existing PCP-only EPLB policy must also retain the target's phase.
+    """
     target_parallel_config = vllm_config.parallel_config
     replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
     if replicated_pcp:
