@@ -50,6 +50,7 @@ from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    KVCacheRuntimeShapesAndDtypes,
     PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enabling_mlapo,
@@ -135,6 +136,42 @@ class AscendMLABackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
+    @classmethod
+    def get_runtime_shapes_and_dtypes(
+        cls,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Return NHD Tensor shapes and storage dtypes for FIA and FlashMLA."""
+        if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+            raise ValueError("MLA runtime views require component dimensions in the cache spec.")
+        block_size = spec.block_size if kernel_block_size is None else kernel_block_size
+        if block_size <= 0 or spec.block_size % block_size:
+            raise ValueError("MLA kernel block size must divide the manager block size.")
+        kernel_blocks_per_manager = spec.block_size // block_size
+        itemsize = spec.dtype.itemsize
+        if spec.page_size_bytes % (kernel_blocks_per_manager * itemsize):
+            raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
+        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
+        prefix = (num_blocks * kernel_blocks_per_manager, block_size, spec.num_kv_heads)
+        widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
+            raise ValueError("MLA kernel slot is smaller than its cache components.")
+        if spec.mla_cache_layout == "token_interleaved":
+            widths = (sum(widths),)
+        return tuple((*prefix, width) for width in widths), (spec.dtype,) * len(widths)
+
+    @staticmethod
+    def format_runtime_views(
+        spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        if spec.mla_cache_layout == "token_interleaved":
+            (cache,) = components
+            return cache
+        return tuple(components)
+
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         use_dcp = is_dcp_enabled()
@@ -179,6 +216,9 @@ class AscendMLAAttention(MLAAttention):
         # Reuse the physical packing selected by the execution implementation.
         values.update(
             num_heads=storage_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
             model_version=spec.model_version or getattr(self, "model_version", None),
             indexes_kv_by_block_stride=bool(
                 getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)

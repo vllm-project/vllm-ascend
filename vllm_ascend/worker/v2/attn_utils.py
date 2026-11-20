@@ -68,7 +68,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder, DeepseekV41CacheBackend
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1433,7 +1433,7 @@ def create_cache_component_views(
     base = raw_tensor.storage_offset() * raw_tensor.element_size()
     offset = base
     views = []
-    for shape, dtype in zip(cache_shapes, cache_dtypes):
+    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
         itemsize = get_dtype_size(dtype)
         if offset % itemsize or block_stride % itemsize:
             raise ValueError(f"Cache component placement is not aligned to {dtype}.")
@@ -1479,31 +1479,28 @@ def create_kv_cache_runtime_views(
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
             if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
-            shapes = group.backend.get_runtime_shapes(
+            raw_cache = backing[start : start + span]
+            block_stride = descriptor.block_stride
+            cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            dtypes: tuple[torch.dtype, ...] = (spec.dtype,)
-            if getattr(spec, "scale_dim", 0):
-                dtypes += (spec.scale_dtype,)
-            # Backend shapes describe bytes in [B,H,N,C]; kernels consume NHD
-            # views with the content dimension expressed in dtype elements.
-            cache_shapes = [
-                (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-                for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-            ]
-            components = create_cache_component_views(
-                backing[start : start + span],
-                cache_shapes,
-                dtypes,
-                descriptor.block_stride,
-            )
-            if issubclass(group.backend, DeepseekV41CacheBackend):
-                caches[name] = components[0] if len(components) == 1 else tuple(components)
-            else:
-                caches[name] = components
+
+            if cache_shapes and cache_shapes[0][0] != num_blocks:
+                runtime_blocks = cache_shapes[0][0]
+                if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
+                    raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+                kernel_blocks_per_manager = runtime_blocks // num_blocks
+                if block_stride != spec.page_size_bytes:
+                    raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+                if block_stride % kernel_blocks_per_manager:
+                    raise ValueError("Physical pages must split into whole kernel slots.")
+                block_stride //= kernel_blocks_per_manager
+            components = create_cache_component_views(raw_cache, cache_shapes, dtypes, block_stride)
+            format_views = getattr(group.backend, "format_runtime_views", None)
+            caches[name] = format_views(spec, components) if format_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1563,7 +1560,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
