@@ -9,6 +9,7 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/test_hash_router_padding_a5.py: 30
   # Initial scheduling estimate for the checkpoint-free FULL replay regression.
   tests/e2e/pull_request/one_card/test_dsv41_adaptive_graph.py: 60
   tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600
