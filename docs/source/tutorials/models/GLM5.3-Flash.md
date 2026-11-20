@@ -268,7 +268,7 @@ are not interchangeable.
 | `--max-num-seqs`, `--max-num-batched-tokens` | Scheduler limits for sequences and tokens processed in an iteration, respectively. These are per engine, not aggregate proxy limits; tune them together with context length and memory capacity. |
 | `--gpu-memory-utilization` | Fraction of device memory budgeted to the model executor. Despite the flag name, it also applies to the NPU backend. Leave room for communication buffers and other device allocations. |
 | `--quantization ascend` | Selects the Ascend quantization loader for ModelSlim checkpoints. Use weights matching the selected hardware and quantization format. |
-| `--kv-cache-dtype`, `--attention_config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
+| `--kv-cache-dtype`, `--attention-config.indexer_kv_dtype` | Select the attention and indexer KV cache formats. Follow the selected checkpoint and hardware example; the supported formats differ across platforms. |
 | `--tool-call-parser glm47`, `--enable-auto-tool-choice` | Parse tool calls and allow automatic tool selection. Configure them on both API-serving roles in a PD deployment. |
 | `--reasoning-parser` | Separates reasoning from the final answer. Use `glm47` for all examples on this page. |
 | `--safetensors-load-strategy prefetch` | Reads checkpoint files into the operating system page cache before workers load them. It can help with network or high-latency storage and needs sufficient host memory; it does not preload weights into NPU memory. See [vLLM weight-loading options](https://docs.vllm.ai/en/latest/configuration/engine_args/#--safetensors-load-strategy). |
@@ -333,7 +333,9 @@ are not interchangeable.
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_BUFFSIZE=1024
 
-    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    vllm serve "$MODEL_PATH" \
       --host 0.0.0.0 \
       --port 8000 \
       --max-model-len 1048576 \
@@ -1147,7 +1149,7 @@ For DP>1, the launcher executes the role script without filtering.
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
-      --attention_config.indexer_kv_dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
       --gpu-memory-utilization 0.9 \
       --async-scheduling \
       --tool-call-parser glm47 \
@@ -1286,7 +1288,7 @@ For DP>1, the launcher executes the role script without filtering.
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
-      --attention_config.indexer_kv_dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
       --gpu-memory-utilization 0.92 \
       --async-scheduling \
       --tool-call-parser glm47 \
@@ -1583,7 +1585,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     is `37000`; the Decode values are `37100-37107`. `lookup_rpc_port`
     identifies the local IPC endpoint between the pooling scheduler and
     worker. Prefill loads and saves pooled prefixes; Decode receives KV
-    cache through `MooncakeConnectorV2` and contributes DDR pool memory.
+    cache through `MooncakeConnectorV2` and contributes DRAM pool memory.
 
 === "A3 series"
 
@@ -1628,9 +1630,9 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     commands below. Replace `<CONFIG_DIRECTORY>` with the absolute directory
     containing the configuration files on each node.
 
-    This example stores pooled KV cache in DDR memory on both the Prefill
+    This example stores pooled KV cache in DRAM memory on both the Prefill
     and Decode nodes. The Memcache LocalService initializes within each vLLM
-    worker, and each worker contributes `20GB` of DDR memory to the pool.
+    worker, and each worker contributes `20GB` of DRAM memory to the pool.
     Decode receives KV cache through `MooncakeConnectorV2`.
 
     On the Prefill node, create `mmc-meta.conf`:
@@ -1655,10 +1657,10 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     ock.mmc.local_service.storage.enabled = false
     ```
 
-    `dram.size` specifies the DDR capacity allocated per worker. Prefill
+    `dram.size` specifies the DRAM capacity allocated per worker. Prefill
     (DP2/TP1/PCP8) and Decode (DP8/TP2) each start 16 workers. At `20GB` per worker,
-    each node contributes `320GB`, for a total DDR pool capacity of `640GB`.
-    Reserve sufficient DDR memory for the operating system and vLLM. For
+    each node contributes `320GB`, for a total DRAM pool capacity of `640GB`.
+    Reserve sufficient DRAM memory for the operating system and vLLM. For
     `device_sdma`, keep each non-zero size aligned to `1GB`.
 
     `world_size` is the maximum number of LocalServices supported by Memcache.
@@ -1788,7 +1790,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     2. Start Decode with DP8/TP2. Wait until all eight engines on ports
        `9900-9907` are ready and their Memcache LocalServices have reserved
-       the configured DDR pool memory.
+       the configured DRAM pool memory.
 
        ```shell
        python launch_online_dp.py --template ./run_d.sh \
@@ -1798,7 +1800,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
 
     3. Start Prefill with DP2/TP1/PCP8. Wait until both engines on ports
        `9081-9082` are ready and their Memcache LocalServices have reserved
-       the configured DDR pool memory.
+       the configured DRAM pool memory.
 
        ```shell
        python launch_online_dp.py --template ./run_p.sh \
@@ -2164,7 +2166,7 @@ Use the role-specific values in the 950DT products example when deploying on tha
   1048576 tokens and a utilization of 0.92 on both roles.
 - Decode enables `recompute_scheduler_enable: true` to allow recomputation
   on Prefill when Decode KV cache is insufficient. Keep it disabled on Prefill.
-- For repeated prefixes, use the DDR KV Cache Pool configuration in
+- For repeated prefixes, use the DRAM KV Cache Pool configuration in
   [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool). Both
   Prefill and Decode contribute `20GB` per worker. Confirm pool hits when
   evaluating reuse benefits.
