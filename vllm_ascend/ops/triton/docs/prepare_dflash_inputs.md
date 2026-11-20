@@ -24,10 +24,10 @@
       rank-local position using vLLM's `cp_local_slot` interleave rules.
       The same manager size indexes the public block table:
       `block_index = min(local_position // block_size, block_table_stride - 1)`,
-      `kernel_block = block_table[req, block_index]`, and
-      `slot = kernel_block * block_size + local_position % block_size`.
+      `manager_block_id = block_table[req, block_index]`, and
+      `slot = manager_block_id * block_size + local_position % block_size`.
       The slot is `PAD_SLOT_ID` when the rank does not own the position or
-      `kernel_block == 0`.
+      `manager_block_id == 0`.
     - Query construction:
       `query_pos = last_valid_pos + 1 + query_offset`;
       query offset `0` uses the request bonus token, and subsequent offsets use
@@ -149,7 +149,7 @@ The cases cover the captured DFlash inference shapes plus branch-specific cases:
 - query-position clamping at `max_model_len`;
 - full-capacity execution with minimal graph padding.
 - DCP ranks 0, 1, and 2; interleave sizes 1, 2, and 4; cross-block positions,
-  non-owned positions, and null kernel blocks.
+  non-owned positions, and null manager blocks.
 - DCP with manager `block_size=384`, validating rank 5 ownership and
   matching manager-table lookup around position 2048.
 
@@ -161,7 +161,8 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_
 
 ## Example
 
-The optimized launcher is called by the DFlash worker wrapper:
+The single-card tests call the Ascend launcher directly. The example below
+shows that launcher with a manager-granular block table:
 
 ```python
 prepare_dflash_inputs_triton(
