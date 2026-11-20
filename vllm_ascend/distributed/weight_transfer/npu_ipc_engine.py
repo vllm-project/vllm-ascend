@@ -11,6 +11,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
+from torch.multiprocessing.reductions import reduce_tensor
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
 )
@@ -29,6 +30,10 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_producer,
 )
 from vllm_ascend.utils import vllm_version_is
+
+# Unpacked tensors keep independent IPC exports, but share a control-plane RPC.
+# A single larger parameter is sent alone. No full checkpoint is retained.
+UNPACKED_BATCH_SIZE_BYTES = 256 * 2**20
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -133,6 +138,32 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
         super().__init__(config, vllm_config, device, model)
         self._packed_importer = NPUPackedBufferImporter()
 
+    def start_weight_update(self) -> None:
+        """Discard an interrupted packed import before starting a full update."""
+        self._packed_importer.close()
+        super().start_weight_update()
+
+    def shutdown(self) -> None:
+        self._packed_importer.close()
+
+    def update_weights(self, update_info: dict[str, Any]) -> None:
+        """Bind the assigned device for rebuilding, loading and synchronization."""
+        with torch.npu.device(self.device):
+            super().update_weights(update_info)
+
+    def finish_weight_update(self) -> None:
+        """Release packed mappings even when reload finalization fails."""
+        try:
+            if vllm_version_is("0.33.0"):
+                super().finish_weight_update()
+            else:
+                from vllm.model_executor.model_loader.reload import finish_reload
+
+                with torch.npu.device(self.device):
+                    finish_reload(self.model, self.model_config, self.device)
+        finally:
+            self._packed_importer.close()
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -199,6 +230,13 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 # differ between sender and receiver.
                 list_args[6] = device_index
                 weight = rebuild_npu_tensor(*list_args)
+                if not vllm_version_is("0.33.0"):
+                    # The main sender releases each export after update_weights
+                    # replies. A layerwise loader may retain its input until
+                    # later parameters arrive, so give it owned local storage.
+                    # The inherited update wrapper synchronizes these copies
+                    # before replying and releasing the producer's allocation.
+                    weight = weight.clone(memory_format=torch.contiguous_format)
                 weights.append((name, weight))
 
         mtp_check = nullcontext()
@@ -215,9 +253,9 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     """Trainer-side NPU IPC weight transfer engine.
 
-    Inherits the handshake, send lifecycle, unpacked sender and payload
-    construction. Only CUDA-specific initialization, collectives, packing
-    and cleanup need NPU implementations.
+    Inherits the handshake, send lifecycle and payload construction. NPU
+    initialization, collectives, packing and cleanup are local. On main the
+    unpacked path sends bounded batches of owned exports to limit trainer HBM.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
@@ -309,3 +347,48 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
             # colocated worker is still reading the current chunk, silently
             # corrupting the transfer.
             self._post_send_sync()
+
+    def _send_unpacked(self, source: "WeightSource") -> list[torch.Tensor]:
+        """Keep a bounded batch of exports until its update is consumed.
+
+        Holding an entire full checkpoint on each trainer NPU can exceed HBM
+        when it shares a chip with a TP worker. The worker synchronizes each
+        update before replying; all trainer ranks wait before releasing a
+        batch. The receiver copies imports to owned storage for loaders that
+        retain their inputs across update calls.
+        """
+        if vllm_version_is("0.33.0"):
+            return super()._send_unpacked(source)
+        pending: list[tuple[str, torch.Tensor]] = []
+        pending_bytes = 0
+        for name, tensor in source.iter_full():
+            size = tensor.numel() * tensor.element_size()
+            if pending and pending_bytes + size > UNPACKED_BATCH_SIZE_BYTES:
+                self._send_unpacked_batch(pending)
+                pending.clear()
+                pending_bytes = 0
+            # A source may reuse its buffer on the next iteration. Keep an
+            # independent export alive until every worker has consumed it.
+            pending.append((name, tensor.detach().clone(memory_format=torch.contiguous_format)))
+            pending_bytes += size
+            if pending_bytes >= UNPACKED_BATCH_SIZE_BYTES:
+                self._send_unpacked_batch(pending)
+                pending.clear()
+                pending_bytes = 0
+        if pending:
+            self._send_unpacked_batch(pending)
+        return []
+
+    def _send_unpacked_batch(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        """Acknowledge a batch before its producer-owned storage is released."""
+        torch.npu.current_stream().synchronize()
+        handles = self._all_gather_and_merge_handles(
+            [{self.npu_uuid: reduce_tensor(weight)[1]} for _, weight in weights]
+        )
+        self._do_send(
+            names=[name for name, _ in weights],
+            dtype_names=[str(weight.dtype).removeprefix("torch.") for _, weight in weights],
+            shapes=[list(weight.shape) for _, weight in weights],
+            ipc_handles=handles,
+        )
+        self._post_send_sync()

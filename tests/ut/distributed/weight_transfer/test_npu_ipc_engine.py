@@ -40,7 +40,7 @@ import os
 import sys
 import types
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import replace
 from importlib import import_module
@@ -77,6 +77,7 @@ def _patch_rebuild_npu_tensor(rebuild_func):
     )
 
 
+@contextmanager
 def _patch_reload_module(*, initialize=None, finalize=None):
     """Provide the lazy-imported reload helpers without importing vLLM models."""
     fake_mod = types.ModuleType("vllm.model_executor.model_loader.reload")
@@ -84,10 +85,11 @@ def _patch_reload_module(*, initialize=None, finalize=None):
     fake_mod.finalize_layerwise_reload = finalize or MagicMock()  # type: ignore[attr-defined]
     fake_mod.start_reload = fake_mod.initialize_layerwise_reload  # type: ignore[attr-defined]
     fake_mod.finish_reload = fake_mod.finalize_layerwise_reload  # type: ignore[attr-defined]
-    return patch.dict(
-        sys.modules,
-        {"vllm.model_executor.model_loader.reload": fake_mod},
-    )
+    with (
+        patch.dict(sys.modules, {"vllm.model_executor.model_loader.reload": fake_mod}),
+        patch.object(torch.npu, "device", side_effect=lambda _: nullcontext()),
+    ):
+        yield
 
 
 def test_init_accepts_model_argument():
@@ -118,7 +120,10 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
     rebuild_args = (None, None, None, None, None, None, 999, None)
     fake_reduce = MagicMock(return_value=("rebuild_func_sentinel", rebuild_args))
 
-    with patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce):
+    with (
+        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce),
+        patch(f"{_MODULE}.reduce_tensor", fake_reduce),
+    ):
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
             NPUIPCTrainerWeightTransferEngine,
         )
@@ -131,7 +136,11 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
         source = MagicMock()
         source.__iter__.return_value = iter([("model.weight", torch.zeros(3))])
         source.iter_full.return_value = iter([("model.weight", torch.zeros(3))])
-        with patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles):
+        with (
+            patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles),
+            patch.object(engine, "_post_send_sync"),
+            patch("torch.npu.current_stream", return_value=MagicMock()),
+        ):
             engine._send_unpacked(source)
 
         stored = engine.client.update_weights.call_args.args[0]["ipc_handles"][0]["node-0"]
@@ -185,6 +194,8 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     engine.model.load_weights.assert_called_once()
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
+    if not vllm_version_is("0.33.0"):
+        assert received["weights"][0][1].data_ptr() != rebuilt_weight.data_ptr()
     # Index 6 (device index) overwritten with the receiver's device.
     assert seen["args"][6] == device_index
 
@@ -192,12 +203,16 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
 def test_start_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
+    engine.packed = False
+    engine._packed_importer = MagicMock()
+    engine._packed_consumer = None
     mock_init = MagicMock()
 
     with _patch_reload_module(initialize=mock_init):
         engine.start_weight_update()
 
     mock_init.assert_called_once_with(engine.model)
+    engine._packed_importer.close.assert_called_once_with()
 
 
 def test_finish_weight_update():
@@ -206,6 +221,7 @@ def test_finish_weight_update():
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._packed_importer = MagicMock()
+    engine._packed_consumer = None
     mock_finalize = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
@@ -497,3 +513,61 @@ def test_packed_export_replacement_and_failed_rebuild_release():
         assert refs[1]() is not None
         importer.close()
         assert refs[1]() is None
+
+
+def test_unpacked_batches_own_reused_inputs_until_ack():
+    engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
+    engine.npu_uuid = "node-0"
+    engine._all_gather_and_merge_handles = lambda handles: handles
+    refs, batches, active = [], [], []
+
+    def reduce(weight):
+        refs.append(weakref.ref(weight))
+        return None, (len(refs) - 1,)
+
+    def send(**payload):
+        active[:] = [handle["node-0"][0] for handle in payload["ipc_handles"]]
+        batches.append((payload["names"], [refs[i]().clone() for i in active]))
+
+    def acknowledge():
+        assert all(refs[i]() is not None for i in active)
+
+    def inputs():
+        tensor = torch.empty(2, dtype=torch.bfloat16)
+        for index in range(5):
+            yield str(index), tensor.fill_(index)
+
+    engine._do_send = send
+    engine._post_send_sync = acknowledge
+    with (
+        patch(f"{_MODULE}.vllm_version_is", return_value=False),
+        patch(f"{_MODULE}.UNPACKED_BATCH_SIZE_BYTES", 8),
+        # A Mock records its Tensor arguments and would itself keep exports alive.
+        patch(f"{_MODULE}.reduce_tensor", new=reduce),
+        patch.object(torch.npu, "current_stream", return_value=MagicMock()),
+    ):
+        result = engine._send_unpacked(types.SimpleNamespace(iter_full=inputs))
+    assert result == []
+    assert [names for names, _ in batches] == [["0", "1"], ["2", "3"], ["4"]]
+    for names, weights in batches:
+        for name, weight in zip(names, weights, strict=True):
+            assert torch.equal(weight, torch.full((2,), int(name), dtype=torch.bfloat16))
+    assert all(ref() is None for ref in refs)
+
+
+def test_unpacked_sends_oversized_parameter_alone():
+    engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
+    engine.npu_uuid = "node-0"
+    engine._all_gather_and_merge_handles = lambda handles: handles
+    engine._post_send_sync = MagicMock()
+    engine._do_send = MagicMock()
+    weights = [("a", torch.ones(2)), ("large", torch.ones(5)), ("b", torch.ones(1))]
+    with (
+        patch(f"{_MODULE}.vllm_version_is", return_value=False),
+        patch(f"{_MODULE}.UNPACKED_BATCH_SIZE_BYTES", 12),
+        patch(f"{_MODULE}.reduce_tensor", return_value=(None, ("export",))),
+        patch.object(torch.npu, "current_stream", return_value=MagicMock()),
+    ):
+        engine._send_unpacked(types.SimpleNamespace(iter_full=lambda: iter(weights)))
+    assert [call.kwargs["names"] for call in engine._do_send.call_args_list] == [["a"], ["large"], ["b"]]
+    assert engine._post_send_sync.call_count == 3
