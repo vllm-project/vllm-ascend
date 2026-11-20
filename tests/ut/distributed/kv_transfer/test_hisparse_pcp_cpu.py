@@ -3,6 +3,7 @@
 """CPU contracts at the PCP / HiSparse boundary; no device kernels are run."""
 
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -423,7 +424,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl.hisparse_cache._prepare_for_batch(meta)
     impl.hisparse_cache.submit_layer_mirror = Mock()
     monkeypatch.setattr(module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
-    resources = {}
+    resources: dict[Any, Any] = {}
     monkeypatch.setattr(
         module,
         "current_workspace_manager",
