@@ -2343,8 +2343,9 @@ layerwise setting and topology.
       }'
     ```
 
-    Both roles use a 200,000-token maximum length, memory utilization 0.92,
-    and three MTP tokens. Prefill uses eager mode, an 8,192-token batch budget,
+    Both roles use a 200,000-token maximum length and memory utilization 0.92.
+    Prefill uses one MTP token and Decode uses three. Prefill uses eager mode,
+    an 8,192-token batch budget,
     64 sequences, and FlashComm1. Decode uses a 256-token
     batch budget, 32 sequences, `FULL_DECODE_ONLY` graphs, sparse C8 options,
     and recomputation scheduling.
@@ -3808,7 +3809,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
         ```
 
     2. Export the settings from [Prepare MemCache](#glm53-pool-a2-prepare)
-       on **every** Prefill node. Start both PP stages of each instance in
+       on **every** Prefill node. Start all four PP stages of the instance in
        separate terminals before waiting for the instance to become ready:
 
         ```shell
@@ -4850,12 +4851,14 @@ For common environment, installation, and general parameter issues, please refer
 
 ### Q: How to enable function calling for GLM-5.2 and GLM-5.3?
 
-A: Please add following configurations in vLLM startup command:
+A: Append these options to the complete startup command for your selected
+hardware and deployment scenario. They enable tool-call parsing, reasoning
+parsing, and automatic tool selection, respectively:
 
 ```shell
 --tool-call-parser glm47 \
 --reasoning-parser glm47 \
---enable-auto-tool-choice \
+--enable-auto-tool-choice
 ```
 
 ### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
