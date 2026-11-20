@@ -31,7 +31,13 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
@@ -3656,8 +3662,10 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 class TestKVPoolWorkerReachableMasks(unittest.TestCase):
     """Layerwise reachable-mask filtering on the save/load paths."""
 
-    def _make_worker(self):
-        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
+    def _make_worker(self, kv_cache_config=None):
+        worker = make_worker(
+            self, extra_config={"backend": "memcache"}, use_layerwise=True, kv_cache_config=kv_cache_config
+        )
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = 1
         worker.grouped_block_size = [16]
@@ -3709,6 +3717,49 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         expected = ([False, True],)
         worker.token_database.store_mask = MagicMock(return_value=expected)
         self.assertEqual(worker._compute_reachable_store_masks(request), expected)
+
+    def test_gva_save_skips_recycled_swa_slots(self):
+        spec = SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32)
+        group = KVCacheGroupSpec(["layer.0"], spec)
+        worker = self._make_worker(SimpleNamespace(kv_cache_groups=[group], prefix_cache_retention_interval=None))
+        worker.cache_coordinator = object()
+        worker.token_database.store_mask = MagicMock(return_value=([True, True, True, False],))
+        ids = [10, 0, 12, 13]
+        request = self._make_request(block_ids=ids, block_ids_by_group=[ids], num_prompt_tokens=128)
+        request.store_masks = worker._compute_reachable_store_masks(request)
+        worker.m_store.batch_alloc.return_value = [101, 102]
+
+        worker._data_plane._alloc_gvas_for_save([request])
+        worker._process_save_for_layer_batch([request], 0)
+
+        self.assertEqual(worker.m_store.batch_alloc.call_args.args[0], ["llama-7b@h0@0", "llama-7b@h2@0"])
+        ranges = worker.layer_save_tasks[0][0].block_ranges
+        self.assertEqual([(r.start_block, r.end_block) for r in ranges], [(0, 1), (2, 3)])
+
+    def test_missing_swa_group_cannot_use_flat_block_ids_for_a_partial_save(self):
+        worker = self._make_worker()
+        worker.num_kv_cache_groups = 2
+        worker.grouped_block_size = [16, 16]
+        worker.group_uses_align_state = [False, False]
+        worker.swa_group_ids = {1}
+        worker.cacheable_group_ids = [0, 1]
+        worker.group_block_len[1] = [64]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+        worker._global_group_alloc_size = MagicMock(return_value=64)
+        worker._make_layerwise_full_key = MagicMock(side_effect=lambda group, block_hash: f"{group}:{block_hash}")
+        worker._make_layerwise_partial_key = MagicMock(
+            side_effect=lambda request, group, index, end: f"partial:{group}"
+        )
+        worker.m_store.batch_alloc.side_effect = lambda keys, *args: [101] * len(keys)
+        request = self._make_request(target_token_len=63, save_end_token=48)
+
+        request.store_masks = worker._compute_reachable_store_masks(request)
+        worker._data_plane._alloc_gvas_for_save([request])
+        worker._process_save_for_layer_batch([request], 0, group_id=1)
+
+        self.assertEqual(request.partial_save_gva_per_group, [101, 0])
+        self.assertEqual(request.block_gvas_by_group_np[1].size, 0)
+        self.assertEqual(worker.layer_save_tasks[0], [])
 
     def test_aligned_prefill_chunk_preserves_real_recurrent_checkpoint(self):
         worker = self._make_worker()

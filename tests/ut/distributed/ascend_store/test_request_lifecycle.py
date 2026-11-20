@@ -372,7 +372,10 @@ def test_raw_sequence_lifecycle(
                 worker.get_finished(output.finished_req_ids)
                 worker.clear_connector_metadata()
                 break
-        assert seen_load == (expected_hit > 0)
+        assert seen_load == (expected_hit > 0), (
+            f"{req_id}: prompt={len(tokens)}, expected external hit={expected_hit}, "
+            f"expected local hit={expected_local}, compute starts={compute_starts}"
+        )
         assert saw_decode
         if req_id == "producer":
             assert sum(start < len(tokens) for start in compute_starts) >= 2

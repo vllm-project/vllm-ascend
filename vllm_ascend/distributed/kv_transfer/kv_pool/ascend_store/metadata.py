@@ -12,7 +12,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+    RSWASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -301,6 +308,20 @@ def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int
     group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
     assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
     return group_ids
+
+
+def get_swa_group_ids(kv_cache_config: KVCacheConfig | None, cacheable_group_ids: Sequence[int]) -> set[int]:
+    if kv_cache_config is None:
+        return set()
+    result = set()
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if group_id not in cacheable_group_ids:
+            continue
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if any(isinstance(item, (SlidingWindowSpec, RSWASpec)) for item in specs):
+            result.add(group_id)
+    return result
 
 
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:
@@ -1082,6 +1103,16 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+
+    def swa_save_block_ids(self, group_id: int) -> list[int] | np.ndarray:
+        """A flat physical block table belongs to group zero only."""
+        if self.block_ids_by_group_np is not None and group_id < len(self.block_ids_by_group_np):
+            return self.block_ids_by_group_np[group_id]
+        if group_id == 0 and self.block_ids_np is not None:
+            return self.block_ids_np
+        if group_id < len(self.block_ids_by_group):
+            return self.block_ids_by_group[group_id]
+        return []
 
     @property
     def block_ids(self) -> list[int]:

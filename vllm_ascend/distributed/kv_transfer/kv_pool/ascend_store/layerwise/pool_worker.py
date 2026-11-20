@@ -65,6 +65,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
     get_group_block_size,
+    get_swa_group_ids,
     infer_dcp_mismatch_info,
     is_kv_save_role,
 )
@@ -114,6 +115,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        self.swa_group_ids = (
+            get_swa_group_ids(kv_cache_config, self.cacheable_group_ids) if self.use_layerwise_transfer else set()
+        )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
@@ -1136,31 +1140,35 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             except AssertionError:
                 masks = None
         align_groups = getattr(self, "group_uses_align_state", [])
-        if not any(align_groups):
+        swa_group_ids = getattr(self, "swa_group_ids", ())
+        if not any(align_groups) and not swa_group_ids:
             return masks
-        # Mamba align slots can be null even when their token range is
-        # reachable. They do not contain a state snapshot. Do not allocate
-        # readable pool keys or copy block zero for these holes; the
-        # non-layerwise path applies the same skip_null_blocks rule.
+        # Reachability describes logical windows. A recycled SWA slot or an
+        # empty Mamba align slot has no physical state to publish.
         result: list[list[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
         for group_id, uses_align in enumerate(align_groups):
-            if not uses_align:
+            if not uses_align and group_id not in swa_group_ids:
                 continue
-            block_ids = request.block_ids_by_group[group_id]
+            block_ids = (
+                request.swa_save_block_ids(group_id)
+                if group_id in swa_group_ids
+                else request.block_ids_by_group[group_id]
+            )
             original_mask = result[group_id]
             num_blocks = request.save_end_token // self.grouped_block_size[group_id]
             # An aligned prefill chunk ends with a real recurrent checkpoint,
             # even when it is not the final prompt replay boundary. Keep that
             # checkpoint before the next chunk moves/reuses its state slots.
             chunk_checkpoint = (
-                request.num_prompt_tokens is not None
+                uses_align
+                and request.num_prompt_tokens is not None
                 and request.target_token_len == request.save_end_token
                 and request.save_end_token % self.cache_transfer_granularity == 0
                 and 0 < request.target_token_len < request.num_prompt_tokens
             )
             result[group_id] = [
                 index < len(block_ids)
-                and block_ids[index] != 0
+                and bool(block_ids[index])
                 and (
                     original_mask is None
                     or (index < len(original_mask) and original_mask[index])

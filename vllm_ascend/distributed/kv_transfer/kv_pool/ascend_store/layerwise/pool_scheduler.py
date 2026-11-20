@@ -135,7 +135,16 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             return self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
 
         if self.use_layerwise_transfer:
-            return self._get_layerwise_hit_tokens(request, prompt_token_len, num_computed_tokens)
+            token_len = prompt_token_len
+            if len(self.cacheable_group_ids) != len(self.original_block_size):
+                # Rebuilding private compressor state requires a whole page.
+                # Bound the lookup before checking sparse SWA windows: trimming
+                # a complete checkpoint afterwards can require an older window
+                # block that was never retained (e.g. 2048 -> 1920).
+                token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
+                if token_len < self.cache_transfer_granularity:
+                    return None
+            return self._get_layerwise_hit_tokens(request, token_len, num_computed_tokens)
 
         raise RuntimeError(f"Unsupported layerwise data plane: {self.layerwise_data_plane!r}")
 

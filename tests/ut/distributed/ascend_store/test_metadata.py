@@ -42,7 +42,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
+    get_swa_group_ids,
     infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
     uses_hybrid_kv_cache,
@@ -67,6 +69,11 @@ class TestCacheLayoutHelpers(unittest.TestCase):
             kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
         )
         self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
+
+    def test_empty_cache_config_has_no_swa_group(self):
+        config = SimpleNamespace(kv_cache_groups=[])
+        ids = infer_cacheable_group_ids(config.kv_cache_groups)
+        self.assertEqual(get_swa_group_ids(config, ids), set())
 
     def test_uses_hybrid_kv_cache(self):
         groups = [

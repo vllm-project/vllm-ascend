@@ -11,8 +11,6 @@ from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    RSWASpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -30,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    get_swa_group_ids,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -103,21 +102,7 @@ class BaseKVPoolScheduler(ABC):
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        self.swa_group_ids = {
-            group_id
-            for group_id in self.cacheable_group_ids
-            if kv_cache_groups is not None
-            and (
-                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
-                or (
-                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
-                    and any(
-                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
-                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
-                    )
-                )
-            )
-        }
+        self.swa_group_ids = get_swa_group_ids(kv_cache_config, self.cacheable_group_ids)
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
