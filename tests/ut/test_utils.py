@@ -23,12 +23,12 @@ from unittest import mock
 import pytest
 import torch
 import torch_npu
+
 from tests.ut.base import TestBase
+from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
-
-from vllm_ascend import ascend_forward_context, utils
 
 
 def test_use_updatable_graph_does_not_require_current_vllm_config():

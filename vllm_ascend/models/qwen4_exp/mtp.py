@@ -24,6 +24,7 @@ from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
+
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA

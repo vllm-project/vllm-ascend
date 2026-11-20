@@ -32,6 +32,13 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend.ascend_config import (
+    KVPPConfig,
+    StairConfig,
+    get_ascend_config,
+    init_ascend_config,
+    is_draft_config_context,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -41,14 +48,6 @@ from vllm_ascend.device.hardware_profile import (
     get_current_hardware_profile,
 )
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
-
-from vllm_ascend.ascend_config import (
-    KVPPConfig,
-    StairConfig,
-    get_ascend_config,
-    init_ascend_config,
-    is_draft_config_context,
-)
 
 # isort: off
 from vllm_ascend.utils import (

@@ -33,11 +33,13 @@ import numpy as np
 import regex as re
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.envs as envs_ascend
 from packaging.version import InvalidVersion, Version
 from safetensors.torch import load_file
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -45,8 +47,6 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
-
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -896,6 +896,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if _ASCEND_CUSTOMOP_IS_REIGISTERED:
         return
     from vllm.model_executor.custom_op import CustomOp
+
     from vllm_ascend.ops.activation import (
         AscendQuickGELU,
         AscendSiluAndMul,
@@ -2148,6 +2149,7 @@ def use_updatable_graph(
         return True
 
     from vllm.distributed import get_dcp_group
+
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
     # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA

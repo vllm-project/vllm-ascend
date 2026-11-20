@@ -57,6 +57,8 @@ from vllm.v1.worker.gpu.model_runner import (
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
     get_mc2_tokens_capacity,
@@ -106,29 +108,6 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
-from vllm_ascend.worker.utils import disable_compilation
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_state,
-    skip_ring_state_update,
-)
-from vllm_ascend.worker.v2.eplb import AscendEPLBController
-from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
-from vllm_ascend.worker.v2.kvpp import KVPPRuntime
-from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
-from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import (
-    AscendV2KVBlockZeroer,
-    C8KVBlockZeroer,
-    communicator_switch,
-    prepare_v41_dummy_ring_state,
-    prepare_v41_source_rope,
-    torch_cuda_wrapper,
-)
-
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -145,8 +124,29 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+from vllm_ascend.worker.utils import disable_compilation
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_state,
+    skip_ring_state_update,
+)
+from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
+from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
+from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.states import AscendRequestState
+from vllm_ascend.worker.v2.utils import (
+    AscendV2KVBlockZeroer,
+    C8KVBlockZeroer,
+    communicator_switch,
+    prepare_v41_dummy_ring_state,
+    prepare_v41_source_rope,
+    torch_cuda_wrapper,
+)
 
 
 @dataclass(frozen=True)

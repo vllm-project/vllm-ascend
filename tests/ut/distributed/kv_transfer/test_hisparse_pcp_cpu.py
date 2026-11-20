@@ -91,9 +91,8 @@ def test_metadata_builder_uses_physical_token_capacity(monkeypatch):
 def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
     monkeypatch, world_size, dtype, rope_dim, decode
 ):
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-
     from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
 
     impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
@@ -280,9 +279,8 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
 
 
 def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
-    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
-
     from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 
     def init(builder, *args, **kwargs):
         builder.device = torch.device("cpu")
@@ -339,9 +337,9 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch, use_pcp, num_decodes, prefill_lens, padding
 ):
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
-    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 
     from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 
     query_lens = torch.tensor([1] * num_decodes + list(prefill_lens), dtype=torch.int32)
     starts = torch.cat((torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0).to(torch.int32)))
@@ -434,9 +432,9 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
 )
 def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill, dtype):
     from vllm.config.compilation import CUDAGraphMode
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
     import vllm_ascend.attention.sfa_hisparse as module
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
 
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)

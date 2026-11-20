@@ -10,6 +10,7 @@ from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,

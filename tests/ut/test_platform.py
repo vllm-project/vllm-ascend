@@ -6,8 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from tests.ut.base import TestBase
-from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -15,10 +13,12 @@ from vllm.platforms import PlatformEnum
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
+
+from tests.ut.base import TestBase
+from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-
-from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
@@ -183,8 +183,9 @@ def test_v4_index_cache_recomputes_first_local_c4(stage_start, pattern):
     ],
 )
 def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, all2all_backend, expected):
-    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
     from vllm.config.parallel import ParallelConfig
+
+    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
 
     config = ParallelConfig(
         data_parallel_size=dp_size,
@@ -260,8 +261,9 @@ def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
 
 @pytest.mark.parametrize("dcp_size", [2, 16])
 def test_parallel_config_preserves_upstream_pcp_dcp_sizes(dcp_size):
-    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
     from vllm.config.parallel import ParallelConfig
+
+    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
 
     config = ParallelConfig(
         tensor_parallel_size=8,
@@ -2453,13 +2455,12 @@ class TestNPUPlatform(TestBase):
 
     def test_refresh_block_size_then_the_hook_keeps_the_physical_size(self):
         """The whole chain: default 16 settles to 32, the parent derives 4096, 32 survives."""
+        from vllm_ascend import utils as vllm_ascend_utils
         from vllm_ascend.attention.dsa_v1 import (
             AscendDSAC4Backend,
             AscendDSAC128Backend,
             AscendDSASWABackend,
         )
-
-        from vllm_ascend import utils as vllm_ascend_utils
 
         backends = [AscendDSASWABackend, AscendDSAC4Backend, AscendDSAC128Backend]
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -2498,8 +2499,9 @@ class TestNPUPlatform(TestBase):
         platform._validate_parallel_config(vllm_config)
 
         # Exercise Pydantic construction, not just the patched Python method.
-        import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
         from vllm.config.parallel import ParallelConfig
+
+        import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
 
         parallel = ParallelConfig(
             tensor_parallel_size=1,
