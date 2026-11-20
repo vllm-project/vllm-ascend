@@ -28,7 +28,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_staging import MooncakeHostStaging
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, buffer_arrays
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -585,7 +589,7 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(self.device_id)
 
     @classmethod
-    def validate_mixed_bulk_config(cls) -> None:
+    def validate_hisparse_colocated_config(cls) -> None:
         config = MooncakeStoreConfig.load_from_env()
         if config.protocol != "ascend" or not os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
             raise ValueError("HiSparse with Mooncake requires protocol=ascend and a Store-owned transfer engine")
@@ -640,7 +644,7 @@ class MooncakeBackend(Backend):
             self._store_initialized = False
 
     def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
-        if any(buffer.host for buffer in buffers):
+        if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
             self._register_host_buffers(buffers)
             return
         ptrs, lengths = buffer_arrays(buffers)
@@ -775,12 +779,19 @@ class MooncakeBackend(Backend):
         return int(method(keys))
 
     def put(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
     ) -> list[bool] | bool:
-        if host is not None:
+        if memory_location is not None:
             if self._host_staging is not None:
-                return self._host_staging.put(keys, addrs, sizes, self._build_replicate_config(), host=host)
-            if host:
+                return self._host_staging.put(
+                    keys, addrs, sizes, self._build_replicate_config(), memory_location=memory_location
+                )
+            if memory_location is MemoryLocation.HOST:
                 raise RuntimeError("Mooncake Host buffers have not been registered")
         self.ensure_initialized()
         assert self.store is not None
@@ -815,11 +826,18 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None):
-        if host is not None:
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        if memory_location is not None:
             if self._host_staging is not None:
-                return self._host_staging.get(keys, addrs, sizes, host=host)
-            if host:
+                return self._host_staging.get(keys, addrs, sizes, memory_location=memory_location)
+            if memory_location is MemoryLocation.HOST:
                 raise RuntimeError("Mooncake Host buffers have not been registered")
         if self._lazy_init and not self._store_initialized:
             logger.error(

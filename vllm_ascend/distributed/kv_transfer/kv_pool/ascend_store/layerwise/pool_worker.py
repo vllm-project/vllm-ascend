@@ -456,7 +456,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def shutdown(self) -> None:
         if self._closed:
             return
-        self._stop_transfer_threads()
+        threads = [thread for thread in (self.kv_send_thread, self.kv_recv_thread) if thread is not None]
+        for thread in threads:
+            thread.stop()
+        for thread in threads:
+            if thread.is_alive():
+                thread.join()
         try:
             if self._step_load_keys:
                 result = self.m_store.batch_remove_lease(list(self._step_load_keys))
@@ -504,6 +509,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
         can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
         if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
+            ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreLayerSendingThread(
                 self.m_store,
                 self.token_database,
@@ -512,7 +518,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.tp_size,
                 self.dcp_size,
                 self.page_size_bytes,
-                threading.Event(),
+                ready_event_sending,
                 self.num_layers,
                 self.layer_save_finished_events,
                 self.sync_save_events,
@@ -526,6 +532,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids=self._invalid_block_ids,
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
             )
+            self.kv_send_thread.start()
+            ready_event_sending.wait()
+        ready_event = threading.Event()
         self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
             self.m_store,
             self.token_database,
@@ -534,7 +543,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self.tp_size,
             self.dcp_size,
             self.page_size_bytes,
-            threading.Event(),
+            ready_event,
             self.layer_load_finished_events,
             self.layer_save_finished_events,
             self.sync_save_events,
@@ -549,10 +558,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             invalid_block_ids_lock=self._invalid_block_ids_lock,
             load_abort_event=self._layer_load_aborted,
         )
-        for thread in (self.kv_recv_thread, self.kv_send_thread):
-            if thread is not None:
-                thread.save_disabled = self._save_disabled
-        self._start_threads_and_wait()
+        self.kv_recv_thread.save_disabled = self._save_disabled
+        if self.kv_send_thread is not None:
+            self.kv_send_thread.save_disabled = self._save_disabled
+        self.kv_recv_thread.start()
+        ready_event.wait()
+        self._transfer_threads_started = True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.use_recoverssm:

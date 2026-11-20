@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
@@ -26,27 +27,29 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 _TRANSFER_SHUTDOWN_POLL_S = 0.1
 
 
-def get_by_residency(
+def get_bulk_by_memory_location(
     backend: Backend,
     keys: list[str],
     addrs: list[list[int]],
     sizes: list[list[int]],
     *,
-    host_keys: list[bool],
+    memory_locations: list[MemoryLocation],
     tp_rank: int = 0,
 ) -> list[int] | None:
     """Group and rotate homogeneous batches, then restore input key order."""
-    if not len(keys) == len(addrs) == len(sizes) == len(host_keys):
-        raise ValueError("Bulk GET requires one buffer list and memory kind per key")
+    if not len(keys) == len(addrs) == len(sizes) == len(memory_locations):
+        raise ValueError("Bulk GET requires one buffer list and memory location per key")
     results = [-1] * len(keys)
-    for host in (False, True):
-        indices = [i for i, is_host in enumerate(host_keys) if is_host == host]
+    for memory_location in (MemoryLocation.DEVICE, MemoryLocation.HOST):
+        indices = [i for i, location in enumerate(memory_locations) if location is memory_location]
         if not indices:
             continue
         rotation = tp_rank % len(indices)
         indices = indices[rotation:] + indices[:rotation]
         batch_keys = [keys[i] for i in indices]
-        codes = backend.get(batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], host=host)
+        codes = backend.get(
+            batch_keys, [addrs[i] for i in indices], [sizes[i] for i in indices], memory_location=memory_location
+        )
         if codes is None:
             return None
         for i, code in zip(indices, require_aligned_batch_results("Bulk GET", batch_keys, codes), strict=True):
@@ -68,7 +71,6 @@ class KVTransferThread(threading.Thread):
         dcp_size: int = 1,
         ready_event: threading.Event | None = None,
         name: str = "KVTransferThread",
-        host_resident_groups: frozenset[int] = frozenset(),
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -78,7 +80,6 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
-        self.host_resident_groups = host_resident_groups
         self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
         # Serialize request submission with the transition to a fatal state.
@@ -95,11 +96,16 @@ class KVTransferThread(threading.Thread):
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
 
-    def _mark_failed_requests(self, requests: list[ReqMeta], *, finish_receiving: bool = False) -> None:
-        logger.error("KV pool transfer failed for requests=%s", [request.req_id for request in requests])
+    def _mark_failed_requests(self, requests: list[ReqMeta]) -> None:
+        logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
         for request in requests:
             request.can_save = False
+        with self.done_task_lock:
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
         self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+
+    def _invalidate_failed_request_blocks(self, requests: list[ReqMeta]) -> None:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(
                 block_id
@@ -109,10 +115,6 @@ class KVTransferThread(threading.Thread):
                 for block_id in group
                 if block_id > 0
             )
-        with self.done_task_lock:
-            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
-            if finish_receiving:
-                self.finished_requests.update(request.req_id for request in requests)
 
     def get_and_clear_failed_requests(self) -> set[str]:
         with self.done_task_lock:
@@ -132,8 +134,7 @@ class KVTransferThread(threading.Thread):
             if self._stopping.is_set():
                 return
             if self._fatal_error is not None:
-                logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
-                self._handle_rejected_request(request)
+                self._reject_failed_submission(request)
                 return
             self.request_queue.put(request)
 
@@ -346,17 +347,16 @@ class KVTransferThread(threading.Thread):
         except Exception:
             pass
 
+    def _initialize_for_transfer(self) -> bool:
+        self._set_os_thread_name()
+        self.m_store.set_device()
+        self.ready_event.set()
+        return True
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
-        try:
-            self._set_os_thread_name()
-            self.m_store.set_device()
-        except BaseException as error:
-            self._fatal_error = error
+        if not self._initialize_for_transfer():
             return
-        finally:
-            # Registration waits for this signal on both success and failure.
-            self.ready_event.set()
         while True:
             request_data = None
             try:
@@ -389,9 +389,8 @@ class KVTransferThread(threading.Thread):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
         pass
 
-    def _handle_rejected_request(self, request_data: Any) -> None:
-        """Allow subclasses to report submissions made after a fatal error."""
-        pass
+    def _reject_failed_submission(self, request_data: Any) -> None:
+        logger.error("Reject KV transfer submission to failed thread %s: %s", self.name, self._fatal_error)
 
     def lookup(
         self,
@@ -491,7 +490,19 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-class KVCacheStoreSendingThread(KVTransferThread):
+class _WholeBlockKVTransferThread(KVTransferThread):
+    """Report startup failure to the whole-block worker waiting on readiness."""
+
+    def _initialize_for_transfer(self) -> bool:
+        try:
+            return super()._initialize_for_transfer()
+        except BaseException as error:
+            self._fatal_error = error
+            self.ready_event.set()
+            return False
+
+
+class KVCacheStoreSendingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -509,7 +520,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
-        host_resident_groups: frozenset[int] = frozenset(),
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
             m_store,
@@ -520,8 +531,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheSendingThread",
-            host_resident_groups=host_resident_groups,
         )
+        self.host_memory_group_ids = host_memory_group_ids
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
         self.put_step = put_step
@@ -1008,8 +1019,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # This request's readiness event covers all subsequent group PUTs.
                 current_event = None
             put_result: bool | list[bool] | None
-            if self.host_resident_groups:
-                put_result = self.m_store.put(keys, addrs, sizes, host=group_id in self.host_resident_groups)
+            if self.host_memory_group_ids:
+                memory_location = (
+                    MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                )
+                put_result = self.m_store.put(keys, addrs, sizes, memory_location=memory_location)
                 if put_result is None:
                     logger.error("KV store returned no bulk PUT status for request %s", req_id)
                     return False
@@ -1050,7 +1064,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
 
-class KVCacheStoreRecvingThread(KVTransferThread):
+class KVCacheStoreRecvingThread(_WholeBlockKVTransferThread):
     def __init__(
         self,
         m_store: Backend,
@@ -1064,7 +1078,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
-        host_resident_groups: frozenset[int] = frozenset(),
+        host_memory_group_ids: frozenset[int] = frozenset(),
     ):
         super().__init__(
             m_store,
@@ -1075,8 +1089,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheStoreRecvingThread",
-            host_resident_groups=host_resident_groups,
         )
+        self.host_memory_group_ids = host_memory_group_ids
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
@@ -1094,10 +1108,22 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if queued is not None:
                 failed.append(queued)
             self.request_queue.task_done()
-        self._mark_failed_requests(failed, finish_receiving=True)
+        self._finish_failed_receives(failed)
 
-    def _handle_rejected_request(self, request_data: ReqMeta) -> None:
-        self._mark_failed_requests([request_data], finish_receiving=True)
+    def _reject_failed_submission(self, request_data: ReqMeta) -> None:
+        super()._reject_failed_submission(request_data)
+        self._finish_failed_receives([request_data])
+
+    def _finish_failed_receives(self, requests: list[ReqMeta]) -> None:
+        logger.error("KV pool receive failed for requests=%s", [request.req_id for request in requests])
+        for request in requests:
+            request.can_save = False
+        self.save_disabled.set()
+        self._invalidate_failed_request_blocks(requests)
+        # Publish failure and receive completion together for scheduler polling.
+        with self.done_task_lock:
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
+            self.finished_requests.update(request.req_id for request in requests)
 
     def get_and_clear_receive_results(
         self, loading_req_ids: set[str], preempted_req_ids: set[str]
@@ -1132,7 +1158,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     mask_num,
                 )
                 if loaded is False:
-                    self._mark_failed_requests([req_meta], finish_receiving=True)
+                    self._finish_failed_receives([req_meta])
                 else:
                     self.set_finished_request(req_id)
                 return
@@ -1141,7 +1167,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            host_keys: list[bool] | None = [] if self.host_resident_groups else None
+            memory_locations: list[MemoryLocation] | None = [] if self.host_memory_group_ids else None
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
@@ -1173,15 +1199,17 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
-                    if host_keys is not None:
-                        host_keys.append(group_id in self.host_resident_groups)
+                    if memory_locations is not None:
+                        memory_locations.append(
+                            MemoryLocation.HOST if group_id in self.host_memory_group_ids else MemoryLocation.DEVICE
+                        )
             if not key_list:
                 self.set_finished_request(req_id)
                 return
             # Mixed GETs rotate within each memory kind and return codes in input
             # order. Ordinary GETs rotate the whole batch, including block IDs.
             rotation = self.tp_rank % len(key_list)
-            if host_keys is None and rotation:
+            if memory_locations is None and rotation:
                 key_list = key_list[rotation:] + key_list[:rotation]
                 addr_list = addr_list[rotation:] + addr_list[:rotation]
                 size_list = size_list[rotation:] + size_list[:rotation]
@@ -1195,11 +1223,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
-            if host_keys is None:
+            if memory_locations is None:
                 ret = self.m_store.get(key_list, addr_list, size_list)
             else:
-                ret = get_by_residency(
-                    self.m_store, key_list, addr_list, size_list, tp_rank=self.tp_rank, host_keys=host_keys
+                ret = get_bulk_by_memory_location(
+                    self.m_store,
+                    key_list,
+                    addr_list,
+                    size_list,
+                    tp_rank=self.tp_rank,
+                    memory_locations=memory_locations,
                 )
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
@@ -1207,9 +1240,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list),
                 )
-            if host_keys is not None or getattr(self.m_store, "strict_get_results", False) is True:
+            if memory_locations is not None or getattr(self.m_store, "strict_get_results", False) is True:
                 if ret is None or len(ret) != len(key_list) or any(r != 0 for r in ret):
-                    self._mark_failed_requests([req_meta], finish_receiving=True)
+                    self._finish_failed_receives([req_meta])
                     return
             elif ret is None or any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(block_id_list, ret if ret is not None else [1] * len(key_list))

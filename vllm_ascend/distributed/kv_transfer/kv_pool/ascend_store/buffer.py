@@ -3,17 +3,25 @@
 """Memory geometry shared by pool workers and transport backends."""
 
 from dataclasses import dataclass
+from enum import Enum
 
 # Device registration includes an aligned slab prefix. Host ranges must never
 # be rounded down: bytes before a Host allocation do not belong to the pool.
 DEVICE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
+class MemoryLocation(Enum):
+    """Location of the local memory addressed by a pool transfer."""
+
+    HOST = "host"
+    DEVICE = "device"
+
+
 @dataclass(frozen=True, kw_only=True)
 class BufferDescriptor:
     address: int
     size_bytes: int
-    host: bool = False
+    memory_location: MemoryLocation = MemoryLocation.DEVICE
     alignment_bytes: int = 1
 
     def __post_init__(self) -> None:

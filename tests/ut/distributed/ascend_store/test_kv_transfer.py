@@ -45,11 +45,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend, MmcDirect
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
-    get_by_residency,
+    get_bulk_by_memory_location,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -414,6 +415,18 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             save_failure_checker=save_failure_checker,
         )
         return thread, load_finished, save_finished, sync_events
+
+    def test_device_initialization_failure_does_not_signal_layerwise_ready(self):
+        thread, _, _, _ = self._make_thread()
+        thread.m_store.set_device.side_effect = RuntimeError("cannot bind layerwise receiver to device")
+
+        with (
+            patch.object(thread, "_set_os_thread_name"),
+            self.assertRaisesRegex(RuntimeError, "cannot bind layerwise receiver"),
+        ):
+            thread.run()
+
+        self.assertFalse(thread.ready_event.is_set())
 
     def test_gva_load_failure_policy(self):
         for hybrid in (False, True):
@@ -1011,13 +1024,13 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         store.requires_exists_before_put = True
         db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, i) for i in range(2)], [16, 16], None)
         db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [16]})
-        sender = KVCacheStoreSendingThread(store, db, 16, tp_rank=0, host_resident_groups=frozenset({1}))
+        sender = KVCacheStoreSendingThread(store, db, 16, tp_rank=0, host_memory_group_ids=frozenset({1}))
         order = []
         event = MagicMock()
         event.synchronize.side_effect = lambda: order.append("ready")
 
-        def put(keys, addrs, sizes, *, host):
-            order.append("host" if host else "device")
+        def put(keys, addrs, sizes, *, memory_location):
+            order.append(memory_location.value)
             return [True]
 
         store.put.side_effect = put
@@ -1112,7 +1125,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         db = ChunkedTokenDatabase([KeyMetadata("m", 0, 0, 0, group) for group in (0, 1)], [16, 16], None)
         db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
         store = MagicMock(spec=MemcacheBackend)
-        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=0, host_resident_groups=frozenset({0}))
+        thread = KVCacheStoreRecvingThread(store, db, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
         entered = threading.Event()
         release = threading.Event()
 
@@ -1170,7 +1183,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         db.set_group_buffers(
             {0: [ctypes.addressof(host)], 1: [ctypes.addressof(device)]}, {0: [16], 1: [16]}, {0: [16], 1: [16]}
         )
-        thread = KVCacheStoreRecvingThread(backend, db, 16, tp_rank=0, host_resident_groups=frozenset({0}))
+        thread = KVCacheStoreRecvingThread(backend, db, 16, tp_rank=0, host_memory_group_ids=frozenset({0}))
         batches = []
         expected = {0: b"a" * 16 + b"b" * 16, 1: b"c" * 16 + b"d" * 16}
 
@@ -1293,11 +1306,11 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
             db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
             store = MagicMock(spec=MemcacheBackend)
 
-            def get(keys, addrs, sizes, *, host):
-                return [result[0] if host else result[1]] * len(keys)
+            def get(keys, addrs, sizes, *, memory_location):
+                return [result[0] if memory_location is MemoryLocation.HOST else result[1]] * len(keys)
 
             store.get.side_effect = get
-            thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_resident_groups=frozenset({0}))
+            thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_memory_group_ids=frozenset({0}))
 
             worker = KVPoolWorker.__new__(KVPoolWorker)
             worker.kv_recv_thread = thread
@@ -1387,7 +1400,10 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         assert result.finished_recving is None
         assert not result.failed_recving
         for store in (first_store, delayed_store):
-            assert [call.kwargs["host"] for call in store.get.call_args_list] == [False, True]
+            assert [call.kwargs["memory_location"] for call in store.get.call_args_list] == [
+                MemoryLocation.DEVICE,
+                MemoryLocation.HOST,
+            ]
         device_call, host_call = delayed_store.get.call_args_list
         assert "@group:1" in device_call.args[0][0]
         assert device_call.args[1:] == ([[2096]], [[32]])
@@ -1398,7 +1414,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         failed = [
             ReqMeta(req_id=req_id, block_ids_by_group=[[2], [3]]) for req_id in ("preempted", "failed", "waiting")
         ]
-        thread._mark_failed_requests(failed, finish_receiving=True)
+        thread._finish_failed_receives(failed)
         thread.set_finished_request("ready")
 
         assert thread.get_and_clear_receive_results({"preempted", "failed", "ready"}, {"preempted"}) == (
@@ -1697,16 +1713,27 @@ def test_bulk_get_rotates_within_memory_kinds_and_restores_original_order():
     store = MagicMock(spec=MemcacheBackend)
     seen = []
 
-    def get(keys, addrs, sizes, *, host):
-        seen.append((keys, host))
+    def get(keys, addrs, sizes, *, memory_location):
+        seen.append((keys, memory_location))
         return [int(key[-1]) for key in keys]
 
     store.get.side_effect = get
     keys = ["host0", "device1", "host2", "device3", "host4"]
-    assert get_by_residency(
-        store, keys, [[i] for i in range(5)], [[8]] * 5, host_keys=[True, False, True, False, True], tp_rank=1
+    assert get_bulk_by_memory_location(
+        store,
+        keys,
+        [[i] for i in range(5)],
+        [[8]] * 5,
+        memory_locations=[
+            MemoryLocation.HOST,
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+        ],
+        tp_rank=1,
     ) == list(range(5))
-    assert seen == [(["device3", "device1"], False), (["host2", "host4", "host0"], True)]
+    assert seen == [(["device3", "device1"], MemoryLocation.DEVICE), (["host2", "host4", "host0"], MemoryLocation.HOST)]
 
 
 @pytest.mark.parametrize("result", [[], [0, 0], None])
@@ -1716,7 +1743,9 @@ def test_bulk_get_rejects_missing_or_misaligned_statuses(result):
     store = MagicMock(spec=MemcacheBackend)
     store.get.return_value = result
     if result is None:
-        assert get_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True]) is None
+        assert (
+            get_bulk_by_memory_location(store, ["key"], [[100]], [[8]], memory_locations=[MemoryLocation.HOST]) is None
+        )
     else:
         with pytest.raises(BatchResultShapeError, match="results for 1"):
-            get_by_residency(store, ["key"], [[100]], [[8]], host_keys=[True])
+            get_bulk_by_memory_location(store, ["key"], [[100]], [[8]], memory_locations=[MemoryLocation.HOST])

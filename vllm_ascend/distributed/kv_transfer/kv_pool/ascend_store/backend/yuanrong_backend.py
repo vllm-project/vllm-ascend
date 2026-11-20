@@ -9,7 +9,11 @@ from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, buffer_arrays
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
 
 
 @dataclass
@@ -114,7 +118,7 @@ class YuanrongBackend(Backend):
         return cls(parallel_config, enable_data_plane=False)
 
     def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
-        if any(buffer.host for buffer in buffers):
+        if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
             raise ValueError("Yuanrong does not support Host pool buffers")
         self._registered_buffers = buffer_arrays(buffers)
         self._register_buffers_if_needed()
@@ -143,9 +147,14 @@ class YuanrongBackend(Backend):
             return [0] * len(keys)
 
     def get(
-        self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
     ) -> list[int] | None:
-        if host:
+        if memory_location is MemoryLocation.HOST:
             raise ValueError("Yuanrong does not support Host pool transfers")
         assert self.store is not None
         failed_keys_for_log = keys
@@ -171,8 +180,15 @@ class YuanrongBackend(Backend):
             logger.debug("Failed to get key details. keys=%s", failed_keys_for_log)
             return None
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], *, host: bool | None = None) -> bool:
-        if host:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ) -> bool:
+        if memory_location is MemoryLocation.HOST:
             raise ValueError("Yuanrong does not support Host pool transfers")
         assert self.store is not None
         failed_keys_for_log = keys

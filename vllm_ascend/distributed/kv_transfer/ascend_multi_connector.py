@@ -8,7 +8,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -72,7 +72,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._draft_host_mirror_save_hook: HiSparseDraftHostMirrorSaveHook | None = None
         if (
             role == KVConnectorRole.WORKER
-            and has_hisparse_layout(kv_cache_config)
+            and has_hisparse_cache_layout(kv_cache_config)
             and vllm_config.speculative_config is not None
         ):
             self._configure_draft_host_mirror_save_hook()
@@ -108,7 +108,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
     def wait_for_save(self):
         if self._draft_host_mirror_save_hook is not None:
-            self._draft_host_mirror_save_hook.before_save()
+            self._draft_host_mirror_save_hook.flush_host_mirror_if_needed()
         super().wait_for_save()
 
     def configure_dspark_prefix_cache(self, vllm_config: "VllmConfig") -> bool:

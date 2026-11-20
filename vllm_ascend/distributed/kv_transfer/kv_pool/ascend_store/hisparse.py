@@ -16,7 +16,11 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AlignedKVCacheTensor
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    DEVICE_BUFFER_ALIGNMENT,
+    BufferDescriptor,
+    MemoryLocation,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -24,8 +28,8 @@ if TYPE_CHECKING:
 _HISPARSE_CACHE_NAMESPACE = "hisparse-v4"
 
 
-def has_hisparse_layout(config: KVCacheConfig | None) -> bool:
-    """Use the same layout predicate during connector setup and view binding."""
+def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
+    """Detect HiSparse cache planning before or after Host pool sizing."""
     if config is None:
         return False
     host_blocks = getattr(config, "hisparse_host_num_blocks", None)
@@ -34,9 +38,19 @@ def has_hisparse_layout(config: KVCacheConfig | None) -> bool:
     )
 
 
-def uses_hisparse_store(vllm_config: Any, config: KVCacheConfig | None) -> bool:
+def is_hisparse_ascendstore_enabled(vllm_config: Any, config: KVCacheConfig | None) -> bool:
     transfer = vllm_config.kv_transfer_config
-    return has_hisparse_layout(config) and transfer is not None and transfer.has_connector("AscendStoreConnector")
+    return has_hisparse_cache_layout(config) and transfer is not None and transfer.has_connector("AscendStoreConnector")
+
+
+def validate_hisparse_decode_config(vllm_config: VllmConfig, *, save_decode_cache: bool) -> None:
+    """Ensure decoded KV is mirrored to Host before it can be published."""
+    if not save_decode_cache:
+        return
+    # A newly decoded row can still be Resident-only when a block is published.
+    mirror = vllm_config.attention_config.hisparse_config
+    if mirror is None or not mirror.eager_host_mirror:
+        raise ValueError("save_decode_cache=true requires eager_host_mirror=true")
 
 
 def _checkpoint_identity(model: ModelConfig) -> tuple[str, str | None, str | None, str, str | None]:
@@ -47,9 +61,12 @@ def _checkpoint_identity(model: ModelConfig) -> tuple[str, str | None, str | Non
     return source, model.revision, model.code_revision, str(model.dtype), model.quantization
 
 
-def store_model_name(vllm_config: VllmConfig, config: KVCacheConfig | None, dcp_size: int, granularity: int) -> str:
+def build_pool_key_namespace(
+    vllm_config: VllmConfig, config: KVCacheConfig | None, dcp_size: int, granularity: int
+) -> str:
+    """Build the external key namespace for the model and its cache layout."""
     model = vllm_config.model_config
-    if not has_hisparse_layout(config):
+    if not has_hisparse_cache_layout(config):
         return model.model.rstrip("/").split("/")[-1]
     assert config is not None
     speculative = vllm_config.speculative_config
@@ -93,8 +110,8 @@ def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCach
 class HiSparseStoreViews:
     host_num_blocks: int
     host_layers: frozenset[str]
-    host_storage_keys: frozenset[int]
-    host_groups: frozenset[int]
+    host_storage_base_ptrs: frozenset[int]
+    host_memory_group_ids: frozenset[int]
 
     def block_count(self, layer_name: str) -> int | None:
         return self.host_num_blocks if layer_name in self.host_layers else None
@@ -104,8 +121,10 @@ class HiSparseStoreViews:
             BufferDescriptor(
                 address=start,
                 size_bytes=end - start,
-                host=storage in self.host_storage_keys,
-                alignment_bytes=1 if storage in self.host_storage_keys else DEVICE_BUFFER_ALIGNMENT,
+                memory_location=MemoryLocation.HOST
+                if storage in self.host_storage_base_ptrs
+                else MemoryLocation.DEVICE,
+                alignment_bytes=1 if storage in self.host_storage_base_ptrs else DEVICE_BUFFER_ALIGNMENT,
             )
             for storage, (start, end) in regions.items()
         ]
@@ -125,14 +144,14 @@ def plan_hisparse_store_views(
     excluded = set()
     normalized = {}
     host_layers = set()
-    host_storage_keys: set[int] = set()
-    host_groups = set()
+    host_storage_base_ptrs: set[int] = set()
+    host_memory_group_ids = set()
     for group_id, group in enumerate(config.kv_cache_groups):
         if not group.enable_kv_transfer:
             excluded.update(group.layer_names)
             continue
         if group.host_resident:
-            host_groups.add(group_id)
+            host_memory_group_ids.add(group_id)
         for name in group.layer_names:
             parts = as_cache_tuple(kv_caches[name])
             if group.role == "hisparse_indexer":
@@ -140,9 +159,9 @@ def plan_hisparse_store_views(
             normalized[name] = parts
             if group.host_resident:
                 host_layers.add(name)
-                host_storage_keys.update(get_storage_key(part) for part in parts)
+                host_storage_base_ptrs.update(get_storage_key(part) for part in parts)
     layout = HiSparseStoreViews(
-        host_num_blocks, frozenset(host_layers), frozenset(host_storage_keys), frozenset(host_groups)
+        host_num_blocks, frozenset(host_layers), frozenset(host_storage_base_ptrs), frozenset(host_memory_group_ids)
     )
     return layout, normalized, excluded
 

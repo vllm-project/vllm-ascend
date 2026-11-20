@@ -17,7 +17,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     require_hisparse_host_tcp,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import DEVICE_BUFFER_ALIGNMENT, BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    DEVICE_BUFFER_ALIGNMENT,
+    BufferDescriptor,
+    MemoryLocation,
+)
 
 
 def test_real_memcache_registration_rollback_and_retry(pytestconfig):
@@ -29,7 +33,7 @@ def test_real_memcache_registration_rollback_and_retry(pytestconfig):
     torch.npu.set_device(0)
     size = DEVICE_BUFFER_ALIGNMENT
     host_tensor = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-    host = BufferDescriptor(address=host_tensor.data_ptr(), size_bytes=size, host=True)
+    host = BufferDescriptor(address=host_tensor.data_ptr(), size_bytes=size, memory_location=MemoryLocation.HOST)
     allocations = [torch.empty(3 * size, dtype=torch.uint8, device="npu:0") for _ in range(2)]
     candidate, conflict = [
         BufferDescriptor(address=t.data_ptr() + (-t.data_ptr() % size), size_bytes=size, alignment_bytes=size)

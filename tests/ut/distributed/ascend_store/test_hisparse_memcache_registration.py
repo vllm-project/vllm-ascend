@@ -24,12 +24,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MemcacheBackend,
     MmcDirect,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
     aligned_hisparse_allocation_config,
-    store_model_name,
+    build_pool_key_namespace,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_by_residency
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import get_bulk_by_memory_location
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 from vllm_ascend.hisparse.binding import prepare_hisparse_cache_views
 
@@ -52,13 +52,13 @@ def test_hisparse_pool_keys_track_checkpoint_identity():
     config = SimpleNamespace(model_config=_checkpoint("team-a/glm", "v1"), speculative_config=None)
 
     def key():
-        return store_model_name(config, cache, 1, 128)
+        return build_pool_key_namespace(config, cache, 1, 128)
 
     original = key()
     for model, revision in [("team-b/glm", "v1"), ("team-a/glm", "v2")]:
         config.model_config = _checkpoint(model, revision)
         assert key() != original
-        assert store_model_name(config, None, 1, 128) == "glm"
+        assert build_pool_key_namespace(config, None, 1, 128) == "glm"
 
     # Object-store staging directories and public serving aliases can change on each rank or restart.
     config.model_config = _checkpoint("/tmp/worker-1", "v1", model_weights="s3://weights/glm")
@@ -81,9 +81,9 @@ def test_relative_checkpoint_keys_follow_the_local_directory(tmp_path, monkeypat
         model.mkdir(parents=True)
         monkeypatch.chdir(parent)
         config = SimpleNamespace(model_config=_checkpoint("./weights"), speculative_config=None)
-        relative = store_model_name(config, cache, 1, 128)
+        relative = build_pool_key_namespace(config, cache, 1, 128)
         config.model_config.model = str(model)
-        assert store_model_name(config, cache, 1, 128) == relative
+        assert build_pool_key_namespace(config, cache, 1, 128) == relative
         keys.append(relative)
     assert keys[0] != keys[1]
 
@@ -226,13 +226,19 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     ptrs = [buffer.address for buffer in buffers]
     lengths = [buffer.size_bytes for buffer in buffers]
     assert worker.m_store.register_buffer.call_args.kwargs == {}
-    assert [buffer for buffer in buffers if buffer.host] == [
-        BufferDescriptor(address=source.data_ptr(), size_bytes=num_host_blocks * 32768, host=True)
+    assert [buffer for buffer in buffers if buffer.memory_location is MemoryLocation.HOST] == [
+        BufferDescriptor(
+            address=source.data_ptr(), size_bytes=num_host_blocks * 32768, memory_location=MemoryLocation.HOST
+        )
     ]
-    assert all(buffer.alignment_bytes == SLAB_ALIGNMENT for buffer in buffers if not buffer.host)
+    assert all(
+        buffer.alignment_bytes == SLAB_ALIGNMENT
+        for buffer in buffers
+        if buffer.memory_location is MemoryLocation.DEVICE
+    )
     assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
     assert worker._transfer_layout is not None
-    assert worker._transfer_layout.host_groups == frozenset({0})
+    assert worker._transfer_layout.host_memory_group_ids == frozenset({0})
     if indexer_c8:
         assert lengths[ptrs.index(raw.data_ptr())] == indexer_offset + (num_device_blocks - 1) * 17408 + 16896
     worker.kv_cache_config.kv_cache_tensors = [
@@ -247,7 +253,9 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     config.model_config = _checkpoint("team/glm")
 
     def pool_key():
-        return store_model_name(config, worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity)
+        return build_pool_key_namespace(
+            config, worker.kv_cache_config, worker.dcp_size, worker.cache_transfer_granularity
+        )
 
     original_key = pool_key()
     worker.kv_cache_config.num_blocks += 1
@@ -326,16 +334,22 @@ def test_memcache_splits_host_and_device_batches_without_reordering(memcache_bac
     addresses = [[1100], [1100], [4000]]
     sizes = [[100], [100], [100]]
     backend.store.batch_put_from_layers.return_value = [0]
-    assert backend.put(keys[:1], addresses[:1], sizes[:1], host=True) == [True]
+    assert backend.put(keys[:1], addresses[:1], sizes[:1], memory_location=MemoryLocation.HOST) == [True]
     backend.store.batch_put_from_layers.assert_called_once_with(["host"], [[1100]], [[100]], MmcDirect.COPY_H2G.value)
-    assert get_by_residency(backend, keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
+    assert get_bulk_by_memory_location(
+        backend,
+        keys,
+        addresses,
+        sizes,
+        memory_locations=[MemoryLocation.HOST, MemoryLocation.DEVICE, MemoryLocation.DEVICE],
+    ) == [0, 0, -7]
     assert backend.store.batch_get_into_layers.call_args_list == [
         call(["device1", "device2"], [[1100], [4000]], [[100], [100]], MmcDirect.COPY_G2L.value),
         call(["host"], [[1100]], [[100]], MmcDirect.COPY_G2H.value),
     ]
-    with pytest.raises(ValueError, match="memory kind per key"):
-        get_by_residency(backend, keys, addresses, sizes, host_keys=[True])
-    assert backend.put(keys, addresses[:1], sizes, host=True) is False
+    with pytest.raises(ValueError, match="memory location per key"):
+        get_bulk_by_memory_location(backend, keys, addresses, sizes, memory_locations=[MemoryLocation.HOST])
+    assert backend.put(keys, addresses[:1], sizes, memory_location=MemoryLocation.HOST) is False
     assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
 
 
@@ -344,8 +358,8 @@ def test_memcache_bounds_each_hisparse_host_get_lease(memcache_backend) -> None:
     backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
     key_size = 130 * 1024 * 1024
 
-    assert get_by_residency(
-        backend, ["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, host_keys=[True] * 3
+    assert get_bulk_by_memory_location(
+        backend, ["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, memory_locations=[MemoryLocation.HOST] * 3
     ) == [
         0,
         -3106,
@@ -364,12 +378,18 @@ def test_memcache_oversized_hisparse_get_only_splits_the_host_batch(memcache_bac
     host_size = 257 * mib
     backend.store.batch_get_into_layers.side_effect = [[0, 0], [0], [0], [0]]
 
-    results = get_by_residency(
+    results = get_bulk_by_memory_location(
         backend,
         ["device1", "host1", "host-large", "device2", "host2"],
         [[1], [2], [3, 4], [5], [6]],
         [[device_size], [mib], [host_size - mib, mib], [device_size], [mib]],
-        host_keys=[False, True, True, False, True],
+        memory_locations=[
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+            MemoryLocation.HOST,
+            MemoryLocation.DEVICE,
+            MemoryLocation.HOST,
+        ],
     )
     assert results == [0] * 5
     assert backend.store.batch_get_into_layers.call_args_list == [
@@ -385,12 +405,12 @@ def test_memcache_hisparse_get_fails_when_sdk_result_count_differs(memcache_back
     backend = memcache_backend
     backend.store.batch_get_into_layers.side_effect = [[0], results]
 
-    result = get_by_residency(
+    result = get_bulk_by_memory_location(
         backend,
         ["host1", "device", "host2"],
         [[1], [2], [3]],
         [[100]] * 3,
-        host_keys=[True, False, True],
+        memory_locations=[MemoryLocation.HOST, MemoryLocation.DEVICE, MemoryLocation.HOST],
     )
     assert result is None
     assert "BatchResultShapeError" in caplog.text
@@ -439,7 +459,7 @@ def test_decode_put_requires_current_host_rows(save_decode, eager):
     )
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
     with (
-        patch.object(MemcacheBackend, "validate_mixed_bulk_config"),
+        patch.object(MemcacheBackend, "validate_hisparse_colocated_config"),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
         ) as scheduler,
@@ -547,7 +567,7 @@ def test_memcache_hisparse_registration_rolls_back_on_sdk_error(memcache_backend
     with pytest.raises(RuntimeError, match="buffer registration failed: size=20, result=-7"):
         backend.register_buffer(
             [
-                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
                 BufferDescriptor(address=200, size_bytes=20),
                 BufferDescriptor(address=300, size_bytes=30),
             ]
@@ -573,7 +593,7 @@ def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_b
     with pytest.raises(ValueError, match="SDK rejected registration") as raised:
         backend.register_buffer(
             [
-                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
                 BufferDescriptor(address=200, size_bytes=20),
                 BufferDescriptor(address=300, size_bytes=30),
             ]
@@ -588,7 +608,7 @@ def test_memcache_hisparse_registration_keeps_error_if_rollback_fails(memcache_b
 def test_memcache_hisparse_registration_rejects_invalid_descriptor(memcache_backend):
     backend = memcache_backend
     with pytest.raises(ValueError, match="address and size must be positive"):
-        backend.register_buffer([BufferDescriptor(address=100, size_bytes=0, host=True)])
+        backend.register_buffer([BufferDescriptor(address=100, size_bytes=0, memory_location=MemoryLocation.HOST)])
     backend.store.register_buffer.assert_not_called()
     assert backend._pending_buffers is None
 
@@ -599,27 +619,30 @@ def test_memcache_hisparse_rollback_keeps_earlier_registration_and_allows_retry(
     backend.store.unregister_buffer.return_value = 0
     backend.register_buffer(
         [
-            BufferDescriptor(address=100, size_bytes=10, host=True),
-            BufferDescriptor(address=100, size_bytes=10, host=True),
+            BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
+            BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
         ]
     )
 
     with pytest.raises(RuntimeError, match="result=-7"):
         backend.register_buffer(
             [
-                BufferDescriptor(address=100, size_bytes=10, host=True),
+                BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
                 BufferDescriptor(address=200, size_bytes=20),
                 BufferDescriptor(address=300, size_bytes=30),
             ]
         )
     backend.store.unregister_buffer.assert_called_once_with(200, 20)
     backend.register_buffer(
-        [BufferDescriptor(address=100, size_bytes=10, host=True), BufferDescriptor(address=200, size_bytes=20)]
+        [
+            BufferDescriptor(address=100, size_bytes=10, memory_location=MemoryLocation.HOST),
+            BufferDescriptor(address=200, size_bytes=20),
+        ]
     )
     with pytest.raises(RuntimeError, match="already registered with size=10, requested size=11"):
-        backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, host=True)])
+        backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, memory_location=MemoryLocation.HOST)])
     backend.unregister_buffer([100], [10])
-    backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, host=True)])
+    backend.register_buffer([BufferDescriptor(address=100, size_bytes=11, memory_location=MemoryLocation.HOST)])
     assert backend.store.register_buffer.call_args_list == [
         call(100, 10),
         call(200, 20),

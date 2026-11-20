@@ -10,7 +10,7 @@ import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_staging
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import BatchResultShapeError
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor, MemoryLocation
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def registered(monkeypatch):
     try:
         bulk.register(
             [
-                BufferDescriptor(address=host_ptr, size_bytes=ctypes.sizeof(host), host=True),
+                BufferDescriptor(address=host_ptr, size_bytes=ctypes.sizeof(host), memory_location=MemoryLocation.HOST),
                 BufferDescriptor(address=device_ptr, size_bytes=ctypes.sizeof(device)),
             ]
         )
@@ -55,7 +55,13 @@ def test_host_put_packs_payload_without_copying_gaps_and_reuses_bounded_buffer(r
         return [0] * len(keys)
 
     sdk.batch_put_from_multi_buffers.side_effect = save
-    assert bulk.put(["a", "b"], [[host_ptr, host_ptr + 8], [host_ptr + 18]], [[4, 6], [10]], None, host=True)
+    assert bulk.put(
+        ["a", "b"],
+        [[host_ptr, host_ptr + 8], [host_ptr + 18]],
+        [[4, 6], [10]],
+        None,
+        memory_location=MemoryLocation.HOST,
+    )
     assert seen == [(["a"], [b"abcdijklmn"]), (["b"], [b"stuvwx0123"])]
 
 
@@ -75,9 +81,9 @@ def test_get_preserves_key_order_and_does_not_publish_short_host_read(registered
         ["short", "good"],
         [[host_ptr], [host_ptr + 8]],
         [[8], [8]],
-        host=True,
+        memory_location=MemoryLocation.HOST,
     ) == [-1, 0]
-    assert bulk.get(["index"], [[device_ptr]], [[8]], host=False) == [0]
+    assert bulk.get(["index"], [[device_ptr]], [[8]], memory_location=MemoryLocation.DEVICE) == [0]
     assert host.raw[:16] == b"........kkkkkkkk"
     assert device.raw == b"kkkkkkkk"
 
@@ -86,7 +92,7 @@ def test_get_rejects_malformed_sdk_results(registered):
     bulk, sdk, host, _ = registered
     sdk.batch_get_into_multi_buffers.return_value = []
     with pytest.raises(BatchResultShapeError, match="0 results for 1"):
-        bulk.get(["bad"], [[ctypes.addressof(host)]], [[8]], host=True)
+        bulk.get(["bad"], [[ctypes.addressof(host)]], [[8]], memory_location=MemoryLocation.HOST)
     assert host.raw[:8] == b"........"
 
 
@@ -94,7 +100,7 @@ def test_get_rejects_malformed_sdk_results(registered):
 def test_invalid_host_geometry_never_reaches_sdk(registered, offset, size, message):
     bulk, sdk, host, _ = registered
     with pytest.raises(ValueError, match=message):
-        bulk.get(["bad"], [[ctypes.addressof(host) + offset]], [[size]], host=True)
+        bulk.get(["bad"], [[ctypes.addressof(host) + offset]], [[size]], memory_location=MemoryLocation.HOST)
     sdk.batch_get_into_multi_buffers.assert_not_called()
 
 
@@ -110,10 +116,10 @@ def test_mooncake_mixed_config_prevents_early_outer_timeout(monkeypatch, tmp_pat
     monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "5000")
     monkeypatch.delenv("ASCEND_ENABLE_USE_FABRIC_MEM", raising=False)
     if outer_timeout == "15":
-        MooncakeBackend.validate_mixed_bulk_config()
+        MooncakeBackend.validate_hisparse_colocated_config()
     else:
         with pytest.raises(ValueError, match="MC_TRANSFER_TIMEOUT"):
-            MooncakeBackend.validate_mixed_bulk_config()
+            MooncakeBackend.validate_hisparse_colocated_config()
 
 
 def test_mooncake_partial_registration_rolls_back_device_and_staging(monkeypatch):
@@ -131,7 +137,7 @@ def test_mooncake_partial_registration_rolls_back_device_and_staging(monkeypatch
     with pytest.raises(RuntimeError, match="registration failed.*-600"):
         backend.register_buffer(
             [
-                BufferDescriptor(address=100, size_bytes=32, host=True),
+                BufferDescriptor(address=100, size_bytes=32, memory_location=MemoryLocation.HOST),
                 BufferDescriptor(address=200, size_bytes=64),
                 BufferDescriptor(address=300, size_bytes=128),
             ]
@@ -155,14 +161,14 @@ def test_backend_routes_both_memory_kinds_through_the_same_get_and_put(registere
     monkeypatch.setattr(backend, "_build_replicate_config", Mock(return_value=object()))
     sdk.batch_put_from_multi_buffers.return_value = [0]
     sdk.batch_get_into_multi_buffers.return_value = [8]
-    for host_resident, buffer in ((True, host), (False, device)):
+    for memory_location, buffer in ((MemoryLocation.HOST, host), (MemoryLocation.DEVICE, device)):
         address = ctypes.addressof(buffer)
-        assert backend.put(["key"], [[address]], [[8]], host=host_resident) == [True]
+        assert backend.put(["key"], [[address]], [[8]], memory_location=memory_location) == [True]
         put_address = sdk.batch_put_from_multi_buffers.call_args.args[1][0][0]
-        assert (put_address == address) is (not host_resident)
-        assert backend.get(["key"], [[address]], [[8]], host=host_resident) == [0]
+        assert (put_address == address) is (memory_location is MemoryLocation.DEVICE)
+        assert backend.get(["key"], [[address]], [[8]], memory_location=memory_location) == [0]
         get_address = sdk.batch_get_into_multi_buffers.call_args.args[1][0][0]
-        assert (get_address == address) is (not host_resident)
+        assert (get_address == address) is (memory_location is MemoryLocation.DEVICE)
 
 
 def test_explicit_device_batch_keeps_the_device_only_backend_path(monkeypatch):
@@ -176,11 +182,11 @@ def test_explicit_device_batch_keeps_the_device_only_backend_path(monkeypatch):
     monkeypatch.setattr(backend, "_build_replicate_config", Mock(return_value=object()))
     backend.store.batch_put_from_multi_buffers.return_value = [0]
     backend.store.batch_get_into_multi_buffers.return_value = [8]
-    assert backend.put(["key"], [[100]], [[8]], host=False) == [True]
-    assert backend.get(["key"], [[100]], [[8]], host=False) == [0]
+    assert backend.put(["key"], [[100]], [[8]], memory_location=MemoryLocation.DEVICE) == [True]
+    assert backend.get(["key"], [[100]], [[8]], memory_location=MemoryLocation.DEVICE) == [0]
     for operation in (backend.put, backend.get):
         with pytest.raises(RuntimeError, match="Host buffers have not been registered"):
-            operation(["key"], [[100]], [[8]], host=True)
+            operation(["key"], [[100]], [[8]], memory_location=MemoryLocation.HOST)
 
 
 def test_host_get_completes_while_host_put_waits_in_sdk(registered):
@@ -202,10 +208,12 @@ def test_host_get_completes_while_host_put_waits_in_sdk(registered):
     sdk.batch_put_from_multi_buffers.side_effect = put
     sdk.batch_get_into_multi_buffers.side_effect = get
     with ThreadPoolExecutor(2) as executor:
-        sending = executor.submit(bulk.put, ["send"], [[host_ptr]], [[8]], None, host=True)
+        sending = executor.submit(bulk.put, ["send"], [[host_ptr]], [[8]], None, memory_location=MemoryLocation.HOST)
         try:
             assert entered.wait(5)
-            receiving = executor.submit(bulk.get, ["recv"], [[host_ptr + 8]], [[8]], host=True)
+            receiving = executor.submit(
+                bulk.get, ["recv"], [[host_ptr + 8]], [[8]], memory_location=MemoryLocation.HOST
+            )
             assert receiving.result(timeout=3) == [0]
             assert host.raw[:16] == b"........kkkkkkkk"
         finally:
@@ -225,8 +233,8 @@ def test_host_key_capacity_is_checked_before_sdk(registered, operation, parts):
 
     def transfer():
         if operation == "get":
-            return bulk.get(["boundary"], [addrs], [parts], host=True)
-        return bulk.put(["boundary"], [addrs], [parts], None, host=True)
+            return bulk.get(["boundary"], [addrs], [parts], memory_location=MemoryLocation.HOST)
+        return bulk.put(["boundary"], [addrs], [parts], None, memory_location=MemoryLocation.HOST)
 
     if sum(parts) <= 16:
         assert transfer() == ([0] if operation == "get" else [True])
@@ -241,7 +249,7 @@ def test_invalid_later_host_key_does_not_issue_earlier_batch(registered):
     bulk, sdk, host, _ = registered
     ptr = ctypes.addressof(host)
     with pytest.raises(ValueError, match="staging capacity"):
-        bulk.get(["first", "bad"], [[ptr], [ptr]], [[8], [17]], host=True)
+        bulk.get(["first", "bad"], [[ptr], [ptr]], [[8], [17]], memory_location=MemoryLocation.HOST)
     sdk.batch_get_into_multi_buffers.assert_not_called()
 
 
@@ -257,7 +265,7 @@ def test_staging_pages_are_faulted_and_zeroed_before_registration(monkeypatch):
 
     sdk.register_buffer.side_effect = register
     try:
-        bulk.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
+        bulk.register([BufferDescriptor(address=100, size_bytes=32, memory_location=MemoryLocation.HOST)])
     finally:
         bulk.unregister()
         bulk.close()
@@ -273,7 +281,7 @@ def test_backend_closes_store_before_releasing_failed_deregistration(monkeypatch
     sdk.register_buffer.return_value = 0
     sdk.unregister_buffer.return_value = -1
     bulk = mooncake_staging.MooncakeHostStaging(sdk)
-    bulk.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
+    bulk.register([BufferDescriptor(address=100, size_bytes=32, memory_location=MemoryLocation.HOST)])
     backend._host_staging, backend.store = bulk, sdk
     backend._store_initialized = True
 
@@ -300,7 +308,7 @@ def test_failed_store_shutdown_keeps_mappings_and_retries_only_outstanding_regis
     sdk.unregister_buffer.side_effect = [-1, 0, 0]
     sdk.close.side_effect = [RuntimeError("Store close failed"), None]
     staging = mooncake_staging.MooncakeHostStaging(sdk)
-    staging.register([BufferDescriptor(address=100, size_bytes=32, host=True)])
+    staging.register([BufferDescriptor(address=100, size_bytes=32, memory_location=MemoryLocation.HOST)])
     backend._host_staging, backend.store = staging, sdk
 
     with pytest.raises(RuntimeError, match="Store close failed"):
