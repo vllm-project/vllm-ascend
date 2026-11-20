@@ -1,4 +1,4 @@
-# Source: https://github.com/vllm-project/vllm/blob/0d93fd5e17ee630a032050b9cb9366a1cd1bec35/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
+# Source: https://github.com/vllm-project/vllm/blob/405a6ce941cbdaf8dc8c7f4a64857b48c4694ac0/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
 # Ascend lane extracted from a measured vLLM-Ascend deployment (hardware-scoped overrides only).
 meta:
   hardware:
@@ -8,8 +8,16 @@ hardware_notes:
     title: vLLM Ascend A2 image required
     body: |-
       Pin quay.io/ascend/vllm-ascend:v0.32.0rc1 - the NVIDIA pip wheel cannot run on Ascend NPU.
-      Served on Ascend NPU with TP8.
+      PD roles = prefill + decode; total NPUs = 8.
+      Before declaring PD ready: every backend process healthy, requests via the router/proxy succeed, KV transfer completes.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
       Set HCCL_BUFFSIZE=1024 before launch.
+strategy_hardware:
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+strategy_min_gpus:
+  ascend_910b: 8
 variants:
   default:
     hardware_overrides:
@@ -81,7 +89,7 @@ guide_sections:
   ascend: |-
     ### Huawei Atlas 800I A2 (Ascend 910B) w8a8 (vLLM Ascend)
 
-    Verified with `quay.io/ascend/vllm-ascend:v0.32.0rc1` on Atlas 800I A2 (Ascend 910B), TP8, A2 platform.
+    Verified with `quay.io/ascend/vllm-ascend:v0.32.0rc1` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (topology per hardware notes).
 
     ```bash
     export IFACE_NAME=<cluster-nic-name>   # e.g. eth7 / bond0 of the RoCE plan
