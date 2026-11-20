@@ -8,23 +8,17 @@ This document guides you to conduct accuracy testing using [lm-eval][1].
 
 You can run a docker container to start the vLLM server on a single NPU:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
+
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
@@ -154,22 +148,14 @@ The results in Markdown format are as follows:
 You can run docker container on a single NPU:
 
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=7
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \

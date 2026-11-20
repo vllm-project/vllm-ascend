@@ -6,23 +6,17 @@ This guide aims to help users improve vLLM Ascend performance at the system leve
 
 ### 1.Run the container
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
+
 ```bash
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci0
+# Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+export ASCEND_VISIBLE_DEVICES=0
 # Update the cann base image
 export IMAGE=m.daocloud.io/quay.io/ascend/cann:{{ cann_image_tag }}
 docker run --rm \
 --name performance-test \
 --shm-size=1g \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
+-e ASCEND_VISIBLE_DEVICES \
 -v /root/.cache:/root/.cache \
 -it $IMAGE bash
 ```

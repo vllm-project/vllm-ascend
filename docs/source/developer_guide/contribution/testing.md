@@ -6,6 +6,8 @@ This document explains how to write unit tests, E2E tests, and nightly tests to 
 
 The fastest way to set up a test environment is to use the main branch's container image:
 
+The container needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host; it selects the NPUs with `ASCEND_VISIBLE_DEVICES`.
+
 === "Local (CPU)"
 
     You can run the unit tests on CPUs with the following steps:
@@ -65,22 +67,14 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     ```bash
 
-    # Update DEVICE according to your device (/dev/davinci[0-7])
-    export DEVICE=/dev/davinci0
+    # Update ASCEND_VISIBLE_DEVICES according to the NPU you want (/dev/davinci[0-7])
+    export ASCEND_VISIBLE_DEVICES=0
     # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device $DEVICE \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash
@@ -107,18 +101,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -e ASCEND_VISIBLE_DEVICES=0-3 \
         -v /root/.cache:/root/.cache \
         -p 8000:8000 \
         -it $IMAGE bash

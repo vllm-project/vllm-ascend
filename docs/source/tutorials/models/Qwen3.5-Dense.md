@@ -35,6 +35,8 @@ It is recommended to download the model weight to a local directory such as `/ro
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. As a minimum-version requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
@@ -46,24 +48,9 @@ It is **recommended to use the latest release candidate (rc) version or the late
     ```bash
     export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
     docker run --rm \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         --name vllm-ascend \
         --shm-size=10g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -p 8080:8080 \
         -it $IMAGE bash
@@ -71,7 +58,9 @@ It is **recommended to use the latest release candidate (rc) version or the late
 
 === "Atlas 200I Pro"
 
-    Start the docker image on each node. Adjust `--device=/dev/davinci0` according to the NPU ID you want to use.
+    Start the docker image on each node. Adjust `ASCEND_VISIBLE_DEVICES` according to the NPU ID you want to use.
+
+    The runtime mounts the driver libraries and `npu-smi`, but not the `ascend_manager` and `user_config` devices nor the Atlas 300I DUO host libraries, so this tab still passes those explicitly.
 
     === "Ubuntu 24.04"
 
@@ -82,8 +71,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --privileged \
         --name vllm-ascend \
         --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
+        -e ASCEND_VISIBLE_DEVICES=0 \
         --device=/dev/ascend_manager \
         --device=/dev/user_config \
         -v /etc/sys_version.conf:/etc/sys_version.conf \
@@ -92,12 +80,10 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -v /var/dmp_daemon:/var/dmp_daemon \
         -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
         -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
         -v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
         -v /etc/slog.conf:/etc/slog.conf \
         -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
         -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
         -v /root/.cache:/root/.cache \
         -p 8080:8080 \
@@ -113,8 +99,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
         --privileged \
         --name vllm-ascend \
         --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
+        -e ASCEND_VISIBLE_DEVICES=0 \
         --device=/dev/ascend_manager \
         --device=/dev/user_config \
         -v /etc/sys_version.conf:/etc/sys_version.conf \
@@ -125,11 +110,9 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
         -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
         -v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
         -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
         -v /etc/slog.conf:/etc/slog.conf \
         -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
         -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
         -v /root/.cache:/root/.cache \
         -p 8080:8080 \

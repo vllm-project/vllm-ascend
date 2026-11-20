@@ -76,6 +76,8 @@ If you want to deploy a multi-node environment, verify multi-node communication 
 
 ### 4.1 Docker Image Installation
 
+{% include "getting_started/installation/ascend_docker_runtime.inc.md" %}
+
 #### Download Docker Image
 
 ```bash
@@ -92,31 +94,17 @@ The output should contain the downloaded `quay.io/ascend/vllm-ascend:hy4-a3`.
 
 #### Create Docker Container
 
-Use the following command to create the container. The Atlas 800I A3 is a 16-card device, so you need to mount `/dev/davinci[0-15]` and the management devices. Also mount the driver library and the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
+Use the following command to create the container. The Atlas 800I A3 exposes 16 DIE devices, so select all of them with `ASCEND_VISIBLE_DEVICES=0-15`. Ascend Docker Runtime mounts the device nodes, the management devices, and the driver libraries. Also mount the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:hy4-a3
 export CONTAINER_NAME=vllm_ascend_hy4
 
-# Generate NPU device mount parameters (Atlas 800I A3: /dev/davinci[0-15])
-DEVICES=""
-for i in $(seq 0 15); do
-    DEVICES="${DEVICES} --device /dev/davinci${i}"
-done
-
 docker run -itd \
     --name ${CONTAINER_NAME} \
     --shm-size=1000g \
-    ${DEVICES} \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
+    -e ASCEND_VISIBLE_DEVICES=0-15 \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /mnt/weight:/mnt/weight \
     ${IMAGE} bash
 ```

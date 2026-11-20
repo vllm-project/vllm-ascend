@@ -711,13 +711,11 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
     for i in {0..7}; do npu-smi set -t custom-op-secverify-mode -i $i -d 0; done;
     ```
 
-    Docker containers need to mount key paths. Example command:
+    Docker containers need to mount key paths. Example command (the command needs [Ascend Docker Runtime](../../getting_started/installation.md#installation-ascend-docker-runtime) on the host and selects the NPUs with `ASCEND_VISIBLE_DEVICES`):
 
     ```shell
     docker run -u root -it -d --name ${NAME} --net=host --privileged=true \
-        --device=/dev/davinci_manager --device=/dev/hisi_hdc --device=/dev/ummu --device=/dev/uburma \
-        --device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
-        --device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
+        -e ASCEND_VISIBLE_DEVICES=0-7 \
         -v /usr/bin/urma_admin:/usr/bin/urma_admin \
         -v /lib/route.conf:/lib/route.conf \
         -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \

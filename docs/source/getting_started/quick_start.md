@@ -23,6 +23,14 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
 Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
 
+The commands below need [Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime) on the **host**. It is the container engine's runtime: it reads `ASCEND_VISIBLE_DEVICES` and binds the selected NPUs into the container. Without it the container starts with no NPU inside, so `npu-smi` reports no device. Install it once on every node that runs containers, and skip the step if it is already installed.
+
+```bash
+chmod u+x Ascend-docker-runtime_<version>_linux-<arch>.run
+./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+systemctl daemon-reload && systemctl restart docker
+```
+
 {% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}
 
 {% filter indent(4, true) %}{% include "getting_started/quick_start/ascend_image/verify_container.inc.md" %}{% endfilter %}
