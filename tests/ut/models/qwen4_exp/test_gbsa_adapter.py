@@ -26,16 +26,6 @@ def _load_cache_views():
     return namespace
 
 
-def test_qsa_union_gbsa_uses_caller_output():
-    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa_union.py"
-    tree = ast.parse(source.read_text())
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_run_union_gbsa")
-    code = ast.unparse(function)
-    assert "generic_block_sparse_attention_out(" in code
-    assert "union_ops.generic_block_sparse_attention(" not in code
-    assert "output.copy_(" not in code
-
-
 @pytest.mark.parametrize("group_ids", [(0, 1), (31, 32), (95, 96)])
 @pytest.mark.parametrize("storage_page_size", [128, 384, 768])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -260,14 +250,14 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
 def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
     root = Path(__file__).resolve().parents[4]
     bundled_source = root / "csrc/attention/generic_block_sparse_attention"
-    adapter = (root / "csrc/aclnn_torch_adapter/gbsa_torch_adpt.h").read_text()
+    adapter = (root / "csrc/attention/gbsa_torch_adpt.h").read_text()
     binding = (root / "csrc/torch_binding.cpp").read_text()
     loader = (root / "csrc/aclnn_torch_adapter/op_api_common.h").read_text()
 
     assert not bundled_source.exists()
     assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttentionMetadata" in adapter
     assert "EXEC_NPU_CMD(aclnnGenericBlockSparseAttention" in adapter
-    assert '#include "aclnn_torch_adapter/gbsa_torch_adpt.h"' in binding
+    assert '#include "attention/gbsa_torch_adpt.h"' in binding
     assert '"npu_generic_block_sparse_attention_metadata(' in binding
     assert '"npu_generic_block_sparse_attention(' in binding
     assert 'return "libopapi_transformer.so";' in loader

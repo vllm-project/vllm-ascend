@@ -24,17 +24,6 @@ def build_qsa_union_inputs_from_compact(
     group_row_map: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build Union inputs with the native AscendC operator."""
-    if compact_indices.ndim != 2:
-        raise ValueError("Union compact indices must be two-dimensional")
-    if visible.shape != (compact_indices.shape[0],):
-        raise ValueError("Union visible lengths must match compact rows")
-    if group_row_map.ndim != 2 or group_row_map.shape[1] != UNION_SIZE:
-        raise ValueError("Union row map must have eight lanes per group")
-    input_groups = compact_indices.shape[1] - 3
-    topk = input_groups + int(input_groups < 512)
-    if input_groups <= 0 or topk & (topk - 1):
-        raise ValueError("Union packed width must be a positive power of two")
-
     return torch.ops._C_ascend.qsa_union_inputs(
         compact_indices.contiguous(), visible.contiguous(), group_row_map.contiguous()
     )

@@ -6,6 +6,7 @@
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
 #include "utils.h"
+#include "attention/qsa_union_inputs/qsa_union_inputs_shape.h"
 
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -649,9 +650,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qsa_union_inputs_meta(
 {
     // dynamic union group count is preserved with sym_size(0).
     // symbolic-meta-ok: candidate width is fixed by the model's top-k configuration.
-    const int64_t input_groups = compact_indices.size(1) - 3;
-    const int64_t topk = input_groups + (input_groups < 512 ? 1 : 0);
-    const int64_t width = 8 * topk;
+    const int64_t width = checked_qsa_union_width(compact_indices, visible_lengths, group_row_map);
     const c10::SymInt groups = group_row_map.sym_size(0);
     at::Tensor union_idx = at::empty_symint(
         {c10::SymInt(1), groups, c10::SymInt(width)},
