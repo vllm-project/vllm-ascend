@@ -357,31 +357,41 @@ class FusedMC2CommImpl(MoECommMethod):
         if symm_buffer is None or not self._mega_moe_hccl_state_stale:
             return True
 
-        device_group = get_mc2_group().device_group
-        local_rank = torch.distributed.get_rank(group=device_group)
-        backend = device_group._get_backend(torch.device("npu"))
-        group_name = backend.get_hccl_comm_name(local_rank)
-        context_manager = symm_buffer._ctx_manager
+        mc2 = get_mc2_group()
+        device_group = mc2.device_group
+        owner = getattr(mc2, "_main_mega_moe_symm_buffer", symm_buffer)
+        # The coordinator survives sleep, but its device group is recreated.
+        # The first stale view to wake rebinds the shared context for all views.
+        if owner.group is not device_group:
+            local_rank = torch.distributed.get_rank(group=device_group)
+            world_size = torch.distributed.get_world_size(group=device_group)
+            backend = device_group._get_backend(torch.device("npu"))
+            group_name = backend.get_hccl_comm_name(local_rank)
+            context_manager = owner._ctx_manager
 
-        # The context tensor was created under inference mode during model
-        # initialization. CANN updates it in place, so preserve that mode here.
-        with torch.inference_mode():
-            context_manager.update_group(group_name, symm_buffer.context)
-        symm_buffer.group = device_group
-        symm_buffer.rank_id = local_rank
-        symm_buffer.group_name = group_name
-        symm_buffer.ep_world_size = torch.distributed.get_world_size(group=device_group)
-        symm_buffer.ccl_buffer_size = context_manager.ccl_buffer_size
-        torch.distributed.barrier(
-            group=device_group,
-            device_ids=[torch.npu.current_device()],
-        )
+            # CANN updates the inference tensor allocated during initialization.
+            with torch.inference_mode():
+                context_manager.update_group(group_name, owner.context)
+            torch.distributed.barrier(group=device_group, device_ids=[torch.npu.current_device()])
+
+            owner.rank_id = local_rank
+            owner.group_name = group_name
+            owner.ep_world_size = world_size
+            owner.ccl_buffer_size = context_manager.ccl_buffer_size
+            owner.group = device_group
+            logger.info(
+                "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
+                local_rank,
+                world_size,
+            )
+
+        if symm_buffer is not owner:
+            symm_buffer.group = owner.group
+            symm_buffer.rank_id = owner.rank_id
+            symm_buffer.group_name = owner.group_name
+            symm_buffer.ep_world_size = owner.ep_world_size
+            symm_buffer.ccl_buffer_size = owner.ccl_buffer_size
         self._mega_moe_hccl_state_stale = False
-        logger.info(
-            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
-            local_rank,
-            symm_buffer.ep_world_size,
-        )
         return True
 
     def _init_mega_moe_symm_buffer(
