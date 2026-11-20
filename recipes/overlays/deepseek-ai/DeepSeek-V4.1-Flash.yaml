@@ -18,6 +18,16 @@ hardware_notes:
     link:
       label: vLLM Ascend DeepSeek-V4.1-Flash tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html
+  ascend_950dt:
+    title: Docker setup for Ascend 950DT
+    body: >-
+      Before running the Prefill and Decode commands, add the UMMU and UBURMA
+      devices, the urma_admin bind mount, and the model directory mount as
+      shown in the tutorial. Use the same mounted checkpoint path in both
+      serving commands.
+    link:
+      label: vLLM Ascend v0.32 RC tutorial for 950DT Docker setup
+      href: https://github.com/vllm-project/vllm-ascend/blob/49007fd8cbcf597d9a1a4e2ebc968c69257045ed/docs/source/tutorials/models/DeepSeek-V4.1-Flash.md#L183-L222
 strategy_hardware:
   single_node_tp:
     npu: unsupported
