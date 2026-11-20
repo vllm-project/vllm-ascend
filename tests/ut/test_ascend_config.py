@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
+    PcpConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -53,6 +54,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
+    pcp_config_from_vllm_config,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -145,6 +147,109 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestPcpConfig(TestBase):
+    def test_defaults_keep_the_replicated_path(self):
+        config = PcpConfig()
+
+        self.assertEqual(config.kv_sharing, "replicated")
+        self.assertEqual(config.owner_placement, "contiguous")
+        self.assertFalse(config.owner_capacity)
+        self.assertFalse(config.local_index)
+        self.assertFalse(config.local_kv_write)
+        self.assertFalse(config.local_kv_write_source)
+        self.assertFalse(config.owner_stage)
+        self.assertEqual(config.owner_stage_bytes, 1 << 30)
+        self.assertFalse(config.owner_stage_swa_chunk)
+        self.assertEqual(config.owner_stage_swa_chunk_bytes, 256 << 20)
+        self.assertFalse(config.enable_timing)
+
+    def test_explicit_values_and_lax_types(self):
+        config = PcpConfig(
+            kv_sharing="owner",
+            owner_placement="modulo",
+            owner_capacity="true",
+            local_index=True,
+            local_kv_write="1",
+            local_kv_write_source=True,
+            owner_stage=True,
+            owner_stage_bytes="2048",
+            owner_stage_swa_chunk=True,
+            owner_stage_swa_chunk_bytes=4096,
+            enable_timing=True,
+        )
+
+        self.assertEqual(config.kv_sharing, "owner")
+        self.assertEqual(config.owner_placement, "modulo")
+        self.assertTrue(config.owner_capacity)
+        self.assertTrue(config.local_kv_write)
+        self.assertEqual(config.owner_stage_bytes, 2048)
+        self.assertEqual(config.owner_stage_swa_chunk_bytes, 4096)
+
+    def test_cross_field_validation(self):
+        with self.assertRaisesRegex(ValueError, "owner_capacity requires"):
+            PcpConfig(owner_capacity=True)
+        with self.assertRaisesRegex(ValueError, "local_kv_write_source requires"):
+            PcpConfig(local_kv_write_source=True)
+        with self.assertRaisesRegex(ValueError, "owner_stage_bytes must be positive"):
+            PcpConfig(owner_stage_bytes=0)
+        with self.assertRaisesRegex(ValueError, "owner_stage_swa_chunk_bytes must be positive"):
+            PcpConfig(owner_stage_swa_chunk_bytes=-1)
+
+    def test_rejects_unknown_and_invalid_values(self):
+        with self.assertRaises(ValueError):
+            PcpConfig(unknown_option=True)
+        with self.assertRaises(ValueError):
+            PcpConfig(kv_sharing="shared")
+        with self.assertRaises(ValueError):
+            PcpConfig(owner_placement="round_robin")
+
+    def test_frozen_contract(self):
+        config = PcpConfig()
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            config.kv_sharing = "owner"  # type: ignore[misc]
+
+    def test_ascend_config_parses_the_nested_key(self):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            pcp_config={
+                "kv_sharing": "owner",
+                "owner_capacity": True,
+                "owner_stage": True,
+                "owner_stage_bytes": 4096,
+            },
+        )
+
+        self.assertIsInstance(config.pcp_config, PcpConfig)
+        self.assertEqual(config.pcp_config.kv_sharing, "owner")
+        self.assertTrue(config.pcp_config.owner_capacity)
+        self.assertEqual(config.pcp_config.owner_stage_bytes, 4096)
+        # The top-level aliases are rejected by extra="forbid".
+        with self.assertRaises(ValueError):
+            AscendConfig(
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
+                pcp_kv_sharing="owner",
+            )
+
+    def test_resolver_defaults_and_typed_object(self):
+        self.assertEqual(pcp_config_from_vllm_config(None).kv_sharing, "replicated")
+        self.assertEqual(
+            pcp_config_from_vllm_config(SimpleNamespace(additional_config={})).kv_sharing,
+            "replicated",
+        )
+        typed = PcpConfig(kv_sharing="owner")
+        self.assertIs(
+            pcp_config_from_vllm_config(SimpleNamespace(additional_config={"pcp_config": typed})),
+            typed,
+        )
+        resolved = pcp_config_from_vllm_config(
+            SimpleNamespace(additional_config={"pcp_config": {"kv_sharing": "owner"}})
+        )
+        self.assertEqual(resolved.kv_sharing, "owner")
+        with self.assertRaisesRegex(ValueError, "must be a dict"):
+            pcp_config_from_vllm_config(SimpleNamespace(additional_config={"pcp_config": ["owner"]}))
 
 
 class TestQuantizedAllReduceConfig(TestBase):

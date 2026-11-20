@@ -271,7 +271,7 @@ def hc_post_reference(x, residual, post, comb):
     return y.to(x.dtype)
 
 
-def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=128, draft_layers=0):
+def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=128, draft_layers=0, pcp_config=None):
     config = SimpleNamespace(
         num_hidden_layers=40,
         compress_ratios=[0, 0] + [2] * 18 + [1] * 20,
@@ -287,11 +287,12 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
         index_head_dim=index_size,
     )
     runtime = SimpleNamespace(
+        additional_config={} if pcp_config is None else {"pcp_config": pcp_config},
         cache_config=SimpleNamespace(
             block_size=block_size,
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
-        )
+        ),
     )
     specs = build_v41_cache_specs(config, runtime)
     for stage in range(draft_layers):
@@ -304,11 +305,11 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             cache_dtype_str="bfloat16",
             model_version="deepseek_v41",
         )
-    groups = make_cache_groups(group_cache_specs(specs))
+    groups = make_cache_groups(group_cache_specs(specs, pcp_config))
     return get_deepseek_v41_kv_cache_config(
         runtime,
         groups,
-        num_blocks * get_deepseek_v41_pool_bytes_per_block(groups),
+        num_blocks * get_deepseek_v41_pool_bytes_per_block(groups, runtime),
     )
 
 

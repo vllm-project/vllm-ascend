@@ -70,10 +70,10 @@ def test_slab_plan_own_chunks_are_empty_when_pcp_exceeds_chunks() -> None:
     assert plan.own_bytes == 0
 
 
-def _fake_v41_config(num_blocks: int = 2):
+def _fake_v41_config(num_blocks: int = 2, pcp_config=None):
     from tests.deepseek_v41_utils import make_cache_config
 
-    return make_cache_config(num_blocks)
+    return make_cache_config(num_blocks, pcp_config=pcp_config)
 
 
 def _layer_specs(config):
@@ -128,11 +128,11 @@ def test_dsv41_owner_allocation_uses_one_slab_for_the_shared_backing(monkeypatch
         assert value.untyped_storage().data_ptr() == tensor.untyped_storage().data_ptr()
 
 
-def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch, _packed_pages) -> None:
+def test_dsv41_local_index_gets_its_own_replicated_backing(_packed_pages) -> None:
+    from vllm_ascend.ascend_config import PcpConfig
     from vllm_ascend.worker.v2 import attn_utils
 
-    monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_INDEX", "1")
-    config = _fake_v41_config()
+    config = _fake_v41_config(pcp_config=PcpConfig(local_index=True))
     specs = _layer_specs(config)
     assert len({descriptor.size for descriptor in config.kv_cache_tensors}) == 2
 
@@ -143,6 +143,7 @@ def test_dsv41_local_index_gets_its_own_replicated_backing(monkeypatch, _packed_
             2 * 1024 * 1024,
             torch.device("cpu"),
             owner_allocator=None,
+            pcp_config=PcpConfig(local_index=True),
         )
     index_names = {name for name in raw if ".indexer.k_cache" in name}
     kv_names = set(raw) - index_names
@@ -182,7 +183,7 @@ def test_dsv41_owner_allocation_falls_back_to_replicated(monkeypatch, _packed_pa
     assert set(raw) == set(specs)
 
 
-def test_capacity_mode_fails_closed_without_a_working_slab(monkeypatch) -> None:
+def test_capacity_mode_fails_closed_without_a_working_slab() -> None:
     from vllm_ascend.worker.v2 import attn_utils
 
     config = _fake_v41_config()
@@ -193,7 +194,7 @@ def test_capacity_mode_fails_closed_without_a_working_slab(monkeypatch) -> None:
         def allocate_slab(layer_names, size_bytes):
             return None
 
-    with pytest.raises(RuntimeError, match="OWNER_CAPACITY"):
+    with pytest.raises(RuntimeError, match="owner_capacity"):
         attn_utils._allocate_deepseek_v41_shared_cache(
             config,
             specs,
@@ -202,7 +203,7 @@ def test_capacity_mode_fails_closed_without_a_working_slab(monkeypatch) -> None:
             owner_allocator=FailingAllocator(),
             require_owner_slab=True,
         )
-    with pytest.raises(RuntimeError, match="OWNER_CAPACITY"):
+    with pytest.raises(RuntimeError, match="owner_capacity"):
         attn_utils._allocate_deepseek_v41_shared_cache(
             config,
             specs,
@@ -213,10 +214,9 @@ def test_capacity_mode_fails_closed_without_a_working_slab(monkeypatch) -> None:
         )
 
 
-def test_dsv41_owner_allocator_is_disabled_by_default(monkeypatch) -> None:
+def test_dsv41_owner_allocator_is_disabled_by_default() -> None:
     from vllm_ascend.worker.v2 import attn_utils
 
-    monkeypatch.delenv("VLLM_ASCEND_PCP_KV_SHARING", raising=False)
     config = SimpleNamespace(
         additional_config={},
         parallel_config=SimpleNamespace(

@@ -1668,31 +1668,37 @@ class TestOwnerLocalKvWrites:
         return SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=layer), long_kv_cache=layer)
 
     def test_local_write_requires_mapped_owner_slab(self, monkeypatch):
+        from vllm_ascend.ascend_config import PcpConfig
         from vllm_ascend.attention.context_parallel import pcp_owner_vmm
 
-        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "1")
+        config = PcpConfig(local_kv_write=True)
         monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: False)
-        assert dsa_v41_cp._local_cache_writes_enabled() is False
+        assert dsa_v41_cp._local_cache_writes_enabled(config) is False
+        # The default config keeps the switch off regardless of the slab.
         monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: True)
-        assert dsa_v41_cp._local_cache_writes_enabled() is True
+        assert dsa_v41_cp._local_cache_writes_enabled(PcpConfig()) is False
+        assert dsa_v41_cp._local_cache_writes_enabled(config) is True
 
     def test_local_source_write_is_off_with_a_replicated_index_copy(self, monkeypatch):
+        from vllm_ascend.ascend_config import PcpConfig
+        from vllm_ascend.attention.context_parallel import pcp_owner_vmm
         from vllm_ascend.models.deepseek_v41 import cache_config
 
-        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE", "1")
-        monkeypatch.setenv("VLLM_ASCEND_PCP_LOCAL_KV_WRITE_SOURCE", "1")
-        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
-        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda: True)
+        config = PcpConfig(local_kv_write=True, local_kv_write_source=True)
+        monkeypatch.setattr(pcp_owner_vmm, "owner_slab_runtime_active", lambda: True)
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda *_: True)
         # Owners of the replicated index plane need the complete global rows.
-        assert dsa_v41_cp._local_source_writes_enabled() is False
-        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda: False)
-        assert dsa_v41_cp._local_source_writes_enabled() is True
+        assert dsa_v41_cp._local_source_writes_enabled(config) is False
+        monkeypatch.setattr(cache_config, "local_index_copy_enabled", lambda *_: False)
+        assert dsa_v41_cp._local_source_writes_enabled(config) is True
+        # Requires local_kv_write as well.
+        assert dsa_v41_cp._local_source_writes_enabled(PcpConfig()) is False
 
     def test_swa_write_skips_gather_for_local_rows(self, monkeypatch):
         from vllm_ascend.attention.context_parallel import pcp_owner_vmm
 
         calls = []
-        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: True)
         monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: object())
         monkeypatch.setattr(
             dsa_v41_cp.AscendDSAV41PCPImpl,
@@ -1706,7 +1712,9 @@ class TestOwnerLocalKvWrites:
         )
         metadata = self._pcp_metadata()
         value = torch.arange(6, dtype=torch.float32).view(3, 2)
-        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(self._attn(), metadata, value)
+        dsa_v41_cp.AscendDSAV41PCPImpl._write_swa_cache(
+            self._attn(), metadata, value, dsa_v41_cp.PcpConfig(local_kv_write=True)
+        )
         assert calls == [(metadata, value)]
 
     def test_swa_write_gathers_when_the_backing_is_replicated(self, monkeypatch):
@@ -1715,7 +1723,7 @@ class TestOwnerLocalKvWrites:
 
         gathered = torch.arange(8, dtype=torch.float32).view(4, 2)
         writes = []
-        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: True)
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: True)
         monkeypatch.setattr(pcp_owner_vmm, "owner_slab_for_tensor", lambda tensor: None)
         monkeypatch.setattr(
             dsa_v41_cp.AscendDSAV41PCPImpl,
@@ -1741,7 +1749,7 @@ class TestOwnerLocalKvWrites:
             assert value.shape[0] == 3
             return gathered
 
-        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda: False)
+        monkeypatch.setattr(dsa_v41_cp, "_local_cache_writes_enabled", lambda *_: False)
         monkeypatch.setattr(dsa_v41_cp.AscendDSAV41PCPImpl, "_gather_cache_rows", staticmethod(gather))
         monkeypatch.setattr(
             dsa_v41_cp.AscendDSAV41Impl,

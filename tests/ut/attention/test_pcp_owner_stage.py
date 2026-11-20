@@ -80,10 +80,9 @@ def test_stage_cache_matches_original_rows():
             assert torch.equal(staged_source[slot], source[original])
 
 
-def test_stage_cache_overflow_falls_back(monkeypatch):
-    monkeypatch.setattr(stage, "_stage_budget_bytes", lambda: 3 * 3 * 4)
+def test_stage_cache_overflow_falls_back():
     source = torch.zeros(8, 3)
-    cache = stage.PcpOwnerStageCache(torch.device("cpu"))
+    cache = stage.PcpOwnerStageCache(torch.device("cpu"), budget_bytes=3 * 3 * 4)
     small = torch.tensor([[0, 1, -1, -1]], dtype=torch.int32)
     assert cache.stage(source, small) is not None
     wide = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int32)
@@ -109,10 +108,11 @@ def test_get_stage_cache_keys_by_block_shape():
     stage._stage_caches.clear()
 
 
-def test_stage_enabled_env(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_PCP_OWNER_STAGE", raising=False)
+def test_stage_enabled_uses_the_typed_config():
+    from vllm_ascend.ascend_config import PcpConfig
+
     assert stage.owner_stage_enabled() is False
-    monkeypatch.setenv("VLLM_ASCEND_PCP_OWNER_STAGE", "1")
-    assert stage.owner_stage_enabled() is True
-    monkeypatch.setenv("VLLM_ASCEND_PCP_OWNER_STAGE", "off")
-    assert stage.owner_stage_enabled() is False
+    assert stage.owner_stage_enabled(PcpConfig()) is False
+    assert stage.owner_stage_enabled(PcpConfig(owner_stage=True)) is True
+    assert stage.owner_stage_swa_chunk_enabled() is False
+    assert stage.owner_stage_swa_chunk_enabled(PcpConfig(owner_stage_swa_chunk=True)) is True
