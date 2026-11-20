@@ -29,7 +29,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -339,7 +338,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.pcp_group = get_pcp_group()
         self.pcp_size = self.pcp_group.world_size
         self.pcp_rank = self.pcp_group.rank_in_group
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self.use_pcp_head_sharding = self.pcp_size > 1
         column_linear = ColumnParallelLinear
         merged_linear = _Glm5NextMergedColumnParallelLinear
@@ -530,7 +529,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attn_metadata = attn_metadata_raw.get(self.prefix) if isinstance(attn_metadata_raw, dict) else None
         pcp_context = getattr(attn_metadata, "pcp_context", None)
         gather_pcp_tokens = pcp_context is not None and (
-            bool(pcp_context.global_batch.is_prefilling_np.any()) or self.is_pcp_decode_sharded
+            self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill
         )
         local_num_tokens = hidden_states.size(0)
         if gather_pcp_tokens:

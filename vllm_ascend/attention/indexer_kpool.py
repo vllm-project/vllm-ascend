@@ -31,7 +31,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -203,7 +202,7 @@ def _get_kpool_pcp_global_metadata(
     global_batch = pcp_context.global_batch
     num_reqs = global_batch.num_reqs
     num_tokens = global_batch.num_tokens
-    if decode_sharded and not bool(global_batch.is_prefilling_np.any()):
+    if decode_sharded and not global_batch.has_prefill:
         # Capture and replay must compress the same global extent even when
         # fewer requests are scheduled. Padding has zero lengths and -1 slots.
         num_reqs = global_batch.num_reqs_after_padding
@@ -303,7 +302,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
         self.compress_ratio = compress_ratio
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the SFA "
@@ -480,9 +479,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
         metadata.indexer_row_shard = self._build_indexer_row_shard(common_attn_metadata, graph_capture)
         pcp_context = common_attn_metadata.pcp_context
-        if pcp_context is not None and (
-            bool(pcp_context.global_batch.is_prefilling_np.any()) or self.is_pcp_decode_sharded
-        ):
+        if pcp_context is not None and (self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool PCP metadata requires the PCP cache-group index.")
@@ -669,7 +666,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
             )
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.block_size = kv_cache_spec.ring_capacity
-        self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self.is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         # Persistent rings are separate from temporary CANN state pages.
         self._max_num_metadata_reqs = max(
             vllm_config.scheduler_config.max_num_seqs, vllm_config.scheduler_config.max_num_batched_tokens
@@ -694,9 +691,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         pcp_context = common_attn_metadata.pcp_context
         write_common = common_attn_metadata
-        if pcp_context is not None and (
-            bool(pcp_context.global_batch.is_prefilling_np.any()) or self.is_pcp_decode_sharded
-        ):
+        if pcp_context is not None and (self.is_pcp_decode_sharded or pcp_context.global_batch.has_prefill):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
                 raise RuntimeError("KPool tail PCP metadata requires the PCP cache-group index.")

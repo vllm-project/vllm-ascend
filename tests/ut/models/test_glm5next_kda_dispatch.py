@@ -159,7 +159,7 @@ def test_kda_pcp_restores_global_order_and_returns_local_output(
         # One request: the other PCP rank still advances its state heads.
         gathered_rows, restore, mapping = [0, -1, -1, -1, -1, -1, -1, -1], [0], [0] * 8
     pcp_context = SimpleNamespace(
-        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(is_prefilling)),
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(is_prefilling), has_prefill=any(is_prefilling)),
         hidden_restore_idx=torch.tensor(restore),
         padded_gather_idx=torch.tensor(mapping),
     )
@@ -237,7 +237,9 @@ def test_kda_decode_advances_state_when_request_ownership_changes(monkeypatch, r
     for requests, values, mapping, restore, expected_global in steps:
         metadata.request_ids = requests
         metadata.pcp_context = SimpleNamespace(
-            global_batch=SimpleNamespace(is_prefilling_np=torch.zeros(len(requests), dtype=torch.bool)),
+            global_batch=SimpleNamespace(
+                is_prefilling_np=torch.zeros(len(requests), dtype=torch.bool), has_prefill=False
+            ),
             hidden_restore_idx=torch.tensor(restore),
             padded_gather_idx=torch.tensor(mapping),
         )

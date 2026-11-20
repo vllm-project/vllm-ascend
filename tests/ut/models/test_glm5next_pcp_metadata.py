@@ -98,7 +98,7 @@ def test_replicated_decode_skips_permutation_until_prefill(builder_cls):
     source = torch.tensor([0, 1, 0, 1])
     context = replace(
         _make_permutation_context(2, 2),
-        global_batch=SimpleNamespace(is_dummy=False, is_prefilling_np=torch.tensor([False])),
+        global_batch=SimpleNamespace(is_dummy=False, is_prefilling_np=torch.tensor([False]), has_prefill=False),
         padded_gather_idx=source,
     )
     metadata = SimpleNamespace(pcp_context=context)
@@ -109,6 +109,7 @@ def test_replicated_decode_skips_permutation_until_prefill(builder_cls):
 
     # A later prefill must still refresh the persistent graph-owned storage.
     context.global_batch.is_prefilling_np[0] = True
+    context.global_batch.has_prefill = True
     metadata = builder._attach_pcp_permutation(metadata)
     assert metadata.pcp_context is not context
     assert metadata.pcp_context.padded_gather_idx.data_ptr() == builder._pcp_gather_indices.data_ptr()
