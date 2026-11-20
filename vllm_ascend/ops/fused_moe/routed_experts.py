@@ -137,8 +137,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     refill_nz_weight(layer, "w2_weight", force=False)
                 else:
                     for name in ("w13_weight", "w2_weight"):
-                        weights = list(getattr(layer, name).data.unbind(dim=0))
-                        refill_expert_list(layer, f"{name}_list", [weight.clone() for weight in weights])
+                        refill_expert_list(layer, f"{name}_list", getattr(layer, name).data.unbind(dim=0))
                         if direct_reload_enabled():
                             retire_parameter(layer, name)
                         else:

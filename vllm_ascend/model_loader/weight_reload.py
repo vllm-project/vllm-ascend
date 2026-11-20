@@ -22,14 +22,14 @@ def _layout(tensor):
 
 
 def refill_expert_list(layer, name, tensors):
-    """Keep the list and kernel-visible allocations across post-load processing.
+    """Own expert slices, retaining their list and allocations across reloads.
 
     Incompatible layouts must fail instead of replacing
     captured allocations. Validate every element before copying any of them.
     """
     old = getattr(layer, name, None)
     if old is None or not direct_reload_enabled():
-        setattr(layer, name, tensors)
+        setattr(layer, name, [tensor.clone() for tensor in tensors])
         return
     if len(old) != len(tensors) or any(_layout(a) != _layout(b) for a, b in zip(old, tensors)):
         raise ValueError(f"{name}: expert runtime layout changed; reload the model and recapture graphs")

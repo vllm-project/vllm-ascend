@@ -206,6 +206,13 @@ def test_bf16_reload_matches_cold_start(config, monkeypatch, layout, mode):
     layer, _ = _build_bf16_layer(layout, 1, config, monkeypatch)
     if layout == "moe-list":
         assert all(hasattr(layer, name) == (mode == "direct") for name in ("w13_weight", "w2_weight"))
+    expert_lists = {
+        name: getattr(layer, name) for name in ("w13_weight_list", "w2_weight_list") if hasattr(layer, name)
+    }
+    if mode == "direct":
+        for name, tensors in expert_lists.items():
+            source = layer.get_parameter(name.removesuffix("_list"))
+            assert all(tensor.untyped_storage().data_ptr() != source.untyped_storage().data_ptr() for tensor in tensors)
     parameters = dict(layer.named_parameters())
     if layout == "kpool-bf16":
         checkpoint_storage = {p.untyped_storage().data_ptr() for p in parameters.values()}
@@ -227,6 +234,7 @@ def test_bf16_reload_matches_cold_start(config, monkeypatch, layout, mode):
                 assert torch.equal(held[name], expected[name]), name
         if mode == "direct":
             assert all(layer.get_parameter(name) is parameter for name, parameter in parameters.items())
+            assert all(getattr(layer, name) is tensors for name, tensors in expert_lists.items())
 
 
 def test_expert_layout_change_rejected_before_copy(monkeypatch):
