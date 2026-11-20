@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 # Each draft loader maps to (target architectures, draft architectures).
-# MiniMax uses FA3 only on its DSpark draft. The listed DFlash targets can also run FA3 on the backbone.
+# A matching DFlash pair enables FA3 on both loaders. A matching DSpark pair enables it only on the draft.
 _FA3_ARCHITECTURE_PAIRS = {
     "dspark_head": (
         frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"}),
@@ -49,6 +49,6 @@ def supports_fa3_model(spec: SpeculativeConfig, model_tag: str) -> bool:
     if supported_drafts.isdisjoint(spec.draft_model_config.architectures or ()):
         return False
 
-    if model_tag == "backbone":
-        return not is_dspark_target and getattr(target, "architecture", None) in supported_targets
-    return model_tag == draft_tag
+    if is_dspark_target:
+        return model_tag == draft_tag
+    return model_tag in ("backbone", draft_tag) and getattr(target, "architecture", None) in supported_targets

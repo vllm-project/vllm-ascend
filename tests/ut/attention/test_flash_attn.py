@@ -384,10 +384,10 @@ def test_hybrid_qwen_target_requires_fa3_draft(qwen_dflash2_fa3, speculation):
 @pytest.mark.parametrize(
     "target,draft,method,tag,target_fa3,draft_fa3",
     [
-        ("Qwen3ForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
+        ("Qwen3ForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
         ("Qwen3MoeForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
-        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
-        ("Qwen4ExpForConditionalGeneration", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
+        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
+        ("Qwen4ExpForConditionalGeneration", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
         ("Qwen3NextForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
         ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dflash", "dspark_head", True, False),
         ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dspark", "dflash_head", False, False),
@@ -395,7 +395,7 @@ def test_hybrid_qwen_target_requires_fa3_draft(qwen_dflash2_fa3, speculation):
         ("MiniMaxM3SparseForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
     ],
 )
-def test_fa3_target_and_draft_use_separate_allowlists(
+def test_fa3_requires_supported_model_pair_and_loader(
     qwen_dflash2_fa3, target, draft, method, tag, target_fa3, draft_fa3
 ):
     r = qwen_dflash2_fa3
