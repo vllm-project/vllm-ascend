@@ -81,6 +81,7 @@ from vllm_ascend.utils import (
 )
 
 from .cache_config import (
+    SWA_BLOCK_SIZE,
     make_mla_cache_spec,
     make_swa_cache_spec,
 )
@@ -603,7 +604,7 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
     def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
-        block_size = cache_config.block_size
+        block_size = min(cache_config.block_size, SWA_BLOCK_SIZE)
         spec = make_swa_cache_spec(
             block_size=block_size,
             window_size=window_size,

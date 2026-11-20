@@ -24,11 +24,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.models.deepseek_v41.cache_config import (
-    get_deepseek_v41_kv_cache_config,
-    get_deepseek_v41_pool_bytes_per_block,
-    group_cache_specs,
     is_deepseek_v41_cache,
-    make_cache_groups,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -307,10 +303,10 @@ def _ascend_get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
-    """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
+    """Use upstream V4.1 grouping and retain other Ascend model adaptations."""
     if is_deepseek_v41_cache(kv_cache_spec):
-        grouped_specs = group_cache_specs(kv_cache_spec)
-        groups = make_cache_groups(grouped_specs)
+        assert _orig_get_packed_kv_cache_groups is not None
+        return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
     else:
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is None:
@@ -492,8 +488,6 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_step5_groups(kv_cache_groups):
         return get_step5_pool_bytes_per_block(kv_cache_groups)
-    if is_deepseek_v41_cache(kv_cache_groups):
-        return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)
@@ -611,8 +605,6 @@ def _ascend_get_kv_cache_config_from_groups(
         )
     elif qwen_config is not None:
         kv_cache_config = qwen_config
-    elif is_deepseek_v41_cache(kv_cache_groups):
-        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif not _is_deepseek_v4_groups(kv_cache_groups):

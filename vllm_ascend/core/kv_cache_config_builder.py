@@ -29,10 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.models.deepseek_v41.cache_config import (
-    get_deepseek_v41_pool_bytes_per_block,
-    group_cache_specs,
     is_deepseek_v41_cache,
-    make_cache_groups,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -63,7 +60,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: Kimi-K3.1, GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
+        Precedence: Kimi-K3.1, GLM-Next, then V4.1 upstream packing / mixed-page-size shared slots, then
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
@@ -77,7 +74,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
 
         if is_deepseek_v41_cache(kv_cache_spec):
-            return make_cache_groups(group_cache_specs(kv_cache_spec))
+            return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
         grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
         if grouped_specs is not None and len(grouped_specs) >= 2:
@@ -95,20 +92,18 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         self,
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
-    ) -> int:
+    ) -> int | None:
         """One global block ID consumes sum(page sizes) x layer tuples.
 
         The default implementation materializes a one-block pool and requires a
         single device backing size, which the DSV4 shared-tuple, the TurboQuant
-        packed, the DSV4.1, the GLM-Next, and the Step5 per-page-size layouts
+        packed, the GLM-Next, and the Step5 per-page-size layouts
         all violate.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_step5_groups(kv_cache_groups):
             return get_step5_pool_bytes_per_block(kv_cache_groups)
-        if is_deepseek_v41_cache(kv_cache_groups):
-            return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
             return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
         qwen_bytes = get_qwen4_exp_pool_bytes_per_block(kv_cache_groups)

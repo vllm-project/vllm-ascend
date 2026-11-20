@@ -9,7 +9,7 @@ moving cache or scheduler knowledge back into the model.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
@@ -325,7 +326,7 @@ def scatter_cache_sk(
 ) -> None:
     """Store rows using builder-prepared coordinates and V4's Ascend op.
 
-    V4.1 cache planes can be views into a larger layer-outermost slot, so the
+    V4.1 cache planes are views into a shared block-outermost pool, so the
     physical page stride is not necessarily the contiguous stride implied by
     the plane shape. ``npu_scatter_nd_update_sk`` preserves that stride and
     treats the builder's ``[-1, -1]`` coordinates as skipped rows, matching V4.
@@ -846,16 +847,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         build_query_metadata=True,
         build_compressor_metadata=True,
     ):
-        if (
-            isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-            and getattr(kv_cache_spec, "model_version", None) == "deepseek_v41"
-        ):
-            logical_block_size = vllm_config.cache_config.block_size
-            if kv_cache_spec.block_size != logical_block_size:
-                updates = {"block_size": logical_block_size}
-                if "storage_block_size" in kv_cache_spec.__dataclass_fields__:
-                    updates["storage_block_size"] = logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
-                kv_cache_spec = replace(kv_cache_spec, **updates)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
@@ -1847,6 +1838,15 @@ def _get_v41_role_builder(role: str):
 
 class DeepseekV41CacheBackend(AttentionBackend):
     """Cache-only backend: supplies layout and metadata, not an AttentionImpl."""
+
+    @classmethod
+    def supported_kv_cache_layouts(cls):
+        # Every resource page is contiguous; logical blocks interleave layers.
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec):
+        return [kv_cache_spec.block_size]
 
     @staticmethod
     def get_name():

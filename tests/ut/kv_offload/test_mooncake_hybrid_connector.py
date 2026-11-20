@@ -15,7 +15,7 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
-from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+from vllm.v1.kv_cache_interface import KVCacheTensor, MambaSpec  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
@@ -557,6 +557,59 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
                 ((f"slot.{slot}.kv", 0), (f"slot.{slot}.index", 64), (f"slot.{slot}.state", 0)),
             )
             self.assertEqual(page.block_stride, (80, 96)[slot])
+
+    def test_upstream_packed_pages_transfer_one_remapped_manager_page(self):
+        manager_stride, managers = 80, 2
+        source = torch.arange(manager_stride * managers, dtype=torch.uint8)
+        destination = torch.full_like(source, 255)
+        descriptors = [
+            KVCacheTensor(
+                size=source.numel(),
+                layers=["kv.0", "kv.1"],
+                layer_stride=8,
+                block_stride=manager_stride,
+            ),
+            KVCacheTensor(
+                size=source.numel(),
+                layers=["indexer"],
+                offset=16,
+                layer_stride=4,
+                block_stride=manager_stride,
+            ),
+            KVCacheTensor(
+                size=source.numel(), layers=["state.0", "state.1"], layer_stride=32, block_stride=manager_stride
+            ),
+        ]
+
+        def views(backing):
+            def page(offset, width):
+                return backing[offset:].as_strided((managers, width), (manager_stride, 1))
+
+            return {
+                "kv.0": page(0, 8),
+                "kv.1": page(8, 8),
+                "indexer": (page(16, 2), page(18, 2)),
+                "state.0": backing.as_strided((managers, 32), (manager_stride, 1)),
+                "state.1": backing[32:].as_strided((managers, 32), (manager_stride, 1)),
+            }
+
+        src_views, dst_views = views(source), views(destination)
+        config = types.SimpleNamespace(kv_cache_tensors=descriptors)
+        pages = _reconstruct_shared_pages(config, src_views)
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].block_stride, manager_stride)
+        self.assertEqual(
+            pages[0].placements, (("kv.0", 0), ("kv.1", 8), ("indexer", 16), ("state.0", 0), ("state.1", 32))
+        )
+        # Remap source manager1 to destination manager0; manager1 stays untouched.
+        stride = pages[0].block_stride
+        destination[:stride].copy_(source[stride : 2 * stride])
+        for name, tensors in src_views.items():
+            source_tensors = tensors if isinstance(tensors, tuple) else (tensors,)
+            target_tensors = dst_views[name] if isinstance(dst_views[name], tuple) else (dst_views[name],)
+            for src, dst in zip(source_tensors, target_tensors):
+                self.assertTrue(torch.equal(src[1], dst[0]))
+                self.assertTrue(torch.all(dst[1] == 255))
 
     def test_zero_layer_stride_uses_descriptor_layers_as_shared_by(self):
         num_blocks = 2
