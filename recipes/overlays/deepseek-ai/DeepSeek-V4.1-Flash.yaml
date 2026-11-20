@@ -367,7 +367,7 @@ presets:
       ports 7100–7107. The separate DP groups each use RPC port 12321.
       Prefill and Decode start KV transfer at ports 26010 and 27010,
       respectively. Check every worker's /health endpoint before starting the
-      Ascend proxy with ROUTER_PORT=1999. Verify /v1/models and send a request
+      Ascend proxy with ROUTER_PORT=30000. Verify /v1/models and send a request
       for dsv41 through the proxy, then confirm KV transfer in the worker logs.
 guide_sections:
   ascend: |
