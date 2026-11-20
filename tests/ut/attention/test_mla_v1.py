@@ -2864,7 +2864,7 @@ class TestAscendMLAImpl(TestBase):
             None,
         ]
         mock_up_proj.return_value = torch.randn(num_tokens, self.impl.num_heads, self.impl.v_head_dim)
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
                 q_nope,
@@ -3220,7 +3220,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.enable_kv_nz = True
 
         mock_npu_fused_infer_attention_score_v2.return_value = [torch.randn(B, N, self.impl.kv_lora_rank), None]
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
                 q_nope,
@@ -3303,7 +3303,7 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(impl.num_heads_padded, B, impl.kv_lora_rank),
             None,
         ]
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
                 q_nope,
@@ -3392,7 +3392,7 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(impl.num_heads_padded, B, 1, impl.kv_lora_rank),
             None,
         ]
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
                 q_nope,
@@ -3443,7 +3443,7 @@ class TestAscendMLAImpl(TestBase):
             torch.randn(B, self.impl.num_kv_heads, self.impl.kv_lora_rank),
             None,
         ]
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_get_forward_context.return_value = MagicMock(capturing=False, additional_kwargs={"capturing": False})
         dequant_scale_q_nope = torch.randn(B, N)  # shape is [B, num_heads]
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
