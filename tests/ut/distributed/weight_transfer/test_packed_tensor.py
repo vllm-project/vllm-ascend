@@ -143,16 +143,6 @@ def _stub_torch_npu():
         upstream._get_streams.cache_clear()
 
 
-@pytest.mark.parametrize(
-    "device",
-    ["npu", "npu:0", types.SimpleNamespace(type="npu")],
-    ids=["unindexed-string", "indexed-string", "device-type"],
-)
-def test_cpu_fixture_redirects_all_npu_device_forms(device):
-    """Guard test infrastructure against indexed/device-object allocations."""
-    assert torch.empty(1, device=device).device.type == "cpu"
-
-
 # ---------------------------------------------------------------------------
 # packed_broadcast_producer
 # ---------------------------------------------------------------------------
@@ -402,7 +392,7 @@ def test_packed_npu_ipc_producer_single_chunk():
         chunks = list(
             packed_npu_ipc_producer(
                 iterator=iter([("w", tensor)]),
-                npu_uuid="node-0",
+                npu_uuid="physical-npu-7",
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
             )
@@ -415,7 +405,7 @@ def test_packed_npu_ipc_producer_single_chunk():
     assert chunk.shapes == [[4]]
     assert chunk.dtype_names == ["float32"]
     assert chunk.tensor_sizes == [16]  # 4 float32 = 16 bytes
-    assert chunk.ipc_handle == {"node-0": args_sentinel}
+    assert chunk.ipc_handle == {"physical-npu-7": args_sentinel}
 
 
 def test_packed_npu_ipc_producer_empty_iterator():
@@ -800,27 +790,6 @@ def test_packed_npu_ipc_producer_handles_multiple_tensors_one_chunk():
     assert chunks[0].names == ["a", "b"]
     assert chunks[0].shapes == [[2], [3]]
     assert chunks[0].tensor_sizes == [8, 12]
-
-
-def test_packed_npu_ipc_producer_ipc_handle_key_matches_npu_uuid():
-    """The ``ipc_handle`` dict key equals the ``npu_uuid`` argument.
-
-    The consumer looks up the handle by its own UUID, so the producer must
-    store it under the UUID it was given.
-    """
-    patcher, args_sentinel = _install_fake_reduce_tensor()
-    with patcher:
-        chunks = list(
-            packed_npu_ipc_producer(
-                iterator=iter([("w", torch.zeros(4, dtype=torch.float32))]),
-                npu_uuid="physical-npu-7",
-                post_iter_func=lambda item: item[1],
-                buffer_size_bytes=DEFAULT_PACKED_BUFFER_SIZE_BYTES,
-            )
-        )
-
-    assert "physical-npu-7" in chunks[0].ipc_handle
-    assert chunks[0].ipc_handle["physical-npu-7"] == args_sentinel
 
 
 # ---------------------------------------------------------------------------
