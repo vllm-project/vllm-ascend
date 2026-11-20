@@ -29,7 +29,7 @@ Hugging Face/ModelScope 时直接使用模型 ID。建议使用与当前 vLLM As
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     export DEVICE=/dev/davinci0
-    docker run --rm --name bge-reranker-a2 --shm-size=1g \
+    docker run --rm --name bge-reranker-a2 --shm-size=16g \
       --device "$DEVICE" --device /dev/davinci_manager \
       --device /dev/devmm_svm --device /dev/hisi_hdc \
       -v /root/.cache:/root/.cache -it "$IMAGE" bash
@@ -40,7 +40,7 @@ Hugging Face/ModelScope 时直接使用模型 ID。建议使用与当前 vLLM As
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
     export DEVICE=/dev/davinci0
-    docker run --rm --name bge-reranker-a3 --shm-size=1g \
+    docker run --rm --name bge-reranker-a3 --shm-size=16g \
       --device "$DEVICE" --device /dev/davinci_manager \
       --device /dev/devmm_svm --device /dev/hisi_hdc \
       -v /root/.cache:/root/.cache -it "$IMAGE" bash
