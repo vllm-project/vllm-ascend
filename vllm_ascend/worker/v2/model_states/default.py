@@ -383,8 +383,9 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
-        if embedding_tp_enable():
+    def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+        # Upstream embeds supplied IDs, which already joins the token exchange.
+        if input_ids is None and embedding_tp_enable():
             if not hasattr(self, "_embedding_tp_dummy_join"):
                 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
 
@@ -404,7 +405,7 @@ class AscendModelState(DefaultModelState):
                 module, token_ids = self._embedding_tp_dummy_join
                 module(token_ids)
 
-        return super().dummy_inputs_embeds(num_tokens)
+        return super().dummy_inputs_embeds(num_tokens, input_ids)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream

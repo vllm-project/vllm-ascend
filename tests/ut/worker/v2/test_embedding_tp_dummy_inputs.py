@@ -142,3 +142,17 @@ def test_other_embedding_plans_do_not_join(monkeypatch, mode):
     assert events == []
     assert state._embedding_tp_dummy_join is None
     state.model.modules.assert_called_once()
+
+
+@pytest.mark.parametrize("supports_mm_inputs", [False, True])
+def test_dummy_input_ids_embed_once_without_an_extra_collective(monkeypatch, supports_mm_inputs):
+    monkeypatch.setattr(default, "embedding_tp_enable", lambda: True)
+    events = []
+    layer, weight = _make_embedding(0, events)
+    state = _make_state(supports_mm_inputs, layer)
+    input_ids = torch.tensor([1, 5, 7, 0, 0, 0, 0, 0], dtype=torch.int32)
+    result = state.dummy_inputs_embeds(8, input_ids)
+    torch.testing.assert_close(result, weight[input_ids])
+    assert result.data_ptr() == state.inputs_embeds.data_ptr()
+    assert [event[1] for event in events] == ["gather", "scatter"]
+    state.model.modules.assert_not_called()
