@@ -617,17 +617,6 @@ def _mixed_quant_sparse_flash_mla_impl(
         out=attn_out,
         lse=softmax_lse,
     )
-    # CannBotDSL records these temporaries on the submission stream. Retire
-    # that use after a device event so the allocator can reuse the buffers
-    # without synchronizing the host. Graph capture retains its lifetimes.
-    if not torch.npu.is_current_stream_capturing():
-        from torch_npu.npu.utils import _erase_stream
-
-        stream = torch.npu.current_stream(q.device)
-        submitted = stream.record_event()
-        stream.wait_event(submitted)
-        _erase_stream(q, stream)
-        _erase_stream(attn_out, stream)
     return (attn_out, softmax_lse)
 
 
