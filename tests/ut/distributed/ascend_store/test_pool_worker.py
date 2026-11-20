@@ -3854,7 +3854,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
                 worker._snapshot_keys[request.req_id] = {1: {1: "private"}}
                 selected_key = lookup_keys[-1]
                 available = {selected_key: SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])}
-                queries = []
+                queries: list[list[str]] = []
 
                 def lookup(keys, available=available, queries=queries, **_):
                     queries.append(list(keys))
