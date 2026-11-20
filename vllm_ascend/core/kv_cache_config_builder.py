@@ -48,11 +48,13 @@ from vllm_ascend.models.deepseek_v4.cache_config import (
     _get_kv_cache_groups_uniform_groups,
     deepseek_v4_pool_bytes_per_block,
     get_deepseek_v4_cache_layout,
-    is_deepseek_v4_groups,
     materialize_deepseek_v4_tensors,
 )
 from vllm_ascend.models.deepseek_v4.cache_config import (
     group_and_unify_kv_cache_specs as group_and_unify_kv_cache_specs,
+)
+from vllm_ascend.models.deepseek_v4.cache_config import (
+    is_deepseek_v4_groups as _is_deepseek_v4_groups,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -198,7 +200,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return qwen_bytes
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.pool_bytes_per_block(kv_cache_groups)
-        if is_deepseek_v4_groups(kv_cache_groups):
+        if _is_deepseek_v4_groups(kv_cache_groups):
             return deepseek_v4_pool_bytes_per_block(kv_cache_groups)
         return super()._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
@@ -290,7 +292,7 @@ def get_ascend_kv_cache_config_from_groups(
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
-    elif not is_deepseek_v4_groups(kv_cache_groups):
+    elif not _is_deepseek_v4_groups(kv_cache_groups):
         kv_cache_config = _upstream_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     else:
         num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
