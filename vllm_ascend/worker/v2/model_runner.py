@@ -22,6 +22,7 @@ import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -124,9 +125,13 @@ from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
+    _get_layer_kv_cache_specs,
     build_attn_state,
     skip_ring_state_update,
 )
+
+if not vllm_version_is("0.33.0"):
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_layer_configs
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -411,7 +416,28 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data()
         return output
 
+    if not vllm_version_is("0.33.0"):
+
+        def get_kv_cache_layer_configs(self):
+            configs = get_kv_cache_layer_configs(self.vllm_config)
+            draft_names = getattr(self.speculator, "draft_attn_layer_names", None)
+            if draft_names and getattr(self.speculator, "dcp_size", None) == 1 and self.dcp_size > 1:
+                for name in configs.keys() & draft_names:
+                    config = configs[name]
+                    configs[name] = replace(config, spec=replace(config.spec, dcp_sharded=False))
+            specs = apply_dspark_resident_kv_specs(
+                {name: config.spec for name, config in configs.items()},
+                self.vllm_config,
+                self.speculator,
+                sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
+                is_last_pp_rank=self.is_last_pp_rank,
+                shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+            )
+            return {name: replace(configs[name], spec=spec) for name, spec in specs.items()}
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        if not vllm_version_is("0.33.0"):
+            return {name: config.spec for name, config in self.get_kv_cache_layer_configs().items()}
         kv_cache_spec = super().get_kv_cache_spec()
 
         return apply_dspark_resident_kv_specs(
@@ -530,7 +556,7 @@ class NPUModelRunner(GPUModelRunner):
             self.model_state._offload_draft_attn_groups = (
                 [] if resident_draft_names else getattr(self.speculator, "attn_groups", [])
             )
-        if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
+        if any(is_circular_kv_cache_spec(spec) for spec in _get_layer_kv_cache_specs(self.kv_cache_config).values()):
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
             for module in self.model.modules():

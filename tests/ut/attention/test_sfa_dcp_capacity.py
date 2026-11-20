@@ -9,6 +9,7 @@ import torch
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.utils import AttentionGroup
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
@@ -18,7 +19,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.platform import _validate_sfa_dcp_kv_sp
-from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer
+from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer, vllm_version_is
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
@@ -57,7 +58,12 @@ def _create_builder(spec, config, indexer):
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_replicated_indexer", return_value=True),
         patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
     ):
-        group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
+        kwargs = {}
+        if not vllm_version_is("0.33.0"):
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            kwargs["kv_cache_group"] = KVCacheGroup.from_layers(make_layer_cache_configs({"layer": spec}))
+        group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128, **kwargs)
     return group.get_metadata_builder()
 
 

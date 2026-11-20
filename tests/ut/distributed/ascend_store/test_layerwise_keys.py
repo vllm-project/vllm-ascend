@@ -13,8 +13,9 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, LegacyMambaSpec, SlidingWindowSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
@@ -61,7 +62,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config = self.make_config()
         config.parallel_config.tensor_parallel_size = 1
         cache = self.make_cache_config(2)
-        cache.kv_cache_groups[1].kv_cache_spec = MambaSpec(
+        cache.kv_cache_groups[1].kv_cache_spec = LegacyMambaSpec(
             block_size=32,
             shapes=((4,),),
             dtypes=(torch.float32,),
@@ -153,7 +154,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     ["model.layers.0.state"],
-                    MambaSpec(
+                    LegacyMambaSpec(
                         block_size=16,
                         shapes=((4,),),
                         dtypes=("uint8",),

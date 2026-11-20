@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.model_states.encoder_decoder import (
 
 import vllm_ascend.worker.v2.model_states as model_states
 import vllm_ascend.worker.v2.model_states.encoder_decoder as encoder_decoder
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states.encoder_decoder import (
     AscendEncoderDecoderModelState,
 )
@@ -139,7 +140,7 @@ def test_ascend_encoder_decoder_state_builds_ascend_attention_metadata(
     attn_groups = [[SimpleNamespace()]]
     block_tables = (torch.zeros((4, 1), dtype=torch.int32),)
     slot_mappings = torch.zeros((1, 8), dtype=torch.int32)
-    kv_cache_config = SimpleNamespace()
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace()])
 
     result = state.prepare_attn(
         input_batch=input_batch,
@@ -154,7 +155,7 @@ def test_ascend_encoder_decoder_state_builds_ascend_attention_metadata(
     assert state.attn_metadata is expected_metadata
     state._get_encoder_seq_lens.assert_called_once_with(
         input_batch.req_ids,
-        attn_groups,
+        attn_groups if vllm_version_is("0.33.0") else kv_cache_config.kv_cache_groups,
         False,
         expected_num_reqs,
     )

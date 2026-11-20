@@ -29,11 +29,22 @@ def initialize_kv_cache(
     kv_cache_config: KVCacheConfig,
     is_profiling: bool = False,
     kv_cache_allocation_context: AbstractContextManager | None = None,
+    extensible: bool = False,
 ) -> None:
+    release_lane = vllm_version_is("0.33.0")
     # GPUWorker finalizes the PD interleave before KV cache initialization.
     self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
     kv_cache_config = upstream.deepcopy(kv_cache_config)
     self.kv_cache_config = kv_cache_config
+    if not release_lane:
+        self.extensible_kv_cache = None
+        if extensible:
+            self.extensible_kv_cache = upstream.ExtensibleKVCache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                export_handle_types=upstream.kv_cache_export_handle_types(self.vllm_config),
+            )
 
     block_table_max_model_len = self.max_model_len
     if self.is_encoder_decoder:
@@ -49,7 +60,17 @@ def initialize_kv_cache(
     max_num_blocks_per_group = []
     slot_mapping_enabled = []
     dcp_sharded = []
+    sliding_window_reach = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
+        if not release_lane:
+            block_sizes.append(kv_cache_group.block_size)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            dcp_sharded.append(kv_cache_group.dcp_sharded)
+            sliding_window_reach.append(kv_cache_group.sliding_window_reach)
+            max_num_blocks_per_group.append(
+                kv_cache_group.block_table_width(self.vllm_config, block_table_max_model_len)
+            )
+            continue
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
         layer_spec = spec.first_spec if isinstance(spec, upstream.UniformTypeKVCacheSpecs) else spec
@@ -93,6 +114,7 @@ def initialize_kv_cache(
     attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
     # Read the effective value from the loaded speculator. Without a confidence
     # head, upstream can provide confidence through its online estimator.
+    manager_kwargs = {} if release_lane else {"copy_admitted_drafts_to_host": self.batch_sharder is not None}
     self.adaptive_verification = upstream.maybe_create_adaptive_verification_manager(
         enable_adaptive_verification=getattr(self.speculator, "enable_adaptive_verification", False),
         attn_groups=self.attn_groups,
@@ -103,30 +125,36 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
+        **manager_kwargs,
     )
 
-    block_tables_kwargs = {}
-    block_tables_kwargs["dcp_sharded"] = dcp_sharded
+    block_tables_kwargs = {"dcp_sharded": dcp_sharded}
+    if release_lane:
+        block_tables_kwargs["kernel_block_sizes"] = self.kernel_block_sizes
+    else:
+        block_tables_kwargs["sliding_window_reach"] = sliding_window_reach
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,
         max_num_batched_tokens=self.max_num_tokens,
         max_num_blocks_per_group=max_num_blocks_per_group,
         device=self.device,
-        kernel_block_sizes=self.kernel_block_sizes,
         slot_mapping_enabled=slot_mapping_enabled,
         cp_size=self.dcp_size,
         cp_rank=self.dcp_rank,
         cp_interleave=self.cp_interleave,
         **block_tables_kwargs,
     )
-    self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
-        self.vllm_config,
-        self.device,
-        self.supports_mm_inputs,
-        self.block_tables,
-        cls=self.pcp_manager_cls,
-    )
+    if release_lane:
+        self.pcp_manager = upstream.pcp.maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            self.block_tables,
+            cls=self.pcp_manager_cls,
+        )
+    elif self.pcp_manager is not None:
+        self.pcp_manager.set_block_tables(self.block_tables)
     self.ubatch_runner = upstream.maybe_build_ubatch_runner(
         self.vllm_config,
         self.device,
@@ -142,7 +170,7 @@ def initialize_kv_cache(
         self.kv_cache_config,
         use_replayssm=self.cache_config.use_replayssm,
     )
-    if vllm_version_is("0.33.0"):
+    if release_lane:
         breakable_cg = upstream.envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         graph_kwargs = {"decode_query_len": self.decode_query_len}
     else:
@@ -159,12 +187,11 @@ def initialize_kv_cache(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
-        **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
+        **({"use_v2_model_runner": True} if release_lane else {}),
         kv_cache_config=self.kv_cache_config,
         max_num_reqs=self.max_num_reqs,
         is_profiling=is_profiling,
         piecewise_capture_available=piecewise_capture_available,
-        **{},
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,
@@ -193,6 +220,14 @@ def initialize_kv_cache(
         self.speculator.init_cudagraph_manager(cudagraph_mode)
 
     # Capture warmup providers that depend on allocated KV-cache strides.
+    allocate_kwargs = {}
+    if not release_lane:
+        allocate_kwargs = {
+            "attn_groups": (
+                g for groups in self.attn_groups + getattr(self.speculator, "attn_groups", []) for g in groups
+            ),
+            "allocate": self.extensible_kv_cache.allocate if self.extensible_kv_cache is not None else None,
+        }
     with self.jit_warmup_registry.activate():
         kv_caches_dict = upstream.init_kv_cache(
             self.compilation_config.static_forward_context,
@@ -202,6 +237,7 @@ def initialize_kv_cache(
             self.vllm_config,
             kv_cache_allocation_context=kv_cache_allocation_context,
             block_tables=self.block_tables,
+            **allocate_kwargs,
         )
     register_sparse_kv_caches = getattr(self, "_register_sparse_kv_caches", None)
     if register_sparse_kv_caches is not None:
@@ -213,18 +249,21 @@ def initialize_kv_cache(
         if tensor is not None and tensor.device == self.device
     ]
     # #55688 adds the collector on main; v0.33.0 shares trackers during binding.
-    if not vllm_version_is("0.33.0"):
+    if not release_lane:
+        self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.replayssm_block_copy_tensors = upstream.get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
         )
     if is_profiling:
         self.kv_connector = upstream.NO_OP_KV_CONNECTOR
     else:
+        if not release_lane:
+            self.kv_caches_by_layer = kv_caches_dict
         self.kv_connector = upstream.get_kv_connector(self.vllm_config, kv_caches_dict)
         # vLLM main carries routed-experts output through the AuxOutput
         # connector, which the V2 NPUModelRunner relies on via super().
         if self.vllm_config.aux_output_config.enabled:
-            if vllm_version_is("0.33.0"):
+            if release_lane:
                 self.aux_output_connector = upstream.get_aux_output_connector(  # type: ignore[call-arg]
                     self.model, self.vllm_config, kv_cache_config
                 )

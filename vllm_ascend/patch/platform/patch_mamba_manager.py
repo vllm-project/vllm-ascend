@@ -4,46 +4,88 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+from __future__ import annotations
+
 from collections.abc import Sequence
 
-import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
-from vllm.v1.core.single_type_kv_cache_manager import (
-    BlockHashList,
-    BlockPool,
-    KVCacheBlock,
-    KVCacheSpec,
-    MambaManager,
-)
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+
+from vllm.v1.core.single_type_kv_cache_manager import BlockHashList, BlockPool, KVCacheBlock, MambaManager
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import KVCacheSpec
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import ManagerConfig
+
+    _original_find_longest_cache_hit = MambaManager.find_longest_cache_hit
+    _original_get_num_blocks_to_allocate = MambaManager.get_num_blocks_to_allocate
 
 
 class AscendMambaManager(MambaManager):
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-        drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Mamba recurrent states are replicated across DCP ranks, so
-        # their prefix-cache lookup keeps the ordinary logical
-        # block layout. Only attention groups shard their KV cache for DCP.
-        return super().find_longest_cache_hit(
-            block_hashes=block_hashes,
-            max_length=max_length,
-            kv_cache_group_ids=kv_cache_group_ids,
-            block_pool=block_pool,
-            kv_cache_spec=kv_cache_spec,
-            alignment_tokens=alignment_tokens,
-            dcp_world_size=1,
-            pcp_world_size=pcp_world_size,
-            drop_eagle_block=drop_eagle_block,
-        )
+    if vllm_version_is("0.33.0"):
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes: BlockHashList,
+            max_length: int,
+            kv_cache_group_ids: list[int],
+            block_pool: BlockPool,
+            kv_cache_spec: KVCacheSpec,
+            alignment_tokens: int,
+            dcp_world_size: int = 1,
+            pcp_world_size: int = 1,
+            drop_eagle_block: bool = False,
+        ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+            # Mamba recurrent states are replicated across DCP ranks, so
+            # their prefix-cache lookup keeps the ordinary logical
+            # block layout. Only attention groups shard their KV cache for DCP.
+            return super().find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_length,
+                kv_cache_group_ids=kv_cache_group_ids,
+                block_pool=block_pool,
+                kv_cache_spec=kv_cache_spec,
+                alignment_tokens=alignment_tokens,
+                dcp_world_size=1,
+                pcp_world_size=pcp_world_size,
+                drop_eagle_block=drop_eagle_block,
+            )
+    else:
+
+        @classmethod
+        def find_longest_cache_hit(
+            cls,
+            block_hashes: BlockHashList,
+            max_length: int,
+            kv_cache_group_ids: list[int],
+            block_pool: BlockPool,
+            block_size: int,
+            manager_config: ManagerConfig,
+            alignment_tokens: int,
+            dcp_world_size: int = 1,
+            pcp_world_size: int = 1,
+            drop_eagle_block: bool = False,
+        ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+            # Mamba recurrent states are replicated across DCP ranks, so
+            # their prefix-cache lookup keeps the ordinary logical
+            # block layout. Only attention groups shard their KV cache for DCP.
+            return _original_find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_length,
+                kv_cache_group_ids=kv_cache_group_ids,
+                block_pool=block_pool,
+                block_size=block_size,
+                manager_config=manager_config,
+                alignment_tokens=alignment_tokens,
+                dcp_world_size=1,
+                pcp_world_size=pcp_world_size,
+                drop_eagle_block=drop_eagle_block,
+            )
 
     def get_num_blocks_to_allocate(
         self,
@@ -67,15 +109,29 @@ class AscendMambaManager(MambaManager):
             if num_local_computed_tokens is not None
             else len(new_computed_blocks) * self.block_size
         )
-        num_new_blocks = super().get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_local_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
-            prefill_end=prefill_end,
+        num_new_blocks = (
+            super().get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+                prefill_end=prefill_end,
+            )
+            if vllm_version_is("0.33.0")
+            else _original_get_num_blocks_to_allocate(
+                self,
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+                prefill_end=prefill_end,
+            )
         )
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one
@@ -92,4 +148,8 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
-single_type_kv_cache_manager.MambaManager = AscendMambaManager
+if vllm_version_is("0.33.0"):
+    single_type_kv_cache_manager.MambaManager = AscendMambaManager
+else:
+    MambaManager.find_longest_cache_hit = AscendMambaManager.__dict__["find_longest_cache_hit"]
+    MambaManager.get_num_blocks_to_allocate = AscendMambaManager.get_num_blocks_to_allocate

@@ -17,20 +17,23 @@
 
 import inspect
 import unittest
-from dataclasses import dataclass, replace
 from unittest.mock import patch
 from weakref import ref
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm_ascend.core.kv_cache_compat import LegacyMambaSpec
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
     _reachable_block_mask,
 )
+from vllm_ascend.utils import vllm_version_is
 # isort: on
 
 
@@ -57,16 +60,7 @@ def _sliding_spec(block_size: int, sliding_window: int) -> SlidingWindowSpec:
     )
 
 
-@dataclass(frozen=True)
-class _FakeCompressedSpec:
-    block_size: int
-    compress_ratio: int
-
-    def copy_with_new_block_size(self, block_size):
-        return replace(self, block_size=block_size)
-
-
-class _FakeCompressedManager:
+class _FakeCompressedManager(FullAttentionManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -74,13 +68,14 @@ class _FakeCompressedManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
+        kv_cache_spec=None,
         drop_eagle_block=False,
         alignment_tokens=16,
+        block_size=None,
         **kwargs,
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
-        logical_block_size = kv_cache_spec.block_size
+        logical_block_size = kv_cache_spec.block_size if block_size is None else block_size
         if logical_block_size != block_pool.hash_block_size:
             scale_factor = logical_block_size // block_pool.hash_block_size
             block_hashes = [
@@ -146,21 +141,26 @@ class TestAscendStoreCoordinator(unittest.TestCase):
     def test_compressed_spec_does_not_apply_ratio_twice(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
+        spec = AscendMLAAttentionSpec(
+            block_size=128 * 128,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            tokens_per_state=128,
+        )
+        if vllm_version_is("0.33.0"):
+            group = KVCacheGroupSpec(["layer.0"], spec)
+        else:
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            group = KVCacheGroup.from_layers({"layer.0": _FakeCompressedManager.layer_config(spec)})
 
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
             return_value=_FakeCompressedManager,
         ):
             coord = AscendStoreCoordinator(
-                [
-                    KVCacheGroupSpec(
-                        ["layer.0"],
-                        _FakeCompressedSpec(
-                            block_size=128 * 128,
-                            compress_ratio=128,
-                        ),
-                    )
-                ],
+                [group],
                 scheduler_block_size=128 * 128,
                 hash_block_size=128,
                 group_block_sizes=[128 * 128],
@@ -173,7 +173,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                 ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
             )
 
-        self.assertEqual(coord.group_effective_specs[0].compress_ratio, 128)
+        self.assertEqual(coord.group_effective_specs[0].tokens_per_state, 128)
         self.assertEqual(hit_length, 128 * 128)
 
     def test_missing_required_group_returns_zero(self):
@@ -271,7 +271,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         if "reachable_boundaries" not in inspect.signature(MambaManager.reachable_block_mask).parameters:
             self.skipTest("requires the reachable_boundaries vLLM API")
-        spec = MambaSpec(block_size=256, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        spec = LegacyMambaSpec(block_size=256, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
         for interval, expected in [
             (0, [False, False, True, False]),
             (512, [False, True, True, True]),

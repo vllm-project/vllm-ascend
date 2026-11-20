@@ -12,8 +12,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+)
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 if TYPE_CHECKING:
@@ -257,7 +265,7 @@ def uses_hybrid_kv_cache(scheduler_config: Any, kv_cache_groups: Sequence[Any] |
         kv_cache_groups
         and not getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False)
         and len(kv_cache_groups) > 1
-        and any(not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_groups)
+        and any(not isinstance(get_group_layout(group), FullAttentionSpec) for group in kv_cache_groups)
     )
 
 
@@ -270,7 +278,7 @@ def infer_group_block_sizes(
 
     block_sizes: list[int] = []
     for group in kv_cache_groups:
-        spec = group.kv_cache_spec
+        spec = get_group_layout(group)
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = next(iter(spec.kv_cache_specs.values()))
         block_sizes.append(spec.block_size)
@@ -284,7 +292,7 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[in
     group_ids: set[int] = set()
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         for name in group.layer_names:
-            spec = group.kv_cache_spec
+            spec = get_group_layout(group)
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 spec = spec.kv_cache_specs[name]
             if not isinstance(spec, MambaSpec):
@@ -298,7 +306,7 @@ def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[in
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
     if not kv_cache_groups:
         return [0]
-    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(get_group_layout(group))]
     assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
     return group_ids
 

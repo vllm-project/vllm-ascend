@@ -40,6 +40,7 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -845,11 +846,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # Restrict recurrent state lookup to real request rows.
         if mamba_cache_mode != "none" and mamba_block_table.shape[0] != m.seq_lens.shape[0]:
             mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
-        block_table_tensor = mamba_get_block_table_tensor(
-            mamba_block_table,
-            m.seq_lens,
-            self.kv_cache_spec,
-            mamba_cache_mode,
+        block_table_tensor = (
+            mamba_get_block_table_tensor(mamba_block_table, m.seq_lens, self.kv_cache_spec, mamba_cache_mode)
+            if vllm_version_is("0.33.0")
+            else mamba_get_block_table_tensor(
+                mamba_block_table, m.seq_lens, self.kv_cache_spec, mamba_cache_mode, self.num_speculative_blocks
+            )
         )
 
         non_spec_conv1d_cache_indices: torch.Tensor | None = None
@@ -1205,6 +1207,10 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
             self._spec_conv_indices is None
             or self.vllm_config.cache_config.mamba_cache_mode != "align"
             or (num_spec_decodes > 0 and self.kv_cache_spec.num_speculative_blocks < self.num_spec)
+            if vllm_version_is("0.33.0")
+            else self._spec_conv_indices is None
+            or self.vllm_config.cache_config.mamba_cache_mode != "align"
+            or (num_spec_decodes > 0 and self.num_speculative_blocks < self.num_spec)
         ):
             return None
 

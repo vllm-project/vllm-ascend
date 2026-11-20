@@ -42,6 +42,15 @@ def _get_ascend_sfa_indexer_backend(self):
 # the release lane gets none of this patch.
 if not vllm_version_is("0.33.0"):
     _VLLM_ATTENTION_IMPL = "vllm"
+    _map_packed_kv_caches = v1_worker_utils.map_kv_caches_to_kernel_blocks
+
+    def _map_ascend_kv_caches_to_kernel_blocks(kv_caches, attn_groups):
+        # Ascend's tuple and descriptor views are shaped for kernel blocks by
+        # its allocator. Only upstream tensor views need packed-cache mapping.
+        tensor_caches = {name: value for name, value in kv_caches.items() if isinstance(value, torch.Tensor)}
+        return {**kv_caches, **_map_packed_kv_caches(tensor_caches, attn_groups)}
+
+    vllm.v1.worker.gpu.attn_utils.map_kv_caches_to_kernel_blocks = _map_ascend_kv_caches_to_kernel_blocks
 
     @cache
     def _materialize_attention_layout(forward):
@@ -107,4 +116,9 @@ vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
-vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+if vllm_version_is("0.33.0"):
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+else:
+    from vllm_ascend.worker.v2.attn_utils import get_kv_cache_layer_configs
+
+    vllm.v1.worker.gpu.model_runner.get_kv_cache_layer_configs = get_kv_cache_layer_configs

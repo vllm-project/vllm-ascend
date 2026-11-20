@@ -11,13 +11,15 @@ from vllm.config import VllmConfig
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -27,6 +29,10 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import KVCacheGroup
 
 STATE_RING_ROWS = 32
 
@@ -136,6 +142,9 @@ def is_deepseek_v41_cache(specs_or_groups):
     else:
         specs = []
         for item in specs_or_groups:
+            if not vllm_version_is("0.33.0") and isinstance(item, KVCacheGroup):
+                specs.extend(item.kv_cache_specs.values())
+                continue
             spec = getattr(item, "kv_cache_spec", item)
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 specs.extend(spec.kv_cache_specs.values())
@@ -192,10 +201,10 @@ def get_layer_tuples(specs):
     return page_sizes, layer_tuples
 
 
-def group_cache_specs(specs):
+def _group_layer_specs(specs):
     """Merge full-context resources and pad layer tuples without mutating inputs."""
     if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
-        return [UniformTypeKVCacheSpecs.from_specs({name: spec}) for name, spec in specs.items()]
+        return [{name: spec} for name, spec in specs.items()]
     page_sizes, layer_tuples = get_layer_tuples(specs)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
@@ -216,11 +225,7 @@ def group_cache_specs(specs):
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]
     state_names = [name for name, spec in padded.items() if isinstance(spec, CircularBufferSpec)]
     # A decoder-only PP stage has no compression state buffers.
-    groups = [
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names})
-        for names in (mla_names, state_names)
-        if names
-    ]
+    groups = [{name: padded[name] for name in names} for names in (mla_names, state_names) if names]
 
     # Transpose the physical tuples. Each scheduler SWA group takes one layer
     # from every tuple, so its members use distinct slots at the same block ID.
@@ -234,7 +239,7 @@ def group_cache_specs(specs):
     ]
     # Stage-local SWA counts need not be divisible by the number of KV sources.
     for names in zip_longest(*swa_columns):
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names if name is not None}))
+        groups.append({name: padded[name] for name in names if name is not None})
 
     draft_names = [
         name
@@ -243,8 +248,22 @@ def group_cache_specs(specs):
         if isinstance(padded[name], AscendSlidingWindowMLASpec) and ".mtp." in f".{name}"
     ]
     if draft_names:
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in draft_names}))
+        groups.append({name: padded[name] for name in draft_names})
     return groups
+
+
+def group_cache_specs(specs):
+    return [UniformTypeKVCacheSpecs.from_specs(group) for group in _group_layer_specs(specs)]
+
+
+def group_layer_configs(layer_configs):
+    """Reuse the V4.1 slot topology with native block-table groups."""
+    specs = {name: config.spec for name, config in layer_configs.items()}
+    return [
+        KVCacheGroup.from_layers({name: replace(layer_configs[name], spec=spec) for name, spec in group.items()})
+        for group in _group_layer_specs(specs)
+        if group
+    ]
 
 
 def make_cache_groups(grouped_specs):
@@ -254,6 +273,9 @@ def make_cache_groups(grouped_specs):
 def _specs_from_groups(groups):
     specs = {}
     for group in groups:
+        if not vllm_version_is("0.33.0") and not isinstance(group, KVCacheGroupSpec):
+            specs.update(group.kv_cache_specs)
+            continue
         for name in group.layer_names:
             group_spec = group.kv_cache_spec
             specs[name] = (
@@ -299,11 +321,14 @@ def get_deepseek_v41_kv_cache_config(
     groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
+    capacity = max(available_memory // get_deepseek_v41_pool_bytes_per_block(groups), 0)
+    return place_deepseek_v41_cache(vllm_config, groups, may_override_num_blocks(vllm_config, capacity))
+
+
+def place_deepseek_v41_cache(vllm_config: VllmConfig, groups, num_blocks: int) -> KVCacheConfig:
     """Place stage-local resource pages within one shared backing pool."""
     specs = _specs_from_groups(groups)
     page_sizes, layer_tuples = _get_worker_layer_tuples(groups)
-    capacity = max(available_memory // sum(page_sizes), 0)
-    num_blocks = may_override_num_blocks(vllm_config, capacity)
     backing_size = num_blocks * sum(page_sizes)
     tensors: list[KVCacheTensor] = []
     slot_offset = 0

@@ -107,6 +107,7 @@ from vllm_ascend.utils import (
     enable_custom_op,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -116,6 +117,9 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
 sequence_parallel_chunk = sp_shard
 
@@ -135,6 +139,12 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.dtype = dtype
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
+
+    if not vllm_version_is("0.33.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            return SlidingWindowManager.layer_config(spec, sliding_window=spec.sliding_window)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +

@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.utils import (
@@ -28,6 +27,7 @@ from vllm_ascend.attention.utils import (
     get_flashmla_ops,
     get_or_register_attention_buffer,
 )
+from vllm_ascend.core.kv_cache_compat import CrossAttentionSpec
 
 NUM_REQS = 2
 # Distinct values so the selected source (CPU mirror vs NPU tensor) is identifiable.

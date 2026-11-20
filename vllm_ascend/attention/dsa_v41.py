@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
@@ -36,7 +36,9 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec
 from vllm_ascend.core.kv_cache_interface import (
+    AscendCircularBufferSpec,
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
@@ -1944,6 +1946,33 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config):
         return self.spec
+
+    def get_kv_cache_config(self, vllm_config):
+        """Translate the existing V4.1 spec to the manager-config API."""
+        from vllm.v1.core.single_type_kv_cache_manager import (
+            CircularBufferManager,
+            FullAttentionManager,
+            SlidingWindowManager,
+        )
+
+        from vllm_ascend.core.single_type_kv_cache_manager import AscendCircularBufferManager
+
+        spec = self.get_kv_cache_spec(vllm_config)
+        if isinstance(spec, CircularBufferSpec):
+            manager = (
+                AscendCircularBufferManager if isinstance(spec, AscendCircularBufferSpec) else CircularBufferManager
+            )
+            return manager.layer_config(spec)
+        if isinstance(spec, AscendSlidingWindowMLASpec):
+            return SlidingWindowManager.layer_config(
+                spec,
+                sliding_window=spec.sliding_window,
+                extra_retained_tokens=spec.extra_retained_tokens,
+                bounded_replay=spec.bounded_replay,
+            )
+        if isinstance(spec, AscendMLAAttentionSpec):
+            return FullAttentionManager.layer_config(spec)
+        raise TypeError(f"Unsupported V4.1 cache spec: {type(spec).__name__}")
 
     def get_attn_backend(self):
         spec = self.spec

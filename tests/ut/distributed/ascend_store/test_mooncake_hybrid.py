@@ -13,16 +13,16 @@ from numpy.typing import NDArray
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
 
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
@@ -145,7 +145,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         if extra_entry:
             groups[1].layer_names.append("model.layers.2.c4_indexer")
         if private_tail:
-            groups[2].kv_cache_spec = MambaSpec(
+            groups[2].kv_cache_spec = LegacyMambaSpec(
                 block_size=16,
                 shapes=((4,), (4,)),
                 dtypes=("uint8", "uint8"),

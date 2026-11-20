@@ -16,9 +16,9 @@ from vllm.config import (
 from vllm.config.model import ModelDType
 from vllm.distributed.parallel_state import all_gather_fake
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 
 
 def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

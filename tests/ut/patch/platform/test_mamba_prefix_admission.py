@@ -5,12 +5,26 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from vllm_ascend.patch.platform import patch_mamba_manager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
+
+
+def upstream_reservation(manager, **kwargs):
+    if vllm_version_is("0.33.0"):
+        return AscendMambaManager.__base__.get_num_blocks_to_allocate(manager, **kwargs)
+    return patch_mamba_manager._original_get_num_blocks_to_allocate(manager, **kwargs)
 
 
 def make_coordinator():
@@ -19,7 +33,8 @@ def make_coordinator():
     specs = [
         FullAttentionSpec(block_size=b, num_kv_heads=1, head_size=8, dtype=torch.bfloat16) for b in (251904, 50688)
     ] + [
-        MambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align") for _ in range(3)
+        LegacyMambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        for _ in range(3)
     ]
     config = KVCacheConfig(
         num_blocks=12,
@@ -75,7 +90,8 @@ def test_partial_boundary_decode_fits_available_blocks():
 def test_external_state_reservation_uses_exact_local_token_count(local, total, main, extra):
     coordinator = make_coordinator()
     manager = coordinator.single_type_managers[2]
-    assert isinstance(manager, AscendMambaManager)
+    assert isinstance(manager, MambaManager)
+    assert manager.get_num_blocks_to_allocate.__func__ is AscendMambaManager.get_num_blocks_to_allocate
     manager.allocate_new_blocks("request", local or 1, local or 1)
     kwargs = dict(
         request_id="request",
@@ -85,7 +101,7 @@ def test_external_state_reservation_uses_exact_local_token_count(local, total, m
         num_local_computed_tokens=local,
         num_tokens_main_model=main,
     )
-    base = AscendMambaManager.__base__.get_num_blocks_to_allocate(manager, **kwargs)
+    base = upstream_reservation(manager, **kwargs)
     assert manager.get_num_blocks_to_allocate(**kwargs) == base + extra
 
 
@@ -100,7 +116,7 @@ def test_external_extension_of_partial_local_hit_keeps_extra_reservation():
         num_local_computed_tokens=768,
         num_tokens_main_model=1025,
     )
-    base = AscendMambaManager.__base__.get_num_blocks_to_allocate(manager, **kwargs)
+    base = upstream_reservation(manager, **kwargs)
     assert manager.get_num_blocks_to_allocate(**kwargs) == base + 1
 
 
@@ -108,7 +124,8 @@ def test_dcp8_prefix_reuses_checkpoint_and_copies_partial_attention_tail():
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     specs = [FullAttentionSpec(block_size=1536, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)] + [
-        MambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align") for _ in range(3)
+        LegacyMambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        for _ in range(3)
     ]
     config = KVCacheConfig(
         num_blocks=64,

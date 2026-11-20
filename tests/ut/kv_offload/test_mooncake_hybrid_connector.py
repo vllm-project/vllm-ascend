@@ -15,9 +15,15 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
+from vllm.v1.core.single_type_kv_cache_manager import (  # noqa: E402
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
@@ -30,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MooncakeConnectorWorker,
     _reconstruct_shared_pages,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 
 class MockRequest:
@@ -371,17 +378,33 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             cache_config=types.SimpleNamespace(block_size=128),
             scheduler_config=types.SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         )
-        state_spec = (
-            MagicMock(spec=MambaSpec, block_size=128, shapes=((2, 2), (2, 2)), dtypes=(torch.float32, torch.float32))
-            if use_mamba
-            else types.SimpleNamespace(block_size=128)
-        )
-        cache_config = types.SimpleNamespace(
-            kv_cache_groups=[
+        state_shapes = ((2, 2), (2, 2))
+        state_dtypes = (torch.float32, torch.float32)
+        if vllm_version_is("0.33.0"):
+            state_spec = (
+                MagicMock(spec=MambaSpec, block_size=128, shapes=state_shapes, dtypes=state_dtypes)
+                if use_mamba
+                else types.SimpleNamespace(block_size=128)
+            )
+            groups = [
                 types.SimpleNamespace(kv_cache_spec=types.SimpleNamespace(block_size=512), layer_names=["layer.0"]),
                 types.SimpleNamespace(kv_cache_spec=state_spec, layer_names=["layer.1"]),
             ]
-        )
+        else:
+            from vllm.v1.kv_cache_interface import KVCacheGroup
+
+            attention = FullAttentionSpec(block_size=512, num_kv_heads=1, head_size=8, dtype=torch.float32)
+            if use_mamba:
+                state = MambaSpec(block_size=128, shapes=state_shapes, dtypes=state_dtypes)
+                state_layer = MambaManager.layer_config(state)
+            else:
+                state = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float32)
+                state_layer = SlidingWindowManager.layer_config(state, sliding_window=512)
+            groups = [
+                KVCacheGroup.from_layers({"layer.0": FullAttentionManager.layer_config(attention)}),
+                KVCacheGroup.from_layers({"layer.1": state_layer}),
+            ]
+        cache_config = types.SimpleNamespace(kv_cache_groups=groups)
         host = f"192.0.2.{pcp_rank * tp_size + tp_rank + 1}"
         engine_id = f"{role}-{dp_rank}-{pcp_rank}-{tp_rank}"
         with patch.multiple(

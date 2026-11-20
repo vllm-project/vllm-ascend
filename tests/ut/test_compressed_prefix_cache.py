@@ -8,33 +8,30 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
-
-# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
-# the v0.33.0 lane still ships it in `kv_cache_utils`.
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager,
-    register_all_kvcache_specs,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, MLAAttentionSpec
 from vllm.v1.request import Request
 
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.33.0 lane still ships it in `kv_cache_utils`.
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    is_kv_cache_spec_uniform,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -76,8 +73,9 @@ def _make_full_manager(
         enable_caching=True,
         hash_block_size=physical_block_size,
     )
+    layout = spec if vllm_version_is("0.33.0") else KVCacheGroupSpec(["layer"], spec)
     manager = FullAttentionManager(
-        spec,
+        layout,
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -187,7 +185,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
         block_pool=block_pool,
-        kv_cache_spec=spec,
+        **full_cache_lookup_kwargs(spec),
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
@@ -227,13 +225,19 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
         block_pool=block_pool,
-        kv_cache_spec=spec,
+        **full_cache_lookup_kwargs(spec),
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
     hit_blocks = hit_result[0][0]
 
     assert hit_blocks == manager.req_to_blocks[request.request_id]
+
+
+def full_cache_lookup_kwargs(spec):
+    if vllm_version_is("0.33.0"):
+        return {"kv_cache_spec": spec}
+    return {"block_size": spec.block_size, "manager_config": FullAttentionManager.config()}
 
 
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
@@ -270,6 +274,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             ],
         ),
         max_model_len=logical_block_size,
+        max_in_flight_tokens=logical_block_size,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
@@ -337,7 +342,7 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
                 ),
                 KVCacheGroupSpec(
                     ["mamba"],
-                    MambaSpec(
+                    LegacyMambaSpec(
                         block_size=block_size,
                         shapes=((1,),),
                         dtypes=(torch.float32,),
@@ -347,13 +352,14 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
             ],
         ),
         max_model_len=8192,
+        max_in_flight_tokens=8192,
         use_eagle=False,
         enable_caching=True,
         enable_kv_cache_events=False,
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=hash_block_size,
-        scheduler_block_size=block_size,
+        scheduler_block_size=block_size if vllm_version_is("0.33.0") else 2 * block_size,
     )
     request = _make_request(
         "a",

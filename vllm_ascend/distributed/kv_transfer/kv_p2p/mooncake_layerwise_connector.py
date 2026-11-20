@@ -44,17 +44,20 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -870,7 +873,7 @@ class MooncakeLayerwiseConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.block_size = [get_group_layout(group).block_size for group in kv_cache_config.kv_cache_groups]
         self.engine_id = engine_id
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -913,7 +916,7 @@ class MooncakeLayerwiseConnectorScheduler:
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
+            kv_cache_spec = get_group_layout(kv_cache_group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 yield from kv_cache_spec.kv_cache_specs.values()
             else:
@@ -1215,7 +1218,9 @@ class MooncakeLayerwiseConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.kv_cache_specs: list[KVCacheSpec] = [spec.kv_cache_spec for spec in self.kv_cache_config.kv_cache_groups]
+        self.kv_cache_specs: list[KVCacheSpec] = [
+            get_group_layout(group) for group in self.kv_cache_config.kv_cache_groups
+        ]
         self.local_engine_id: str = " "
         self.engine_id = engine_id
         self.dp_rank: int = vllm_config.parallel_config.data_parallel_rank
@@ -1414,7 +1419,7 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(kv_cache_tuple, (list, tuple)) is False:
                 kv_cache_tuple = [kv_cache_tuple]
             layer_kv_group_id = layer2group_ids[layer_name]
-            layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
+            layer_kv_cache_spec = get_group_layout(kv_cache_groups[layer_kv_group_id])
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
             # Read the layout flags directly: some Ascend versions expose the

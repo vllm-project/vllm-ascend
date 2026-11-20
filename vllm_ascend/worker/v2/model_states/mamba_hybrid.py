@@ -38,9 +38,15 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
+
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.worker.mamba_utils import get_mamba_group_ids, get_mamba_group_params
+
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer, vllm_version_is
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -91,9 +97,25 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if not vllm_version_is("0.33.0"):
+            self._mamba_spec: MambaSpec | None = None
+            self._mamba_group_ids: list[int] = []
+
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+
+    if not vllm_version_is("0.33.0"):
+
+        def _get_mamba_group_info(self, kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
+            if self._mamba_spec is None:
+                groups = get_mamba_groups(kv_cache_config)
+                group_ids = get_mamba_group_ids(groups)
+                # Native manager params carry scheduling policy after #61452.
+                get_mamba_group_params(kv_cache_config, group_ids)
+                self._mamba_group_ids = group_ids
+                self._mamba_spec = next(iter(groups))
+            return self._mamba_group_ids, self._mamba_spec
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the

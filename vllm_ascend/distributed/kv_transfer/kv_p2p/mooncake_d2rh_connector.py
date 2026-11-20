@@ -27,6 +27,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import get_group_layout
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     GroupPull,
@@ -2044,7 +2045,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
             prefill_pp_rank = remote_rank // prefill_tp_size
             group_pulls: list[GroupPull] = []
             for group_id, group in enumerate(self.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, MambaSpec):
+                if isinstance(get_group_layout(group), MambaSpec):
                     num_group_pulls = max(1, prefill_tp_size // self._decode_tp_size)
                 else:
                     group_spec = self._serialize_group_for_scheduler(group)
@@ -2070,7 +2071,7 @@ class MooncakeConnectorScheduler(BaseMooncakeConnectorScheduler):
 
     @staticmethod
     def _serialize_group_for_scheduler(group: Any) -> dict[str, Any]:
-        kv_cache_spec = group.kv_cache_spec
+        kv_cache_spec = get_group_layout(group)
         return {
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": {

@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 from torch import Tensor
-from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_compat import UniformTypeKVCacheSpecs
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )

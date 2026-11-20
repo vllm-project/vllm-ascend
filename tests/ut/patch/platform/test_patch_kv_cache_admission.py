@@ -14,39 +14,43 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     FullAttentionManager,
     SlidingWindowManager,
-    register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
+from vllm_ascend.core.kv_cache_compat import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+    register_all_kvcache_specs,
+)
 from vllm_ascend.patch.platform import patch_kv_cache_admission  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
+
+
+def _manager_layout(kind):
+    kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    if kind == "sliding":
+        return SlidingWindowManager, SlidingWindowSpec(sliding_window=8, **kwargs)
+    if kind == "chunked":
+        return ChunkedLocalAttentionManager, ChunkedLocalAttentionSpec(attention_chunk_size=8, **kwargs)
+    return FullAttentionManager, FullAttentionSpec(**kwargs)
 
 
 def _manager(kind="sliding", cap=8197, enable_caching=True, block_pool=None):
     register_all_kvcache_specs(None)
-    kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
-    if kind == "sliding":
-        cls = SlidingWindowManager
-        spec = SlidingWindowSpec(sliding_window=8, **kwargs)
-    elif kind == "chunked":
-        cls = ChunkedLocalAttentionManager
-        spec = ChunkedLocalAttentionSpec(attention_chunk_size=8, **kwargs)
-    else:
-        cls = FullAttentionManager
-        spec = FullAttentionSpec(**kwargs)
+    cls, spec = _manager_layout(kind)
     if block_pool is None:
         null = KVCacheBlock(block_id=0)
         null.is_null = True
         block_pool = SimpleNamespace(null_block=null)
+    ownership = (
+        {"kv_cache_spec": spec} if vllm_version_is("0.33.0") else {"kv_cache_group": KVCacheGroupSpec(["layer"], spec)}
+    )
     return cls(
-        kv_cache_spec=spec,
         block_pool=block_pool,
+        **ownership,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=2,
@@ -175,7 +179,8 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     max_model_len = 128
     chunk_tokens = 16
     num_blocks = 256
-    spec = _manager(kind).kv_cache_spec
+    register_all_kvcache_specs(None)
+    _, spec = _manager_layout(kind)
     config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],

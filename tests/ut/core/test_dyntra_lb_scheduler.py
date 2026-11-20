@@ -10,11 +10,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -33,6 +29,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)

@@ -3,7 +3,7 @@
 
 import inspect
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -13,16 +13,23 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+)
+
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheSpecRegistry,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm_ascend.core.kv_cache_compat import legacy_allocation_blocks, legacy_block_table_width
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -199,6 +206,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     # TP ranks hold the full latent vector, including quantization scales.
     max_tp_shards: int | None = 1
+    is_draft: bool = field(default=False, compare=False)
+    non_causal_multi_token_decode: bool = False
 
     # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
     # caches without query heads use the one-latent-head cache contract.
@@ -283,7 +292,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
         )
         first_spec = specs[0]
-        merged = super().merge(specs)
+        if vllm_version_is("0.33.0"):
+            merged = super().merge(specs)
+        else:
+            assert all(spec == first_spec for spec in specs), "All MLA layers must use the same cache layout."
+            merged = first_spec
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
@@ -299,6 +312,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             # target and draft have distinct physical layouts.
             is_draft=all(spec.is_draft for spec in specs),
         )
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        if vllm_version_is("0.33.0"):
+            return super().max_num_blocks_per_req(vllm_config, max_len)
+        return legacy_block_table_width(self, vllm_config, max_len)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -319,6 +337,9 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     indexer retains its own physical cache region, separate from the MLA cache.
     """
 
+    is_draft: bool = field(default=False, compare=False)
+    non_causal_multi_token_decode: bool = False
+
     # Indexer keys and their scales are replicated across TP ranks.
     max_tp_shards: int | None = 1
     scale_dim: int = 0
@@ -329,6 +350,16 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     sfa_dcp_replicated_indexer_size: int = 1
 
     block_table_block_size: int | None = None
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        if vllm_version_is("0.33.0"):
+            return super().max_memory_usage_bytes(vllm_config)
+        return legacy_allocation_blocks(self, vllm_config) * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        if vllm_version_is("0.33.0"):
+            return super().max_num_blocks_per_req(vllm_config, max_len)
+        return legacy_block_table_width(self, vllm_config, max_len)
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         return replace(
@@ -378,8 +409,13 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         )
         # Preserve Core's role, padding and stride alignment, and reuse its
         # standard-field validation before restoring the Ascend-only fields.
+        if vllm_version_is("0.33.0"):
+            merged = super().merge(specs)
+        else:
+            merged = specs[0]
+            assert all(spec == merged for spec in specs), "All SFA indexer layers must use the same cache layout."
         return replace(
-            super().merge(specs),
+            merged,
             scale_dim=scale_dim_set.pop(),
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
@@ -399,6 +435,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     model_version: str | None = None
     indexes_kv_by_block_stride: bool = False
     bounded_replay: bool = False
+    is_draft: bool = False
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -523,7 +560,11 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, cls) for spec in specs)
-        return super().merge(specs)
+        if vllm_version_is("0.33.0"):
+            return super().merge(specs)
+        first = specs[0]
+        assert all(spec == first for spec in specs), "All indexer tails must use the same cache layout."
+        return replace(first)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         del vllm_config

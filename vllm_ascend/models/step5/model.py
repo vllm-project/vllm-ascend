@@ -79,9 +79,10 @@ from vllm.models.step5.nvidia.model import (
     make_layers,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector, wait_for_kv_layer_from_connector
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -113,6 +114,7 @@ else:
         Step5SparseConfig,
         get_step5_sparse_config,
     )
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 
 def _kv_cache_torch_dtype(cache_config, vllm_config) -> torch.dtype:
@@ -397,6 +399,18 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
         )
+
+    if not vllm_version_is("0.33.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = AttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                head_size_v=self.head_dim,
+                dtype=self.kv_cache_torch_dtype,
+            )
+            return FullAttentionManager.layer_config(spec)
 
     def _apply_sparse_indexer_rope(
         self,

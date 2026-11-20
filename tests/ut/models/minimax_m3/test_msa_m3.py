@@ -16,9 +16,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention

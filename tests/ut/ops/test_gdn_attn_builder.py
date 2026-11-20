@@ -21,6 +21,7 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
     GDNAttentionMetadataBuilder310,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_compat import LegacyMambaSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import gdn as ascend_gdn
@@ -209,12 +210,15 @@ def _make_vllm_config(
     model_config.get_num_attention_heads = lambda parallel_config: num_heads
 
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode, use_replayssm=False),
         compilation_config=SimpleNamespace(
             cudagraph_mode=cudagraph_mode,
             max_cudagraph_capture_size=None,
+            static_forward_context={},
         ),
         speculative_config=speculative_config,
+        num_speculative_tokens=num_speculative_tokens,
+        use_replayssm_trackers=False,
         num_hash_lookahead_tokens=0,
         use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
@@ -250,7 +254,7 @@ def _make_builder(
         mamba_cache_mode=mamba_cache_mode,
         cudagraph_mode=cudagraph_mode,
     )
-    spec = MambaSpec(
+    spec = LegacyMambaSpec(
         block_size=block_size,
         shapes=((1,), (1,)),
         dtypes=(torch.float32,),
@@ -909,6 +913,7 @@ def test_adaptive_mixed_batch_rejects_cpu_fused_layout():
     builder._spec_conv_indices = torch.empty(3, dtype=torch.int32)
     builder.vllm_config = SimpleNamespace(cache_config=SimpleNamespace(mamba_cache_mode="align"))
     builder.kv_cache_spec = SimpleNamespace(num_speculative_blocks=3)
+    builder.num_speculative_blocks = 3
     builder.num_spec = 3
     builder.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
     with patch.object(ascend_gdn_attn_builder, "prepare_gdn", side_effect=AssertionError("CPU layout is unsafe")):

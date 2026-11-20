@@ -16,15 +16,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransfe
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+)
+
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
-
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     is_circular_kv_cache_spec,
@@ -743,10 +745,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         is_replicated_sfa_indexer = isinstance(spec, AscendSFAIndexerCacheSpec) and (
             spec.sfa_dcp_replicated_indexer_size > 1 or remote_indexer_replication_size > 1
         )
+        full_attention = isinstance(spec, (FullAttentionSpec, MLAAttentionSpec))
         is_dcp_transfer = (
-            (local_dcp_size > 1 or remote_dcp_size > 1)
-            and isinstance(spec, FullAttentionSpec)
-            and not is_replicated_sfa_indexer
+            (local_dcp_size > 1 or remote_dcp_size > 1) and full_attention and not is_replicated_sfa_indexer
         )
         if is_circular_kv_cache_spec(spec):
             if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:
@@ -776,7 +777,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             remote_kernel_block_ids = self._expand_block_ids(
                 remote_group_block_ids[local_unhashed_start_idx:], remote_block_size_scale
             )
-        elif isinstance(spec, FullAttentionSpec):
+        elif full_attention:
             if is_dcp_transfer:
                 local_kernel_block_size = local_block_size // local_block_size_scale
                 remote_kernel_block_size = remote_block_size // remote_block_size_scale

@@ -10,9 +10,10 @@ import json
 from copy import copy
 from typing import Any
 
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_compat import SlidingWindowSpec, UniformTypeKVCacheSpecs, get_group_layout
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.utils import vllm_version_is
 
@@ -122,7 +123,7 @@ def validate_dcp_groups(kv_cache_config: Any) -> None:
         return None
     group_block_sizes: list[int] = []
     for group in groups:
-        spec = group.kv_cache_spec
+        spec = get_group_layout(group)
         specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
         for sub_spec in specs:
             if isinstance(sub_spec, SlidingWindowSpec):
@@ -162,7 +163,7 @@ def group_block_size_signature(group) -> tuple[int, ...]:
     shape to the set of block sizes it contains rather than reading a single
     representative (which depends on dict order).
     """
-    spec = group.kv_cache_spec
+    spec = get_group_layout(group)
     specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
     return tuple(sorted({int(sub.block_size) for sub in specs}))
 

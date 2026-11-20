@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )

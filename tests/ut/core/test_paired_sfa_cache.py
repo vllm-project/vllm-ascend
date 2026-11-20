@@ -7,9 +7,11 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec, LegacyMambaSpec
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
@@ -17,6 +19,7 @@ from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_specs():
@@ -42,7 +45,7 @@ def make_specs():
                 cache_sparse_li_c8=True,
             )
         else:
-            specs[name + ".linear_attn"] = MambaSpec(
+            specs[name + ".linear_attn"] = LegacyMambaSpec(
                 block_size=1536,
                 shapes=((3, 4608), (12, 128, 128)),
                 dtypes=(torch.bfloat16, torch.float32),
@@ -211,16 +214,22 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     monkeypatch.setattr(kv_cache_config_builder, "paired_sfa_cache_groups", paired)
     monkeypatch.setattr(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
     monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
-    monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *a, **k: None)
     monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 
-    actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
+    release = vllm_version_is("0.33.0")
+    inputs = specs if release else make_layer_cache_configs(specs)
+    actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, inputs)
 
     # The same hybrid cache geometry must not opt unrelated models into K3.1.
     # K3.1's nested text config still reports kimi_linear.
     selected, other = (paired, upstream) if model_type == "kimi_k31" else (upstream, paired)
-    assert actual is selected.return_value
-    selected.assert_called_once_with(config, specs)
+    if not release and model_type == "kimi_k31":
+        assert actual == selected.return_value
+        selected.assert_called_once_with(config, specs, layer_configs=inputs)
+    else:
+        assert actual is selected.return_value
+        selected.assert_called_once_with(config, inputs)
     other.assert_not_called()
 
 
@@ -238,6 +247,7 @@ def test_generic_planner_reproduces_paired_sfa_pool_accounting():
 
     specs, config = make_specs(), make_config()
     config.model_config.max_model_len = 4096
+    config.max_in_flight_tokens = 4096
     config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
     config.attention_config = SimpleNamespace(hisparse_config=None)
     groups = paired_sfa_cache_groups(config, specs)

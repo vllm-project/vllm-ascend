@@ -63,15 +63,12 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
@@ -690,9 +687,10 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
 
     import torch
     from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.structured_output import StructuredOutputManager
 
+    from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
 
     ascend_config = SimpleNamespace(
