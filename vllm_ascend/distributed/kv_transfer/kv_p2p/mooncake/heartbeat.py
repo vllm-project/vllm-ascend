@@ -116,9 +116,11 @@ class MooncakeHeartbeatThread(threading.Thread):
                                 peer.pending.popleft()
                                 peer.ack_deadline = now + HEARTBEAT_ACK_TIMEOUT
                                 logger.debug(
-                                    "MooncakeHeartbeat event=send producer=%s:%d request_count=%d",
+                                    "MooncakeHeartbeat event=send producer=%s:%d request_count=%d "
+                                    "heartbeat_interval_s=%g",
                                     *endpoint,
                                     request_count,
+                                    self.interval,
                                 )
                         except zmq.Again:  # type: ignore[attr-defined]
                             continue

@@ -108,8 +108,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
                 else:
                     unchanged += 1
         logger.debug(
-            "MooncakeHeartbeat event=process engine_id=%s received=%d extended=%d unchanged=%d expired=%d unknown=%d",
+            "MooncakeHeartbeat event=process engine_id=%s renewal_window_s=%d "
+            "received=%d extended=%d unchanged=%d expired=%d unknown=%d",
             self.engine_id,
+            self.lease_extension,
             len(request_ids),
             extended,
             unchanged,
@@ -382,6 +384,16 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         )
         if type(self._kv_lease_duration) is not int or self._kv_lease_duration < 6:
             raise ValueError("Mooncake kv_lease_duration must be an integer of at least 6 seconds")
+
+        logger.debug(
+            "MooncakeHeartbeat event=config engine_id=%s kv_role=%s "
+            "initial_lease_s=%d renewal_window_s=%d heartbeat_interval_s=%d",
+            self.engine_id,
+            self.kv_transfer_config.kv_role,
+            self._kv_lease_duration,
+            self._kv_lease_duration * 2 // 3,
+            self._kv_lease_duration // 6,
+        )
 
         if self.kv_transfer_config.is_kv_consumer:
             recving_ready_event = threading.Event()
