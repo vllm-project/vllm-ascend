@@ -225,6 +225,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         block_tables: Any,
         target_input_buffers: Any,
         target_attn_groups: Any,
+        kernel_block_sizes: list[int] | None = None,
     ) -> None:
         # Initialize the draft attention backend with its PCP=1 config.
         with set_current_vllm_config(self.attn_vllm_config):
@@ -234,6 +235,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 block_tables,
                 target_input_buffers,
                 target_attn_groups,
+                *((kernel_block_sizes,) if kernel_block_sizes is not None else ()),
             )
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
