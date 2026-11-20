@@ -1,3 +1,4 @@
+import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1250,7 +1251,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8, 64)
 
 
-class TestBnsdPaReadGather(TestBase):
+class TestBnsdPaReadGather(unittest.TestCase):
     """The head-major (BNSD/HND) cache read must feed FIA its PA contract.
 
     aclnnFusedInferAttentionScore has no kv-cache layout parameter: in
@@ -1283,6 +1284,12 @@ class TestBnsdPaReadGather(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_feeds_kernel_contract_and_remaps_table(self, mock_ctx):
+        """Full-table-width gather: every cell maps to its own gathered slot.
+
+        The gather is intentionally not deduplicated (torch.unique has a
+        data-dependent output shape, forcing the host sync AsyncScheduler
+        must avoid); duplicates read the same content from their own slots.
+        """
         mock_ctx.return_value = MagicMock(capturing=False)
         impl = self._make_impl()
         impl.key_cache = self._make_bnsd_cache()
@@ -1291,17 +1298,42 @@ class TestBnsdPaReadGather(TestBase):
 
         key, value, remapped = impl._materialize_bnsd_pa_read(block_table)
 
-        gathered = {0, 1, 3, 5}
         self.assertEqual(key.dim(), 3)
-        self.assertEqual(key.shape, (len(gathered), self.BLOCK_SIZE, self.NUM_HEADS * self.HEAD_SIZE))
+        self.assertEqual(key.shape, (block_table.numel(), self.BLOCK_SIZE, self.NUM_HEADS * self.HEAD_SIZE))
         self.assertTrue(key.is_contiguous())
         for row in key:
             self.assertEqual(row.unique().numel(), 1)
+        # The remap is the identity over the flattened table.
+        self.assertEqual(remapped.tolist(), [[0, 1, 2], [3, 4, 5]])
+        # Every cell reads its own physical block.
         for row_idx, row in enumerate(block_table):
             for col_idx, block_id in enumerate(row.tolist()):
                 self.assertEqual(key[remapped[row_idx, col_idx], 0, 0].item(), block_id)
+        # Duplicate cells (block 3 at (0, 1) and (1, 0)) gather identical
+        # content into distinct slots.
+        self.assertEqual(key[remapped[0, 1]].tolist(), key[remapped[1, 0]].tolist())
         for row_idx, row in enumerate(block_table):
             self.assertEqual(value[remapped[row_idx, 0], 0, 0].item(), row[0].item() + 100)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_repeated_block_ids_gather_full_width_with_identical_content(self, mock_ctx):
+        """A table of one repeated id gathers one slot per cell, all equal."""
+        mock_ctx.return_value = MagicMock(capturing=False)
+        impl = self._make_impl()
+        impl.key_cache = self._make_bnsd_cache()
+        impl.value_cache = self._make_bnsd_cache()
+        block_table = torch.tensor([[2, 2], [2, 2]])
+
+        key, _, remapped = impl._materialize_bnsd_pa_read(block_table)
+
+        self.assertEqual(key.shape[0], block_table.numel())
+        self.assertEqual(remapped.tolist(), [[0, 1], [2, 3]])
+        for row_idx, row in enumerate(block_table):
+            for col_idx in range(row.numel()):
+                self.assertEqual(key[remapped[row_idx, col_idx], 0, 0].item(), 2)
+        # Every gathered row is block 2's content: all slots agree.
+        for row in key:
+            self.assertTrue(torch.equal(row, key[0]))
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_negative_table_entries_clamp_to_block_zero(self, mock_ctx):
@@ -1318,6 +1350,7 @@ class TestBnsdPaReadGather(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_capture_mode_gathers_full_table(self, mock_ctx):
+        """Capture uses the same full-width gather as eager (static shape)."""
         mock_ctx.return_value = MagicMock(capturing=True)
         impl = self._make_impl()
         impl.key_cache = self._make_bnsd_cache()
