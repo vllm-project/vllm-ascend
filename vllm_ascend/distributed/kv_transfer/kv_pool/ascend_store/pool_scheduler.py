@@ -566,8 +566,6 @@ class BaseKVPoolScheduler(ABC):
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
         self._sync_swa_block_ids(request_tracker)
-        if getattr(self.kv_cache_config, "dsv4_component_identity", None) is not None:
-            request_tracker.sync_live_block_ids(scheduler_output)
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
         # save_decode_cache is intentionally narrower than
         # consumer_is_to_put: a consumer keeps skipping prefill writes and is

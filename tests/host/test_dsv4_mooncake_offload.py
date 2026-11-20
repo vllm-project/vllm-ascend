@@ -284,30 +284,6 @@ def test_mixed_batch_restores_only_shared_bytes_for_continuation(ns):
     assert (main[1:3] == 33).all()
 
 
-def test_live_table_replaces_holes_and_copies_without_new_blocks():
-    tree = ast.parse((ROOT / STORE / "metadata.py").read_text())
-    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RequestTracker")
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "sync_live_block_ids")
-    cls.body = [method]
-    cls.decorator_list = []
-    ns = {}
-    exec(
-        compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "tracker", "exec", flags=0x1000000),
-        ns,
-    )
-    tracker = ns["RequestTracker"]()
-    tracker.req_id = "request"
-    tracker.allocated_block_ids_by_group = [[10, 20], [9]]
-    live = [[0, 20, 35], [0, 18]]
-    tracker.sync_live_block_ids(NS(kv_connector_block_state=NS(get_block_ids=lambda req: live)))
-    live[0][1] = 99
-    assert tracker.allocated_block_ids_by_group == [[0, 20, 35], [0, 18]]
-    with pytest.raises(RuntimeError, match="requires"):
-        tracker.sync_live_block_ids(NS())
-    with pytest.raises(RuntimeError, match="no live"):
-        tracker.sync_live_block_ids(NS(kv_connector_block_state=NS(get_block_ids=lambda req: None)))
-
-
 def test_tail_snapshot_uses_raw_tokens_and_skips_resident_restore(ns):
     worker = NS(
         group_uses_align_state=[False],
@@ -491,12 +467,18 @@ def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
 
 
 def test_indexer_transport_drops_only_overlapping_view(ns):
-    views = [object(), object(), object()]
-    caches = {"layer.indexer.k_cache": views, "other": views}
+    torch = pytest.importorskip("torch")
+    ns["torch"] = torch
+    backing = torch.empty((2, 8), dtype=torch.uint8)
+    views = (backing[:, :6], backing[:, 6:], backing)
+    other = object()
+    caches = {"layer.indexer.k_cache": views, "other": other}
     selected = ns["transfer_cache_views"](caches)
-    assert selected["layer.indexer.k_cache"] == views[:2]
-    assert selected["other"] is views
-    assert len(caches["layer.indexer.k_cache"]) == 3
+    assert selected["layer.indexer.k_cache"][0] is views[0]
+    assert selected["layer.indexer.k_cache"][1] is views[1]
+    assert len(selected["layer.indexer.k_cache"]) == 2
+    assert selected["other"] is other
+    assert caches["layer.indexer.k_cache"] is views
 
 
 def isolated_method(path, cls_name, method_name, ns):

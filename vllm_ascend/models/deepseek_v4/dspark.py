@@ -293,7 +293,7 @@ class DeepseekV4DSparkModel(nn.Module):
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         if context_states.numel() == 0 or context_positions.numel() == 0:
             return
@@ -308,6 +308,10 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         if context_slot_mapping is None:
             return
+
+        # The native drafter supplies one tensor when all draft layers share a group.
+        if isinstance(context_slot_mapping, torch.Tensor):
+            context_slot_mapping = [context_slot_mapping] * len(self.layers)
 
         # Prefill may skip proposals while still writing draft context KV.
         # Publish those writes even when no draft attention forward runs.
@@ -513,7 +517,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         self,
         context_states: torch.Tensor,
         context_positions: torch.Tensor,
-        context_slot_mapping: list[torch.Tensor | None] | None = None,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         self.model.precompute_and_store_context_kv(
             context_states,
