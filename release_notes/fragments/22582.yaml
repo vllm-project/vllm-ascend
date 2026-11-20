@@ -1,0 +1,8 @@
+pr: 22582
+entries:
+  - category: performance
+    text: >-
+      Mooncake PD transfers now combine contiguous K/scale regions that occupy
+      only part of a page, reducing transfer descriptors without copying trailing
+      padding. Upgrade both prefill and decode nodes together, since mixed
+      revisions can disagree on descriptor counts for these layouts.
