@@ -42,6 +42,7 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
+    FlashAttentionNpu3Model,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -1561,9 +1562,9 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward_with_output",
             ]
         )
-        additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
-        additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
-        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
+        # npugraph_ex compiles each piece (force_eager) and runs the static/
+        # super kernel passes per piece; keep the user's
+        # ascend_compilation_config flags untouched for PIECEWISE.
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
@@ -1879,7 +1880,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select the optional A2/A3 FA3 ABI only for compatible MiniMax attention."""
+    """Select optional FA3 for compatible MiniMax or Step5 attention."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1893,7 +1894,9 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     spec = config.speculative_config if config is not None else None
     if spec is None or spec.draft_model_config is None:
         return False
-    if config is None or config.model_config is None or not _uses_minimax_fa3(config):
+    if config is None or config.model_config is None:
+        return False
+    if not (_uses_minimax_fa3(config) or _uses_step5_fa3(config)):
         return False
     parallel = config.parallel_config
     return (
@@ -1923,6 +1926,14 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
     )
 
 
+def _uses_step5_fa3(config) -> bool:
+    """Select Step5 attention on hardware profiles that enable this model family."""
+    architectures = config.model_config.hf_config.architectures or ()
+    return FlashAttentionNpu3Model.STEP5 in get_current_hardware_profile().flash_attn_npu_3_models and bool(
+        {"Step5ForCausalLM", "Step5ForConditionalGeneration", "Step5MTP"}.intersection(architectures)
+    )
+
+
 def _uses_minimax_fa3(config) -> bool:
     """Keep unrelated models and drafts on their configured attention backend."""
     architectures = config.model_config.hf_config.architectures or ()
@@ -1936,7 +1947,8 @@ def _uses_minimax_fa3(config) -> bool:
         "Qwen3OmniDSparkModel",
     }
     return (
-        getattr(spec, "method", None) in ("dspark",)
+        FlashAttentionNpu3Model.MINIMAX in get_current_hardware_profile().flash_attn_npu_3_models
+        and getattr(spec, "method", None) in ("dspark",)
         and bool(draft_architectures.intersection(architectures))
         and bool(_MINIMAX_M3_ARCHITECTURES.intersection(getattr(target_hf, "architectures", None) or ()))
     )
