@@ -451,77 +451,6 @@ presets:
           ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
           HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
           HCCL_BUFFSIZE: '512'
-      pooling_prefill:
-        label: MemCache three-tier pooling / Prefill
-        tp: 2
-        args:
-          - '--port'
-          - '25568'
-          - '--max-num-batched-tokens'
-          - '8192'
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--enforce-eager'
-          - '--additional-config'
-          - >-
-            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
-          - '--pipeline-parallel-size'
-          - '2'
-          - '--data-parallel-size'
-          - '2'
-          - '--max-model-len'
-          - '262144'
-          - '--engram-config'
-          - '{"cpu_offload":true,"dp_shared_memory":true}'
-          - '--kv-transfer-config'
-          - >-
-            {"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}
-        remove_args:
-          - '--compilation-config'
-        json_args:
-          '--speculative-config':
-            enforce_eager: true
-        env:
-          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
-          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
-          HCCL_BUFFSIZE: '8192'
-          PYTHONHASHSEED: '0'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local.conf
-          ACL_OP_INIT_MODE: '1'
-          ASCEND_ENABLE_USE_FABRIC_MEM: '1'
-      pooling_decode:
-        label: MemCache three-tier pooling / Decode
-        tp: 2
-        args:
-          - '--port'
-          - '25569'
-          - '--data-parallel-size'
-          - '4'
-          - '--max-num-batched-tokens'
-          - '8192'
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--engram-config'
-          - '{"cpu_offload":true,"dp_shared_memory":true}'
-          - '--additional-config'
-          - >-
-            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
-          - '--max-model-len'
-          - '262144'
-          - '--kv-transfer-config'
-          - >-
-            {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}
-        json_args:
-          '--speculative-config':
-            enforce_eager: false
-        env:
-          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
-          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
-          HCCL_BUFFSIZE: '512'
-          PYTHONHASHSEED: '0'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local.conf
-          ACL_OP_INIT_MODE: '1'
-          ASCEND_ENABLE_USE_FABRIC_MEM: '1'
       long_context_prefill:
         label: Long context (1M) / Prefill
         tp: 2
@@ -822,118 +751,6 @@ presets:
           HCCL_IF_BASE_PORT: '63000'
           no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
           NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      pooling_prefill:
-        label: MemCache three-tier pooling / Prefill
-        tp: 2
-        args:
-          - '--compilation-config'
-          - '{"cudagraph_mode":"NONE"}'
-          - '--enable-auto-tool-choice'
-          - '--reasoning-parser'
-          - qwen3
-          - '--port'
-          - '8247'
-          - '--served-model-name'
-          - qwen38-megamoe-sp-pd
-          - '--data-parallel-size'
-          - '2'
-          - '--max-model-len'
-          - '262144'
-          - '--max-num-seqs'
-          - '64'
-          - '--gpu-memory-utilization'
-          - '0.9'
-          - '--mamba-cache-mode'
-          - align
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--engram-config'
-          - '{"cpu_offload":true,"dp_shared_memory":true}'
-          - '--additional-config'
-          - >-
-            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
-          - '--kv-transfer-config'
-          - >-
-            {"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}
-          - '--tool-call-parser'
-          - qwen3_coder
-          - '--data-parallel-address'
-          - $LOCAL_SERVICE_IP
-          - '--data-parallel-rpc-port'
-          - '29770'
-        json_args:
-          '--speculative-config':
-            enforce_eager: ~
-        env:
-          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
-          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
-          ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
-          VLLM_HOST_IP: $LOCAL_SERVICE_IP
-          HCCL_IF_IP: $LOCAL_SERVICE_IP
-          GLOO_SOCKET_IFNAME: $SERVICE_NIC
-          TP_SOCKET_IFNAME: $SERVICE_NIC
-          HCCL_SOCKET_IFNAME: $SERVICE_NIC
-          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          PYTHONHASHSEED: '0'
-          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-          HCCL_BUFFSIZE: '512'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf
-      pooling_decode:
-        label: MemCache three-tier pooling / Decode
-        tp: 2
-        args:
-          - '--enable-auto-tool-choice'
-          - '--reasoning-parser'
-          - qwen3
-          - '--port'
-          - '8248'
-          - '--served-model-name'
-          - qwen38-megamoe-sp-pd
-          - '--data-parallel-size'
-          - '2'
-          - '--max-model-len'
-          - '262144'
-          - '--max-num-seqs'
-          - '64'
-          - '--gpu-memory-utilization'
-          - '0.9'
-          - '--mamba-cache-mode'
-          - align
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--engram-config'
-          - '{"cpu_offload":true,"dp_shared_memory":true}'
-          - '--additional-config'
-          - >-
-            {"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
-          - '--kv-transfer-config'
-          - >-
-            {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}
-          - '--tool-call-parser'
-          - qwen3_coder
-          - '--data-parallel-address'
-          - $LOCAL_SERVICE_IP
-          - '--data-parallel-rpc-port'
-          - '29780'
-        json_args:
-          '--speculative-config':
-            enforce_eager: false
-        env:
-          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
-          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
-          ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
-          VLLM_HOST_IP: $LOCAL_SERVICE_IP
-          HCCL_IF_IP: $LOCAL_SERVICE_IP
-          GLOO_SOCKET_IFNAME: $SERVICE_NIC
-          TP_SOCKET_IFNAME: $SERVICE_NIC
-          HCCL_SOCKET_IFNAME: $SERVICE_NIC
-          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          PYTHONHASHSEED: '0'
-          HCCL_BUFFSIZE: '512'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf
       long_context_prefill:
         label: Long context (1M) / Prefill
         tp: 4
@@ -1420,14 +1237,12 @@ guide_sections:
     in separate terminals on that host. The table links directly to each pair.
     For the A3 image-and-text point, expand **A3 image-and-text 10K launch scripts** above the command
     to launch all four Decode ranks, start the proxy and send the image request.
-    For pooling, complete the storage setup in Sections 4.3 and 5.5 before starting the workers.
 
     | Procedure | A3 (Prefill / Decode) | 950DT (Prefill / Decode) |
     | --- | --- | --- |
     | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_decode) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_decode) |
     | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP4 PP2 DP1 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_decode) | [TP2 PP2 DP1 (EP2)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_decode) |
     | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_decode) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_prefill) / [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_decode) |
-    | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | [TP2 PP2 DP2 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=pooling_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=pooling_decode) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=pooling_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=pooling_decode) |
 
     The 950DT Basic PD presets use the tutorial's `VLLM_VERSION=0.32.0` override with the
     `v0.32.0rc1-a5` image. If you switch images, unset this override so vLLM Ascend
@@ -1463,10 +1278,12 @@ guide_sections:
     ```
 
     Use the proxy ports in the linked procedure for each workload point.
-    Both long-context roles use YaRN and a 1,010,000-token service limit. For
-    A3 pooling, both Mooncake peers declare Prefill DP2/TP2/PP2 and Decode
-    DP4/TP2. Both roles enable Engram DP shared memory.
+    Both long-context roles use YaRN and a 1,010,000-token service limit.
 
-    #### Not covered by this page
+    #### MemCache three-tier pooling on A3 and 950DT
 
-    **MemCache three-tier pool setup.** On A3 and 950DT, the pooling presets generate the Prefill and Decode worker commands. To set up the full pool on A3 or 950DT, follow [Section 4.3](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling) to prepare the container and mount the storage devices. Then follow the steps for your hardware in [Section 5.5](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) to configure MemCache, start or reuse MetaService, and verify cache reuse.
+    Use the model deployment tutorial for the complete pooling procedure, including the Prefill and Decode commands.
+
+    1. Before starting the container, prepare the SSD or loop devices and mount them together with the MemCache configuration directory as shown in [Section 4.3, Docker for three-tier PD pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#43-docker-for-three-tier-pd-pooling).
+    2. In [Section 5.5, PD separation with a MemCache three-tier KV cache pool](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool), select your hardware. For a new pool, configure the MetaService and LocalService files and start MetaService. For an existing pool, use its endpoints and LocalService files and preserve its disk initialization settings.
+    3. Confirm the MetaService and ConfigStore endpoints are reachable, then use the service environment and P/D launch commands in the same hardware tab.
