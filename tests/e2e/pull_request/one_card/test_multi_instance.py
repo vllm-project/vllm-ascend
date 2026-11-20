@@ -32,6 +32,8 @@ pre-fix negative-KV-cache condition.
 
 import os
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -91,3 +93,55 @@ def test_two_instances_on_single_card() -> None:
         "Second instance output text is empty — "
         "KV cache may have been allocated with zero blocks (pre-fix OOM regression)"
     )
+
+
+class ModelLoadProbe:
+    """Check extension callbacks on workers created by both executors."""
+
+    def before_load_model(self, *, load_dummy_weights):
+        assert not load_dummy_weights
+        assert self.model_runner is not None
+        assert getattr(self.model_runner, "model", None) is None
+        self.model_load_events = ["before"]
+
+    def after_load_model(self, *, load_dummy_weights):
+        assert not load_dummy_weights
+        assert self.model_load_events == ["before"]
+        parameters = list(self.model_runner.get_model().parameters())
+        assert parameters and all(p.device.type == "npu" for p in parameters)
+        self.model_load_events.append("after")
+
+    def inspect_model_load_events(self):
+        return self.model_load_events
+
+
+@pytest.mark.parametrize("executor", ["uni", "mp"])
+@pytest.mark.e2e_coverage(
+    arch="dense",
+    feature="",
+    parallel="",
+    deploy="pd_mix",
+    hardware="",
+    quantization="FP16",
+    graph_mode="eager",
+)
+def test_worker_extension_model_load(executor):
+    prompts = ["Hello", "The capital of France is"]
+    kwargs = dict(
+        dtype="float16",
+        max_model_len=128,
+        max_num_seqs=2,
+        enforce_eager=True,
+        distributed_executor_backend=executor,
+        seed=0,
+    )
+    model = "Qwen/Qwen2.5-0.5B-Instruct"
+    with VllmRunner(model, **kwargs) as baseline:
+        expected = baseline.generate_greedy(prompts, max_tokens=4)
+    with VllmRunner(
+        model,
+        worker_extension_cls=f"{__name__}.ModelLoadProbe",
+        **kwargs,
+    ) as runner:
+        assert runner.model.collective_rpc("inspect_model_load_events") == [["before", "after"]]
+        assert runner.generate_greedy(prompts, max_tokens=4) == expected
