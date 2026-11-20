@@ -189,6 +189,36 @@ class TestAttemptEvidenceAccounting(unittest.TestCase):
         rep = ev.to_failure_report()
         self.assertEqual(rep.rollback_boundary, 0)
 
+    def test_report_preserves_local_prefix_before_external_failure(self):
+        # [2] mixed local+external hit: blocks below the attempt's delta
+        # start are the request's LOCAL prefix (vllm_cached_tokens), never
+        # enumerated as external blocks. The logical indices are
+        # request-absolute, so the failure geometry lands above the local
+        # prefix and the rollback keeps the healthy local blocks (plus the
+        # contiguously loaded external blocks) outside the repair write set
+        # -- mirroring the upstream mooncake producer's local-prefix fix.
+        local_prefix_blocks = 2
+        ev = make_attempt(extent=6 * BLOCK)
+        for i in range(local_prefix_blocks, 6):
+            ev.note_expected_block(i)
+            ev.block_ids[i] = 100 + i
+        ev.note_block_outcome(local_prefix_blocks, True)
+        ev.note_block_outcome(local_prefix_blocks + 1, False)
+        for i in range(local_prefix_blocks + 2, 6):
+            ev.note_block_outcome(i, True)
+        ev.finalize()
+        rep = ev.to_failure_report()
+        att = ev.to_attestation()
+        self.assertIsNotNone(rep)
+        self.assertEqual(rep.token_span, (3 * BLOCK, 4 * BLOCK))
+        self.assertEqual(rep.rollback_boundary, 3 * BLOCK)
+        self.assertEqual(rep.failed_block_ids, [103])
+        self.assertEqual(rep.restored_extent, 6 * BLOCK)
+        # Attestation cells cover the EXTERNAL set only: 4 blocks x layers.
+        self.assertEqual(att.expected_objects, 4 * LAYERS)
+        self.assertEqual(att.failed_objects, 1 * LAYERS)
+        self.assertTrue(att.well_formed())
+
     def test_multi_block_failure_not_representable(self):
         # [2] v1 supports exactly one region: no report, honest attestation.
         ev = fill_attempt(make_attempt(), failed=(0, 3))
