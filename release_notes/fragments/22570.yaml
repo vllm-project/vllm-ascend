@@ -1,0 +1,7 @@
+pr: 22570
+entries:
+  - category: bugfix
+    text: >-
+      Kimi K3 and K3.1 deployments can pass RecoverSSM startup validation with
+      experimental non-layerwise MemCache pooling by listing MooncakeConnectorV2
+      before AscendStoreConnector in MultiConnector.
