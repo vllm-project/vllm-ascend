@@ -123,6 +123,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * worker.num_kv_cache_groups
             for group_id in range(worker.num_kv_cache_groups):
+                block_ids_by_group: list[int] | np.ndarray | None
                 if group_id in worker.swa_group_ids:
                     block_ids_by_group = request.swa_save_block_ids(group_id)
                 elif request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np):
