@@ -668,6 +668,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload failed while saving shared KV/state")
 
         if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
@@ -688,6 +690,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if self._session_tracker is not None:
                 self._session_tracker.commit_put_keys(committed_keys)
             self._remove_started_keys(active_keys)
+            if failed_keys and self.raise_on_transfer_failure:
+                raise RuntimeError("Mooncake offload failed to publish shared KV/state")
         self._active_put_keys = None
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
@@ -881,7 +885,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
         self._active_load_indices: set[int] | None = None
-        self._group_load_indices: dict[int, set[int] | None] = {}
+        self._group_load_indices: dict[int, tuple[SharedBlockData, set[int] | None]] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -968,17 +972,23 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     self.set_finished_request(req_id)
             self._active_load_indices = None
 
+    def _wait_for_reuse_saves(self, data: LayerLoadTask) -> bool:
+        for source in data.wait_for_save_layers:
+            if not self._wait_for_event(self.layer_save_finished_events[source], self.save_failure_checker):
+                return False
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
+            # CPU completion on a non-writing rank only records the NPU event.
+            self.sync_save_events[source].synchronize()
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(source)
+        return True
+
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
-            wait_for_save = data.wait_for_save_layer
-            if wait_for_save is not None:
-                if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                    return
-                if self.save_failure_checker is not None:
-                    self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
-                self.layer_save_finished_events[wait_for_save].clear()
+            if not self._wait_for_reuse_saves(data):
+                return
 
             if data.attention_start_gate is not None:
                 if not self._wait_for_event(data.attention_start_gate):
@@ -994,9 +1004,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 if not isinstance(req_meta, LayerRangeReqMeta):
                     raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
-                self._active_load_indices = self._group_load_indices.get(task.group_id)
+                # Resident and shared layers can select different requests within one group.
+                previous = self._group_load_indices.get(task.group_id)
+                self._active_load_indices = previous[1] if previous is not None and previous[0] is shared else None
                 self._handle_range_request(req_meta, shared)
-                self._group_load_indices[task.group_id] = None if task.final_group_layer else self._active_load_indices
+                if task.final_group_layer:
+                    self._group_load_indices.pop(task.group_id, None)
+                else:
+                    self._group_load_indices[task.group_id] = (shared, self._active_load_indices)
         except Exception as exc:
             self._fatal_error = exc
             if self._active_load_indices is not None:
@@ -1043,22 +1058,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _copy_gva_layers(self, data: LayerLoadTask) -> bool:
         # Layerwise threads only run when the worker-side
         # protocol gate is on; every store call below sits on the Backend ABC.
-        wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
-
-        if wait_for_save is not None:
-            if not self._wait_for_event(self.layer_save_finished_events[wait_for_save], self.save_failure_checker):
-                return False
-            if self.save_failure_checker is not None:
-                self.save_failure_checker()
-            # Non-saving TP ranks have no D2H task to synchronize the event.
-            # Their CPU save-finished signal only means the event was recorded;
-            # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
-            logger.debug("Layer save event cleared: layer %d", wait_for_save)
-            self.layer_save_finished_events[wait_for_save].clear()
+        if not self._wait_for_reuse_saves(data):
+            return False
 
         if self.load_disabled.is_set():
             if self.external_slot_release_waiter is not None:

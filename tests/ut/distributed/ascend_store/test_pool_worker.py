@@ -442,7 +442,7 @@ class TestPCPPoolWorker(unittest.TestCase):
 
 
 class TestDFlashLayerwiseKV(unittest.TestCase):
-    def make_worker(self, kv_role="kv_both"):
+    def make_worker(self, kv_role="kv_both", reuse=False):
         target_names = [f"model.layers.{layer}.attn" for layer in range(4)]
         draft_names = [f"draft.layers.{layer}.attn" for layer in range(4, 6)]
         spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
@@ -451,6 +451,15 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
             prefix_cache_retention_interval=None,
             dflash_draft_layer_names=tuple(draft_names),
         )
+        if reuse:
+            layout = SimpleNamespace(
+                prefetch_layer_map={2: (1,), 3: (2,)},
+                has_layer_reuse=True,
+                num_prefetch_layers=1,
+                cache_layer_indices={name: layer for layer, name in enumerate(target_names + draft_names)},
+                reused_cache_names=frozenset(target_names[1:]),
+            )
+            plan.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={"_layerwise_reuse_layout": layout})
         worker = make_worker(
             self,
             num_layers=4,
@@ -468,11 +477,11 @@ class TestDFlashLayerwiseKV(unittest.TestCase):
         return worker
 
     def test_draft_layers_are_persistent_and_outside_target_reuse(self):
-        worker = self.make_worker()
+        worker = self.make_worker(reuse=True)
         self.assertEqual(worker.num_layers, 6)
         self.assertEqual(worker._dflash_draft_start_layer, 4)
-        self.assertEqual(set(worker._layerwise_reuse_layout.layer_cache_specs), {0, 1, 2, 3})
-        self.assertTrue({4, 5} <= set(worker.independent_layers))
+        self.assertEqual(worker.prefetch_layer_map, {2: (1,), 3: (2,)})
+        self.assertEqual(worker._reused_layers_by_group, {0: {1, 2, 3}})
         worker.layer_load_tasks = [[object()] for _ in range(6)]
         worker.current_layer = worker.next_layer_to_submit = 3
         worker._submit_ready_layer_loads()
@@ -3820,6 +3829,50 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         self.assertEqual(queried_keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
         self.assertEqual(request.load_masks, ([False, True, False, True],))
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0, 201, 0, 201])
+
+    def test_restore_rotating_recurrent_state_from_previous_prefill_chunk(self):
+        for cached_tokens, lookup_keys in (
+            (31, ["private"]),
+            (32, ["public"]),
+            (32, ["public", "private"]),
+        ):
+            with self.subTest(cached_tokens=cached_tokens, lookup_keys=lookup_keys):
+                worker = self._make_worker()
+                worker.num_kv_cache_groups = 2
+                worker.grouped_block_size = [16, 16]
+                worker.group_uses_align_state = [False, True]
+                worker.cacheable_group_ids = {0, 1}
+                worker._reused_layers_by_group = {1: {0}}
+                worker._make_layerwise_full_key = MagicMock(return_value="public")
+                block_ids = [[10, 11], [20, 21]]
+                request = self._make_request(
+                    block_hashes=["h0", "h1"][: cached_tokens // 16],
+                    block_ids_by_group=block_ids,
+                    block_ids_by_group_np=[np.asarray(ids, dtype=np.int64) for ids in block_ids],
+                    load_spec=LoadSpec(cached_tokens, cached_tokens, True, layerwise_previous_step=True),
+                )
+                worker._snapshot_keys[request.req_id] = {1: {1: "private"}}
+                selected_key = lookup_keys[-1]
+                available = {selected_key: SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])}
+                queries = []
+
+                def lookup(keys, available=available, queries=queries, **_):
+                    queries.append(list(keys))
+                    return [available.get(key) for key in keys]
+
+                worker.m_store.batch_get_key_info.side_effect = lookup
+                worker.m_store.batch_add_lease.return_value = [0]
+
+                worker._data_plane._prepare_load_gvas([request])
+
+                self.assertTrue(request.load_spec.can_load)
+                self.assertEqual(queries, [[key] for key in [*lookup_keys, selected_key]])
+                self.assertEqual(request.load_keys, [selected_key])
+                self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [])
+                self.assertEqual(
+                    request.load_block_gvas_by_group_np[1].tolist(), [0, 201 if cached_tokens == 32 else 0]
+                )
+                self.assertEqual(request.partial_load_gva_per_group, [0, 201 if cached_tokens == 31 else 0])
 
     def test_process_load_for_layer_batch_respects_load_mask(self):
         worker = self._make_worker()

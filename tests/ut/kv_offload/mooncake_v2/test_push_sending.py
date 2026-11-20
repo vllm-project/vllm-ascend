@@ -261,6 +261,45 @@ def test_proxy_destinations_and_two_chunks(worker, monkeypatch, dcp):
     assert results.finished_sending == {"p-request"}
 
 
+def test_shared_cache_waits_for_push_source_write(worker):
+    name = worker.transfer_metadata.layer_names[0]
+    worker._shared_layer_indices[name] = 0
+    started, release = threading.Event(), threading.Event()
+
+    def write(*args):
+        started.set()
+        assert release.wait(3)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = write
+    worker.start_load_kv(source_meta(scheduled=8))
+    worker.save_kv_layer(name)
+    try:
+        assert started.wait(3)
+        with ThreadPoolExecutor() as executor:
+            fence = executor.submit(worker.wait_for_layer_reuse, 0)
+            try:
+                with pytest.raises(TimeoutError):
+                    fence.result(timeout=0.1)
+            finally:
+                release.set()
+            fence.result(timeout=3)
+    finally:
+        release.set()
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_called_once()
+
+
+def test_shared_cache_with_missing_save_hook_completes_as_failed(worker):
+    name = worker.transfer_metadata.layer_names[0]
+    worker._shared_layer_indices[name] = 0
+    worker.start_load_kv(source_meta(scheduled=8))
+    worker.save_kv_layer("")
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_not_called()
+    assert worker._send_done.call_args.args[-1].startswith("Missing Mooncake Push save hook")
+
+
 def test_partial_block_waits_for_later_chunk(worker):
     worker.start_load_kv(source_meta(0, 3))
     worker.wait_for_save()

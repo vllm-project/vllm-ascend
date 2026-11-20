@@ -390,7 +390,15 @@ def get_glm5_next_kv_cache_groups(
         # no recurrent groups.
         return groups
 
-    grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+        keep_recurrent_state_resident,
+    )
+
+    if keep_recurrent_state_resident(vllm_config):
+        # Speculative acceptance selects each layer's resident checkpoint after forward.
+        grouped_names = [[name] for name in _sorted_layer_names(list(mamba_specs))]
+    else:
+        grouped_names = _group_glm5_next_mamba_layer_names(kv_cache_spec, mamba_specs)
     groups.extend(_create_mamba_groups(mamba_specs, grouped_names))
     return groups
 

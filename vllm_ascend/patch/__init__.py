@@ -291,6 +291,22 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `Scheduler._get_local_prefix_cache_hit`,
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
+#    Why:
+#       GLM layerwise scratch buffers overwrite locally hashed prefix pages.
+#       Hash presence alone cannot establish that their payload is resident.
+#    How:
+#       Ask AscendStore for a verified prefix bound before local admission.
+#       Registered component plans retain local block/hash sharing and restore
+#       shared payload per layer. Legacy scratch plans reject local hits.
+#       Ordinary persistent cache layouts retain their existing hit policy.
+#    Related PR (if no, explain why):
+#       No upstream PR; this accompanies GLM Prefill main-pack reuse.
+#    Future Plan:
+#       Remove when upstream prefix admission can track scratch residency or
+#       delegate hit validation to the layerwise connector before admission.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -300,11 +316,14 @@
 #       Ascend cache layouts need platform-specific materialization and memory
 #       accounting.
 #    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       Cache materialization records the reuse backing size for Core budgeting
+#       and AscendStore scheduler initialization.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Remove once the upstream builder API can materialize Ascend layouts,
+#       account for their physical memory costs, and pass reuse metadata to the scheduler.
+#
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:
