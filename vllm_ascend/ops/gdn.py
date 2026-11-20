@@ -48,14 +48,42 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNFusedAttentionBackend,
     GDNSpecCausalConv1dMetadata,
 )
+from vllm_ascend.ops.layernorm import AscendRMSNormGated
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
+from vllm_ascend.ops.triton.fla.gdn_gated_norm import gdn_gated_norm
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+def _gdn_output_norm(norm, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    """Use the strided-Z kernel only for supported GDN inference inputs."""
+    if (
+        type(norm) is AscendRMSNormGated
+        and not torch.is_grad_enabled()
+        and x.device.type == "npu"
+        and x.device == z.device == norm.weight.device
+        and x.ndim == 3
+        and x.shape == z.shape
+        and x.shape[-1] == 128
+        and x.shape[1] > 0
+        and x.dtype == z.dtype
+        and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and x.stride(-1) == z.stride(-1) == 1
+        and all(s > 0 for s in (*x.stride(), *z.stride()))
+        and not z.is_contiguous()
+        and norm.weight.shape == (128,)
+        and norm.weight.is_contiguous()
+        and norm.bias is None
+        and norm.group_size in (None, 128)
+        and norm.activation in ("swish", "silu", "sigmoid")
+    ):
+        return gdn_gated_norm(x, z, norm.weight, norm.eps, norm.norm_before_gate, norm.activation)
+    return norm(x.reshape(-1, x.shape[-1]), z.reshape(-1, z.shape[-1])).reshape(z.shape)
 
 
 @lru_cache(maxsize=1)
@@ -478,10 +506,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 3: Output Projection
         # ============================================================
         z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = _gdn_output_norm(self.norm, core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
