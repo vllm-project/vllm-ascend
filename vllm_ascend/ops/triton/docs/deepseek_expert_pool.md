@@ -32,6 +32,8 @@
 
 ## Constraints
 
+- The production `DSparkExpertPool.route` entry requires FP32 logits and rejects other dtypes before allocating routing scratch or launching a kernel. The DeepSeek V4 gate already computes FP32 logits; this interface does not implicitly promote FP16 or BF16 inputs.
+
 - `logits` must be FP32 and 2D with `experts == router.num_logical_experts` and one row per prepared token role; `DSparkExpertPool.route` raises `ValueError` otherwise. `logits` may carry arbitrary row/expert strides (both are passed to the kernel); every other tensor must be contiguous.
 - `roles` must be int32, contiguous, with values in `{0, 1, 2}`. The caller's role construction (`build_roles` with `protected_positions` in `[1, num_speculative_tokens + 1]`) always pairs RESTRICTED rows with CONTRIBUTOR rows, and each CONTRIBUTOR row votes 6 distinct experts, so the pool always holds at least `K` candidates and the emitted IDs stay in `[0, experts)`.
 - `bias` must be a contiguous `[experts]` tensor in the logits dtype. `raw` must be a contiguous FP32 `[rows, experts]` buffer (a leading-dimension slice of a persistent `[workspace_rows, experts]` workspace satisfies this); `votes` must be a contiguous int32 `[experts]` buffer. The wrapper zeroes `votes` per call, so the scratch is reusable across calls but must not be shared by concurrent calls.

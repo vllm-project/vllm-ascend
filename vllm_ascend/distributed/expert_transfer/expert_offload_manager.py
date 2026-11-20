@@ -79,6 +79,8 @@ class HostExpertStore:
 
         Only one conversion bundle is live on the NPU. Physical copies bypass
         ND interpretation of NZ padding and preserve packed scale strides.
+        Native tensors must start at their storage base and have a consistent
+        physical size across experts; zero-offset layout views are supported.
         Raw checkpoint tensors are retired after the complete layer succeeds.
         """
         import acl  # type: ignore[import-not-found]
@@ -91,7 +93,17 @@ class HostExpertStore:
             torch.npu.current_stream(device).synchronize()
             for name, tensor in expert_weights.items():
                 # Include native padding in weights and packed scale storage.
+                # A shifted pointer cannot copy the complete physical allocation.
+                if tensor.storage_offset() != 0:
+                    raise ValueError(
+                        f"expert offload requires zero-offset native tensors; {name} for expert {expert_id} "
+                        f"has storage offset {tensor.storage_offset()}"
+                    )
                 expert_bytes = int(torch_npu.get_storage_size(tensor)) * tensor.element_size()
+                if not 0 < expert_bytes <= tensor.untyped_storage().nbytes():
+                    raise ValueError(f"invalid native storage size for {name} of expert {expert_id}: {expert_bytes}")
+                if expert_id > 0 and expert_bytes != prepared[name].expert_bytes:
+                    raise ValueError(f"inconsistent native expert storage size for {name} of expert {expert_id}")
                 if expert_id == 0:
                     # The host allocator rounds large pinned allocations up to a
                     # power of two. Splitting 288 experts into 32-expert chunks
@@ -115,7 +127,7 @@ class HostExpertStore:
                 error = acl.rt.memcpy(
                     chunk[row].data_ptr(),
                     expert_bytes,
-                    tensor.untyped_storage().data_ptr(),
+                    tensor.data_ptr(),
                     expert_bytes,
                     ACL_MEMCPY_DEVICE_TO_HOST,
                 )
@@ -376,6 +388,8 @@ class ExpertOffloadManager:
             for layer in model.modules()
             if (binding := getattr(layer, "_expert_offload_binding", None)) is not None
         }
+        if not self.bindings:
+            raise ValueError("expert offload is enabled but found no layers with expert offload bindings")
         for binding in self.bindings.values():
             binding.manager = self
         self.full_pool.allocate(self.bindings.values())

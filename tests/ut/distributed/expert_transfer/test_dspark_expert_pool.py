@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -133,3 +135,43 @@ def test_capture_uses_the_configured_verify_width_for_all_requests():
     assert pool.roles[:12].tolist() == [1, 1, 2, 2] * 3
     pool.prepare(make_batch([0, 4, 8], [3, 3], 12))
     assert pool.roles[:12].tolist() == [1, 1, 2, 2] * 2 + [0] * 4
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_non_fp32_logits_are_rejected_before_kernel_dispatch(monkeypatch, dtype):
+    route = Mock()
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.ops.triton.deepseek_expert_pool", SimpleNamespace(route_experts=route)
+    )
+    pool = DSparkExpertPool(torch.device("cpu"), 6, 2, 2, num_speculative_tokens=5, num_device_experts=84)
+    pool.num_rows = 6
+    router = SimpleNamespace(num_logical_experts=256, e_score_correction_bias=None, routed_scaling_factor=1.5)
+
+    with pytest.raises(ValueError, match="aligned FP32 logits"):
+        pool.route(router, torch.zeros(6, 256, dtype=dtype))
+
+    route.assert_not_called()
+    assert pool.workspaces == {}
+
+
+def test_fp32_logits_reach_kernel_unchanged_with_fp32_scratch(monkeypatch):
+    weights = torch.full((6, 6), 0.25)
+    ids = torch.zeros((6, 6), dtype=torch.int32)
+    route = Mock(return_value=(weights, ids))
+    monkeypatch.setitem(
+        sys.modules, "vllm_ascend.ops.triton.deepseek_expert_pool", SimpleNamespace(route_experts=route)
+    )
+    pool = DSparkExpertPool(torch.device("cpu"), 6, 2, 2, num_speculative_tokens=5, num_device_experts=84)
+    pool.num_rows = 6
+    logits = torch.arange(6 * 256, dtype=torch.float32).reshape(6, 256)
+    original = logits.clone()
+    router = SimpleNamespace(num_logical_experts=256, e_score_correction_bias=None, routed_scaling_factor=1.5)
+
+    actual_weights, actual_ids = pool.route(router, logits)
+
+    assert actual_weights is weights and actual_ids is ids
+    passed_logits, _, bias, raw_scores, votes, _, _ = route.call_args.args
+    assert passed_logits is logits
+    assert bias.dtype == raw_scores.dtype == torch.float32
+    assert votes.dtype == torch.int32
+    torch.testing.assert_close(logits, original)

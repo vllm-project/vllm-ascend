@@ -7,6 +7,18 @@ import torch
 from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
 
 
+def test_enabled_offload_rejects_models_without_bound_layers(monkeypatch):
+    manager = ExpertOffloadManager()
+    allocate = Mock()
+    monkeypatch.setattr(manager.full_pool, "allocate", allocate)
+
+    with pytest.raises(ValueError, match="expert offload is enabled.*no layers.*offload bindings"):
+        manager.initialize(torch.nn.Linear(2, 2))
+
+    allocate.assert_not_called()
+    assert manager.bindings == {}
+
+
 @pytest.mark.parametrize("kind", ["mxfp4", "mxfp8"])
 def test_loading_decode_prefill_and_capacity_fallback(expert_factory, manager_factory, kind):
     layer, scheme = expert_factory(kind)
