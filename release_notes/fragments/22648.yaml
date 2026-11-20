@@ -1,0 +1,6 @@
+pr: 22648
+entries:
+  - category: performance
+    text: Removed the per-launch device-to-host synchronisation from the FLA/KDA varlen
+      chunk-index construction, so the remaining fallback prefill paths no longer stall
+      the NPU pipeline and can be captured by ACLGraph.
