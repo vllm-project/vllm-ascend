@@ -82,7 +82,7 @@ export function checkScenario(scenario) {
       || /\.nvidia$|\.cuda_map$/.test(install.imageSource)
       || /(?:^|\/)vllm\/vllm-openai(?=[:@]|$)|nvcr\.io\/nvidia\//.test(install.image)) {
       add("ASC001", `NPU image resolves to ${install.image || "<empty>"} from ${install.imageSource}.`,
-        "Pin an Ascend image in the variant's exact hardware override, or disable Docker for a pip-only recipe.");
+        "Pin an Ascend image in the variant's exact hardware override, or disable Docker for a pip-only recipe.", "warning");
     }
   }
   const genericExplicitPip = /--torch-backend(?:=|\s+)auto\b/.test(install.pipCommand || "")
@@ -91,7 +91,7 @@ export function checkScenario(scenario) {
     add("ASC002", install.nightly
       ? "NPU pip tab falls back to the CUDA nightly wheel index."
       : "NPU pip tab falls back to generic vLLM --torch-backend auto installation.",
-    "Set install.pip: false on the exact hardware, or supply an effective Ascend main pip command. Dependencies do not override it.");
+    "Set install.pip: false on the exact hardware, or supply an effective Ascend main pip command. Dependencies do not override it.", "warning");
   }
   if (install.pipEnabled && /(?:wheels\.vllm\.ai|download\.pytorch\.org)[^\s]*\/cu\d+|--torch-backend(?:=|\s+)cu\d+/.test(install.pipCommand || "")) {
     add("ASC003", "The effective pip command selects CUDA wheels.", "Use an Ascend installation flow or disable the pip tab.");
@@ -102,8 +102,8 @@ export function checkScenario(scenario) {
   }
   if (deployType === "pd_cluster") {
     if (!expectedPD?.connector || !expectedPD?.router) {
-      add("ASC010", "PD connector/router has no explicit static expectation; renderer defaults are not Ascend validation.",
-        "Review the tutorial and record the expected connector/router with --pd-expectations; this is not an NPU pass record.");
+      add("ASC010", "PD connector/router has no independent static expectation; rendering is not NPU validation.",
+        "Review the declared preset against the tutorial; optionally supply --pd-expectations for an independent comparison.", "warning");
     } else if (router !== expectedPD.router) {
       add("ASC013", `PD router is ${router}; expected ${expectedPD.router}.`, "Fix the recipe or the upstream renderer; do not change expectations merely to silence the check.");
     }

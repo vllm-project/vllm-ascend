@@ -167,25 +167,21 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model)
+        signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
 
 
-PROMPTS = [
-    "The capital of France is",
-    "Explain why the sky is blue in one sentence:",
-]
-
-
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
+def generation_signature(
+    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...]
+) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison."""
     signature = []
-    for prompt in PROMPTS:
+    for prompt in prompts:
         response = client.completions.create(
             model=model,
-            prompt=prompt,
+            prompt=list(prompt) if isinstance(prompt, tuple) else prompt,
             max_tokens=8,
             temperature=0,
             logprobs=1,
@@ -239,7 +235,7 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model)
+        dummy_signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
         yield server, reference, dummy_signature
 
 

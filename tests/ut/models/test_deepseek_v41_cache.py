@@ -1043,6 +1043,8 @@ def test_async_compressed_lengths_use_device_values_at_rejection_boundary(runtim
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize("query_len", [1, 3])
 def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monkeypatch, deferred, query_len):
+    # This test mocks the CANN metadata ABI; packed A5 planning has separate coverage.
+    monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
     groups = make_cache_config(17).kv_cache_groups
     builders = []
     for group in groups:
@@ -1773,6 +1775,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
             method=method,
             enable_adaptive_verification=True,
             num_speculative_tokens=num_drafts,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
@@ -1820,6 +1823,7 @@ def test_v41_query_bound_is_independent_of_adaptive_policy(method, enabled, num_
             method=method,
             enable_adaptive_verification=enabled,
             num_speculative_tokens=num_drafts,
+            max_num_new_slots_for_drafting=0,
             parallel_drafting=False,
         ),
         use_v2_model_runner=True,

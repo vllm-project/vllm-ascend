@@ -19,6 +19,7 @@ import math
 import os
 import subprocess
 import sys
+from copy import copy
 from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
@@ -48,6 +49,7 @@ from vllm_ascend.ascend_config import (
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
+    draft_config_context,
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
@@ -1955,7 +1957,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
         # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
-        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
+        # the published MegaMoE flag to False, regardless
         # of whether the model config supports megamoe. So even when
         # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
         # up False and the fused path routes to dispatch_ffn_combine instead of
@@ -2006,30 +2008,30 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+    def test_minimax_m3_draft_validates_its_own_mc2_mode(self, mock_fix):
         vc = VllmConfig()
         vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
-        config = init_ascend_config(vc)
-        # Exercise a custom entry point with normalized MC2 mode and an
-        # uninitialized capability cache, outside the usual factory ordering.
-        config.enable_fused_mc2 = 1
+        vc.parallel_config.world_size = 8
+        vc.additional_config = {"enable_fused_mc2": 2}
+
         with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
             patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
             patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
         ):
-            config.derive_and_validate(vc)
-            self.assertEqual(config.enable_fused_mc2, 1)
+            target = init_ascend_config(vc)
             self.assertTrue(is_mega_moe_supported())
+            draft_vc = copy(vc)
+            draft_vc.additional_config = {"enable_fused_mc2": 1}
 
-        # An explicitly disabled cache must stay disabled even with CANN
-        # installed: MiniMax cannot use dispatch_ffn_combine.
-        with (
-            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
-            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
-            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
-        ):
-            config.derive_and_validate(vc)
+            with (
+                draft_config_context(),
+                self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+            ):
+                init_ascend_config(draft_vc)
+
+            self.assertIs(get_ascend_config(), target)
+            self.assertTrue(is_mega_moe_supported())
 
     @_clean_up
     @patch(

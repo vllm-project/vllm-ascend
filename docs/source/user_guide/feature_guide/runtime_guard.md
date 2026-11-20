@@ -55,6 +55,8 @@ Configure through `--additional-config` (or `LLM(..., additional_config=...)`):
 | `runtime_report_dir` | str | Override report root (default `<cwd>/runtime/report`) |
 | `runtime_dump_dir` | str | Seed KV dump root `dump.dump_dir` (default derived from report root). Hot-reload of `dump.dump_dir` in JSON wins after startup |
 
+**Bootstrap overwrite:** At process start the effective config is built from **built-in defaults + `additional_config.runtime_config` overlay** (and dump-dir seed). Any pre-existing file at `runtime_config_path` is **ignored for that first load** and then **rewritten** when the worker leader persists (`(overwrote)` in the startup log). Put detectors / dump quotas you need at boot into the `runtime_config` overlay (or edit the JSON **after** start with hot-reload). Pre-seeding only the on-disk JSON without an overlay will look like “my file was wiped” — that is expected.
+
 See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config reference](../configuration/runtime_config.md).
 
 ## Architecture (summary)
@@ -86,7 +88,7 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 | Type | Stage | Typical use |
 |------|-------|-------------|
 | `token_repeat` | after sample | Stutter / repetition |
-| `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
+| `logits_finite` | before sample | NaN/Inf logits (`isfinite` + gate; default **async** `.item()` wait at after-sample — logits may be mutated by grammar before wait; set `item_sync: true` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
 All detectors default to **disabled**. Enable individually under `detector.<name>.enabled`.
@@ -123,7 +125,36 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 
 Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hardware; it is not gated by default CI.
 
+## Feature compatibility
+
+Runtime Guard is wired on **Model Runner v2** only (v1 is not wired). Tracking epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976).
+
+Status meanings:
+
+- **Supported** — code path analyzed and exercised (unit tests and/or live NPU).
+- **Partial** — works with documented limits or follow-up fixes; see Notes / linked issues.
+- **Caveat** — usable only with the listed operational constraints.
+
+Code-path analysis and live verification are tracked separately; Status below reflects both.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| TP / PP | Supported | Detect last-PP TP0; `dump_kv` last PP × all TP. Exercised in functional runs. |
+| DP | Supported | Per-replica report/dump; watch multi-DP `manual_dump` quota. |
+| SP (MoE) | Supported | Sample-time rows are post all-gather; no Guard-specific SP handling needed. |
+| PCP | Partial | Detection must use the post-`restore_for_sampling` batch (see [#22026](https://github.com/vllm-project/vllm-ascend/issues/22026)). Dump path tags need `pcp_manager.pcp_rank` ([#22028](https://github.com/vllm-project/vllm-ascend/issues/22028)). |
+| DCP / CP interleave | Partial | Each rank dumps its **local dense shard**; no CP stitch in-tree. Treat `.pt` as per-rank shards. |
+| Spec / MTP / adaptive | Partial | `spec_acceptance` needs real draft lengths, not padded row width ([#22027](https://github.com/vllm-project/vllm-ascend/issues/22027)). |
+| Hybrid / multi KV group / draft KV | Partial | `dump_kv` must resolve `block_ids` per group ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| C8 (INT8 KV cache) / TQ4 (quantized sparse flash-attention KV) / kernel pages | Partial | Prefer forward-context tuple KV; expand manager→kernel ids when `blocks_per_kv_block > 1` ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| Prefix cache / APC | Caveat | Finish / +1-wave dump may see freed or reused pages (`request_finished_at_dump`). |
+| KV Pool / Offload / PD disagg | Caveat | Dump reads **device** `kv_caches` only; not a first-class offload/remote source. |
+| Grammar / structured output | Supported | `logits_finite` default async gate may observe post-grammar logits; use `item_sync: true` for sync kind. |
+
+Residual risks (PD cross-machine, DCP full-sequence stitch, offload-backed dump) stay documentation-only until product requires them.
+
 ## Related docs
 
-- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
+- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference
+- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`
