@@ -842,7 +842,6 @@ class TestRegisterKvCaches:
 
         # The lifecycle is D2RH-local, so all collaborators resolve here too.
         with (
-            patch.object(d2rh, "enable_sfa_dcp_replicated_indexer", return_value=False),
             patch.object(d2rh, "validate_register_region_count"),
             patch.object(d2rh, "global_te"),
             patch.object(d2rh, "get_ip", return_value="127.0.0.1"),

@@ -11,14 +11,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 
 
 @pytest.mark.parametrize("c8_first", [False, True])
-@pytest.mark.parametrize("replication", [1, 2])
-def test_mixed_views_share_one_allocation_and_keep_transfer_geometry(c8_first, replication):
+def test_mixed_views_share_one_allocation_and_keep_transfer_geometry(c8_first):
     bf16 = AscendSFAIndexerCacheSpec(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        sfa_dcp_replicated_indexer_size=replication,
     )
     c8 = AscendSFAIndexerCacheSpec(
         block_size=128,
@@ -28,7 +26,6 @@ def test_mixed_views_share_one_allocation_and_keep_transfer_geometry(c8_first, r
         scale_dim=1,
         scale_dtype=torch.float16,
         cache_sparse_li_c8=True,
-        sfa_dcp_replicated_indexer_size=replication,
     )
     specs = {"c8": c8, "bf16": bf16} if c8_first else {"bf16": bf16, "c8": c8}
     allocations = []
@@ -39,14 +36,14 @@ def test_mixed_views_share_one_allocation_and_keep_transfer_geometry(c8_first, r
 
     raw = allocate_shared_indexer_cache(specs, 3, allocate)
     assert allocations == [3 * bf16.page_size_bytes]
-    bf_view = raw["bf16"][0].view(torch.bfloat16).view(3, replication * 128, 128)
-    data = raw["c8"][0].view(3, replication * 128, 128)
-    scales = raw["c8"][1].view(torch.float16).view(3, replication * 128, 1)
+    bf_view = raw["bf16"][0].view(torch.bfloat16).view(3, 128, 128)
+    data = raw["c8"][0].view(3, 128, 128)
+    scales = raw["c8"][1].view(torch.float16).view(3, 128, 1)
     assert bf_view.data_ptr() == data.data_ptr()
     assert scales.untyped_storage().data_ptr() == data.untyped_storage().data_ptr()
     assert scales.data_ptr() - data.data_ptr() == data.numel()
     # These are the per-view byte lengths and strides used by KV transfer.
-    for view, block_bytes in ((bf_view, replication * 32768), (data, replication * 16384), (scales, replication * 256)):
+    for view, block_bytes in ((bf_view, 32768), (data, 16384), (scales, 256)):
         assert view[0].numel() * view.element_size() == block_bytes
         assert view.stride(0) * view.element_size() == block_bytes
     data.fill_(7)

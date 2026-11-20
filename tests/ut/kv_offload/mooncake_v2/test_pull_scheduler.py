@@ -1043,42 +1043,6 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     assert not scheduler._reqs_recv_info
 
 
-@pytest.mark.parametrize("sizes", [[0, 1, 8], [0, 0, 0]])
-def test_sending_thread_aligns_indexer_replication_sizes_by_layer(sizes) -> None:
-    first = replace(
-        make_transfer_metadata(layer_names=["layer.0", "layer.1", "layer.2"]),
-        indexer_replication_sizes=sizes,
-    )
-    second = replace(
-        make_transfer_metadata(layer_names=["layer.2", "layer.1", "layer.0"]),
-        indexer_replication_sizes=list(reversed(sizes)),
-    )
-    thread = make_sending_thread({0: first, 1: second}, tp_size=2)
-    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
-    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == sizes
-
-
-@pytest.mark.parametrize("other_sizes", [[1], [8]])
-def test_sending_thread_rejects_inconsistent_indexer_replication_sizes(other_sizes) -> None:
-    first = replace(make_transfer_metadata(), indexer_replication_sizes=[0])
-    second = replace(make_transfer_metadata(), indexer_replication_sizes=other_sizes)
-    with pytest.raises(ValueError, match="indexer_replication_sizes"):
-        make_sending_thread({0: first, 1: second}, tp_size=2)
-
-
-def test_sending_thread_merges_replication_for_split_layers() -> None:
-    workers: dict[int | tuple[int, ...], object] = {
-        rank: replace(
-            make_transfer_metadata(layer_names=[layer]),
-            indexer_replication_sizes=[0 if rank == 0 else 8],
-        )
-        for rank, layer in enumerate(["layer.0", "layer.1"])
-    }
-    thread = make_sending_thread(workers, tp_size=2, use_kv_pp=True)
-    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
-    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == [0, 8]
-
-
 def test_sending_thread_publishes_cp_interleave() -> None:
     metadata = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
     thread = make_sending_thread({0: metadata})

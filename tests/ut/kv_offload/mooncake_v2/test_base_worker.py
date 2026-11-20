@@ -332,7 +332,6 @@ def test_register_kv_caches_publishes_raw_slot_for_component_major_mla_views(mon
     assert metadata.block_strides == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_lens == [[slot_elems * raw_cache.element_size()]]
     assert metadata.block_shapes == [[(slot_elems,)]]
-    assert metadata.indexer_replication_sizes == [0]
     assert metadata.cp_kv_cache_interleave_size == 16
     assert metadata.block_size_scales == [[1]]
 
@@ -356,13 +355,11 @@ def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
     assert worker._get_shared_page_metadata((k_cache, v_cache)) is None
 
 
-@pytest.mark.parametrize("replication_size", [1, 2])
-def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
+def test_register_kv_caches_publishes_sfa_indexer_local_block_size(
     monkeypatch,
-    replication_size: int,
 ) -> None:
-    spec = make_sfa_indexer_spec(block_size=16, replication_size=replication_size)
-    cache = torch.empty((2 * replication_size, 16, 1, 8), dtype=torch.float16)
+    spec = make_sfa_indexer_spec(block_size=16)
+    cache = torch.empty((2, 16, 1, 8), dtype=torch.float16)
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
@@ -401,9 +398,8 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
 
     metadata = worker.xfer_handshake_metadata
     assert metadata is not None
-    assert metadata.indexer_replication_sizes == [replication_size]
-    assert metadata.layer_block_sizes == [16 * replication_size]
-    assert metadata.block_size_scales == [[replication_size]]
+    assert metadata.layer_block_sizes == [16]
+    assert metadata.block_size_scales == [[1]]
     assert metadata.layer_block_sizes[0] // metadata.block_size_scales[0][0] == spec.block_size
 
 

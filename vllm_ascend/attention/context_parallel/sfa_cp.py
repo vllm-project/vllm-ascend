@@ -78,21 +78,15 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-# SFA DCP replicated-indexer layout:
+# SFA and LightningIndexer cache tokens use the same DCP owners. Each rank
+# selects candidates from its local indexer history, then distributed TopK
+# determines the sparse selection. Main attention consumes owner-local IDs
+# or remaps global IDs, depending on the shared-index coordinate contract.
 #
-# - LightningIndexer cache is replicated on every DCP rank so index selection
-#   can run against the full sequence and keep the same sparse topk semantics as
-#   non-DCP SFA.
-# - SFA KV cache remains DCP-local to preserve the KV memory saving. The sparse
-#   topk indices produced from the replicated indexer view are remapped to local
-#   KV indices before calling sparse flash attention.
-# - BlockTable only owns the DCP-local physical layout. This builder derives its
-#   replicated block table and slot mapping on demand, then stores the original
-#   DCP-local view in metadata.dcp_context for KV writes and SFA reads. The
-#   independent indexer builder derives its own replicated view from common
-#   metadata using the same stateless address helpers.
-# - The replicated view uses the same logical/kernel block size as BlockTable,
-#   including hybrid block splitting.
+# The main-attention builder retains temporary full-context address views for
+# shared metadata construction and gathered-prefill paths. Persistent KV writes
+# and sharded attention reads use metadata.dcp_context's local slots/tables;
+# the independent LightningIndexer builder consumes its own local common metadata.
 class AscendSFADCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendSFAMetadataBuilder,

@@ -327,7 +327,7 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
 )
 
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
-    name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
+    name="dsv3_2_sfa_pcp_dcp_mtp5_sharded_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=DSV3_2_SFA_DCP_GOLDENS,

@@ -89,7 +89,6 @@ def test_registration_preserves_layout_and_d2rh_owns_host_regions(worker_cls, ro
         return thread
 
     with (
-        patch.object(runtime_module, "enable_sfa_dcp_replicated_indexer", return_value=False),
         patch.object(runtime_module.global_te, "register_buffer") as register,
         patch.object(runtime_module, "KVCacheSendingThread", side_effect=ready_thread) as sender,
         patch.object(runtime_module, "KVCacheRecvingThread", side_effect=ready_thread) as receiver,

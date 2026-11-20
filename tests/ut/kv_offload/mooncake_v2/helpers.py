@@ -86,14 +86,12 @@ def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
 
 def make_sfa_indexer_spec(
     block_size: int = 16,
-    replication_size: int = 2,
 ) -> AscendSFAIndexerCacheSpec:
     return AscendSFAIndexerCacheSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float16,
-        sfa_dcp_replicated_indexer_size=replication_size,
     )
 
 
@@ -129,7 +127,6 @@ def make_transfer_metadata(
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
-        indexer_replication_sizes=[0] * num_layers,
         dcp_sharded=dcp_sharded if dcp_sharded is not None else [True] * num_layers,
         local_ip=local_ip,
         handshake_port=handshake_port,
@@ -166,7 +163,6 @@ def make_pp_metadata(
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
-        indexer_replication_sizes=[0] * num_layers,
         dcp_sharded=dcp_sharded if dcp_sharded is not None else [True] * num_layers,
         metadata_by_pcp_rank={
             pcp_rank: MooncakePCPTransferMetadata(

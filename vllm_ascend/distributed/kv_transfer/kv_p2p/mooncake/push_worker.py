@@ -28,7 +28,7 @@ from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -426,12 +426,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         remote_size = remote.dcp_size if pp.dcp_sharded[index] else 1
         if is_circular_kv_cache_spec(spec):
             return 1, 1
-        if isinstance(spec, AscendSFAIndexerCacheSpec):
-            # Packed indexer pages already contain all DCP sequence pieces.
-            if spec.sfa_dcp_replicated_indexer_size > 1:
-                local_size = 1
-            if pp.indexer_replication_sizes[index] > 1:
-                remote_size = 1
         return local_size, remote_size
 
     def _get_transfer_partition(

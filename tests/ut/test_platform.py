@@ -370,7 +370,7 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
     )
     with (
         patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
-        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True) as enable_sfa,
+        patch("vllm_ascend.platform.enable_sfa_dcp_sharded_indexer", return_value=True) as enable_sfa,
     ):
         if model_role == "draft":
             _validate_parallel_config(config)
@@ -396,7 +396,7 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
     )
     with (
         patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
-        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True),
+        patch("vllm_ascend.platform.enable_sfa_dcp_sharded_indexer", return_value=True),
         patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
     ):
         _validate_parallel_config(config)
@@ -663,12 +663,12 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
+    @patch("vllm_ascend.platform.enable_sfa_dcp_sharded_indexer", return_value=True)
     @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)
-    def test_sfa_dcp_replicated_indexer_aligns_interleave_to_block_size(
+    def test_sfa_dcp_sharded_indexer_aligns_interleave_to_block_size(
         self,
         _mock_sparse,
-        _mock_replicated_indexer,
+        _mock_sharded_indexer,
         _mock_enable_sp,
     ):
         vllm_config = self.mock_vllm_config()

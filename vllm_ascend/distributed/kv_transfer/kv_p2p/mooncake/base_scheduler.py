@@ -230,7 +230,6 @@ class MooncakeMetadataThread(threading.Thread):
                             worker_metadata.block_lens[local_layer_index],
                             worker_metadata.block_shapes[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
-                            worker_metadata.indexer_replication_sizes[local_layer_index],
                         )
                         previous_signature = layer_signature_by_name.get(layer_name)
                         if previous_signature is not None and previous_signature != layer_signature:
@@ -242,7 +241,6 @@ class MooncakeMetadataThread(threading.Thread):
                                 "block_lens",
                                 "block_shapes",
                                 "block_size_scales",
-                                "indexer_replication_sizes",
                             )
                             mismatched_layer_fields = [
                                 field_name
@@ -266,7 +264,6 @@ class MooncakeMetadataThread(threading.Thread):
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
             block_size_scales: list[list[int]] = []
-            indexer_replication_sizes: list[int] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
@@ -276,7 +273,6 @@ class MooncakeMetadataThread(threading.Thread):
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
-                indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
 
             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
             metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
@@ -314,7 +310,6 @@ class MooncakeMetadataThread(threading.Thread):
                 block_shapes=block_shapes,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
-                indexer_replication_sizes=indexer_replication_sizes,
             )
         return merged
 

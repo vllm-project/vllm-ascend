@@ -56,7 +56,6 @@ def test_mixed_mla_indexer_specs_are_not_uniform(indexer_first):
     assert not is_kv_cache_spec_uniform(dict(specs))
 
 
-@pytest.mark.parametrize("replicas", [1, 2, 8])
 @pytest.mark.parametrize("block_size", [128, 768])
 @pytest.mark.parametrize(
     "dtype,head_size,scale_dim,scale_dtype",
@@ -66,9 +65,7 @@ def test_mixed_mla_indexer_specs_are_not_uniform(indexer_first):
         (torch.uint8, 64, 4, torch.float8_e8m0fnu),
     ],
 )
-def test_indexer_layout_strides_cover_replicated_keys_and_scales(
-    replicas, block_size, dtype, head_size, scale_dim, scale_dtype
-):
+def test_indexer_layout_strides_cover_local_keys_and_scales(block_size, dtype, head_size, scale_dim, scale_dtype):
     spec = AscendSFAIndexerCacheSpec(
         block_size=block_size,
         num_kv_heads=1,
@@ -76,7 +73,6 @@ def test_indexer_layout_strides_cover_replicated_keys_and_scales(
         dtype=dtype,
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
-        sfa_dcp_replicated_indexer_size=replicas,
     )
     num_blocks = 3
     layer_stride, block_stride, *_ = compute_layout_strides(spec, num_blocks, 2, KVCacheLayout.LBNHC)

@@ -78,7 +78,6 @@ from vllm_ascend.distributed.utils import (
 )
 from vllm_ascend.utils import (
     enable_custom_op,
-    enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
 )
@@ -533,7 +532,6 @@ class KVCacheRecvingThread(threading.Thread):
             else 0
         )
         self.use_mla = self.model_config.is_deepseek_mla
-        self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
         self.is_hma_required = is_hma_required
         self.use_request_level_recv_errors = use_request_level_recv_errors
         self.block_size = self.vllm_config.cache_config.block_size
@@ -592,8 +590,6 @@ class KVCacheRecvingThread(threading.Thread):
         num_computed_tokens: int = 0,
         all_task_done: bool = False,
         shard_idx: int = 0,
-        local_block_ids_replicate_k: BlockIds | None = None,
-        remote_block_ids_replicate_k: BlockIds | None = None,
         awaiting_kvs: bool = True,
     ):
         """Add a new request to the queue for processing."""
@@ -603,8 +599,6 @@ class KVCacheRecvingThread(threading.Thread):
             "request_id": request_id,
             "local_block_ids": local_block_ids,
             "remote_block_ids": remote_block_ids,
-            "local_block_ids_replicate_k": local_block_ids_replicate_k or tuple(),
-            "remote_block_ids_replicate_k": remote_block_ids_replicate_k or tuple(),
             "group_pulls": group_pulls,
             "remote_engine_id": remote_engine_id,
             "remote_request_id": remote_request_id,
@@ -813,9 +807,6 @@ class KVCacheRecvingThread(threading.Thread):
         remote_request_id = req_meta["remote_request_id"]
         local_block_ids: BlockIds = req_meta["local_block_ids"]
         remote_block_ids: BlockIds = req_meta["remote_block_ids"]
-        local_block_ids_replicate_k: BlockIds = req_meta.get("local_block_ids_replicate_k", tuple())
-        remote_block_ids_replicate_k: BlockIds = req_meta.get("remote_block_ids_replicate_k", tuple())
-        has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
         group_pulls: list[GroupPull] = req_meta["group_pulls"]
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
@@ -823,7 +814,7 @@ class KVCacheRecvingThread(threading.Thread):
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
         num_local_blocks = sum(len(group_block_ids) for group_block_ids in local_block_ids)
-        if num_local_blocks == 0 and not has_replicate_k_blocks:
+        if num_local_blocks == 0:
             return
 
         # Check if we have the remote metadata cached.
@@ -851,13 +842,6 @@ class KVCacheRecvingThread(threading.Thread):
         dst_list: list[int] = []
         length_list: list[int] = []
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
-        grouped_remote_k_block_ids: list[list[int]] = []
-        grouped_local_k_block_ids: list[list[int]] = []
-        if has_replicate_k_blocks:
-            grouped_remote_k_block_ids, grouped_local_k_block_ids = group_concurrent_contiguous(
-                remote_block_ids_replicate_k[0],
-                local_block_ids_replicate_k[0],
-            )
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int, group_spec: dict[str, Any]) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
@@ -912,7 +896,7 @@ class KVCacheRecvingThread(threading.Thread):
             local_group_block_ids = local_block_ids[block_id_idx]
             remote_group_block_ids = remote_block_ids[block_id_idx]
             has_group_blocks = bool(local_group_block_ids)
-            if not has_group_blocks and (is_mamba_group or not has_replicate_k_blocks):
+            if not has_group_blocks:
                 continue
             if not is_mamba_group:
                 grouped_remote_block_ids: list[list[int]] = []
@@ -1017,20 +1001,13 @@ class KVCacheRecvingThread(threading.Thread):
                     block_stride = self.block_stride_per_addr[layer_idx][cache_idx]
                     remote_block_stride = remote_block_stride_per_addr[remote_layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
-                    is_sfa_indexer_group = group_spec["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec"
-                    if is_sfa_indexer_group and has_replicate_k_blocks:
-                        transfer_remote_block_ids = grouped_remote_k_block_ids
-                        transfer_local_block_ids = grouped_local_k_block_ids
-                    else:
-                        if not has_group_blocks:
-                            continue
-                        transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
-                            grouped_remote_block_ids,
-                            grouped_local_block_ids,
-                            src_block_stride=remote_block_stride,
-                            dst_block_stride=block_stride,
-                            block_len=inner_block_len,
-                        )
+                    transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                        grouped_remote_block_ids,
+                        grouped_local_block_ids,
+                        src_block_stride=remote_block_stride,
+                        dst_block_stride=block_stride,
+                        block_len=inner_block_len,
+                    )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
                         src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
                         dst = dst_layer_base_addr + remote_block_id[0] * remote_block_stride
@@ -2658,7 +2635,6 @@ class MooncakeConnectorWorker:
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
-        self.enable_sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(self.vllm_config)
 
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
@@ -3071,10 +3047,7 @@ class MooncakeConnectorWorker:
                     layer_indices, meta, group_idx, group_spec
                 )
                 continue
-            if spec_type == "AscendSFAIndexerCacheSpec":
-                # The full indexer cache is transferred separately.
-                continue
-            if spec_type not in ("MLAAttentionSpec", "AscendMLAAttentionSpec"):
+            if spec_type not in ("MLAAttentionSpec", "AscendMLAAttentionSpec", "AscendSFAIndexerCacheSpec"):
                 raise NotImplementedError(
                     f"Decode-only DCP does not support cache type {spec_type} "
                     f"in transfer group {group_idx} (layer indices {layer_indices})."
@@ -3088,6 +3061,7 @@ class MooncakeConnectorWorker:
             first_block = meta.num_computed_tokens // self.block_size
             first_block += (self.dcp_rank - first_block) % self.dcp_size
             # P owns the full sequence; D rank r owns r, r + DCP, ... .
+            # The indexer follows the same ownership with its own kernel scale.
             global_blocks = range(first_block, min(meta.num_prompt_blocks, len(remote_blocks)), self.dcp_size)
             scale = self._get_kernel_block_scale(layer_indices)
             local_block_ids[block_id_idx] = self._expand_block_ids(
@@ -3962,83 +3936,6 @@ class MooncakeConnectorWorker:
                         head_shards.append([port] * len(head_shards[0]))
                         ports.add(port)
 
-    def _get_sfa_replicate_k_block_ids(
-        self,
-        meta: ReqMeta,
-    ) -> tuple[BlockIds, BlockIds]:
-        remote_uses_replicated_indexer = self.use_sfa_sparse and meta.remote_dcp_size > 1
-        if not (self.enable_sfa_dcp_replicated_indexer or remote_uses_replicated_indexer):
-            return tuple(), tuple()
-        if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
-            return tuple(), tuple()
-
-        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
-            raise AssertionError(
-                "SFA replicate-K currently expects exactly one KV cache group. "
-                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
-            )
-
-        remote_cp_size = meta.remote_dcp_size
-        local_cp_size = self.dcp_size
-        if (
-            local_cp_size <= 0
-            or remote_cp_size <= 0
-            or (remote_cp_size % local_cp_size != 0 and local_cp_size % remote_cp_size != 0)
-        ):
-            raise AssertionError(
-                f"SFA replicate-K requires positive P/D CP sizes with one divisible by the other, "
-                f"got P CP={remote_cp_size}, D CP={local_cp_size}."
-            )
-        num_prefix_cached_blocks = min(meta.num_computed_tokens // self.block_size, meta.num_prompt_blocks)
-        num_external_blocks = meta.num_prompt_blocks - num_prefix_cached_blocks
-        num_external_blocks_from_tokens = math.ceil(meta.num_external_tokens / self.block_size)
-        if num_external_blocks < num_external_blocks_from_tokens:
-            raise AssertionError(
-                f"num_external_blocks({num_external_blocks}) derived from num_computed_tokens "
-                f"must cover num_external_blocks_from_tokens({num_external_blocks_from_tokens})."
-            )
-
-        if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
-            raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
-
-        remote_blocks = list(meta.remote_block_ids[0])
-        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
-        if not local_full_blocks:
-            return tuple(), tuple()
-
-        local_block_ids: list[int] = []
-        remote_block_ids: list[int] = []
-        for global_block_idx in range(num_prefix_cached_blocks, meta.num_prompt_blocks):
-            remote_local_idx = global_block_idx // remote_cp_size
-            local_local_idx = global_block_idx // local_cp_size
-            if remote_local_idx >= len(remote_blocks) or local_local_idx >= len(local_full_blocks):
-                break
-            remote_block_ids.append(
-                int(remote_blocks[remote_local_idx]) * remote_cp_size + global_block_idx % remote_cp_size
-            )
-            local_block_ids.append(
-                int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
-            )
-
-        local_block_ids = local_block_ids[:num_external_blocks]
-        remote_block_ids = remote_block_ids[: len(local_block_ids)]
-        local_block_ids = local_block_ids[: len(remote_block_ids)]
-
-        logger.debug(
-            "Mooncake SFA replicate-K block ids prepared from aligned full blocks. "
-            "remote_cp_size=%s local_cp_size=%s num_prompt_blocks=%s num_computed_tokens=%s "
-            "num_external_blocks=%s local_len=%s remote_len=%s",
-            remote_cp_size,
-            local_cp_size,
-            meta.num_prompt_blocks,
-            meta.num_computed_tokens,
-            num_external_blocks,
-            len(local_block_ids),
-            len(remote_block_ids),
-        )
-
-        return (local_block_ids,), (remote_block_ids,)
-
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id in metadata.reqs_in_batch:
@@ -4065,20 +3962,10 @@ class MooncakeConnectorWorker:
             remote_req_id = meta.remote_request_id
             prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
             (
-                local_block_ids_replicate_k,
-                remote_block_ids_replicate_k,
-            ) = self._get_sfa_replicate_k_block_ids(meta)
-
-            (
                 remote_handshake_port_list,
                 local_block_ids_list,
                 remote_block_ids_list,
             ) = self._get_kv_split_metadata(remote_req_id, meta)
-            has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
-            remote_transfer_ports = [port for remote_ports in remote_handshake_port_list for port in remote_ports]
-            replicate_k_transfer_port = (
-                remote_transfer_ports[0] if has_replicate_k_blocks and remote_transfer_ports else None
-            )
             group_pulls_list = self._get_group_pulls_metadata(
                 remote_req_id,
                 remote_handshake_port_list,
@@ -4108,26 +3995,7 @@ class MooncakeConnectorWorker:
                         meta.remote_engine_id,
                         meta.remote_multi_nodes_meta_mapping,
                     )
-                    local_block_ids_replicate_k_for_port = (
-                        local_block_ids_replicate_k
-                        if replicate_k_transfer_port is not None and remote_handshake_port == replicate_k_transfer_port
-                        else None
-                    )
-                    remote_block_ids_replicate_k_for_port = (
-                        remote_block_ids_replicate_k
-                        if replicate_k_transfer_port is not None and remote_handshake_port == replicate_k_transfer_port
-                        else None
-                    )
                     group_pulls = group_pulls_list[shard_idx][remote_tp_offset]
-                    if has_replicate_k_blocks and remote_handshake_port != replicate_k_transfer_port:
-                        # The indexer is replicated, not an attention DCP shard.
-                        # Other ports must not overwrite its full-cache transfer.
-                        group_pulls = [
-                            pull
-                            for pull in group_pulls
-                            if self.kv_group2layeridx[pull.group_id][0]["kv_cache_spec_type"]
-                            != "AscendSFAIndexerCacheSpec"
-                        ]
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
                         remote_request_id=remote_req_id,
@@ -4145,8 +4013,6 @@ class MooncakeConnectorWorker:
                         ),
                         shard_idx=shard_idx,
                         remote_block_size=meta.remote_block_size,
-                        local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
-                        remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
                         awaiting_kvs=meta.num_external_tokens > 0,
                     )
 
