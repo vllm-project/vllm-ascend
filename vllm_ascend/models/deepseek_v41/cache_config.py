@@ -360,14 +360,23 @@ def _get_worker_layer_tuples(groups):
         return [max(specs[name].page_size_bytes for name in names) for names in slots], slots
     _, source_tuples = get_layer_tuples(specs)
     # A column's entries need distinct slots; different columns may alias.
-    columns = [
-        [tuple(name for name in names if isinstance(specs[name], AscendMLAAttentionSpec)) for names in source_tuples]
-    ]
+    columns = [[]]
+    index_slots: list[tuple[str, ...]] = []
+    for names in source_tuples:
+        mla_names = tuple(name for name in names if isinstance(specs[name], AscendMLAAttentionSpec))
+        if _is_index_only_tuple(names):
+            # VLLM_ASCEND_PCP_LOCAL_INDEX keeps the indexer K plane on its own
+            # replicated backing. It must not take SWA/state aliases from the
+            # positional packing below, which would make it a sharded slot.
+            index_slots.append(mla_names)
+        else:
+            columns[0].append(mla_names)
     columns.extend(
         [(name,) for name in group.layer_names if not isinstance(specs[name], AscendMLAAttentionSpec)]
         for group in groups
     )
     slots = [tuple(chain.from_iterable(parts)) for parts in zip_longest(*columns, fillvalue=())]
+    slots.extend(index_slots)
     page_sizes = [
         max(
             sum(specs[name].page_size_bytes for name in names if isinstance(specs[name], AscendMLAAttentionSpec)),
