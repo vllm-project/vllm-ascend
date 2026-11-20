@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 from zmq.error import ZMQError
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
@@ -33,6 +33,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     LookupKeyServer,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cpu_events import (
+    CPUBlockEventTracker,
+    CPUBlockStoreReport,
+)
 
 # isort: on
 
@@ -167,6 +171,42 @@ class TestLookupKeyServer(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_physical_reports_survive_worker_aggregation_and_complete_across_steps(self, mock_scheduler):
+        connector = AscendStoreConnector(self._make_vllm_config(), KVConnectorRole.SCHEDULER, MagicMock())
+        event = BlockStored(
+            block_hashes=[1],
+            parent_block_hash=None,
+            token_ids=[1, 2],
+            block_size=2,
+            lora_id=None,
+            medium="cpu",
+            lora_name=None,
+        )
+        required = frozenset(["A/head0", "A/head1"])
+
+        def batch(key):
+            report = CPUBlockStoreReport(
+                event=event, request_id="r1", required_keys=required, completed_keys=frozenset([key])
+            )
+            output = AscendStoreKVEvents(1)
+            output.add_events([report])
+            return output
+
+        # Match upstream's add_events/get_all_events aggregation interface.
+        first = batch("A/head0")
+        replica = batch("A/head0")
+        first.add_events(replica.get_all_events())
+        first.increment_workers(1)
+        connector.update_connector_output(types.SimpleNamespace(kv_cache_events=first.aggregate()))
+        self.assertEqual(list(connector.take_events()), [])
+
+        second = batch("A/head1")
+        connector.update_connector_output(types.SimpleNamespace(kv_cache_events=second.aggregate()))
+        self.assertEqual(list(connector.take_events()), [event])
+        connector.update_connector_output(types.SimpleNamespace(kv_cache_events=batch("A/head0")))
+        self.assertEqual(list(connector.take_events()), [])
+
     def test_hybrid_failures_use_request_results(self):
         for layerwise in (False, True):
             with self.subTest(layerwise=layerwise):
@@ -851,6 +891,7 @@ def _scheduler_connector(backend="mooncake", use_layerwise=False):
     scheduler.reset_store.return_value = True
     connector.connector_scheduler = scheduler
     connector._kv_cache_events = MagicMock()
+    connector._cpu_event_tracker = CPUBlockEventTracker()
     return connector
 
 
