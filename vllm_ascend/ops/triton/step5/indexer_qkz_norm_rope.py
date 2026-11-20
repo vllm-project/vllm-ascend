@@ -15,8 +15,8 @@ Numerical contract:
 - index_q: RMSNorm per head over ``head_dim`` in fp32, zero-centered weights
   add 1.0 (``q_norm_weight_bias``), no mean subtraction, no bias; rounded to
   the input dtype (bf16) before rotation, rotated in fp32.
-- index_k: LayerNorm per head (mean subtracted, ``k_norm_weight_bias`` on the
-  scale, optional bias), same rounding/rotation contract.
+- index_k: LayerNorm per head (mean subtracted, learned ``k_norm_bias``),
+  same rounding/rotation contract.
 - RoPE: NeoX pairs over the first ``rotary_dim`` dims = ``rotary_dim // 2``
   pairs (pair layout: dims i and i + rotary_dim // 2), angles read from the
   a single caller-provided ``[cos | sin]`` cache (``cos_sin_cache``),
@@ -432,8 +432,7 @@ def _fused_indexer_qkz_norm_rope_impl(
     k_norm_weight: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
-    q_norm_bias: torch.Tensor | None = None,
-    k_norm_bias: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor,
     *,
     head_dim: int,
     num_q_heads: int,
@@ -441,9 +440,6 @@ def _fused_indexer_qkz_norm_rope_impl(
     rotary_dim: int,
     eps: float = 1e-6,
     q_norm_weight_bias: float = 1.0,
-    k_norm_weight_bias: float = 0.0,
-    subtract_mean_q: bool = False,
-    subtract_mean_k: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # ``rotary_dim`` follows the module convention: the number of rotated
     # dims at the head of each indexer head (sparse_indexer_rope_dim, e.g.
@@ -504,7 +500,7 @@ def _fused_indexer_qkz_norm_rope_impl(
         out_k,
         out_z,
         q_norm_weight,
-        q_norm_bias if q_norm_bias is not None else q_norm_weight,
+        q_norm_weight,
         k_norm_weight,
         k_norm_bias if k_norm_bias is not None else k_norm_weight,
         cos_sin_cache,
@@ -518,15 +514,15 @@ def _fused_indexer_qkz_norm_rope_impl(
         cos_sin_cache.stride(0),
         eps,
         q_norm_weight_bias,
-        k_norm_weight_bias,
+        0.0,
         num_q_heads=num_q_heads,
         num_k_heads=num_k_heads,
         head_dim=head_dim,
         rotary_dim=rotary_pairs,
-        SUBTRACT_MEAN_Q=subtract_mean_q,
-        HAS_BIAS_Q=q_norm_bias is not None,
-        SUBTRACT_MEAN_K=subtract_mean_k,
-        HAS_BIAS_K=k_norm_bias is not None,
+        SUBTRACT_MEAN_Q=False,
+        HAS_BIAS_Q=False,
+        SUBTRACT_MEAN_K=True,
+        HAS_BIAS_K=True,
         BLOCK_D=triton.next_power_of_2(head_dim),
         BLOCK_R=triton.next_power_of_2(rotary_pairs),
         H_CHUNK_Q=(hc_q := _pick_head_chunk(num_q_heads, head_dim)),
@@ -547,8 +543,7 @@ def _fused_indexer_qkz_norm_rope_fake(
     k_norm_weight: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
-    q_norm_bias: torch.Tensor | None = None,
-    k_norm_bias: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor,
     *,
     head_dim: int,
     num_q_heads: int,
@@ -556,9 +551,6 @@ def _fused_indexer_qkz_norm_rope_fake(
     rotary_dim: int,
     eps: float = 1e-6,
     q_norm_weight_bias: float = 1.0,
-    k_norm_weight_bias: float = 0.0,
-    subtract_mean_q: bool = False,
-    subtract_mean_k: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _allocate_indexer_outputs(
         index_q, index_k, index_z, num_q_heads * head_dim, num_k_heads * head_dim
@@ -581,8 +573,7 @@ def fused_indexer_qkz_norm_rope(
     k_norm_weight: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
-    q_norm_bias: torch.Tensor | None = None,
-    k_norm_bias: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor,
     *,
     head_dim: int,
     num_q_heads: int,
@@ -590,9 +581,6 @@ def fused_indexer_qkz_norm_rope(
     rotary_dim: int,
     eps: float = 1e-6,
     q_norm_weight_bias: float = 1.0,
-    k_norm_weight_bias: float = 0.0,
-    subtract_mean_q: bool = False,
-    subtract_mean_k: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused Step5 sparse-indexer Q/K norm + RoPE with Z passthrough.
 
@@ -617,7 +605,6 @@ def fused_indexer_qkz_norm_rope(
         k_norm_weight,
         cos_sin_cache,
         positions,
-        q_norm_bias,
         k_norm_bias,
         head_dim=head_dim,
         num_q_heads=num_q_heads,
@@ -625,7 +612,4 @@ def fused_indexer_qkz_norm_rope(
         rotary_dim=rotary_dim,
         eps=eps,
         q_norm_weight_bias=q_norm_weight_bias,
-        k_norm_weight_bias=k_norm_weight_bias,
-        subtract_mean_q=subtract_mean_q,
-        subtract_mean_k=subtract_mean_k,
     )

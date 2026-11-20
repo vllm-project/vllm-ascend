@@ -84,15 +84,13 @@
 | `k_norm_weight` | Input | Per-head LayerNorm scale for K, `[head_dim]` | bf16 | ND (1-D) |
 | `cos_sin_cache` | Input | Single `[cos | sin]` cache for the indexer RoPE (last dim = `rotary_dim`); row stride passed to the kernel | bf16 | ND 2-D `[max_pos, rotary_dim]` |
 | `positions` | Input | Absolute position of each token | int32 / int64 | ND (1-D) |
-| `q_norm_bias` | Input | Optional Q norm bias (None in production) | bf16 / None | ND (1-D) |
-| `k_norm_bias` | Input | LayerNorm bias for K | bf16 | ND (1-D) |
+| `k_norm_bias` | Input | Required LayerNorm bias for K | bf16 | ND (1-D) |
 | `head_dim` | Attribute | Per-head width (`proxy_dim`, 256 in production) | int | - |
 | `num_q_heads` | Attribute | Local index Q heads (constexpr) | int | - |
 | `num_k_heads` | Attribute | Local index K heads (constexpr) | int | - |
 | `rotary_dim` | Attribute | Rotated dim count (`sparse_indexer_rope_dim`, 32 in production); converted to NeoX pairs internally | int | - |
 | `eps` | Attribute | Norm epsilon (default `1e-6`) | float | - |
-| `q_norm_weight_bias` / `k_norm_weight_bias` | Attribute | Added to the norm scale: Q `1.0` zero-centered, K `0.0` | float | - |
-| `subtract_mean_q` / `subtract_mean_k` | Attribute | LayerNorm (True) vs RMSNorm (False) per stage | bool | - |
+| `q_norm_weight_bias` | Attribute | Added to the Q norm scale: `1.0` for zero-centered weights, `0.0` otherwise | float | - |
 | return `index_q` | Output | `[tokens, num_q_heads * head_dim]`, normed + rotated, **float8_e4m3fn** (quantized at the store) | fp8 | ND |
 | return `index_k` | Output | `[tokens, num_k_heads * head_dim]`, normed + rotated | bf16 | ND |
 | return `index_z` | Output | `[tokens, num_k_heads * head_dim]`, bit-exact passthrough | bf16 | ND |

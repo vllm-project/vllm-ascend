@@ -202,7 +202,6 @@ def test_fused_indexer_norm_rope_accuracy(num_tokens: int, num_q_heads: int, num
         k_weight,
         cos_sin_cache,
         positions,
-        q_norm_bias=None,
         k_norm_bias=k_bias,
         head_dim=HEAD_DIM,
         num_q_heads=num_q_heads,
@@ -210,9 +209,6 @@ def test_fused_indexer_norm_rope_accuracy(num_tokens: int, num_q_heads: int, num
         rotary_dim=ROTARY_DIM,
         eps=EPS,
         q_norm_weight_bias=1.0,
-        k_norm_weight_bias=0.0,
-        subtract_mean_q=False,
-        subtract_mean_k=True,
     )
 
     # index_q is e4m3 (quantized at the kernel store): compare against the
@@ -274,7 +270,6 @@ def test_fused_indexer_norm_rope_pos0_is_identity():
         k_weight,
         cos_sin_cache,
         positions,
-        q_norm_bias=None,
         k_norm_bias=k_bias,
         head_dim=HEAD_DIM,
         num_q_heads=num_q_heads,
@@ -282,9 +277,6 @@ def test_fused_indexer_norm_rope_pos0_is_identity():
         rotary_dim=ROTARY_DIM,
         eps=EPS,
         q_norm_weight_bias=1.0,
-        k_norm_weight_bias=0.0,
-        subtract_mean_q=False,
-        subtract_mean_k=True,
     )
     # index_q is e4m3; one-ULP tolerance for the quantized comparison.
     q_ref8 = q_ref.to(torch.float8_e4m3fn)
@@ -320,7 +312,6 @@ def test_fused_indexer_norm_rope_empty_input():
         k_weight,
         cos_sin_cache,
         positions,
-        q_norm_bias=None,
         k_norm_bias=k_bias,
         head_dim=HEAD_DIM,
         num_q_heads=num_q_heads,
@@ -328,9 +319,6 @@ def test_fused_indexer_norm_rope_empty_input():
         rotary_dim=ROTARY_DIM,
         eps=EPS,
         q_norm_weight_bias=1.0,
-        k_norm_weight_bias=0.0,
-        subtract_mean_q=False,
-        subtract_mean_k=True,
     )
 
     assert q_out.shape == (0, q_len) and q_out.dtype == torch.float8_e4m3fn

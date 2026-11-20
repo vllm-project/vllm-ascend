@@ -467,7 +467,6 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
                 self.sparse_indexer_k_norm.weight,
                 self.sparse_indexer_rotary_emb.cos_sin_cache,
                 positions,
-                q_norm_bias=None,
                 k_norm_bias=self.sparse_indexer_k_norm.bias,
                 head_dim=proxy_dim,
                 num_q_heads=num_index_q_heads,
@@ -475,9 +474,6 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
                 rotary_dim=self.sparse_indexer_rotary_emb.rotary_dim,
                 eps=self.sparse_indexer_q_norm.variance_epsilon,
                 q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
-                k_norm_weight_bias=0.0,
-                subtract_mean_q=False,
-                subtract_mean_k=True,
             )
             index_q = index_q.reshape(
                 num_tokens, self.num_kv_heads, heads_per_group, proxy_dim
