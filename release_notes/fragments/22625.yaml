@@ -1,4 +1,4 @@
-pr: 21452
+pr: 22625
 entries:
   - category: performance
     text: Reduced DeepSeek V4.1 hash routing overhead by removing redundant token ID casts and padding normalization before the native Hash TopK kernel.
