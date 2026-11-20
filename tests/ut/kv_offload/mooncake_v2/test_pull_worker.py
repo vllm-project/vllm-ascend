@@ -934,9 +934,9 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
 @pytest.mark.parametrize(("local_tp", "local_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize(("remote_tp", "remote_pcp"), [(1, 4), (4, 1), (2, 2)])
 @pytest.mark.parametrize("worker_rank", [1, 2, 3])
-@pytest.mark.parametrize("recoverssm", [False, True])
+@pytest.mark.parametrize("state_layout", ["native", "kda_recoverssm", "gdn_recoverssm", "gdn_recoverssm_bf16"])
 def test_mamba_equal_tp_address_generation_transfers_each_cache(
-    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, recoverssm
+    local_tp, local_pcp, remote_tp, remote_pcp, worker_rank, state_layout
 ) -> None:
     tp_rank, pcp_rank = divmod(worker_rank, local_pcp)
     remote_tp_rank, remote_pcp_rank = divmod(worker_rank, remote_pcp)
@@ -944,8 +944,8 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     dtypes: tuple[torch.dtype, ...] = (torch.float16, torch.float32)
     local_bases, remote_bases = [1000, 2000], [5000, 6000]
     strides, block_lens = [128, 256], [96, 128]
-    expected_src, expected_dst = [1128, 2256], [5256, 6512]
-    if recoverssm:
+    expected_src = [1128, 2256]
+    if state_layout == "kda_recoverssm":
         shapes += [(2, 6, 4), (2, 6, 8)]
         dtypes += (torch.float32, torch.float16)
         local_bases += [3000, 4000]
@@ -953,7 +953,19 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
         strides += [256, 256]
         block_lens += [192, 192]
         expected_src += [3256, 4256]
-        expected_dst += [7512, 8512]
+    elif state_layout.startswith("gdn_recoverssm"):
+        # TP-local Qwen geometry with a four-token speculative window.
+        shapes = [(7, 2048), (8, 128, 128), (8, 5, 257)]
+        checkpoint_dtype = torch.bfloat16 if state_layout.endswith("bf16") else torch.float32
+        dtypes = (torch.bfloat16, checkpoint_dtype, torch.float32)
+        local_bases = [1000000, 2000000, 3000000]
+        remote_bases = [6000000, 7000000, 8000000]
+        checkpoint_bytes = 262144 if checkpoint_dtype == torch.bfloat16 else 524288
+        block_lens = [28672, checkpoint_bytes, 41120]
+        strides = [length + 256 for length in block_lens]
+        expected_src = [base + stride for base, stride in zip(local_bases, strides)]
+    remote_strides = [stride + 128 for stride in strides]
+    expected_dst = [base + 2 * stride for base, stride in zip(remote_bases, remote_strides)]
     thread = make_thread(
         tp_size=local_tp,
         tp_rank=tp_rank,
@@ -966,7 +978,7 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     )
     remote = make_pp_metadata(
         block_shapes=[shapes],
-        block_strides=[strides],
+        block_strides=[remote_strides],
         block_lens=[block_lens],
         pcp_tp_base_addrs={
             pcp: {
@@ -980,7 +992,16 @@ def test_mamba_equal_tp_address_generation_transfers_each_cache(
     dst: list[int] = []
     lengths: list[int] = []
     thread._append_mamba_transfer_addresses(
-        replace(make_mamba_spec(), shapes=tuple(shapes), dtypes=dtypes),
+        replace(
+            make_mamba_spec(),
+            shapes=tuple(shapes),
+            dtypes=dtypes,
+            mamba_type=(
+                MambaAttentionBackendEnum.GDN_ATTN
+                if state_layout.startswith("gdn_recoverssm")
+                else MambaAttentionBackendEnum.MAMBA2
+            ),
+        ),
         remote_pcp_rank,
         remote_tp_rank,
         remote_tp,

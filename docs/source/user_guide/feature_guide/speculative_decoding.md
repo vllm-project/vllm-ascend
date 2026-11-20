@@ -1005,6 +1005,44 @@ Validate the selected P graph configuration separately for your deployment.
 
 Removing `--use-replayssm` selects the native KDA path.
 
+## Experimental Qwen GDN RecoverSSM
+
+Model-level RecoverSSM E2E validation covers the following checkpoints:
+
+| Checkpoint | Model entry point | Variant | GDN geometry |
+|------------|-------------------|---------|--------------|
+| `Qwen/Qwen3.6-35B-A3B` | `Qwen3_5MoeForConditionalGeneration` | MoE | 16 key heads, 32 value heads, K/V head dimensions 128, convolution width 4 |
+| `Qwen/Qwen3.8-27B` | `Qwen3_5ForConditionalGeneration` | Dense | 16 key heads, 48 value heads, K/V head dimensions 128, convolution width 4 |
+
+!!! note
+
+    The selector, cache descriptors, and model entry-point wiring also cover
+    Qwen3.5-compatible Dense and MoE `CausalLM` and `ConditionalGeneration`
+    architectures, as well as `Qwen3NextForCausalLM`. Except for the two
+    checkpoints listed above, these paths are wired but have not received
+    distinct model-level RecoverSSM E2E validation in this change. A shared
+    model type or architecture descriptor alone does not imply RecoverSSM
+    validation for a checkpoint.
+
+For the validated checkpoints, colocated Qwen GDN RecoverSSM supports `none`
+and `align` Mamba cache modes;
+`align` supports prefix caching. The PD configuration below remains limited to
+`none` with prefix caching disabled.
+
+Qwen GDN RecoverSSM supports prefill/decode separation with
+`MooncakeConnectorV2` or `MooncakePullConnector`. Use matching model weights,
+TP sizes, speculative configurations (including the draft model and window),
+and `--use-replayssm` settings on P and D. MTP and DSpark use the same GDN
+state-transfer contract; P without speculative decoding is not supported by
+this contract.
+
+Both peers require Model Runner V2, BF16 activations/conv state, matching BF16 or FP32 SSM state,
+`--mamba-cache-mode none`, and `--no-enable-prefix-caching`. PP, PCP and DCP
+must be 1. TP must divide the configured key-head and value-head counts.
+
+See [Qwen GDN RecoverSSM](../../developer_guide/Design_Documents/qwen_gdn_recoverssm.md#prefilldecode-separation)
+for deployment commands, supported layouts and validation steps.
+
 ## Synthetic Rejection Sampling
 
 In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.

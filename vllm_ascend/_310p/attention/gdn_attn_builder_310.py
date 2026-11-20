@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
 )

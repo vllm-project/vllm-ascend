@@ -211,6 +211,79 @@ def test_npu_moe_gating_topk_compare(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize("tokens", [25, 392, 396, 400])
+@torch.inference_mode()
+def test_a5_fp32_native_renorm_matches_external_path(tokens: int) -> None:
+    import torch_npu
+
+    from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+    logits = torch.randn(tokens, 512, dtype=torch.float32, device="npu")
+    adaptor = object.__new__(A5DeviceAdaptor)
+    actual_weights, actual_ids, _ = adaptor.moe_gating_top_k(
+        logits,
+        k=10,
+        k_group=1,
+        group_count=1,
+        group_select_mode=0,
+        renorm=1,
+        norm_type=0,
+        out_flag=False,
+    )
+    expected_weights, expected_ids, _ = torch_npu.npu_moe_gating_top_k(
+        logits,
+        k=10,
+        k_group=1,
+        group_count=1,
+        group_select_mode=0,
+        renorm=0,
+        norm_type=0,
+    )
+    expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+
+    torch.testing.assert_close(actual_ids, expected_ids.to(torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(actual_weights, expected_weights, rtol=1e-5, atol=1e-7)
+    torch.testing.assert_close(
+        actual_weights.sum(dim=-1),
+        torch.ones(tokens, dtype=torch.float32, device="npu"),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@torch.inference_mode()
+def test_a5_bf16_renorm_preserves_external_rounding() -> None:
+    import torch_npu
+
+    from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+    logits = torch.randn(25, 512, dtype=torch.bfloat16, device="npu")
+    adaptor = object.__new__(A5DeviceAdaptor)
+    actual_weights, actual_ids, _ = adaptor.moe_gating_top_k(
+        logits,
+        k=10,
+        k_group=1,
+        group_count=1,
+        group_select_mode=0,
+        renorm=1,
+        norm_type=0,
+        out_flag=False,
+    )
+    expected_weights, expected_ids, _ = torch_npu.npu_moe_gating_top_k(
+        logits,
+        k=10,
+        k_group=1,
+        group_count=1,
+        group_select_mode=0,
+        renorm=0,
+        norm_type=0,
+    )
+    expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+
+    torch.testing.assert_close(actual_ids, expected_ids.to(torch.int32), rtol=0, atol=0)
+    torch.testing.assert_close(actual_weights, expected_weights, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     # Execute pytest tests with verbose output
     pytest.main([__file__, "-sv"])
