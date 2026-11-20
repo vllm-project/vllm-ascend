@@ -329,13 +329,7 @@ class AscendDSABackend(AttentionBackend):
         layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
-        """Return NHD Tensor shapes and storage dtypes for V4 components.
-
-        V4 stores NHD components regardless of the generic layout selection.
-        Its compressed-token count comes from the spec, not the manager's
-        raw-token kernel block size. The combined indexer view is an alias,
-        rather than a third sequential component.
-        """
+        """Return the final component view shapes in NHD order and their storage dtypes."""
         prefix = (num_blocks, spec.num_states, spec.num_kv_heads)
         shapes = ((*prefix, spec.head_size),)
         dtypes = (spec.dtype,)
