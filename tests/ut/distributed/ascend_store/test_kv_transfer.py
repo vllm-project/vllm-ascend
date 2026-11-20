@@ -1749,3 +1749,12 @@ def test_bulk_get_rejects_missing_or_misaligned_statuses(result):
     else:
         with pytest.raises(BatchResultShapeError, match="results for 1"):
             get_bulk_by_memory_location(store, ["key"], [[100]], [[8]], memory_locations=[MemoryLocation.HOST])
+
+
+def test_bulk_get_validates_every_location_before_issuing_reads():
+    store = MagicMock(spec=MemcacheBackend)
+    with pytest.raises(ValueError, match="bulk GET memory location"):
+        get_bulk_by_memory_location(
+            store, ["valid", "invalid"], [[100], [200]], [[8], [8]], memory_locations=[MemoryLocation.DEVICE, "host"]
+        )
+    store.get.assert_not_called()

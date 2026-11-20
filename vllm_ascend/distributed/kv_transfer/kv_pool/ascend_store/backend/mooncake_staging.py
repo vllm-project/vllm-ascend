@@ -110,7 +110,8 @@ class MooncakeHostStaging:
         self, addrs: list[list[int]], sizes: list[list[int]], staging: _HostStaging
     ) -> Iterator[tuple[int, int, list[list[int]]]]:
         """Yield batch slices and their staging addresses."""
-        # Validate all ranges before any copy; addresses are raw pointers.
+        # Validate all pointers before copying. Each key fits into an empty buffer,
+        # so crossing the limit always flushes a nonempty batch.
         totals = [self._validate_host_key(a, s) for a, s in zip(addrs, sizes, strict=True)]
         begin = 0
         cursor = staging.base
@@ -140,12 +141,14 @@ class MooncakeHostStaging:
             raise ValueError("Mooncake bulk PUT requires one buffer list per key")
         if memory_location is MemoryLocation.DEVICE:
             return self._put(keys, addrs, sizes, config)
+        if memory_location is not MemoryLocation.HOST:
+            raise ValueError(f"Unsupported Mooncake PUT memory location: {memory_location!r}")
         result = []
         with self._send.lock:
             for begin, end, staged in self._iter_host_staging_batches(addrs, sizes, self._send):
-                for src, dst, lengths in zip(addrs[begin:end], staged, sizes[begin:end], strict=True):
-                    for source, target, length in zip(src, dst, lengths, strict=True):
-                        ctypes.memmove(target, source, length)
+                for host_ptrs, staging_ptrs, lengths in zip(addrs[begin:end], staged, sizes[begin:end], strict=True):
+                    for host_ptr, staging_ptr, length in zip(host_ptrs, staging_ptrs, lengths, strict=True):
+                        ctypes.memmove(staging_ptr, host_ptr, length)
                 result.extend(self._put(keys[begin:end], staged, sizes[begin:end], config))
         return result
 
@@ -162,15 +165,17 @@ class MooncakeHostStaging:
             raise ValueError("Mooncake bulk GET requires one buffer list per key")
         if memory_location is MemoryLocation.DEVICE:
             return self._get(keys, addrs, sizes)
+        if memory_location is not MemoryLocation.HOST:
+            raise ValueError(f"Unsupported Mooncake GET memory location: {memory_location!r}")
         results = []
         with self._recv.lock:
             for begin, end, staged in self._iter_host_staging_batches(addrs, sizes, self._recv):
                 lengths = sizes[begin:end]
                 codes = self._get(keys[begin:end], staged, lengths)
-                for src, dst, spans, code in zip(staged, addrs[begin:end], lengths, codes, strict=True):
+                for host_ptrs, staging_ptrs, spans, code in zip(addrs[begin:end], staged, lengths, codes, strict=True):
                     if code == 0:
-                        for source, target, length in zip(src, dst, spans, strict=True):
-                            ctypes.memmove(target, source, length)
+                        for host_ptr, staging_ptr, length in zip(host_ptrs, staging_ptrs, spans, strict=True):
+                            ctypes.memmove(host_ptr, staging_ptr, length)
                 results.extend(codes)
         return results
 
