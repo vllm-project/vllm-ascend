@@ -448,9 +448,7 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
             eps=self.sparse_indexer_q_norm.variance_epsilon,
             q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
         )
-        index_q = index_q.reshape(
-            num_tokens, self.num_kv_heads, heads_per_group, proxy_dim
-        )
+        index_q = index_q.reshape(num_tokens, self.num_kv_heads, heads_per_group, proxy_dim)
         index_k = index_k.reshape(num_tokens, num_index_k_heads, proxy_dim)
         index_z = index_z.reshape(num_tokens, num_index_k_heads, proxy_dim)
         weights = weights.to(dtype=torch.float32)

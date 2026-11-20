@@ -75,9 +75,7 @@ def _assert_close(
     assert frac >= MIN_WITHIN_FRACTION, (
         f"{name}: only {frac:.4%} elements within tolerance (max abs err {diff.max().item():.6f})"
     )
-    assert diff.max().item() <= max_abs_err, (
-        f"{name}: max abs err {diff.max().item():.6f} exceeds {max_abs_err}"
-    )
+    assert diff.max().item() <= max_abs_err, f"{name}: max abs err {diff.max().item():.6f} exceeds {max_abs_err}"
 
 
 def _build_cos_sin_cache(max_pos: int, pairs: int, theta: float, device):

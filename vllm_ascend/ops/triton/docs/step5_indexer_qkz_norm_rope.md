@@ -55,11 +55,11 @@
    1. Grid `min(max(tiles_q, tiles_kz), num_vector_cores)`;
       `ROWS_PER_PROGRAM_Q` / `ROWS_PER_PROGRAM_KZ` are selected once per
       layer shape (`head_dim`, `rotary_dim`) and reused for all token
-      counts, instead of being retuned for each token-count bucket.
-    2. Q stage: each program loops over its token tiles; per tile the
+      counts, instead of being tuned again for each token-count bucket.
+   2. Q stage: each program loops over its token tiles; per tile the
        head axis is chunked (`H_CHUNK` sized to a 4096-lane budget) and
        each chunk is normed, rotated and stored through block pointers.
-    3. K stage rides the same traversal and additionally copies the Z rows
+   3. K stage rides the same traversal and additionally copies the Z rows
        bit-exact (block-pointer load/store).
 - **Supported modes**: Ascend 950PR/950DT (A5) on the Triton-Ascend
   backend; execution evidence on Ascend950DT. Atlas A2/A3 are not validated
@@ -79,7 +79,7 @@
 | `index_z` | Input | Indexer Z values, `[tokens, num_k_heads * head_dim]` | bf16 | ND; may be a strided view |
 | `q_norm_weight` | Input | Per-head RMSNorm scale for Q, `[head_dim]` | bf16 | ND (1-D) |
 | `k_norm_weight` | Input | Per-head LayerNorm scale for K, `[head_dim]` | bf16 | ND (1-D) |
-| `cos_sin_cache` | Input | Single `[cos | sin]` cache for the indexer RoPE (last dim = `rotary_dim`); row stride passed to the kernel | bf16 | ND 2-D `[max_pos, rotary_dim]` |
+| `cos_sin_cache` | Input | Single `[cos \| sin]` cache for the indexer RoPE (last dim = `rotary_dim`); row stride passed to the kernel | bf16 | ND 2-D `[max_pos, rotary_dim]` |
 | `positions` | Input | Absolute position of each token | int32 / int64 | ND (1-D) |
 | `k_norm_bias` | Input | Required LayerNorm bias for K | bf16 | ND (1-D) |
 | `head_dim` | Attribute | Per-head width (`proxy_dim`, 256 in production) | int | - |
@@ -112,7 +112,7 @@
   autotuner keys only on `head_dim` and `rotary_dim`, deliberately excluding
   token counts: the first call at each layer shape benchmarks the config
   list once, and all subsequent token counts reuse that selection instead
-  of retuning per batch. The selected configuration therefore depends on
+  of tuning again per batch. The selected configuration therefore depends on
   the first batch seen by the process; this is a performance trade-off, not
   a numerical difference. `do_not_specialize` is not used (the classes are
   few, fixed in serving, and the alignment specialization feeds

@@ -36,10 +36,7 @@ def _reference(attn_output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     num_tokens = attn_output.shape[0]
     num_heads = gate.shape[-1]
     head_dim = attn_output.shape[-1] // num_heads
-    return (
-        attn_output.view(num_tokens, num_heads, head_dim)
-        * gate.unsqueeze(-1).sigmoid()
-    ).view(num_tokens, -1)
+    return (attn_output.view(num_tokens, num_heads, head_dim) * gate.unsqueeze(-1).sigmoid()).view(num_tokens, -1)
 
 
 def _assert_bf16_close(actual: torch.Tensor, ref: torch.Tensor, name: str = "out") -> None:
@@ -51,9 +48,7 @@ def _assert_bf16_close(actual: torch.Tensor, ref: torch.Tensor, name: str = "out
     assert frac >= MIN_WITHIN_FRACTION, (
         f"{name}: only {frac:.4%} elements within BF16 tolerance (max abs err {diff.max().item():.6f})"
     )
-    assert diff.max().item() <= MAX_ABS_ERR, (
-        f"{name}: max abs err {diff.max().item():.6f} exceeds {MAX_ABS_ERR}"
-    )
+    assert diff.max().item() <= MAX_ABS_ERR, f"{name}: max abs err {diff.max().item():.6f} exceeds {MAX_ABS_ERR}"
 
 
 @pytest.mark.skipif(

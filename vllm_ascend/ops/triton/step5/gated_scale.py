@@ -83,11 +83,7 @@ def _gated_scale_impl(
     num_heads: int,
 ) -> torch.Tensor:
     gate_row_stride = gate_base.stride(0)
-    assert (
-        gate_col_offset >= 0
-        and num_heads > 0
-        and gate_col_offset + num_heads <= gate_row_stride
-    ), (
+    assert gate_col_offset >= 0 and num_heads > 0 and gate_col_offset + num_heads <= gate_row_stride, (
         "gated_scale gate columns must stay inside the base's row span: "
         f"offset={gate_col_offset}, num_heads={num_heads}, "
         f"row_stride={gate_row_stride}"
@@ -145,6 +141,4 @@ def gated_scale(
     wider packed GEMM row (the DSA ``qkv`` view) also qualifies and the kernel
     reads the gate tail in place.
     """
-    return torch.ops.vllm.ascend_step5_gated_scale(
-        attn_output, gate_base, gate_col_offset, num_heads
-    )
+    return torch.ops.vllm.ascend_step5_gated_scale(attn_output, gate_base, gate_col_offset, num_heads)

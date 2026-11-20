@@ -41,9 +41,13 @@ guards).
 from __future__ import annotations
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
-import triton.language.extra.cann.extension as extension  # noqa: F401 (used in @triton.jit bodies)
+if HAS_TRITON:
+    try:
+        import triton.language.extra.cann.extension as _extension_module  # type: ignore
+    except ImportError:
+        _extension_module = None
 
 
 def _npu_vec_core_num() -> int:
@@ -140,14 +144,14 @@ def _norm_rope_tile_npu_chunk(
     if CH == 1:
         xrow = tok_abs * stride_x_token + head_off + head * head_dim
         real_raw = tl.load(
-            x_ptr + xrow[:, None] + half[None, :],
-            mask=row_ok[:, None] & half_ok[None, :], other=0.0).to(tl.float32)
+            x_ptr + xrow[:, None] + half[None, :], mask=row_ok[:, None] & half_ok[None, :], other=0.0
+        ).to(tl.float32)
         imag_raw = tl.load(
-            x_ptr + xrow[:, None] + rotary_dim + half[None, :],
-            mask=row_ok[:, None] & half_ok[None, :], other=0.0).to(tl.float32)
+            x_ptr + xrow[:, None] + rotary_dim + half[None, :], mask=row_ok[:, None] & half_ok[None, :], other=0.0
+        ).to(tl.float32)
     else:
-        real_raw = extension.extract_slice(values, [0, 0], [ROWS_PER_PROGRAM * CH, BLOCK_R], [1, 1])
-        imag_raw = extension.extract_slice(values, [0, rotary_dim], [ROWS_PER_PROGRAM * CH, BLOCK_R], [1, 1])
+        real_raw = _extension_module.extract_slice(values, [0, 0], [ROWS_PER_PROGRAM * CH, BLOCK_R], [1, 1])
+        imag_raw = _extension_module.extract_slice(values, [0, rotary_dim], [ROWS_PER_PROGRAM * CH, BLOCK_R], [1, 1])
     real = (real_raw - mean[:, None]) * rstd[:, None] * (w_real + weight_bias)
     imaginary = (imag_raw - mean[:, None]) * rstd[:, None] * (w_imag + weight_bias)
     if LAYERNORM:
@@ -226,9 +230,9 @@ def _norm_rope_tile_npu(
 ) -> None:
     half = tl.arange(0, BLOCK_R)
     half_ok = half < rotary_dim
-    w_hd = extension.extract_slice(tl.reshape(w_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
+    w_hd = _extension_module.extract_slice(tl.reshape(w_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
     if LAYERNORM:
-        b_hd = extension.extract_slice(tl.reshape(b_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
+        b_hd = _extension_module.extract_slice(tl.reshape(b_all, (1, BLOCK_D)), [0, 0], [1, head_dim], [1, 1])
     else:
         b_hd = tl.zeros((1, head_dim), dtype=tl.float32)
 
@@ -238,40 +242,74 @@ def _norm_rope_tile_npu(
         mask=token_ok[:, None] & half_ok[None, :],
         other=0.0,
     ).to(tl.float32)
-    extension.compile_hint(cos_t, "mayDiscretememaccess")
+    _extension_module.compile_hint(cos_t, "mayDiscretememaccess")
     sin_t = tl.load(
         cos_sin_cache_ptr + rotary_dim + position[:, None] * stride_cos + half[None, :],
         mask=token_ok[:, None] & half_ok[None, :],
         other=0.0,
     ).to(tl.float32)
-    extension.compile_hint(sin_t, "mayDiscretememaccess")
+    _extension_module.compile_hint(sin_t, "mayDiscretememaccess")
 
     for c in tl.static_range(N_FULL):
         _norm_rope_tile_npu_chunk(
-            x_ptr, out_ptr, cos_t, sin_t, token_start,
-            stride_x_token, stride_out_token, c * H_CHUNK * head_dim,
-            w_hd, b_hd, w_real, w_imag, b_real, b_imag, eps, weight_bias, tokens,
-            CH=H_CHUNK, TOTAL_HEADS=num_heads, head_dim=head_dim, rotary_dim=rotary_dim,
+            x_ptr,
+            out_ptr,
+            cos_t,
+            sin_t,
+            token_start,
+            stride_x_token,
+            stride_out_token,
+            c * H_CHUNK * head_dim,
+            w_hd,
+            b_hd,
+            w_real,
+            w_imag,
+            b_real,
+            b_imag,
+            eps,
+            weight_bias,
+            tokens,
+            CH=H_CHUNK,
+            TOTAL_HEADS=num_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
             LAYERNORM=LAYERNORM,
-            BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
+            BLOCK_R=BLOCK_R,
+            ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
         )
     if REM_HEADS > 0:
         _norm_rope_tile_npu_chunk(
-            x_ptr, out_ptr, cos_t, sin_t, token_start,
-            stride_x_token, stride_out_token, N_FULL * H_CHUNK * head_dim,
-            w_hd, b_hd, w_real, w_imag, b_real, b_imag, eps, weight_bias, tokens,
-            CH=REM_HEADS, TOTAL_HEADS=num_heads, head_dim=head_dim, rotary_dim=rotary_dim,
+            x_ptr,
+            out_ptr,
+            cos_t,
+            sin_t,
+            token_start,
+            stride_x_token,
+            stride_out_token,
+            N_FULL * H_CHUNK * head_dim,
+            w_hd,
+            b_hd,
+            w_real,
+            w_imag,
+            b_real,
+            b_imag,
+            eps,
+            weight_bias,
+            tokens,
+            CH=REM_HEADS,
+            TOTAL_HEADS=num_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
             LAYERNORM=LAYERNORM,
-            BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
+            BLOCK_R=BLOCK_R,
+            ROWS_PER_PROGRAM=ROWS_PER_PROGRAM,
         )
 
 
 @triton.autotune(
     configs=[
         triton.Config({"ROWS_PER_PROGRAM_Q": q, "ROWS_PER_PROGRAM_KZ": kv})
-        for q, kv in (
-            (1, 2), (1, 4), (1, 8), (1, 16), (2, 2), (2, 4), (2, 8), (2, 16), (2, 32), (4, 16), (4, 32)
-        )
+        for q, kv in ((1, 2), (1, 4), (1, 8), (1, 16), (2, 2), (2, 4), (2, 8), (2, 16), (2, 32), (4, 16), (4, 32))
     ],
     # Token counts are intentionally excluded: tune once per layer shape and
     # reuse the selected configuration for all subsequent token counts.
@@ -334,15 +372,35 @@ def _indexer_qkz_norm_rope_kernel(
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_Q)
         token_ok = token_idx < tokens
         _norm_rope_tile_npu(
-            x_q_ptr, out_q_ptr, cos_sin_cache_ptr, positions_ptr,
-            token_idx, token_start, token_ok,
-            stride_x_q, stride_out_q, stride_cos,
-            w_all_q, w_real_q, w_imag_q, b_all_q, b_real_q, b_imag_q, eps, weight_bias_q,
+            x_q_ptr,
+            out_q_ptr,
+            cos_sin_cache_ptr,
+            positions_ptr,
+            token_idx,
+            token_start,
+            token_ok,
+            stride_x_q,
+            stride_out_q,
+            stride_cos,
+            w_all_q,
+            w_real_q,
+            w_imag_q,
+            b_all_q,
+            b_real_q,
+            b_imag_q,
+            eps,
+            weight_bias_q,
             tokens,
-            num_heads=num_q_heads, head_dim=head_dim, rotary_dim=rotary_dim,
+            num_heads=num_q_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
             LAYERNORM=False,
-            BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_Q,
-            H_CHUNK=H_CHUNK_Q, N_FULL=N_FULL_Q, REM_HEADS=REM_Q,
+            BLOCK_D=BLOCK_D,
+            BLOCK_R=BLOCK_R,
+            ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_Q,
+            H_CHUNK=H_CHUNK_Q,
+            N_FULL=N_FULL_Q,
+            REM_HEADS=REM_Q,
         )
 
     w_all_k = tl.load(k_weight_ptr + dims, mask=dim_ok, other=0.0).to(tl.float32)
@@ -357,15 +415,35 @@ def _indexer_qkz_norm_rope_kernel(
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_KZ)
         token_ok = token_idx < tokens
         _norm_rope_tile_npu(
-            x_k_ptr, out_k_ptr, cos_sin_cache_ptr, positions_ptr,
-            token_idx, token_start, token_ok,
-            stride_x_k, stride_out_k, stride_cos,
-            w_all_k, w_real_k, w_imag_k, b_all_k, b_real_k, b_imag_k, eps, 0.0,
+            x_k_ptr,
+            out_k_ptr,
+            cos_sin_cache_ptr,
+            positions_ptr,
+            token_idx,
+            token_start,
+            token_ok,
+            stride_x_k,
+            stride_out_k,
+            stride_cos,
+            w_all_k,
+            w_real_k,
+            w_imag_k,
+            b_all_k,
+            b_real_k,
+            b_imag_k,
+            eps,
+            0.0,
             tokens,
-            num_heads=num_k_heads, head_dim=head_dim, rotary_dim=rotary_dim,
+            num_heads=num_k_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
             LAYERNORM=True,
-            BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_KZ,
-            H_CHUNK=H_CHUNK_K, N_FULL=N_FULL_K, REM_HEADS=REM_K,
+            BLOCK_D=BLOCK_D,
+            BLOCK_R=BLOCK_R,
+            ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_KZ,
+            H_CHUNK=H_CHUNK_K,
+            N_FULL=N_FULL_K,
+            REM_HEADS=REM_K,
         )
         z_bp = tl.make_block_ptr(
             base=x_z_ptr,
@@ -444,8 +522,7 @@ def fused_indexer_qkz_norm_rope(
         )
     if index_q.shape[1] != num_q_heads * head_dim:
         raise ValueError(
-            f"index_q shape {tuple(index_q.shape)} does not match "
-            f"num_q_heads={num_q_heads} * head_dim={head_dim}"
+            f"index_q shape {tuple(index_q.shape)} does not match num_q_heads={num_q_heads} * head_dim={head_dim}"
         )
     if index_k.shape[1] != num_k_heads * head_dim or index_z.shape[1] != num_k_heads * head_dim:
         raise ValueError(
