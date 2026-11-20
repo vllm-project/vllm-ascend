@@ -33,6 +33,7 @@ with ``__new__`` and drive it through recording fake managers, and the
 scheduler wrapper is exercised against one-off scheduler double classes.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -299,7 +300,9 @@ class _RecordingManager:
         dcp_world_size=1,
         pcp_world_size=1,
     ):
-        cls.calls.append({"max_length": max_length, "drop_eagle_block": drop_eagle_block})
+        cls.calls.append(
+            {"max_length": max_length, "drop_eagle_block": drop_eagle_block, "dcp_world_size": dcp_world_size}
+        )
         return (([],), max_length)
 
 
@@ -404,6 +407,19 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+def test_per_group_lookup_preserves_replicated_draft_positions():
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.dcp_world_size = 2
+    draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
+    coordinator.attention_groups = [
+        SpecGroup(FA_SPEC, [0], _RecordingFA, False),
+        SpecGroup(draft_spec, [1], _RecordingMamba, True),
+    ]
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
+    assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
 
 
 if __name__ == "__main__":
