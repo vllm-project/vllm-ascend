@@ -425,7 +425,7 @@ def _int8_write_packed_cache(
             tl.store(cache + address, value, columns_idx < width)
 
 
-def _int8_int8_write_packed_cache_tensor(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor) -> None:
+def _int8_write_packed_cache_tensor(cache: torch.Tensor, updates: torch.Tensor, slots: torch.Tensor) -> None:
     """Write packed rows while preserving the allocator's physical-page stride."""
     if cache.ndim != 4 or cache.shape[2] != 1 or cache.stride(-1) != 1:
         raise ValueError("Cache must be [pages, page_size, 1, width] with contiguous rows")
@@ -468,7 +468,7 @@ def int8_write_attention_cache(
         raise ValueError(f"unsupported INT8 cache kind: {kind}")
     packed = pack_int8_kv(values)
     slots = flat_slots[: packed.shape[0]].contiguous()
-    _int8_int8_write_packed_cache_tensor(cache, packed, slots)
+    _int8_write_packed_cache_tensor(cache, packed, slots)
 
 
 def _int8_pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
