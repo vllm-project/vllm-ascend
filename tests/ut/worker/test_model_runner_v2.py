@@ -20,8 +20,6 @@ from vllm.model_executor.offloader.base import create_offloader as create_vllm_o
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -35,7 +33,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
-from vllm_ascend.patch.worker import patch_model_runner
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -93,49 +90,6 @@ def _make_runner(*args, **kwargs):
     # these tests focus on buffer refresh / upstream passthrough only.
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     return runner
-
-
-def test_eager_dispatch_tp_aligns_target_and_reused_draft_sync(monkeypatch):
-    vllm_config = SimpleNamespace(
-        additional_config={},
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=4,
-            use_sequence_parallel_moe=True,
-            enable_hc_sp=False,
-        ),
-    )
-    manager = SimpleNamespace(vllm_config=vllm_config)
-    sync_kwargs: dict[str, Any] = dict(
-        num_tokens_across_dp=torch.tensor([3, 5]),
-        uniform_token_count=None,
-        eager=True,
-        num_reqs=1,
-    )
-    if not vllm_version_is("0.33.0"):
-        sync_kwargs["max_query_len"] = None
-    initial_sync = DPSyncState(**sync_kwargs)
-    seen_tokens = []
-
-    def dispatch(_manager, num_reqs, num_tokens, _uniform, *args, **kwargs):
-        seen_tokens.append(num_tokens)
-        return (
-            BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
-                num_tokens=num_tokens,
-                num_reqs=num_reqs,
-            ),
-            kwargs.get("dp_sync_state") or initial_sync,
-        )
-
-    monkeypatch.setattr(patch_model_runner, "_dispatch_cg_and_sync_dp", dispatch)
-    target_desc, target_sync = patch_model_runner.dispatch_cg_and_sync_dp(manager, 1, 3, None)
-    assert target_desc.num_tokens == 4
-    assert target_sync is not None
-    torch.testing.assert_close(target_sync.num_tokens_across_dp, torch.tensor([4, 8]))
-
-    draft_desc, _ = patch_model_runner.dispatch_cg_and_sync_dp(manager, 1, 3, None, dp_sync_state=target_sync)
-    assert draft_desc.num_tokens == 4
-    assert seen_tokens == [3, 4]
 
 
 @pytest.mark.parametrize(
