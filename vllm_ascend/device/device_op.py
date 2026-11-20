@@ -1233,6 +1233,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Qwen3.8-Next computes its softmax router logits in FP32. Keep the
+        # Top-K renormalization inside MoeGatingTopK for that path instead of
+        # launching a separate ReduceSum and Div. Other dtypes retain the
+        # established post-op path because rounding before renormalization is
+        # observably different for BF16 outputs.
+        native_renorm = renorm if norm_type == 0 and x.dtype == torch.float32 else 0
         topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
             x,
             k=k,
@@ -1240,12 +1246,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             k_group=k_group,
             group_count=group_count,
             group_select_mode=group_select_mode,
-            renorm=0,
+            renorm=native_renorm,
             norm_type=norm_type,
             routed_scaling_factor=routed_scaling_factor,
             eps=eps,
         )
-        if norm_type == 0 and renorm == 1:
+        if norm_type == 0 and renorm == 1 and native_renorm == 0:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return topk_weights, topk_ids.to(torch.int32), out

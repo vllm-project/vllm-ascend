@@ -34,7 +34,11 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    initialize_packed_conv_weight,
+    initialize_recurrent_fp32_parameters,
+)
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -218,6 +222,7 @@ else:
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        initialize_recurrent_fp32_parameters(self)
         initialize_packed_conv_weight(self)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
