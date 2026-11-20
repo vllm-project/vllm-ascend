@@ -22,10 +22,10 @@ def test_packed_groups_leave_eagle_annotation_to_upstream():
     with (
         patch.object(cache_patch, "_kv_cache_planning", upstream),
         patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
-        patch.object(cache_patch, "group_cache_specs", return_value=specs),
-        patch.object(cache_patch, "make_cache_groups", return_value=groups),
+        patch.object(cache_patch, "_orig_get_packed_kv_cache_groups", return_value=groups) as planner,
     ):
         assert cache_patch._ascend_get_packed_kv_cache_groups(config, specs) is groups
 
+    planner.assert_called_once_with(config, specs)
     annotator.assert_not_called()
     warning.assert_not_called()

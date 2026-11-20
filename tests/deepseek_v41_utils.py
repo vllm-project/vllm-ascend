@@ -7,7 +7,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.config import CacheConfig
+from vllm.v1.core import kv_cache_planning as cache_planning
+from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -15,12 +17,40 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
-    get_deepseek_v41_kv_cache_config,
-    get_deepseek_v41_pool_bytes_per_block,
-    group_cache_specs,
-    make_cache_groups,
+    SWA_BLOCK_SIZE,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+
+
+def cache_runtime(block_size=128):
+    cache = CacheConfig(block_size=block_size)
+    cache.kv_cache_layout = "BLHNC"
+    return SimpleNamespace(
+        cache_config=cache,
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41"), supports_kv_cache_grouping=False
+        ),
+        kv_transfer_config=None,
+        speculative_config=None,
+        attention_config=SimpleNamespace(hisparse_config=None),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
+
+
+def group_cache_specs(specs):
+    groups = cache_planning.get_kv_cache_groups(cache_runtime(), specs)
+    return [UniformTypeKVCacheSpecs.from_specs({name: specs[name] for name in group.layer_names}) for group in groups]
+
+
+def make_cache_groups(specs):
+    return [KVCacheGroupSpec(list(spec.kv_cache_specs), spec) for spec in specs]
+
+
+def get_deepseek_v41_pool_bytes_per_block(groups):
+    return cache_planning._pool_bytes_per_block(cache_runtime(), groups)
+
+
+get_deepseek_v41_kv_cache_config = cache_planning.get_kv_cache_config_from_groups
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
@@ -35,7 +65,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
     for role in build_layer_plan(config).layers:
         attn_prefix = f"{prefix}.layers.{role.layer_idx}.self_attn"
         specs[f"{attn_prefix}.swa_cache"] = AscendSlidingWindowMLASpec(
-            block_size=block_size,
+            block_size=min(block_size, SWA_BLOCK_SIZE),
             num_kv_heads=1,
             head_size=width,
             dtype=torch.bfloat16,
@@ -63,6 +93,7 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
             model_version="deepseek_v41",
             # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
             **{},
+            state_content_bytes=index_width + torch.float16.itemsize,
             scale_dim=1,
             scale_dtype=torch.float16,
         )
@@ -286,17 +317,11 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
         head_dim=head_size,
         index_head_dim=index_size,
     )
-    runtime = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            num_gpu_blocks_override=None,
-            prefix_cache_retention_interval=None,
-        )
-    )
+    runtime = cache_runtime(block_size)
     specs = build_v41_cache_specs(config, runtime)
     for stage in range(draft_layers):
         specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
-            block_size=block_size,
+            block_size=min(block_size, SWA_BLOCK_SIZE),
             num_kv_heads=1,
             head_size=head_size,
             dtype=torch.bfloat16,
@@ -319,7 +344,13 @@ def allocate_cache_views(config, device="cpu"):
         create_kv_cache_runtime_views,
     )
 
-    specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
+    specs = {
+        name: group.kv_cache_spec.kv_cache_specs[name]
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        else group.kv_cache_spec
+        for group in config.kv_cache_groups
+        for name in group.layer_names
+    }
     context = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
     layers = {name: DeepseekV41CacheLayer(context, name, spec) for name, spec in specs.items()}
     raw = torch.zeros(config.kv_cache_tensors[0].size, dtype=torch.int8, device=device)

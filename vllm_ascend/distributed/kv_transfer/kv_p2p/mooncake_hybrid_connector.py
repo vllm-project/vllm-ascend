@@ -123,6 +123,9 @@ def _reconstruct_shared_pages(
     pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
     page_strides: dict[tuple[str, int, int], int] = {}
     strided_placements: list[tuple[str, int, int, int]] = []
+    block_outermost = any(
+        0 < descriptor.layer_stride < descriptor.block_stride for descriptor in kv_cache_config.kv_cache_tensors
+    )
     for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
         descriptor_layers: list[tuple[str, int, tuple[torch.Tensor, ...]]] = []
         for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
@@ -135,7 +138,7 @@ def _reconstruct_shared_pages(
                 )
             )
 
-        if descriptor.layer_stride == 0:
+        if descriptor.layer_stride == 0 and not block_outermost:
             page_base = min(tensor.data_ptr() for _, _, layer_tensors in descriptor_layers for tensor in layer_tensors)
             page_key = ("shared_by", descriptor_idx, 0)
             pages_by_key[page_key] = [
@@ -152,6 +155,16 @@ def _reconstruct_shared_pages(
             min(tensor.data_ptr() for tensor in layer_tensors) - placement_start
             for _, placement_start, layer_tensors in descriptor_layers
         )
+        if block_outermost:
+            # Groups alias the same backing but own different scheduler IDs.
+            manager_stride = descriptor.block_stride
+            page_key = ("manager", manager_stride, descriptor_base)
+            for layer_name, _, layer_tensors in descriptor_layers:
+                pages_by_key.setdefault(page_key, []).append(
+                    (layer_name, min(tensor.data_ptr() for tensor in layer_tensors) - descriptor_base)
+                )
+            page_strides[page_key] = manager_stride
+            continue
         for layer_name, placement_start, layer_tensors in descriptor_layers:
             layer_start = descriptor_base + placement_start
             strided_placements.append(
