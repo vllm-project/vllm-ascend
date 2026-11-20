@@ -1,9 +1,0 @@
-pr: 22207
-entries:
-  - category: feature
-    text: >-
-      Enable MegaMoe shared-expert fusion (enable_fused_mc2=3) on Atlas A3
-      (Ascend 910C) for W8A8/W4A8 INT8 models, fusing the shared expert into
-      the CANN MegaMoe operator instead of running a separate shared-expert
-      forward. Validated on GLM-5.3-Flash with 97.19% on GSM8K (1319).
-    hardware: [A3]
