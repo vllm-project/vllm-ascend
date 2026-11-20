@@ -1856,6 +1856,7 @@ class MockRequest:
         self.max_tokens: int = 8
         self.prompt_embeds: torch.Tensor | None = None
         self.block_hashes: list = []
+        self.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42)
 
         self.truncate_block_hashes = MagicMock()
         self.sampling_params = types.SimpleNamespace(ignore_eos=False, _eos_token_id=42)
