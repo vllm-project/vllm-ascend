@@ -19,10 +19,9 @@ from tests.e2e.common.rlhf.weight_transfer.hccl import (
     ("case", "packed", "reload_mode"),
     [
         pytest.param(*parameter.values, mode, marks=parameter.marks, id=f"{parameter.id}-{mode}")
-        for parameter in pytest_model_cases("hccl", model_cases=QWEN_CASES)
-        # Keep the existing packed skip once; only expand the working unpacked lane.
-        for mode in (("layerwise",) if parameter.values[1] else ("layerwise", "direct"))
+        for mode in ("layerwise", "direct")
+        for parameter in pytest_model_cases("hccl", model_cases=QWEN_CASES, reload_mode=mode)
     ],
 )
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, reload_mode: str):
-    run_hccl_weight_transfer_transaction(case, packed, reload_mode=reload_mode)
+    run_hccl_weight_transfer_transaction(case, packed, reload_mode=reload_mode, cold_start=reload_mode == "direct")

@@ -127,6 +127,18 @@ class SparseCheckpointOracle:
         # vLLM mixes this extension into its worker class at runtime.
         get_model: Callable[[], torch.nn.Module]
 
+    def sparse_reload_configuration(self):
+        from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+
+        state = {
+            "enabled": direct_reload_enabled(),
+            "checkpoint_tensor_count": len(getattr(self.get_model(), "_ckpt_param_names", ())),
+        }
+        group = get_dp_group()
+        gathered = [None] * group.world_size
+        torch.distributed.all_gather_object(gathered, state, group=group.cpu_group)
+        return gathered
+
     def sparse_digest(self):
         hashes = {}
         for name, parameter in self.get_model().named_parameters():
@@ -260,6 +272,11 @@ def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, dp_size):
                 time.sleep(2)
             else:
                 pytest.fail("server did not become ready")
+            if environment.get("VLLM_RELOAD_MODE") == "direct":
+                configurations = rpc(url, "sparse_reload_configuration")
+                assert len(configurations) == workers
+                assert all(state["enabled"] and state["checkpoint_tensor_count"] > 0 for state in configurations)
+                print(f"[direct-compatible-sparse] workers={configurations}", flush=True)
             baseline = rpc(url, "sparse_capture_baseline")
             reference = rpc(url, "sparse_dense_reference", [str(model_path)])
             assert len(reference) == workers

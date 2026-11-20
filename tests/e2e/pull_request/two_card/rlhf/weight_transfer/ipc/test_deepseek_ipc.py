@@ -19,6 +19,13 @@ from tests.e2e.common.rlhf.weight_transfer.npu_ipc import (
 )
 
 
-@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc", model_cases=DEEPSEEK_V41_CASES))
-def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    run_npu_ipc_weight_transfer_transaction(case, packed)
+@pytest.mark.parametrize(
+    ("case", "packed", "reload_mode"),
+    [
+        pytest.param(*parameter.values, mode, marks=parameter.marks, id=f"{parameter.id}-{mode}")
+        for mode in ("layerwise", "direct")
+        for parameter in pytest_model_cases("npu_ipc", model_cases=DEEPSEEK_V41_CASES, reload_mode=mode)
+    ],
+)
+def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, reload_mode: str):
+    run_npu_ipc_weight_transfer_transaction(case, packed, reload_mode=reload_mode, cold_start=reload_mode == "direct")
