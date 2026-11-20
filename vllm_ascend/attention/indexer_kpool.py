@@ -32,7 +32,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_effective_prefill
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, has_requests_to_run_as_prefill
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
@@ -200,7 +200,7 @@ def _get_kpool_pcp_global_metadata(
     global_batch = pcp_context.global_batch
     num_reqs = global_batch.num_reqs
     num_tokens = global_batch.num_tokens
-    if decode_sharded and not has_effective_prefill(global_batch):
+    if decode_sharded and not has_requests_to_run_as_prefill(global_batch):
         # Capture and replay must compress the same global extent even when
         # fewer requests are scheduled. Padding has zero lengths and -1 slots.
         num_reqs = global_batch.num_reqs_after_padding
@@ -486,7 +486,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         metadata.indexer_row_shard = self._build_indexer_row_shard(common_attn_metadata, graph_capture)
         pcp_context = common_attn_metadata.pcp_context
         if pcp_context is not None and (
-            self.is_pcp_decode_sharded or has_effective_prefill(pcp_context.global_batch)
+            self.is_pcp_decode_sharded or has_requests_to_run_as_prefill(pcp_context.global_batch)
         ):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
@@ -700,7 +700,7 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         pcp_context = common_attn_metadata.pcp_context
         write_common = common_attn_metadata
         if pcp_context is not None and (
-            self.is_pcp_decode_sharded or has_effective_prefill(pcp_context.global_batch)
+            self.is_pcp_decode_sharded or has_requests_to_run_as_prefill(pcp_context.global_batch)
         ):
             cache_group_idx = common_attn_metadata.pcp_cache_group_idx
             if cache_group_idx is None:
