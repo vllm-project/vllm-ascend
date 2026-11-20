@@ -548,7 +548,8 @@ ge::graphStatus HcPreTiling::GetWorkspaceSize()
 
     uint64_t requiredSize = workspaceSize1 + workspaceSize2 + squareSumSize + 16 * 1024 * 1024; // 16MB 预留缓冲
 
-    workspaceSize_ = requiredSize;
+    uint64_t defaultSize = 16 * 1024 * 1024 + 192 * 1024 * 1024; // 208MB
+    workspaceSize_ = requiredSize > defaultSize ? requiredSize : defaultSize;
 
     return ge::GRAPH_SUCCESS;
 }
