@@ -73,6 +73,42 @@ def test_prepared_linear_input_import_does_not_cycle_through_moe():
     assert PreparedLinearInput in get_args(shared_experts_module.LinearInput)
 
 
+@pytest.mark.parametrize("has_separate_shared", [False, True], ids=["fused-shared", "separate-shared"])
+def test_prepared_moe_returns_only_tensor_outputs(monkeypatch, has_separate_shared):
+    routed_output = torch.ones(2, 4)
+    shared_output = torch.zeros_like(routed_output) if has_separate_shared else None
+    layer = SimpleNamespace(_forward_impl=lambda *args, **kwargs: (shared_output, routed_output))
+    monkeypatch.setattr(fused_moe_module, "get_layer_from_name", lambda _: layer)
+
+    library = torch.library.Library("prepared_moe_test", "DEF")
+    try:
+        fused_moe_module.direct_register_custom_op(
+            "forward",
+            fused_moe_module._ascend_moe_forward_prepared,
+            fake_impl=fused_moe_module._ascend_moe_forward_prepared_fake,
+            target_lib=library,
+            dispatch_key="CPU",
+        )
+        prepare = torch.ops.prepared_moe_test.forward
+        inputs = (
+            routed_output,
+            routed_output,
+            None,
+            torch.zeros(2, dtype=torch.long),
+            torch.zeros(2, dtype=torch.bool),
+        )
+        metadata = ("test", 0, has_separate_shared, False)
+        outputs = prepare(*inputs, *metadata)
+        expected = [shared_output, routed_output] if has_separate_shared else [routed_output]
+        torch.testing.assert_close(outputs, expected)
+
+        meta_inputs = tuple(tensor.to("meta") if tensor is not None else None for tensor in inputs)
+        fake_outputs = prepare(*meta_inputs, *metadata)
+        assert [tensor.shape for tensor in fake_outputs] == [tensor.shape for tensor in outputs]
+    finally:
+        library._destroy()
+
+
 @pytest.fixture
 def runtime_moe_all_reduce(monkeypatch):
     context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER, no_compile_layers={})

@@ -69,6 +69,10 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
+    DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID,
+    DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
+)
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
@@ -140,6 +144,21 @@ def _rollback_local_engram_tables(model, error):
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     """Use the current vLLM Engram opt-in for both runtime paths."""
     return engram_enabled(config) and vllm_config.engram_config is not None
+
+
+def prepare_moe_routing_inputs(
+    input_ids: torch.Tensor | None, config
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Prepare once per target/draft forward; never mutate embedding/Engram IDs."""
+    if input_ids is None or not get_current_hardware_profile().supports(
+        HardwareCapability.MOE_GATING_TOP_K_HASH_VISION
+    ):
+        return input_ids, None
+    # The router consumes int64 IDs; convert once rather than in every layer.
+    routing_input_ids = torch.where(input_ids == -1, 0, input_ids).to(torch.int64)
+    image_lo = getattr(config, "image_sentinel_base_id", DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID)
+    image_mask = (routing_input_ids >= image_lo) & (routing_input_ids < image_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT)
+    return routing_input_ids, image_mask
 
 
 class DeepseekV41MLP(nn.Module):
@@ -306,6 +325,7 @@ class DeepseekV41MoE(nn.Module):
         input_ids: torch.Tensor | None = None,
         hidden_states_fp32: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
+        image_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -327,6 +347,7 @@ class DeepseekV41MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_input,
                 input_ids=input_ids,
+                image_mask=image_mask,
             )
         else:
             # router_logits: (num_tokens, n_experts)
@@ -336,6 +357,7 @@ class DeepseekV41MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                image_mask=image_mask,
             )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
@@ -943,6 +965,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         pre_mix,
         llama_4_scaling=None,
         input_ids=None,
+        image_mask=None,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         residual = hidden_states
@@ -975,6 +998,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             input_ids=input_ids,
             hidden_states_fp32=x_fp32,
             already_sequence_parallel=use_sequence_parallel,
+            image_mask=image_mask,
         )
         hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
         return hidden_states, ffn_pre
@@ -1724,6 +1748,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         pre_mix[:, 0] = 1.0
         last_layer = None
         aux_hidden_states = []
+        routing_input_ids, image_mask = prepare_moe_routing_inputs(input_ids, self.config)
         for layer in self.layers:
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 assert self.decoder_replay_layer_name is not None
@@ -1778,7 +1803,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
                 )
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            hidden_states, pre_mix = layer(
+                positions, hidden_states, pre_mix, None, input_ids=routing_input_ids, image_mask=image_mask
+            )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
@@ -1798,6 +1825,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def _run_replay_layers(self, hidden_states, pre_mix, positions, input_ids):
         aux = []
+        routing_input_ids, image_mask = prepare_moe_routing_inputs(input_ids, self.config)
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
             if layer.layer_idx in self.aux_hidden_state_layers:
@@ -1805,7 +1833,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
                 aux.append(residual)
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            hidden_states, pre_mix = layer(
+                positions, hidden_states, pre_mix, None, input_ids=routing_input_ids, image_mask=image_mask
+            )
         return hidden_states, pre_mix, *aux
 
 
