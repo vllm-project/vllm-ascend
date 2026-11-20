@@ -40,7 +40,20 @@ def selector(monkeypatch):
     packing.__dict__.update(pack_qsa_group_indices_npu=Mock(side_effect=fake_pack))
     utilities = ModuleType("vllm.utils.torch_utils")
     utilities.__dict__.update(canonicalize_singleton_dim_strides=Mock(side_effect=lambda tensor: tensor))
-    for module in (upstream, packing, utilities):
+    preparation = ModuleType("vllm_ascend.ops.triton.qwen4_exp.lightning_v2_prepare")
+
+    def reference_prepare(query, lengths, starts, ratio):
+        # CPU oracle for the device boundary, not execution of the Triton kernel.
+        weight = torch.tensor(1 / 128**0.5, dtype=torch.bfloat16).float()
+        return (
+            weight.expand(query.shape[:2]).clone(),
+            starts[: lengths.numel() + 1].clamp_max(query.shape[0]),
+            lengths.floor_divide(ratio),
+            lengths.remainder(ratio),
+        )
+
+    preparation.__dict__.update(prepare_qsa_lightning_v2_inputs=Mock(side_effect=reference_prepare))
+    for module in (upstream, packing, utilities, preparation):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
     spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
@@ -136,6 +149,7 @@ def test_padded_bounds_preserve_output_and_metadata(selector, monkeypatch, rows,
         4,
     )
     utilities.canonicalize_singleton_dim_strides.assert_called_once()
+    module.prepare_qsa_lightning_v2_inputs.assert_called_once()
     packing.pack_qsa_group_indices_npu.assert_called_once()
 
 
@@ -149,6 +163,7 @@ def test_empty_query_clears_output_without_launch(selector):
     bindings.lightning_indexer_v2.assert_not_called()
     bindings.lightning_indexer_v2_metadata.assert_not_called()
     packing.pack_qsa_group_indices_npu.assert_not_called()
+    module.prepare_qsa_lightning_v2_inputs.assert_not_called()
 
 
 def test_further_trimmed_query_regenerates_prepared_schedule(selector):

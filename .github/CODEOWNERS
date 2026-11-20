@@ -105,7 +105,7 @@
 /vllm_ascend/ops/dsa.py @zzzzwwjj @lcfenglinwan @GDzhu01 @linfeng-yuan
 /vllm_ascend/ops/linear_op.py @xuchi-0808
 /vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
-/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
+/vllm_ascend/ops/triton @ShyRa1n @ZT-AIA @yiz-liu
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/triton/dcp/ @weiguihua2 @zhenwenqi2024 @pisceskkk @zhaochuang001 @li1how @wzx0726
@@ -233,7 +233,7 @@
 /tests/e2e/common/rlhf/ @Ronald1995
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
-/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @AuroraEmiya
+/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n
 /tests/ut/models/test_glm5next_recoverssm_config.py @drslark @chenxi-hh
 /tests/ut/models/test_glm5next_recoverssm_metadata.py @drslark @chenxi-hh
 /tests/ut/models/test_kimi_recoverssm_config.py @drslark @chenxi-hh

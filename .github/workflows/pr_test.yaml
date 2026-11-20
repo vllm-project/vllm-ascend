@@ -831,75 +831,6 @@ jobs:
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
-  # Lightweight CODEOWNERS gate: every changed file needs an approval from one
-  # of its CODEOWNERS owners. Owners without org membership or write
-  # access count as approvers on purpose (this is why the native
-  # require_code_owner_review is not used).
-  codeowner-approval:
-    # /run-triggered runs (a `ci-run` labeled pull_request event) skip this
-    # job on purpose: codeowner approval is a merge-review concern and is
-    # evaluated when reviews are submitted, not when tests are requested
-    # manually. Review events re-evaluate the gate by re-running this job
-    # inside the original pull_request run (see pr_refresh_ci_gate.yaml),
-    # never through a second check under the same name.
-    # Runs after pre-commit on purpose: a lint failure forces a new push that
-    # re-runs everything anyway, so skipping the gate on those runs keeps it
-    # off the CPU pool without delaying merge readiness (ci-gate waits on
-    # pre-commit regardless, and checks pre-commit before the owner gate).
-    needs: [pre-commit]
-    if: ${{ github.event.label.name != 'ci-run' }}
-    runs-on: linux-amd64-cpu-2-hk
-    permissions:
-      pull-requests: read
-    steps:
-      - name: Checkout the base branch
-        # The base branch, never the merge ref: this job enforces the owner
-        # gate, so both the gate script and CODEOWNERS must come from a tree
-        # the PR cannot alter - otherwise a PR could weaken the gate script
-        # or list itself as an owner and approve its own changes. CODEOWNERS
-        # edits made by a PR take effect once it merges.
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-          persist-credentials: false
-          # The gate only needs the gate script and CODEOWNERS, both under
-          # .github/: skip the rest of the tree to keep this high-frequency
-          # job off the CPU pool as briefly as possible.
-          sparse-checkout: .github
-          fetch-depth: 1
-
-      - name: CODEOWNERS coverage check
-        env:
-          COVERAGE_ERRORS_OUT: ${{ runner.temp }}/coverage_errors.txt
-        run: python3 .github/workflows/scripts/codeowner_gate.py check-coverage
-
-      - name: CODEOWNERS approval check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
-          SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
-          APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
-        run: |
-          python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
-            --pr "${{ github.event.pull_request.number }}"
-
-      - name: Upload gate details for the comment bot
-        # Per-PR details for the failure comment: which files lack an owner
-        # (no approval required) and which files are missing owner approvals
-        # (with the exact owners to ask). Always uploaded so the bot can read
-        # empty lists too.
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: codeowner-details-${{ github.run_id }}
-          retention-days: 1
-          if-no-files-found: error
-          path: |
-            ${{ runner.temp }}/unclaimed_files.txt
-            ${{ runner.temp }}/self_owned_files.txt
-            ${{ runner.temp }}/approval_failures.txt
-            ${{ runner.temp }}/coverage_errors.txt
-
   upload-pr-context:
     # Post-coverage-comment context bridge. The workflow_run-triggered
     # post_fork_coverage_comment.yaml sees an empty pull_requests[] payload
@@ -929,7 +860,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
+    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     # The only producer of the required `ci-gate` check. Review events
     # re-evaluate the gate by re-running this job inside the original
     # pull_request run (see pr_refresh_ci_gate.yaml), so the required check
@@ -939,17 +870,74 @@ jobs:
     # makes the gate run even when a needed job failed - without it, the
     # default success() would skip ci-gate, and a skipped required check
     # counts as satisfied on GitHub.
+    #
+    # The CODEOWNERS gate (approval + coverage health) lives inside this job
+    # as steps, evaluated last among the gate checks: it is a cheap API
+    # check, and running it at the end of the workflow means reviews
+    # submitted while the tests run are already visible when it judges - so
+    # a mid-CI approval turns the gate green without any re-run.
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     timeout-minutes: 360
     permissions:
-      # Post/delete the gate-failure PR comment (issue comments).
+      # Post/delete the gate-failure PR comment (issue comments), and read
+      # the PR's reviews and changed files for the CODEOWNERS gate.
       issues: write
       pull-requests: write
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - name: Checkout the base branch
+        # Only needed for the CODEOWNERS gate steps below. The base branch,
+        # never the merge ref: this checkout enforces the owner gate, so both
+        # the gate script and CODEOWNERS must come from a tree the PR cannot
+        # alter - otherwise a PR could weaken the gate script or list itself
+        # as an owner and approve its own changes. CODEOWNERS edits made by
+        # a PR take effect once it merges.
+        # Skipped on lint-failed runs on purpose: a lint failure forces a new
+        # push that re-runs everything anyway, and the gate reports
+        # pre-commit before the owner gate, so running the owner check there
+        # would only burn API calls it cannot influence.
+        if: ${{ needs.pre-commit.result == 'success' }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+          # The gate only needs the gate script and CODEOWNERS, both under
+          # .github/: skip the rest of the tree to keep this job off the CPU
+          # pool as briefly as possible.
+          sparse-checkout: .github
+          fetch-depth: 1
+
+      - name: CODEOWNERS coverage check
+        id: codeowners-coverage
+        # Lightweight CODEOWNERS health gate: every changed file needs an
+        # approval from one of its CODEOWNERS owners. Owners without org
+        # membership or write access count as approvers on purpose (this is
+        # why the native require_code_owner_review is not used).
+        if: ${{ needs.pre-commit.result == 'success' }}
+        env:
+          COVERAGE_ERRORS_OUT: ${{ runner.temp }}/coverage_errors.txt
+        run: python3 .github/workflows/scripts/codeowner_gate.py check-coverage
+
+      - name: CODEOWNERS approval check
+        id: codeowners-approvals
+        if: ${{ needs.pre-commit.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
+          SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
+          APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
+        run: |
+          python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
+            --pr "${{ github.event.pull_request.number }}"
+
       - name: Check all required jobs
+        # always()-style execution is essential now that the CODEOWNERS gate
+        # steps live in this job: a failing approval check must not short-
+        # circuit this step, or the packaged gate result loses the reason
+        # (empty reason -> the comment bot posts its generic fallback).
+        if: ${{ !cancelled() }}
         id: check
         env:
           HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
@@ -957,20 +945,28 @@ jobs:
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
           SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
           MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
-          # The pull_request-event owner check below.
-          OWNER_RESULT: ${{ needs.codeowner-approval.result }}
+          # The in-job CODEOWNERS gate steps above; 'skipped' on lint-failed
+          # runs or when an earlier step aborted the job.
+          CODEOWNERS_COVERAGE_OUTCOME: ${{ steps.codeowners-coverage.outcome }}
+          CODEOWNERS_APPROVALS_OUTCOME: ${{ steps.codeowners-approvals.outcome }}
         run: |
           set -euo pipefail
 
-          # Collect a short human-readable failure reason; the step below posts
-          # (or updates) the PR comment from this file when the gate fails.
+          # Aggregate EVERY gate problem before deciding: ci-gate is the merge
+          # gate's last checkpoint, so one push should surface all its issues
+          # at once (lint + UT + missing owner approval + ...) instead of
+          # revealing them one rerun at a time. Each check appends a reason;
+          # the verdict is made once, at the end. Checks whose inputs are
+          # meaningless because an upstream job never ran (e.g. cpu-ut
+          # skipped because lint failed) are guarded so they only report
+          # real failures, not cascade noise.
           FAILURE_FILE="${RUNNER_TEMP}/ci_gate_failure_reason.txt"
           rm -f "${FAILURE_FILE}"
-          # shellcheck disable=SC2317  # fail() is only invoked conditionally
-          fail() {
-            echo "$1" >> "${FAILURE_FILE}"
+          REASONS=()
+          # shellcheck disable=SC2317  # add() is only invoked conditionally
+          add() {
+            REASONS+=("$1")
             echo "::error::${1}"
-            exit 1
           }
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
@@ -999,10 +995,12 @@ jobs:
           fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
-            fail "pre-commit failed (lint / markdownlint / mypy / gitleaks). Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
+            add "pre-commit failed (lint / markdownlint / mypy / gitleaks). Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
           fi
 
-          if [ "${CPU_UT_RESULT}" != "success" ]; then
+          # Downstream jobs are skipped when lint failed; their results are
+          # meaningless then and are not reported.
+          if [ "${PRE_COMMIT_RESULT}" = "success" ]; then
             # cpu-ut is skipped on purpose for docs-only PRs (no src,
             # ci_pipeline, or cpu_ut paths, no run-enabling label). Any other
             # skip is a workflow bug and must fail the gate.
@@ -1010,76 +1008,107 @@ jobs:
               && [ "${CI_PIPELINE_FILTER}" != "true" ] && [ "${CPU_UT_FILTER}" != "true" ] \
               && [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
               echo "::notice::cpu-ut skipped: PR changes no src/ci_pipeline/cpu_ut paths and carries no run-enabling label"
-            else
-              fail "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
+            elif [ "${CPU_UT_RESULT}" != "success" ]; then
+              add "cpu-ut failed. Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
             fi
           fi
 
-          # /run-triggered runs skip the codeowner-approval job on purpose
-          # (see the job condition); the gate still passes here and owner
-          # approval is evaluated when reviews are submitted. This check sits
-          # behind the pre-commit/cpu-ut ones on purpose: a lint failure
-          # demands a new push that re-runs everything anyway, so reporting
-          # the owner gate first would only mislead (PR #22133).
-          if [ "${{ github.event.label.name }}" = "ci-run" ]; then
-            echo "codeowner-approval: skipped (/run requested; evaluated when reviews are submitted)"
-          elif [ "${OWNER_RESULT}" != "success" ]; then
-            fail "CODEOWNERS approval gate failed: at least one changed file has no approval from its owner(s). Open the 'codeowner-approval' job above to see which files are missing approvals and who can approve."
-          fi
-
-          if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
-            # select-tests only runs under a run-enabling label
-            # (ready-precise / main2main). An unlabeled run
-            # passes the gate when (and only when) the paths-filter in
-            # pre-commit found no src or ci_pipeline paths in the diff.
-            if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
-              echo "::notice::No source paths changed; precision tests are not required for this PR."
-              echo "=== CI Gate: PASSED ==="
-              exit 0
+          # The CODEOWNERS gate runs unconditionally (including /run-triggered
+          # runs): ci-gate is the merge gate's last checkpoint, so a missing
+          # owner approval must surface here no matter how the run was
+          # requested - a green gate without owner sign-off would let the PR
+          # merge through the required check. Reported after pre-commit/cpu-ut
+          # so a lint or UT failure does not drown it in the same rerun
+          # cycle (PR #22133).
+          if [ "${PRE_COMMIT_RESULT}" = "success" ]; then
+            if [ "${CODEOWNERS_COVERAGE_OUTCOME}" != "success" ] || [ "${CODEOWNERS_APPROVALS_OUTCOME}" != "success" ]; then
+              add "CODEOWNERS approval gate failed: at least one changed file has no approval from its owner(s). Open the 'CODEOWNERS' steps above to see which files are missing approvals and who can approve."
             fi
-            fail "This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge. Fix: a maintainer adds the 'ready-precise' label; the workflow reruns automatically once the label is added."
           fi
 
-          if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
-            fail "select-tests failed. Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection)."
-          fi
-
-          # Even after successful test selection, only explicit true/false
-          # values are valid. A missing output must not mean no tests.
-          if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
-            fail "Invalid or missing has_tests output: '${HAS_TESTS}'"
-          fi
-
-          if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
-            fail "Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
-          fi
-
-          if [ "${HAS_TESTS}" = "true" ]; then
-            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
-            echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
-              fail "This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge.${MATCHED_MODULES:+ Affected modules: ${MATCHED_MODULES}.} Fix: a maintainer adds the 'ready-precise' label."
-            fi
-            if [ "${TESTS_RESULT}" != "success" ]; then
-              if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then
-                fail "The 'main2main' dual-version E2E suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
+          if [ "${PRE_COMMIT_RESULT}" = "success" ]; then
+            if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
+              # select-tests only runs under a run-enabling label
+              # (ready-precise / main2main). An unlabeled run
+              # passes the gate when (and only when) the paths-filter in
+              # pre-commit found no src or ci_pipeline paths in the diff.
+              if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
+                echo "::notice::No source paths changed; precision tests are not required for this PR."
               else
-                fail "The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
+                add "This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge. Fix: a maintainer adds the 'ready-precise' label; the workflow reruns automatically once the label is added."
+              fi
+            elif [ "${SELECT_TESTS_RESULT}" != "success" ]; then
+              add "select-tests failed. Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection)."
+            fi
+
+            if [ "${SELECT_TESTS_RESULT}" = "success" ]; then
+              # Even after successful test selection, only explicit true/false
+              # values are valid. A missing output must not mean no tests.
+              if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
+                add "Invalid or missing has_tests output: '${HAS_TESTS}'"
+              fi
+              if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
+                add "Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
+              fi
+
+              if [ "${HAS_TESTS}" = "true" ]; then
+                TESTS_RESULT="${{ needs.run-selected-tests.result }}"
+                echo "run-selected-tests: ${TESTS_RESULT}"
+                if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ]; then
+                  add "This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge.${MATCHED_MODULES:+ Affected modules: ${MATCHED_MODULES}.} Fix: a maintainer adds the 'ready-precise' label."
+                fi
+                if [ "${TESTS_RESULT}" = "failure" ]; then
+                  if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then
+                    add "The 'main2main' dual-version E2E suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
+                  else
+                    add "The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
+                  fi
+                fi
+              fi
+
+              if [ "${HAS_TESTS_A5}" = "true" ]; then
+                TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
+                echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
+                if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
+                  echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
+                elif [ "${TESTS_A5_RESULT}" = "failure" ]; then
+                  add "The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
+                elif [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" = "true" ]; then
+                  add "run-selected-tests-a5 was skipped although the ready-a5 label is set. Open the run-selected-tests-a5 job above for why it was skipped."
+                fi
               fi
             fi
           fi
 
-          if [ "${HAS_TESTS_A5}" = "true" ]; then
-            TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
-            echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
-            elif [ "${TESTS_A5_RESULT}" != "success" ]; then
-              fail "The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
-            fi
+          if [ "${#REASONS[@]}" -gt 0 ]; then
+            # One comment lists every problem; the step below posts (or
+            # updates) it on the PR.
+            printf '%s\n' "${REASONS[@]}" > "${FAILURE_FILE}"
+            echo "=== CI Gate: FAILED (${#REASONS[@]} problem(s)) ==="
+            exit 1
           fi
 
           echo "=== CI Gate: PASSED ==="
+
+      - name: Upload gate details for the comment bot
+        # Per-PR details for the failure comment: which files lack an owner
+        # (no approval required) and which files are missing owner approvals
+        # (with the exact owners to ask). Always uploaded so the bot can read
+        # empty lists too. Skipped steps leave no files behind, so the bot
+        # simply omits those sections (download uses continue-on-error).
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeowner-details-${{ github.run_id }}
+          retention-days: 1
+          # 'warn', not 'error': the CODEOWNERS steps are skipped on
+          # lint-failed runs, leaving no detail files.
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/unclaimed_files.txt
+            ${{ runner.temp }}/self_owned_files.txt
+            ${{ runner.temp }}/approval_failures.txt
+            ${{ runner.temp }}/coverage_errors.txt
 
       - name: Package gate result
         if: ${{ always() }}

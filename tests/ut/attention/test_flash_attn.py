@@ -185,7 +185,11 @@ def select_flash_attn(monkeypatch):
     from vllm_ascend import platform
     from vllm_ascend.device.hardware_profile import AttentionBackendFamily
 
-    profile = SimpleNamespace(supports=lambda _: True, attention_backend_family=AttentionBackendFamily.STANDARD)
+    profile = SimpleNamespace(
+        supports=lambda _: True,
+        attention_backend_family=AttentionBackendFamily.STANDARD,
+        flash_attn_npu_3_models=frozenset(),
+    )
     monkeypatch.setattr(platform, "get_current_hardware_profile", lambda: profile)
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *_: False)
 

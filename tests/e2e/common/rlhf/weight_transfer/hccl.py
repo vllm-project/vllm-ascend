@@ -98,9 +98,11 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                 source.seed = seed
                 print(f"[trainer] {case.id}: {reload_mode} update round={update_round} seed={seed}", flush=True)
                 post_control(server, "pause")
-                engine.send_weights()
-                post_control(server, "resume")
-                assert generation_signature(client, case.model) == references[seed], (
+                try:
+                    engine.send_weights()
+                finally:
+                    post_control(server, "resume")
+                assert generation_signature(client, case.model, prompts=case.prompts) == references[seed], (
                     f"{case.id}: {reload_mode} round {update_round} differs from cold loading seed {seed}"
                 )
         finally:

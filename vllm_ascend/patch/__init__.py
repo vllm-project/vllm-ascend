@@ -409,67 +409,6 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 14. File: platform/patch_minimax_m2_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.ModelConfig._verify_quantization`
-#    Why:
-#       MiniMax-M2 fp8 checkpoints on NPU may fail upstream quantization validation.
-#       vllm-ascend needs to disable fp8 quantization and load bf16 dequantized
-#       weights in worker-side patches instead.
-#    How：
-#       Monkey-patch `_verify_quantization` and intercept platform quantization
-#       verification to force `cfg.quantization=None` for MiniMax-M2 fp8 on NPU.
-#    Related PR (if no, explain why):
-#       No, upstream behavior differs across versions and needs discussion.
-#    Future Plan:
-#       Remove this patch once upstream supports MiniMax-M2 fp8 on NPU or provides
-#       a backend-safe validation / override mechanism.
-#
-#   2. `vllm.config.model.ModelConfig._verify_cuda_graph`
-#    Why:
-#       For MiniMax-M2 on NPU with ACL graph capture enabled, HCCL op expansion
-#       mode affects graph shape coverage. Users may forget to set it.
-#    How：
-#       If user doesn't set it, set `HCCL_OP_EXPANSION_MODE=AIV` for this model
-#       and log a warning when a different value is detected.
-#    Related PR (if no, explain why):
-#       No, this is an environment-specific tuning knob.
-#    Future Plan:
-#       Remove this patch if upstream provides an official NPU graph-capture
-#       guidance / auto-configuration path for HCCL.
-#
-#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
-#    Why:
-#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
-#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
-#       can emit auxiliary hidden states.
-#    How：
-#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
-#       MiniMax model_type when method is eagle3/extract_hidden_states.
-#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
-#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
-#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
-#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
-#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
-#       so nested `speculative_config` validation does not use a stale schema.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream whitelist includes MiniMax.
-#
-#   4. `vllm.model_executor.models.registry` (spec decode aliases)
-#    Why:
-#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
-#       string while reusing the shared Eagle3 implementation.
-#    How：
-#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
-#       existing Eagle3 implementation in the speculative decoding registry.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Drop the alias once upstream registry includes it or the checkpoint
-#       standardizes architecture strings.
-#
 # ** 15. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   REMOVED: upstream vLLM v0.32.0 exposes the official

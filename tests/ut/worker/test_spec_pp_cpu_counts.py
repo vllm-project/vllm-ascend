@@ -7,6 +7,8 @@ import __future__
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -38,6 +40,7 @@ def runner_cls(mamba_state_cls):
         in {
             "__init__",
             "_can_skip_spec_cpu_length_sync",
+            "initialize_spec_cpu_length_sync",
             "postprocess_sampled",
             "postprocess_num_computed_tokens",
             "_update_seq_lens_cpu",
@@ -253,3 +256,91 @@ def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch
         sparse_kv_offload_config=SimpleNamespace(enabled=blocked == "sparse_offload")
     )
     assert runner._can_skip_spec_cpu_length_sync() is (blocked is None)
+
+
+@pytest.fixture
+def fa3_runner(runner_cls):
+    fa3 = type(
+        "AscendFlashAttentionBackend",
+        (),
+        {
+            "__module__": "vllm_ascend.attention.flash_attention_v3",
+            "full_cls_name": Mock(
+                return_value=("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+            ),
+        },
+    )
+    runner = runner_cls.__new__(runner_cls)
+    runner.sync_spec_pp_cpu_counts = False
+    runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=["OtherModel"]))
+    runner.speculative_config = SimpleNamespace(method="mtp")
+    runner.model_state = SimpleNamespace(initialize_spec_cpu_length_sync=Mock())
+    # set_attn initializes nested draft groups, not an attn_backends mapping.
+    runner.speculator = SimpleNamespace(attn_groups=[[SimpleNamespace(backend=fa3)], [SimpleNamespace(backend=fa3)]])
+    return runner
+
+
+@pytest.mark.parametrize(
+    "case", ["fa3", "empty", "empty_group", "missing", "cann", "mixed", "no_speculator", "sync_pp"]
+)
+def test_fa3_draft_cpu_sync_policy(fa3_runner, case):
+    runner = fa3_runner
+    cann = type(
+        "AscendFlashAttentionBackend",
+        (),
+        {
+            "__module__": "vllm_ascend.attention.fa_v1",
+            "full_cls_name": Mock(return_value=("vllm_ascend.attention.fa_v1", "AscendFlashAttentionBackend")),
+        },
+    )
+    if case == "empty":
+        runner.speculator.attn_groups = []
+    elif case == "empty_group":
+        runner.speculator.attn_groups = [[]]
+    elif case == "missing":
+        del runner.speculator.attn_groups
+    elif case == "cann":
+        runner.speculator.attn_groups = [[SimpleNamespace(backend=cann)]]
+    elif case == "mixed":
+        runner.speculator.attn_groups[1][0].backend = cann
+    elif case == "no_speculator":
+        runner.speculator = None
+    elif case == "sync_pp":
+        runner.sync_spec_pp_cpu_counts = True
+    # No target groups or model-specific draft config: only draft backends matter.
+    assert not runner._can_skip_spec_cpu_length_sync()
+    runner.initialize_spec_cpu_length_sync()
+    runner.model_state.initialize_spec_cpu_length_sync.assert_called_once_with(runner)
+    assert runner._can_skip_spec_cpu_length_sync() is (case == "fa3")
+
+
+def test_fa3_skips_cpu_snapshot_and_wait(fa3_runner):
+    runner = fa3_runner
+    runner.initialize_spec_cpu_length_sync()
+    backend = runner.speculator.attn_groups[0][0].backend
+    backend.full_cls_name.reset_mock()
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/model_runner.py"
+    cls = next(
+        node
+        for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner"
+    )
+    copy = next(
+        node
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_copy_num_computed_tokens_to_cpu"
+    )
+    namespace: dict[str, Any] = {}
+    exec(compile(ast.Module(body=[copy], type_ignores=[]), str(source), "exec"), namespace)
+    # No stream/buffer dependencies are supplied: taking the D2H path fails.
+    namespace[copy.name](runner)
+    runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: pytest.fail("unexpected CPU wait"))
+    runner.req_states = SimpleNamespace(req_id_to_index={"cached": 0}, num_computed_tokens_cpu=torch.tensor([20]))
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(1, dtype=torch.int32))
+    scheduler = SimpleNamespace(
+        num_scheduled_tokens={"cached": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["cached"])
+    )
+    runner._update_seq_lens_cpu(scheduler, ["cached"])
+    assert runner.input_buffers.seq_lens_cpu.tolist() == [24]
+
+    backend.full_cls_name.assert_not_called()
