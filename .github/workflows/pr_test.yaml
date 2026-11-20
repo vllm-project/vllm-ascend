@@ -533,9 +533,9 @@ jobs:
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
     #   all         - main2main forced
-    #   ops         - the PR touches the CI pipeline; temporarily schedule a few
-    #                 one-card e2e tests so the UT-then-e2e order can be checked.
-    #                 Restore MODE="all" before merging.
+    #   ops         - the PR touches the CI pipeline; temporarily schedule
+    #                 two_card/ops instead of the full suite. Restore MODE="all"
+    #                 before merging.
     #   none        - ready-precise on a PR whose diff recommends no tests
     if: >-
       ${{
@@ -625,9 +625,8 @@ jobs:
             MODE="all"
           elif [ "${CI_PIPELINE}" = "true" ]; then
             # Temporary: a CI-pipeline change normally escalates to the full
-            # suite. Schedule a few one-card e2e tests instead, and let
-            # run-selected-tests wait until cpu-ut succeeds. Restore MODE="all"
-            # before merging.
+            # suite. Schedule two_card/ops instead. run-selected-tests still
+            # waits until cpu-ut succeeds. Restore MODE="all" before merging.
             MODE="ops"
           elif [ "${HAS_READY_PRECISE}" = "true" ]; then
             if [ "${RECOMMEND_RESULT}" != "success" ]; then
@@ -646,19 +645,14 @@ jobs:
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE} (src=${SRC:-unknown} ci_pipeline=${CI_PIPELINE:-unknown})"
 
-      - name: Select pipeline probe tests
+      - name: Select operator grouping tests
         id: scope-ops
         if: steps.decide.outputs.mode == 'ops'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex pyyaml -q
-          # A few short one-card cases. cpu-ut stays a separate job and
-          # run-selected-tests does not start until that job succeeds.
           python3 .github/workflows/scripts/select_tests.py \
-            --explicit-e2e-tests \
-              tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py \
-              tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py \
-              tests/e2e/pull_request/one_card/test_glm5next_pooled_cache_write.py \
+            --explicit-e2e-tests tests/e2e/pull_request/two_card/ops \
             --skip-cpu-ut \
             --skip-a5
 
