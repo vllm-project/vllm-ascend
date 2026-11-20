@@ -20,7 +20,7 @@ import threading
 import unittest
 from itertools import product
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import numpy as np
 
@@ -1394,11 +1394,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.register_buffer.assert_called_once()
 
     def test_start_load_kv_sync(self):
-        worker = self._make_worker(extra_config={"load_async": False})
-        worker.m_store.get = MagicMock(return_value=[0])
-        # Setup token database
-        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
-
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
         req = ReqMeta(
             req_id="r1",
@@ -1409,11 +1404,20 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.start_load_kv(meta)
-        worker.m_store.get.assert_called_once()
-        stats = worker.get_stats()
-        self.assertEqual(stats.data["load_get_keys"], 1)
-        self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+        for role in ("kv_producer", "kv_both"):
+            with self.subTest(role=role):
+                worker = self._make_worker(kv_role=role, extra_config={"backend": "mooncake", "load_async": False})
+                operations = MagicMock()
+                operations.get.return_value = [0]
+                worker.m_store.get = operations.get
+                # Setup token database
+                worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+                with patch.object(torch.npu, "current_stream", return_value=operations):
+                    worker.start_load_kv(meta)
+                self.assertEqual(operations.method_calls, [call.synchronize(), call.get(ANY, ANY, ANY)])
+                stats = worker.get_stats()
+                self.assertEqual(stats.data["load_get_keys"], 1)
+                self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
     def test_start_load_kv_sync_skips_pp_local_empty_group(self):
         worker = self._make_worker(extra_config={"load_async": False})
@@ -3301,6 +3305,27 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], len(worker.m_store.get.call_args.args[0]))
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_tp_mismatch_get_orders_only_synchronous_prefill_reads(self):
+        for role, load_async, expected_sync in (
+            ("kv_producer", False, True),
+            ("kv_both", False, True),
+            ("kv_consumer", False, False),
+            ("kv_producer", True, False),
+        ):
+            with self.subTest(role=role, load_async=load_async):
+                worker = self._make_strided_worker()
+                worker.kv_role = role
+                worker.load_async = load_async
+                operations = MagicMock()
+                operations.get.return_value = [0]
+                worker.m_store.get = operations.get
+
+                with patch.object(torch.npu, "current_stream", return_value=operations):
+                    worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
+
+                expected = [call.synchronize()] if expected_sync else []
+                self.assertEqual(operations.method_calls, [*expected, call.get(ANY, ANY, ANY)])
 
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
