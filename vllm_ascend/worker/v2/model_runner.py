@@ -35,6 +35,7 @@ from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
+from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -99,7 +100,7 @@ from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
-from vllm_ascend.models.host_offload import track_host_offload_owners
+from vllm_ascend.models.host_offload import HostOffloadOwner, track_host_offload_owners
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
     runtime_guard_step,
@@ -345,16 +346,7 @@ class NPUModelRunner(GPUModelRunner):
                 try:
                     super().load_model(load_dummy_weights, *args, **kwargs)
                 except BaseException:
-                    # self.model may not exist yet. Close every recorded owner
-                    # without collectives and retain failures for shutdown retry.
-                    pending = getattr(self, "_shared_engram_shutdown_pending", [])
-                    for owner in owners:
-                        try:
-                            owner.close_host_offload()
-                        except Exception:
-                            pending.append(owner)
-                            logger.exception("Failed to release host offload after model loading failed")
-                    self._shared_engram_shutdown_pending = pending
+                    self._release_failed_host_offload(owners)
                     raise
             self.pd_dspark_aux_layer_ids = aux_layers
         finally:
@@ -371,6 +363,47 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+        if self.ascend_config.input_embedding_host_vmm and not load_dummy_weights:
+            self._offload_input_embeddings()
+
+    def _release_failed_host_offload(self, owners: list[HostOffloadOwner]) -> None:
+        pending = getattr(self, "_shared_engram_shutdown_pending", [])
+        for owner in owners:
+            try:
+                owner.close_host_offload()
+            except Exception:
+                pending.append(owner)
+                logger.exception("Failed to release host offload after model loading failed")
+        self._shared_engram_shutdown_pending = pending
+
+    def _offload_input_embeddings(self) -> None:
+        from vllm_ascend.models.deepseek_v41.input_embedding import offload_input_embeddings
+
+        # A rank-local mapping can fail after the shared Engram tables have
+        # been loaded. Its rollback must only close the mappings it acquired.
+        with track_host_offload_owners() as owners:
+            try:
+                with DeviceMemoryProfiler(self.device) as memory:
+                    draft = getattr(self.speculator, "model", None)
+                    embeddings = offload_input_embeddings(self.model, draft)
+                if memory.consumed_memory >= 0:
+                    raise RuntimeError("Host VMM input embeddings released no NPU tensor memory")
+                self.model_memory_usage += memory.consumed_memory
+                torch.npu.empty_cache()
+            except BaseException:
+                self._release_failed_host_offload(owners)
+                raise
+        self._input_embedding_host_vmm_owners = embeddings
+        logger.info(
+            "Host VMM input embeddings: moved %d table(s) and released %d bytes of NPU tensor memory",
+            len(embeddings),
+            -memory.consumed_memory,
+        )
+
+    def reload_weights(self, *args, **kwargs) -> None:
+        if getattr(self, "_input_embedding_host_vmm_owners", None):
+            raise RuntimeError("Restart the worker to reload weights with Host VMM input embeddings")
+        super().reload_weights(*args, **kwargs)
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
@@ -622,6 +655,8 @@ class NPUModelRunner(GPUModelRunner):
         model = getattr(self, "model", None)
         # Include private/shared UVA owners, which have no MemFabric client.
         shared_embeddings = list(getattr(self, "_shared_engram_shutdown_pending", None) or [])
+        shared_embeddings.extend(getattr(self, "_input_embedding_host_vmm_owners", ()))
+        self._input_embedding_host_vmm_owners = []
         if model is not None:
             owner_ids = {id(owner) for owner in shared_embeddings}
             shared_embeddings.extend(
