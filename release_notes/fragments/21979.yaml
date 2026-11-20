@@ -1,0 +1,4 @@
+pr: 21979
+entries:
+  - category: bugfix
+    text: Fixed a Qwen3.8-Flash-Next warmup failure by falling back to separate QSA normalization and RoPE when fusion is unsupported.
