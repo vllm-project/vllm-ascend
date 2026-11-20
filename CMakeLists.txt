@@ -21,9 +21,9 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.10.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
-  message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
+set(TORCH_REQUIRED_VERSION "2.14.0")
+if(NOT "${TORCH_VERSION}" VERSION_EQUAL "${TORCH_REQUIRED_VERSION}")
+  message(FATAL_ERROR "Expected PyTorch version ${TORCH_REQUIRED_VERSION}, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
