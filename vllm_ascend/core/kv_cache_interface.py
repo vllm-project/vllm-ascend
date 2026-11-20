@@ -200,9 +200,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # TP ranks hold the full latent vector, including quantization scales.
     max_tp_shards: int | None = 1
 
-    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
-    # caches without query heads use the one-latent-head cache contract.
-    num_heads: int = 1
+    # Query metadata must not shadow upstream num_heads, which describes
+    # physical cache heads and is used to compute allocation strides.
+    num_query_heads: int = 1
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
     mla_cache_layout: Literal["component_major", "token_interleaved"] = "component_major"
@@ -266,7 +266,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ascend_layouts = {
             (
                 spec.scale_dim,
-                spec.num_heads,
+                spec.num_query_heads,
                 spec.kv_lora_rank,
                 spec.qk_rope_head_dim,
                 spec.mla_cache_layout,
@@ -293,7 +293,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
-            num_heads=first_spec.num_heads,
+            num_query_heads=first_spec.num_query_heads,
             kv_lora_rank=first_spec.kv_lora_rank,
             qk_rope_head_dim=first_spec.qk_rope_head_dim,
             mla_cache_layout=first_spec.mla_cache_layout,

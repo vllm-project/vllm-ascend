@@ -163,7 +163,7 @@ class AscendMLABackend(AttentionBackend):
             raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
         slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
         prefix = (num_blocks * kernel_blocks_per_manager, spec.num_kv_heads, block_size)
-        widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        widths: tuple[int, ...] = (spec.kv_lora_rank, spec.qk_rope_head_dim)
         if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
             raise ValueError("MLA kernel slot is smaller than its cache components.")
         if spec.mla_cache_layout == "token_interleaved":
@@ -217,10 +217,10 @@ class AscendMLAAttention(MLAAttention):
             return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
-        storage_heads = self.num_heads
+        query_heads = self.num_heads
         if model_type == "kimi_linear":
             # Preserve the existing Kimi Linear cache head-count contract.
-            storage_heads = spec.num_heads
+            query_heads = spec.num_heads
         head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
 
         # Preserve upstream metadata and apply all owner fields together.
@@ -234,7 +234,7 @@ class AscendMLAAttention(MLAAttention):
                 else "component_major",
             )
         values.update(
-            num_heads=storage_heads,
+            num_query_heads=query_heads,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             model_version=spec.model_version or getattr(self, "model_version", None),

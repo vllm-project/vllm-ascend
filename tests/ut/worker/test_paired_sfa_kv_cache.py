@@ -258,7 +258,7 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
     vllm_config.model_config.hf_text_config.model_type = model_type
     main_spec = AscendMLAAttentionSpec(
         block_size=BLOCK_SIZE,
-        num_heads=num_heads,
+        num_query_heads=num_heads,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -288,7 +288,7 @@ def test_generic_sfa_mixed_group_keeps_private_caches(monkeypatch, vllm_config, 
             )
         )
         offset += len(names) * layer_stride
-    assert descriptors[1].offset + descriptors[1].layer_stride >= backing_size
+    assert offset == backing_size
     plan = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=descriptors,

@@ -21,6 +21,7 @@ def make_config():
         block_size=4,
         num_kv_heads=1,
         head_size=12,
+        num_query_heads=16,
         dtype=torch.float16,
         kv_lora_rank=8,
         qk_rope_head_dim=4,
@@ -145,3 +146,30 @@ def test_upstream_indexer_placement_includes_scales_and_replicas(dtype, width, s
     assert spec.page_size_bytes == page_bytes
     # The final layer's final page must fit the upstream backing exactly.
     assert strides[0] + 2 * strides[1] + spec.page_size_bytes == 6 * page_bytes
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.BLHNC])
+def test_main_cache_upstream_placement_uses_physical_heads(layout):
+    spec = make_config().kv_cache_groups[0].kv_cache_spec
+    num_blocks, num_layers = 3, 2
+    layer_stride, block_stride, *_ = compute_layout_strides(spec, num_blocks, num_layers, layout)
+    size = num_blocks * num_layers * spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(size=size, layers=["main.0", "main.1"], layer_stride=layer_stride, block_stride=block_stride)
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["main.0", "main.1"], kv_cache_spec=spec)],
+    )
+    groups = [
+        attn_utils.AttentionGroup(
+            backend=AscendSFABackend, layer_names=["main.0", "main.1"], kv_cache_spec=spec, kv_cache_group_id=0
+        )
+    ]
+    raw = torch.zeros(size, dtype=torch.int8)
+    caches = attn_utils.create_kv_cache_runtime_views(config, raw, groups, [spec.block_size], {})
+    for components in caches.values():
+        for component in components:
+            component.fill_(1)
+    assert all(component.shape[2] == 1 for components in caches.values() for component in components)
+    assert torch.count_nonzero(raw.view(spec.dtype)) == size // torch.empty((), dtype=spec.dtype).element_size()
