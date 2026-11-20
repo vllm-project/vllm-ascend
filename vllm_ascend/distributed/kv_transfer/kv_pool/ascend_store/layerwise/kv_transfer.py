@@ -29,7 +29,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerTransferTask,
     SharedBlockData,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, ReqMeta
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import (
+    ChunkedTokenDatabase,
+)
 
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
@@ -110,20 +115,21 @@ class LayerBatchBuilder:
         self.num_layers = num_layers
         self.group_id = group_id
         self.layer_byte_offset = layer_byte_offset
-        self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
+        layout = token_database.group_layouts[group_id]
+        self._block_len_np = np.asarray(layout.block_lengths, dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
-            token_database.group_kv_caches_base_addr[group_id],
+            layout.base_addresses,
             dtype=np.int64,
         )
-        group_block_stride = token_database.group_block_stride.get(group_id, token_database.group_block_len[group_id])
-        self._block_stride_np = np.asarray(group_block_stride, dtype=np.int64)
-        layer_cache_entry_offsets = token_database.group_layer_cache_entry_offsets.get(group_id)
-        if layer_cache_entry_offsets is None:
+        self._block_stride_np = np.asarray(layout.block_strides, dtype=np.int64)
+        if layout.layer_offsets is not None:
+            self._layer_cache_entry_offsets_np = np.asarray(layout.layer_offsets, dtype=np.int64)
+        else:
             caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
-            layer_cache_entry_offsets = [
-                min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
-            ]
-        self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
+            self._layer_cache_entry_offsets_np = np.asarray(
+                [min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)],
+                dtype=np.int64,
+            )
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
@@ -213,37 +219,7 @@ class LayerBatchBuilder:
         is_save: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         request = block_range.request
-        group_id = self.group_id
-        block_ids_np: np.ndarray | None
-        block_gvas_np: np.ndarray | None
-        if is_save:
-            group_block_ids = request.block_ids_by_group_np
-            group_block_gvas = request.block_gvas_by_group_np
-            if (
-                group_block_ids is not None
-                and group_block_gvas is not None
-                and group_id < len(group_block_ids)
-                and group_id < len(group_block_gvas)
-            ):
-                block_ids_np = group_block_ids[group_id]
-                block_gvas_np = group_block_gvas[group_id]
-            else:
-                block_ids_np = request.block_ids_np
-                block_gvas_np = request.block_gvas_np
-        else:
-            group_block_ids = request.block_ids_by_group_np
-            group_block_gvas = request.load_block_gvas_by_group_np
-            if (
-                group_block_ids is not None
-                and group_block_gvas is not None
-                and group_id < len(group_block_ids)
-                and group_id < len(group_block_gvas)
-            ):
-                block_ids_np = group_block_ids[group_id]
-                block_gvas_np = group_block_gvas[group_id]
-            else:
-                block_ids_np = request.block_ids_np
-                block_gvas_np = request.load_block_gvas_np
+        block_ids_np, block_gvas_np = request.get_transfer_arrays(self.group_id, is_save)
         if block_ids_np is None or block_gvas_np is None:
             raise RuntimeError(
                 f"ReqMeta {'save' if is_save else 'load'} block metadata"
@@ -277,14 +253,14 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            if request.save_keys:
-                all_save_keys.extend(request.save_keys)
-            if request.load_keys and id(request) not in collected_load_keys_request_ids:
+            if request.transfer.save_keys:
+                all_save_keys.extend(request.transfer.save_keys)
+            if request.transfer.load_keys and id(request) not in collected_load_keys_request_ids:
                 # Avoid collecting the same request's load_keys multiple times
                 collected_load_keys_request_ids.add(id(request))
-                all_load_keys.extend(request.load_keys)
+                all_load_keys.extend(request.transfer.load_keys)
             block_ids_np, block_gvas_np = self._require_request_arrays(block_range, is_save)
-            gva_block_offset = request.gva_block_offset if is_save else request.load_gva_block_offset
+            gva_block_offset = request.transfer.gva_block_offset if is_save else request.transfer.load_gva_block_offset
 
             num_blocks = block_range.end_block - block_range.start_block
             if num_blocks > 0:
@@ -304,7 +280,9 @@ class LayerBatchBuilder:
             if block_range.partial_block_index is not None:
                 partial_block_gva = None
                 partial_gva_per_group = (
-                    request.partial_save_gva_per_group if is_save else request.partial_load_gva_per_group
+                    request.transfer.partial_save_gva_per_group
+                    if is_save
+                    else request.transfer.partial_load_gva_per_group
                 )
                 if task.group_id < len(partial_gva_per_group):
                     partial_block_gva = partial_gva_per_group[task.group_id]
@@ -355,21 +333,20 @@ class LayerBatchBuilder:
     ) -> tuple[list[str | None], int, str | None]:
         if is_save:
             return (
-                request.save_block_keys,
-                request.save_key_block_offset,
-                request.save_last_block_key,
+                request.transfer.save_block_keys,
+                request.transfer.save_key_block_offset,
+                request.transfer.save_last_block_key,
             )
         return (
-            request.load_block_keys,
-            request.load_key_block_offset,
-            request.load_last_block_key,
+            request.transfer.load_block_keys,
+            request.transfer.load_key_block_offset,
+            request.transfer.load_last_block_key,
         )
 
     def _request_block_ids(self, request: ReqMeta) -> list[int]:
-        if request.block_ids_by_group_np is not None and self.group_id < len(request.block_ids_by_group_np):
-            return request.block_ids_by_group_np[self.group_id].tolist()
-        if request.block_ids_np is not None:
-            return request.block_ids_np.tolist()
+        block_ids = request.get_block_ids_array(self.group_id)
+        if block_ids is not None:
+            return block_ids.tolist()
         if self.group_id < len(request.block_ids_by_group):
             return request.block_ids_by_group[self.group_id]
         return request.block_ids
@@ -391,7 +368,7 @@ class LayerBatchBuilder:
             request = block_range.request
             req_ids.append(request.req_id)
             is_last_chunks.append(request.is_last_chunk)
-            all_load_keys.extend(request.load_keys)
+            all_load_keys.extend(request.transfer.load_keys)
             request_block_ids = self._request_block_ids(request)
             if (
                 block_range.start_block < 0

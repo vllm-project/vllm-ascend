@@ -98,7 +98,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                     worker._record_failed_request(request)
                     worker._snapshot_keys.pop(request.req_id, None)
                 request.can_save = False
-                request.save_keys = []
+                request.transfer.save_keys = []
 
     def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
@@ -126,12 +126,15 @@ class GvaDataPlane(LayerwiseDataPlane):
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
-            request.partial_save_gva_per_group = [0] * worker.num_kv_cache_groups
+            request.transfer.partial_save_gva_per_group = [0] * worker.num_kv_cache_groups
             for group_id in range(worker.num_kv_cache_groups):
                 block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
+                    request.transfer.block_ids_by_group_np[group_id]
+                    if (
+                        request.transfer.block_ids_by_group_np is not None
+                        and group_id < len(request.transfer.block_ids_by_group_np)
+                    )
+                    else request.transfer.block_ids_np
                 )
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
@@ -161,8 +164,8 @@ class GvaDataPlane(LayerwiseDataPlane):
                 if request.load_spec is not None and not request.load_spec.layerwise_previous_step:
                     save_start_block = request.load_spec.clamp_save_start(save_start_block, effective_block_size)
                 group_store_mask = (
-                    request.store_masks[group_id]
-                    if request.store_masks is not None and group_id < len(request.store_masks)
+                    request.transfer.store_masks[group_id]
+                    if request.transfer.store_masks is not None and group_id < len(request.transfer.store_masks)
                     else None
                 )
                 end_limit = min(save_end_block, len(block_ids_by_group))
@@ -267,7 +270,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                         )
                     if worker.layerwise_offload and partial_gva <= 0:
                         return False
-                    request.partial_save_gva_per_group[group_id] = (
+                    request.transfer.partial_save_gva_per_group[group_id] = (
                         partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
                     )
 
@@ -295,11 +298,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
             if all_group_gvas:
-                request.save_keys = all_group_save_keys
-                request.block_gvas_by_group_np = all_group_gvas
-                request.block_ids_by_group_np = all_group_block_ids
-                request.block_gvas_np = all_group_gvas[0]
-                request.gva_block_offset = 0
+                request.transfer.save_keys = all_group_save_keys
+                request.transfer.block_gvas_by_group_np = all_group_gvas
+                request.transfer.block_ids_by_group_np = all_group_block_ids
+                request.transfer.block_gvas_np = all_group_gvas[0]
+                request.transfer.gva_block_offset = 0
         return None
 
     # --- load path -----------------------------------------------------------
@@ -344,11 +347,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                     request.req_id,
                 )
             block_hashes = request.block_hashes
-            request.load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
+            request.transfer.load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
-            partial_load_gvas = [0] * worker.num_kv_cache_groups
+            request.transfer.partial_load_gva_per_group = [0] * worker.num_kv_cache_groups
             restore_previous_step = worker.layerwise_offload and request.load_spec.layerwise_previous_step
             for group_id in range(worker.num_kv_cache_groups):
                 if group_id not in worker.cacheable_group_ids:
@@ -374,9 +377,12 @@ class GvaDataPlane(LayerwiseDataPlane):
                     partial_block_index = worker._resolve_layerwise_load_partial(cached_tokens, effective_block_size)
 
                 block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
+                    request.transfer.block_ids_by_group_np[group_id]
+                    if (
+                        request.transfer.block_ids_by_group_np is not None
+                        and group_id < len(request.transfer.block_ids_by_group_np)
+                    )
+                    else request.transfer.block_ids_np
                 )
                 if (
                     worker.layerwise_offload
@@ -408,8 +414,8 @@ class GvaDataPlane(LayerwiseDataPlane):
                     continue
 
                 group_load_mask = (
-                    request.load_masks[group_id]
-                    if request.load_masks is not None and group_id < len(request.load_masks)
+                    request.transfer.load_masks[group_id]
+                    if request.transfer.load_masks is not None and group_id < len(request.transfer.load_masks)
                     else None
                 )
                 block_indices = [
@@ -582,12 +588,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                         full_gvas[block_idx] = gvas[gva_index]
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 if has_partial_key and gvas:
-                    partial_load_gvas[group_id] = gvas[-1]
+                    request.transfer.partial_load_gva_per_group[group_id] = gvas[-1]
 
             if all_group_load_gvas:
-                request.load_keys = all_group_load_keys
-                request.load_block_gvas_by_group_np = all_group_load_gvas
-                request.load_block_gvas_np = all_group_load_gvas[0]
-                request.partial_load_gva_per_group = partial_load_gvas
-                request.load_gva_block_offset = 0
+                request.transfer.load_keys = all_group_load_keys
+                request.transfer.load_block_gvas_by_group_np = all_group_load_gvas
+                request.transfer.load_block_gvas_np = all_group_load_gvas[0]
+                request.transfer.load_gva_block_offset = 0
         return None

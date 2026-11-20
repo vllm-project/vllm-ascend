@@ -86,10 +86,14 @@ class SchedulerCase:
             "kv_role": "kv_both",
             "consumer_is_to_put": False,
             "can_put": False,
+            "tp_mismatch": False,
+            "layerwise_offload": False,
+            "save_decode_cache": False,
             "_request_trackers": {},
             "_unfinished_requests": {req_id: (None, []) for req_id in unfinished_ids},
             "_preempted_req_ids": set(),
             "_loading_req_ids": set(),
+            "_async_loading_req_ids": set(),
         }.items():
             setattr(self.scheduler, name, value)
         self.scheduler._process_async_load_request = self.process_pending
@@ -97,7 +101,10 @@ class SchedulerCase:
             finished_req_ids=set(),
             preempted_req_ids=set(),
             scheduled_new_reqs=[],
-            scheduled_cached_reqs=SimpleNamespace(req_ids=cached_ids),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=cached_ids,
+                new_block_ids=[[] for _ in cached_ids],
+            ),
         )
 
     def process_pending(self, req_id: str, *_: Any) -> None:
@@ -135,6 +142,8 @@ class LeaseCase:
             {key: MockInfo(int(address)) for key, address in zip(self.keys, self.addresses, strict=True)}
         )
         self.worker = module.LayerwiseKVPoolWorker.__new__(module.LayerwiseKVPoolWorker)
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
+
         for name, value in {
             "use_layerwise_transfer": True,
             "use_eagle": False,
@@ -143,6 +152,7 @@ class LeaseCase:
             "grouped_block_size": [128],
             "hash_block_size": 128,
             "layerwise_offload": True,
+            "layerwise_data_plane": "gva",
             "_step_load_keys": set(),
             "m_store": self.store,
             "_compute_reachable_load_masks": lambda *_: None,
@@ -151,6 +161,7 @@ class LeaseCase:
             "_make_layerwise_full_key": self.make_key,
         }.items():
             setattr(self.worker, name, value)
+        self.worker._data_plane = make_data_plane(self.worker)
         ids = np.arange(count, dtype=np.int64)
         self.request = ReqMeta(
             req_id="benchmark-load",
@@ -173,14 +184,14 @@ class LeaseCase:
         self.worker._step_load_keys.clear()
 
     def run(self) -> Any:
-        return self.worker._prepare_load_gvas_for_request([self.request])
+        return self.worker._data_plane._prepare_load_gvas_for_request([self.request])
 
     def verify(self, result: Any) -> dict[str, Any]:
         import numpy as np
 
         assert result is None
-        assert self.request.load_keys == self.keys
-        np.testing.assert_array_equal(self.request.load_block_gvas_by_group_np[0], self.addresses)
+        assert self.request.transfer.load_keys == self.keys
+        np.testing.assert_array_equal(self.request.transfer.load_block_gvas_by_group_np[0], self.addresses)
         assert self.worker._step_load_keys == set(self.keys)
         assert self.store.calls == {
             "metadata_calls": 2,

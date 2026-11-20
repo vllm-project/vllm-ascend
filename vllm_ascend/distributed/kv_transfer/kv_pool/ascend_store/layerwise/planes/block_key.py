@@ -83,8 +83,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
     def _prepare_single_put_session(self, request: ReqMeta) -> None:
         worker = self._worker
-        request.save_block_keys = []
-        request.save_last_block_key = None
+        request.transfer.save_block_keys = []
+        request.transfer.save_last_block_key = None
         if not worker._is_layerwise_save_owner() or not request.can_save:
             return
 
@@ -93,17 +93,17 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         if request.load_spec is not None:
             start_block = request.load_spec.clamp_save_start(start_block, worker.block_size)
         group_block_hashes = get_block_hashes(request.block_hashes, worker.block_size, worker.hash_block_size)
-        request.save_key_block_offset = start_block
-        request.save_block_keys = [None] * max(0, end_block - start_block)
+        request.transfer.save_key_block_offset = start_block
+        request.transfer.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
             key = worker._make_layerwise_full_key(0, block_hash_to_str(group_block_hashes[block_index]))
-            request.save_block_keys[block_index - start_block] = key
+            request.transfer.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = worker._make_layerwise_full_key(0, f"{request.req_id}_lastblock")
-            key_slots.append((request.save_last_block_key, None, request.partial_block_index))
+            request.transfer.save_last_block_key = worker._make_layerwise_full_key(0, f"{request.req_id}_lastblock")
+            key_slots.append((request.transfer.save_last_block_key, None, request.partial_block_index))
 
         requested_keys = list(dict.fromkeys(key for key, _, _ in key_slots))
         if not requested_keys:
@@ -130,11 +130,11 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         for key, slot, _ in key_slots:
             if key in started:
                 if slot is None:
-                    request.save_last_block_key = key
+                    request.transfer.save_last_block_key = key
             elif slot is None:
-                request.save_last_block_key = None
+                request.transfer.save_last_block_key = None
             else:
-                request.save_block_keys[slot] = None
+                request.transfer.save_block_keys[slot] = None
         worker._layerwise_session_tracker.register_put_keys(
             request.req_id,
             ((key, block_index) for key, _, block_index in key_slots if key in started),
@@ -142,9 +142,9 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
     def _prepare_single_get_session(self, request: ReqMeta) -> list[tuple[str, int, int | None]]:
         worker = self._worker
-        request.load_block_keys = []
-        request.load_last_block_key = None
-        request.load_keys = []
+        request.transfer.load_block_keys = []
+        request.transfer.load_last_block_key = None
+        request.transfer.load_keys = []
         current_entries: list[tuple[str, int]] = []
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
@@ -180,11 +180,11 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         ]
         if not valid_entries:
             return []
-        request.load_key_block_offset = 0
-        request.load_block_keys = [None] * (max(block_index for _, block_index in valid_entries) + 1)
+        request.transfer.load_key_block_offset = 0
+        request.transfer.load_block_keys = [None] * (max(block_index for _, block_index in valid_entries) + 1)
         key_slots: list[tuple[str, int, int | None]] = []
         for key, block_index in valid_entries:
-            request.load_block_keys[block_index] = key
+            request.transfer.load_block_keys[block_index] = key
             key_slots.append((key, request.block_ids[block_index], block_index))
         return key_slots
 
@@ -234,16 +234,16 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 view = copy(request)
                 # Keep the complete group block table: LayerBatchBuilder indexes it
                 # using task.group_id. Only key/session metadata is group-local.
-                view.save_block_keys = []
-                view.load_block_keys = []
-                view.load_keys = []
-                view.save_last_block_key = view.load_last_block_key = None
+                view.transfer.save_block_keys = []
+                view.transfer.load_block_keys = []
+                view.transfer.load_keys = []
+                view.transfer.save_last_block_key = view.transfer.load_last_block_key = None
                 view.partial_block_index = None
                 result[group].append(view)
                 ids = request.block_ids_by_group[group]
                 hashes = get_block_hashes(request.block_hashes, block_size, worker.hash_block_size)
                 load_mask = load_masks[group] if load_masks is not None else None
-                store_mask = request.store_masks[group] if request.store_masks is not None else None
+                store_mask = request.transfer.store_masks[group] if request.transfer.store_masks is not None else None
 
                 def key(index, group=group, hashes=hashes):
                     return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
@@ -264,10 +264,10 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                     for name, index in entries
                     if start <= index < min(len(ids), cached_tokens // block_size) and selected(load_mask, index)
                 ]
-                view.load_key_block_offset = 0
-                view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
+                view.transfer.load_key_block_offset = 0
+                view.transfer.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
                 for name, index in entries:
-                    view.load_block_keys[index] = name
+                    view.transfer.load_block_keys[index] = name
                     get_slots.append((view, name, ids[index], index))
 
                 start = request.save_start_token // block_size
@@ -275,8 +275,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                 if request.load_spec is not None:
                     start = request.load_spec.clamp_save_start(start, block_size)
                 view.save_end_token = end * block_size
-                view.save_key_block_offset = start
-                view.save_block_keys = [None] * max(0, end - start)
+                view.transfer.save_key_block_offset = start
+                view.transfer.save_block_keys = [None] * max(0, end - start)
                 if not request.can_save or not worker._is_layerwise_save_owner(group):
                     continue
                 key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
@@ -333,7 +333,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
                             worker._put_started_keys.update(started_now)
                 for name, index in key_indices:
                     if name in started:
-                        view.save_block_keys[index - start] = name
+                        view.transfer.save_block_keys[index - start] = name
                 tracker.register_put_keys(
                     request.req_id, ((name, index) for name, index in key_indices if name in started), group_id=group
                 )
