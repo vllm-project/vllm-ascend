@@ -1433,7 +1433,7 @@ def create_cache_component_views(
     base = raw_tensor.storage_offset() * raw_tensor.element_size()
     offset = base
     views = []
-    for shape, dtype in zip(cache_shapes, cache_dtypes):
+    for shape, dtype in zip(cache_shapes, cache_dtypes, strict=True):
         itemsize = get_dtype_size(dtype)
         if offset % itemsize or block_stride % itemsize:
             raise ValueError(f"Cache component placement is not aligned to {dtype}.")
@@ -1481,14 +1481,12 @@ def create_kv_cache_runtime_views(
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             raw_cache = backing[start : start + span]
             block_stride = descriptor.block_stride
-            component_specs = group.backend.get_runtime_components(
+            cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            cache_shapes = [shape for shape, _ in component_specs]
-            dtypes = [dtype for _, dtype in component_specs]
 
             if cache_shapes and cache_shapes[0][0] != num_blocks:
                 runtime_blocks = cache_shapes[0][0]

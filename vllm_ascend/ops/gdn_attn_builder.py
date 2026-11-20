@@ -43,7 +43,7 @@ from vllm_ascend.ops.triton.fla.utils import (
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
 
 if TYPE_CHECKING:
-    from vllm_ascend.attention.utils import KVCacheRuntimeComponents
+    from vllm_ascend.attention.utils import KVCacheRuntimeShapesAndDtypes
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -1110,14 +1110,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
     @staticmethod
-    def get_runtime_components(
+    def get_runtime_shapes_and_dtypes(
         spec: MambaSpec,
         num_blocks: int,
         _layout: Any,
         kernel_block_size: int | None = None,
-    ) -> "KVCacheRuntimeComponents":
+    ) -> "KVCacheRuntimeShapesAndDtypes":
         # The leading state dimension indexes manager blocks.
-        return tuple(((num_blocks, *shape), dtype) for shape, dtype in zip(spec.shapes, spec.dtypes, strict=True))
+        return tuple((num_blocks, *shape) for shape in spec.shapes), spec.dtypes
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:

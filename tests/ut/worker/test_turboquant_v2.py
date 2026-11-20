@@ -4,7 +4,6 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.attention import dsa_v1
@@ -17,12 +16,7 @@ from vllm_ascend.worker.v2 import attn_utils
 def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
     from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
-    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
-    dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,)
-    cache_shapes = [
-        (blocks, tokens, heads, content_bytes // get_dtype_size(dtype))
-        for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
-    ]
+    cache_shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, num_blocks, None)
     return create_cache_component_views(
         raw,
         cache_shapes,
@@ -292,7 +286,7 @@ def test_unified_dsv4_matches_existing_allocation_and_views(monkeypatch, turboqu
 
 
 @pytest.mark.parametrize("scale_dtype", [torch.float16, torch.float32])
-def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale_dtype):
+def test_dsa_runtime_shapes_and_dtypes_from_storage_spec(monkeypatch, scale_dtype):
     spec = AscendMLAAttentionSpec(
         block_size=128,
         tokens_per_state=4,
@@ -308,10 +302,9 @@ def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale
         "get_kv_cache_shape",
         Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
     )
-    assert AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128) == (
-        (3, 1, 32, 128),
-        (3, 1, 32, get_dtype_size(scale_dtype)),
-    )
+    shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, 3, "HND", 128)
+    assert shapes == ((3, 32, 1, 128), (3, 32, 1, 1))
+    assert dtypes == (torch.int8, scale_dtype)
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
     components = _runtime_views(raw, spec, 3)
     assert components[0].shape == (3, 32, 1, 128)

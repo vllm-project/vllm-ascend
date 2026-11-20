@@ -13,7 +13,6 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -39,9 +38,7 @@ from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    KVCacheRuntimeComponents,
-    KVCacheRuntimeShapes,
-    attention_runtime_components,
+    KVCacheRuntimeShapesAndDtypes,
     get_or_register_attention_buffer,
     is_pcp_enabled,
     maybe_save_kv_layer_to_connector,
@@ -325,37 +322,27 @@ class AscendDSABackend(AttentionBackend):
         return num_blocks, block_size, num_kv_heads, head_size
 
     @classmethod
-    def get_runtime_shapes(
+    def get_runtime_shapes_and_dtypes(
         cls,
         spec: AttentionSpec,
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
-    ) -> KVCacheRuntimeShapes:
-        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+    ) -> KVCacheRuntimeShapesAndDtypes:
+        """Return NHD Tensor shapes and storage dtypes for V4 components.
 
         V4 stores NHD components regardless of the generic layout selection.
         Its compressed-token count comes from the spec, not the manager's
         raw-token kernel block size. The combined indexer view is an alias,
         rather than a third sequential component.
         """
-        prefix = (num_blocks, spec.num_kv_heads, spec.num_states)
-        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        prefix = (num_blocks, spec.num_states, spec.num_kv_heads)
+        shapes = ((*prefix, spec.head_size),)
+        dtypes = (spec.dtype,)
         if getattr(spec, "scale_dim", 0):
-            shapes.append((*prefix, spec.scale_dim * get_dtype_size(spec.scale_dtype)))
-        return tuple(shapes)
-
-    @classmethod
-    def get_runtime_components(
-        cls,
-        spec: AttentionSpec,
-        num_blocks: int,
-        layout: Any,
-        kernel_block_size: int | None = None,
-    ) -> KVCacheRuntimeComponents:
-        shapes = cls.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
-        dtypes = (spec.dtype, spec.scale_dtype) if getattr(spec, "scale_dim", 0) else (spec.dtype,)
-        return attention_runtime_components(shapes, dtypes)
+            shapes += ((*prefix, spec.scale_dim),)
+            dtypes += (spec.scale_dtype,)
+        return shapes, dtypes
 
     @staticmethod
     def get_scale_shape(num_blocks: int, block_size: int, scale_size: int) -> tuple[int, ...]:
