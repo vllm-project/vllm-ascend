@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, has_effective_prefill
+from vllm_ascend.attention.utils import apply_prefill_as_decode_mask, has_requests_to_run_as_prefill
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -326,7 +326,7 @@ class AscendPCPManager(PCPManager):
         token, so their request metadata is kept at the request extent instead.
         """
         return (
-            not has_effective_prefill(global_batch)
+            not has_requests_to_run_as_prefill(global_batch)
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
         )
@@ -415,7 +415,7 @@ class AscendPCPManager(PCPManager):
             local_batch.seq_lens_np = actual_seq_lens_np
         # Preserve the global attention state for decode-only batches, including
         # empty ranks, before upstream clears local draft metadata.
-        if not has_effective_prefill(global_batch):
+        if not has_requests_to_run_as_prefill(global_batch):
             return local_batch
 
         local_batch.attn_state = build_attn_state(
@@ -463,7 +463,7 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Pad a replicated decode batch to the fixed FULL-graph layout."""
         graph_num_tokens = global_batch.num_tokens_after_padding
-        is_decode_only = not has_effective_prefill(global_batch)
+        is_decode_only = not has_requests_to_run_as_prefill(global_batch)
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Other graph modes may pad tokens without padding request metadata.
         is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
@@ -758,7 +758,7 @@ class AscendPCPManager(PCPManager):
         assert hidden_restore_idx is not None
         global_block_table_num_blocks = None
         local_to_global_req_indices = None
-        if self.dcp_world_size > 1 and has_effective_prefill(global_batch):
+        if self.dcp_world_size > 1 and has_requests_to_run_as_prefill(global_batch):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
             ).to(device=self.device, non_blocking=True)

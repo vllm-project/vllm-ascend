@@ -62,7 +62,7 @@ def apply_prefill_as_decode_mask(
     return flags & ~override
 
 
-def has_effective_prefill(batch: "InputBatch") -> bool:
+def has_requests_to_run_as_prefill(batch: "InputBatch") -> bool:
     """Whether an input batch still contains requests computed by the prefill path."""
     flags = apply_prefill_as_decode_mask(batch.is_prefilling_np, getattr(batch, "prefill_runs_as_decode_np", None))
     return bool(flags.any())
