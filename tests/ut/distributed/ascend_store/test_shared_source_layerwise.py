@@ -47,6 +47,9 @@ class MemoryGVAStore:
         self.resume = threading.Event()
         self.fail_copy = False
 
+    def copied_addresses(self, direction):
+        return {address for kind, addrs in self.copies if kind == direction for address in addrs}
+
     def ensure_initialized(self):
         pass
 
@@ -114,16 +117,22 @@ class MemoryGVAStore:
         return 0
 
 
-def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8)):
+def make_shared_worker(
+    test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8), partition=None, pp_rank=0, mirrors=()
+):
     """Register real CPU cache views with the production GVA worker and queue threads."""
+    start = sum(partition[:pp_rank]) if partition else 0
+    local_count = partition[pp_rank] if partition else num_layers
+    local_layers = range(start, start + local_count)
     names = [
         name
         for source in sources
+        if source in local_layers or source in mirrors
         for name in (f"model.layers.{source}.attn.long_kv_cache", f"model.layers.{source}.attn.indexer.k_cache")
     ]
     groups = [names[::2], names[1::2]]
     if not bounded:
-        groups.append([f"model.layers.{layer}.attn.swa_cache" for layer in range(num_layers)])
+        groups.append([f"model.layers.{layer}.attn.swa_cache" for layer in local_layers])
     if draft:
         groups.append(["model.mtp.layers.0.attn.kv_cache"])
     spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
@@ -145,7 +154,7 @@ def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sourc
             str(layer): SimpleNamespace(
                 layer_idx=layer, kv_transfer_cache_names=(f"model.layers.{layer}.attn.swa_cache",)
             )
-            for layer in range(num_layers)
+            for layer in local_layers
         }
         config.parallel_config.use_ubatching = config.parallel_config.use_sequence_parallel_moe = False
         config.cache_config.swa_bounded_replay = bounded
@@ -163,7 +172,10 @@ def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sourc
         worker = test_pool_worker.make_worker(
             test,
             use_layerwise=True,
-            num_layers=num_layers,
+            num_layers=local_count,
+            pp_partition=partition,
+            pp_size=len(partition) if partition else 1,
+            pp_rank=pp_rank,
             num_hidden_layers=num_layers,
             extra_config={"backend": "memcache"},
             kv_cache_config=cache_config,
@@ -236,6 +248,55 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         save_prefix(worker)
         self.assertTrue(store.published)
         self.assertEqual({size for _, size in store.objects.values()}, {32})
+
+    def test_pp_mirror_transfers_follow_local_execution_hooks(self):
+        for partition, mirrors in [((20, 20), ()), ((24, 16), (20,)), ((14, 26), (8,))]:
+            with self.subTest(partition=partition):
+                worker, store, caches = make_shared_worker(
+                    self,
+                    bounded=False,
+                    num_layers=40,
+                    sources=(2, 8, 14, 20),
+                    partition=partition,
+                    pp_rank=1,
+                    mirrors=mirrors,
+                )
+                first, count = partition
+                self.assertEqual(worker.num_layers, count)
+                self.assertEqual(worker._global_to_local_layer[first], 0)
+                for mirror in mirrors:
+                    self.assertEqual(worker._global_to_local_layer[mirror], 0)
+
+                # Assert HBM transfer targets and ordering independently of the backend's
+                # GVA allocation/byte-offset policy.
+                addresses = {name: cache[1].data_ptr() for name, cache in caches.items()}
+                meta = metadata(worker)
+                worker.prepare_layerwise_step(meta)
+                worker.start_load_kv(meta)
+                with patch.object(
+                    worker, "_wait_for_final_layer_save", wraps=worker._wait_for_final_layer_save
+                ) as fence:
+                    for _ in range(count - 1):
+                        forward_layer(worker, meta)
+                    fence.assert_not_called()
+                    forward_layer(worker, meta)
+                    fence.assert_called_once()
+                worker.get_finished(set(), meta)
+                self.assertTrue(store.published)
+                self.assertEqual(store.copied_addresses(0), set(addresses.values()))
+                meta = metadata(worker, load=True, save=False)
+                worker.prepare_layerwise_step(meta)
+                worker.start_load_kv(meta)
+                worker.wait_for_layer_load()
+                first_hook = {
+                    addr for name, addr in addresses.items() if worker._extract_physical_layer_index(name) <= first
+                }
+                self.assertTrue(first_hook <= store.copied_addresses(1))
+                worker.save_kv_layer(meta)
+                for _ in range(count - 1):
+                    forward_layer(worker, meta)
+                worker.get_finished(set(), meta)
+                self.assertEqual(store.copied_addresses(1), set(addresses.values()))
 
     def test_roundtrip_sparse_sources_swa_and_draft(self):
         for bounded in (False, True):

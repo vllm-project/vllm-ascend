@@ -250,14 +250,24 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 for layer_name in group_spec.layer_names
                 if layer_name not in draft_names
             }
+            incoming_mirrors = set()
             if getattr(self, "has_shared_kv", False):
-                # Execution layers include holes; group ordinals stay dense.
-                physical_layers.update(range(base_layers))
-                self.num_layers = max(physical_layers) + 1
+                if self.pp_size > 1 and self.pp_layer_end is not None:
+                    start = self.pp_layer_offset
+                    incoming_mirrors = {layer for layer in physical_layers if layer < start}
+                    physical_layers.difference_update(incoming_mirrors)
+                    physical_layers.update(range(start, self.pp_layer_end))
+                    self.num_layers = len(physical_layers)
+                else:
+                    physical_layers.update(range(base_layers))
+                    self.num_layers = max(physical_layers) + 1
             if physical_layers:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
                 }
+                # PP receive writes incoming mirrors before the first local forward.
+                # Service their prefix transfers there without inventing a callback.
+                self._global_to_local_layer.update(dict.fromkeys(incoming_mirrors, 0))
                 if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
                     self._recurrent_layers = {
                         self._global_to_local_layer[self._extract_physical_layer_index(name)]
