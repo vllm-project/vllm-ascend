@@ -260,8 +260,16 @@ def test_original_m3_dspark_cpu_sync_guards_are_retained(runner_cls, monkeypatch
 
 @pytest.fixture
 def fa3_runner(runner_cls):
-    fa3 = type("AscendFlashAttentionBackend", (), {"__module__": "vllm_ascend.attention.flash_attention_v3"})
-    fa3.full_cls_name = Mock(return_value=("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend"))
+    fa3 = type(
+        "AscendFlashAttentionBackend",
+        (),
+        {
+            "__module__": "vllm_ascend.attention.flash_attention_v3",
+            "full_cls_name": Mock(
+                return_value=("vllm_ascend.attention.flash_attention_v3", "AscendFlashAttentionBackend")
+            ),
+        },
+    )
     runner = runner_cls.__new__(runner_cls)
     runner.sync_spec_pp_cpu_counts = False
     runner.model_config = SimpleNamespace(hf_config=SimpleNamespace(architectures=["OtherModel"]))
@@ -277,8 +285,14 @@ def fa3_runner(runner_cls):
 )
 def test_fa3_draft_cpu_sync_policy(fa3_runner, case):
     runner = fa3_runner
-    cann = type("AscendFlashAttentionBackend", (), {"__module__": "vllm_ascend.attention.fa_v1"})
-    cann.full_cls_name = Mock(return_value=("vllm_ascend.attention.fa_v1", "AscendFlashAttentionBackend"))
+    cann = type(
+        "AscendFlashAttentionBackend",
+        (),
+        {
+            "__module__": "vllm_ascend.attention.fa_v1",
+            "full_cls_name": Mock(return_value=("vllm_ascend.attention.fa_v1", "AscendFlashAttentionBackend")),
+        },
+    )
     if case == "empty":
         runner.speculator.attn_groups = []
     elif case == "empty_group":
