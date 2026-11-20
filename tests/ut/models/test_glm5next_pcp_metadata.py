@@ -7,12 +7,12 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm_ascend.models.glm5next.kda import Glm5NextGDNHostMetadataBuilder, Glm5NextPCPMetadataMixin
 from vllm_ascend.models.glm5next.recoverssm_metadata import (
     AscendKDARecoverSSMMetadataBuilder,
     Glm5NextRecoverSSMMetadataBuilder,
 )
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
-from vllm_ascend.ops.kda_pcp import Glm5NextGDNHostMetadataBuilder, Glm5NextPCPMetadataMixin
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
