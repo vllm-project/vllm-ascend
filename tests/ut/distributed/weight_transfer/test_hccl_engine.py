@@ -67,7 +67,10 @@ def test_finish_weight_update_finalizes_layerwise_reload():
     engine = _make_engine()
 
     finish = "finalize_layerwise_reload" if vllm_version_is("0.33.0") else "finish_reload"
-    with patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize:
+    with (
+        patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize,
+        patch.object(torch.accelerator, "empty_cache"),
+    ):
         engine.finish_weight_update()
 
     args: tuple[Any, ...] = (engine.model, engine.model_config)

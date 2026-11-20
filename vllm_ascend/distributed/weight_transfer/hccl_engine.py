@@ -21,7 +21,6 @@ from vllm.distributed.weight_transfer.base import (
     VLLMWeightSyncClient,
     WeightSource,
 )
-from vllm.distributed.weight_transfer.nccl_common import worker_init_payload
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -198,17 +197,9 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
             super().update_weights(update_info)
 
     def finish_weight_update(self) -> None:
-        """Finalize on NPU and release its allocator's cached memory."""
-        if vllm_version_is("0.33.0"):
-            super().finish_weight_update()
-            return
-        from vllm.model_executor.model_loader.reload import finish_reload
-
+        """Use upstream finalization and the platform's allocator adaptation."""
         with torch.npu.device(self.device):
-            finish_reload(self.model, self.model_config, self.device)
-            # torch 2.10's accelerator.empty_cache expects DeviceAllocator;
-            # torch_npu owns a different caching allocator.
-            torch.npu.empty_cache()
+            super().finish_weight_update()
 
     def shutdown(self) -> None:
         # PyHcclCommunicator releases its comm through `close()`, not `destroy()`.
@@ -288,22 +279,12 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         # collectives in `_broadcast`.
         if not engine.is_sender:
             return engine
-        # Upstream's `NCCLTrainerInitInfo` has no `rank_offset`: the single
-        # trainer sender is rank 0, so the workers start at rank 1.
-        worker_init_info = HCCLWeightTransferInitInfo(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            rank_offset=1,
-            world_size=init_info.world_size,
-            packed=init_info.packed,
-            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
-            packed_num_buffers=init_info.packed_num_buffers,
-        )
+        payload = cls._build_worker_init_payload(init_info)
         # The worker-side init blocks inside the HCCL rendezvous, so drive the
         # RPC on a side thread while this rank opens rank 0.
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(client.init_weight_transfer_engine, worker_init_payload(worker_init_info))
+            future = executor.submit(client.init_weight_transfer_engine, payload)
             engine.model_update_group = hccl_common.trainer_init(init_info, rank=init_info.rank)
             future.result()
         except BaseException:
@@ -380,16 +361,6 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             the worker RPC in `_send_update`.
             """
             with torch.npu.device(self.device):
-                if not self.is_sender:
-                    # Non-sender trainer ranks hold no HCCL communicator. They
-                    # still have to replay the source so the trainer-side
-                    # gather (an FSDP `full_tensor()`, say) keeps every rank in
-                    # the collective; only the rank-0 sender ships weights.
-                    source = self.source
-                    if source is not None:
-                        for _ in source.iter_full():
-                            pass
-                    return
                 if self.model_update_group is None:
                     raise RuntimeError("HCCL trainer communicator is not initialized")
                 if src != 0:
