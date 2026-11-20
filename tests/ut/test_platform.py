@@ -351,6 +351,58 @@ def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
     _validate_draft_decode_context_parallel_config(vllm_config)
 
 
+@pytest.mark.parametrize("draft_tp_size", [4, 8])
+@pytest.mark.parametrize("target_dcp_size", [2, 8])
+@pytest.mark.parametrize(
+    "method,architecture,use_v2,use_mla,dynamic,expected_error",
+    [
+        ("dflash", "DFlashDraftModel", True, False, False, None),
+        ("dflash", "DFlash2DraftModel", True, False, False, None),
+        ("dspark", "DSparkDraftModel", True, False, False, None),
+        ("dflash", "DFlashDraftModel", False, False, False, "tensor parallel size"),
+        ("dflash", "DFlash2DraftModel", False, False, False, "tensor parallel size"),
+        ("eagle3", "Eagle3DraftModel", True, False, False, "tensor parallel size"),
+        ("dflash", "DFlash2DraftModel", True, False, True, "Dynamic speculative decoding"),
+        ("dflash", "DFlash2DraftModel", True, True, False, None),
+    ],
+)
+def test_parallel_draft_dcp_validation(
+    draft_tp_size, target_dcp_size, method, architecture, use_v2, use_mla, dynamic, expected_error
+):
+    config = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=target_dcp_size,
+        ),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens_per_batch_size=[(1, 8, 3)] if dynamic else None,
+            draft_model_config=SimpleNamespace(
+                use_mla=use_mla,
+                architectures=[architecture],
+                model_arch_config=SimpleNamespace(total_num_attention_heads=32),
+                get_total_num_kv_heads=lambda: 8,
+            ),
+            draft_parallel_config=SimpleNamespace(
+                tensor_parallel_size=draft_tp_size,
+                decode_context_parallel_size=1,
+            ),
+            use_dspark=lambda: method == "dspark",
+            use_dflash=lambda: method == "dflash",
+        ),
+    )
+
+    if expected_error is not None:
+        with pytest.raises(ValueError, match=expected_error):
+            _validate_draft_decode_context_parallel_config(config)
+    else:
+        _validate_draft_decode_context_parallel_config(config)
+
+    assert config.parallel_config.decode_context_parallel_size == target_dcp_size
+    assert config.speculative_config.draft_parallel_config.decode_context_parallel_size == 1
+
+
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
 def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
     target = object()

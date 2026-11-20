@@ -2317,9 +2317,16 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if draft_model_config is None:
         return
 
-    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
+    # Upstream DFlashSpeculator runs non-MLA DFlash/DSpark drafts at DCP=1 and the
     # target runner marks their KV groups with dcp_sharded=False.
-    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
+    # TODO: Resolve the effective draft DCP size during configuration and
+    # share it between platform validation and the speculator. Remove this
+    # method-specific exemption once both use the same resolved topology.
+    if (
+        vllm_config.use_v2_model_runner
+        and (speculative_config.use_dspark() or speculative_config.use_dflash())
+        and not draft_model_config.use_mla
+    ):
         return
 
     # MLA draft models do not use the GQA/MQA head-sharding rules below.
