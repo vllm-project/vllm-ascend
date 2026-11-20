@@ -64,28 +64,6 @@ def test_layerwise_registration_preserves_kernel_views_and_other_groups():
     assert transferred["model.layers.2.self_attn.compressor.state_cache"] is state
 
 
-def test_saved_indexer_restores_full_kernel_view_after_source_reuse():
-    name = "model.layers.2.self_attn.indexer.k_cache"
-    source = make_indexer_views()
-    expected = source[2].clone()
-    views = register_transport({name: source})[name]
-    # Immutable CPU copies stand in for the external byte store. Mutating the
-    # source models the layer's HBM being reused before a second request loads.
-    pages = [torch.cat([view[page].view(torch.uint8).reshape(-1) for view in views]) for page in range(4)]
-    assert all(page.numel() == 4224 for page in pages)
-    source[2].zero_()
-    destination = make_indexer_views()
-    destination[2].zero_()
-    for page, payload in enumerate(pages):
-        offset = 0
-        for view in register_transport({name: destination})[name]:
-            target = view[page].view(torch.uint8).reshape(-1)
-            target.copy_(payload[offset : offset + target.numel()])
-            offset += target.numel()
-    assert torch.equal(destination[2], expected)
-    assert torch.count_nonzero(source[2]) == 0
-
-
 def test_non_dsv4_registration_keeps_existing_three_component_behavior():
     caches = {"other_model.cache": make_indexer_views()}
     assert register_transport(caches, dsv4=False) is caches
@@ -176,31 +154,35 @@ def test_subpage_copies_only_selected_data_and_scale_rows(scale_bytes, src_paddi
     name = "model.layers.2.self_attn.indexer.k_cache"
     source = make_indexer_views(scale_bytes, src_padding)
     destination = make_indexer_views(scale_bytes, dst_padding)
-    source[0].fill_(17)
-    source[1].fill_(5)
+    source[0].copy_(torch.arange(4 * 32).reshape(4, 32, 1, 1))
+    source[1].copy_(source[0][..., :1] + 128)
     length = destination[2].untyped_storage().nbytes()
     ctypes.memset(destination[2].data_ptr(), 0xA5, length)
     expected = bytearray([0xA5] * length)
     page_bytes = 4096 + 32 * scale_bytes
-    for start, end in ((first * 128, last * 128), (4096 + first * scale_bytes, 4096 + last * scale_bytes)):
-        expected[page_bytes + dst_padding + start : page_bytes + dst_padding + end] = ctypes.string_at(
-            source[2].data_ptr() + page_bytes + src_padding + start, end - start
-        )
 
-    def segments(views):
+    def register_database(views):
         database = ChunkedTokenDatabase([], [32], None)
         members = register_transport({name: views})[name]
         database.group_kv_caches_base_addr[0] = [v.data_ptr() for v in members]
         database.group_block_len[0] = [v[0].numel() * v.element_size() for v in members]
         database.group_block_stride[0] = [v.stride(0) * v.element_size() for v in members]
-        return database.prepare_value(first, last, [1])[:2]
+        return database
 
-    src, sizes = segments(source)
-    dst, dest_sizes = segments(destination)
-    assert sizes == dest_sizes
-    for a, b, size in zip(src, dst, sizes, strict=True):
-        ctypes.memmove(b, a, size)
-    assert ctypes.string_at(destination[2].data_ptr(), length) == expected
+    writer, reader = register_database(source), register_database(destination)
+    for block, source_page in enumerate(source[2]):
+        offset = block * (page_bytes + dst_padding)
+        for start, end in ((first * 128, last * 128), (4096 + first * scale_bytes, 4096 + last * scale_bytes)):
+            expected[offset + start : offset + end] = ctypes.string_at(source_page.data_ptr() + start, end - start)
+
+        src, sizes, _ = writer.prepare_value(first, last, [block])
+        dst, dest_sizes, _ = reader.prepare_value(first, last, [block])
+        assert sizes == dest_sizes == [(last - first) * 128, (last - first) * scale_bytes]
+        saved = [ctypes.string_at(addr, size) for addr, size in zip(src, sizes, strict=True)]
+        source_page.zero_()  # The next layer can overwrite HBM after the store has saved these bytes.
+        for addr, payload in zip(dst, saved, strict=True):
+            ctypes.memmove(addr, payload, len(payload))
+        assert ctypes.string_at(destination[2].data_ptr(), length) == expected
 
 
 @pytest.mark.parametrize("model", ["flash", "pro"])

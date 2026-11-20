@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    allocate_cache_backing,
     apply_layerwise_kv_cache_plan,
     get_cache_views,
     get_layerwise_reuse_backing_bytes,
@@ -438,22 +439,17 @@ def test_piecewise_graph_preserves_the_layerwise_plan():
     assert get_layerwise_reuse_layout(plan) is not None
 
 
-def test_no_new_model_planner_class_is_needed():
+@pytest.mark.parametrize("model", ["flash", "pro"])
+@pytest.mark.parametrize("resident", ["state", "swa", "one_member"])
+def test_excluded_members_do_not_force_other_roles_to_reside(model, resident):
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
     from vllm_ascend.models.deepseek_v4.cache_reuse import get_spec_reuse_rules
 
-    runtime, groups, specs = make_layout()
-    assert all(LayerwiseCachePlanner.can_reuse_spec(spec, get_spec_reuse_rules()) for spec in specs.values())
-    assert LayerwiseCachePlanner.can_reuse_spec(KVCacheSpec(block_size=32), get_spec_reuse_rules()) is False
-
-
-@pytest.mark.parametrize("model", ["flash", "pro"])
-@pytest.mark.parametrize("resident", ["state", "swa", "one_member"])
-def test_excluded_members_do_not_force_other_roles_to_reside(model, resident):
-    from vllm_ascend.models.deepseek_v4.cache_reuse import get_spec_reuse_rules
-
     runtime, groups, specs = make_layout(model, buffers=3, independent=[0, 1])
+    rules = get_spec_reuse_rules()
+    assert all(LayerwiseCachePlanner.can_reuse_spec(spec, rules) for spec in specs.values())
+    assert not LayerwiseCachePlanner.can_reuse_spec(KVCacheSpec(block_size=32), rules)
     extra = runtime.kv_transfer_config.kv_connector_extra_config
     runtime.kv_transfer_config = None
     native = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(runtime, groups, num_blocks=8)
@@ -469,7 +465,7 @@ def test_excluded_members_do_not_force_other_roles_to_reside(model, resident):
         native,
         runtime,
         extra,
-        spec_reuse_rules={spec_type: lambda spec: id(spec) not in excluded_ids for spec_type in get_spec_reuse_rules()},
+        spec_reuse_rules={spec_type: lambda spec: id(spec) not in excluded_ids for spec_type in rules},
     ).build()
     assert not excluded & layout.reused_cache_names
     assert layout.has_layer_reuse
@@ -527,20 +523,21 @@ def test_core_converges_worker_budgets_using_the_reused_physical_cost(monkeypatc
     assert get_layerwise_reuse_backing_bytes(plans[0]) <= min(budgets)
 
 
-def test_raw_pages_roundtrip_across_requests_layers_and_steps():
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-        allocate_cache_backing,
-    )
-
-    runtime, groups, specs = make_layout(buffers=2, independent=[0, 1, 4])
-    config = make_worker_config(runtime, groups, num_blocks=32)
+def make_raw_cache_pages(model, *, buffers, independent, num_blocks):
+    runtime, groups, specs = make_layout(model, buffers=buffers, independent=independent)
+    config = make_worker_config(runtime, groups, num_blocks)
     raw = allocate_cache_backing(
         config,
         specs,
         lambda size: torch.zeros(size, dtype=torch.uint8),
         get_layerwise_reuse_layout(config).cache_view_sizes,
     )
-    descriptors = {name: descriptor for descriptor in config.kv_cache_tensors for name in descriptor.layers}
+    pages = {name: raw[name].split(tensor.block_stride) for tensor in config.kv_cache_tensors for name in tensor.layers}
+    return groups, pages
+
+
+def test_raw_pages_roundtrip_across_requests_layers_and_steps():
+    groups, pages = make_raw_cache_pages("flash", buffers=2, independent=[0, 1, 4], num_blocks=32)
     host = {}
     for step in range(3):
         for layer in range(43):
@@ -549,10 +546,9 @@ def test_raw_pages_roundtrip_across_requests_layers_and_steps():
                 for name in group.layer_names:
                     if f"layers.{layer}." not in name:
                         continue
-                    stride = descriptors[name].block_stride
                     for request_id in range(3):
                         block_id = 1 + group_id + len(groups) * request_id
-                        page = raw[name][block_id * stride : (block_id + 1) * stride]
+                        page = pages[name][block_id]
                         key = (request_id, name)
                         if step:
                             page.copy_(host[key])
@@ -587,30 +583,20 @@ def test_expensive_but_requested_reuse_is_not_silently_disabled():
 
 @pytest.mark.parametrize("model", ["flash", "pro"])
 def test_reference_attention_matches_after_rotated_page_restore(model):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-        allocate_cache_backing,
-    )
-
-    runtime, groups, specs = make_layout(model, buffers=1, independent=[0, 1])
-    config = make_worker_config(runtime, groups, num_blocks=16)
-    layout = get_layerwise_reuse_layout(config)
-    raw = allocate_cache_backing(
-        config, specs, lambda size: torch.zeros(size, dtype=torch.uint8), layout.cache_view_sizes
-    )
-    descriptors = {name: tensor for tensor in config.kv_cache_tensors for name in tensor.layers}
+    _, pages = make_raw_cache_pages(model, buffers=1, independent=[0, 1], num_blocks=16)
     # Two C4 main-history layers deliberately share bytes. Use a small BF16
     # matrix inside an allocated page and compare attention to a resident copy.
-    first, later = (f"model.layers.{layer}.self_attn.attn" for layer in (2, 4))
-    assert raw[first].data_ptr() == raw[later].data_ptr()
-    stride = descriptors[first].block_stride
-    keys = raw[first][stride : stride + 64].view(torch.bfloat16).reshape(4, 8)
+    first, later = (pages[f"model.layers.{layer}.self_attn.attn"][1][:64] for layer in (2, 4))
+    assert first.data_ptr() == later.data_ptr()
+    keys = first.view(torch.bfloat16).reshape(4, 8)
     resident = torch.arange(32, dtype=torch.float32).reshape(4, 8).div(32).to(torch.bfloat16)
     query = torch.arange(8, dtype=torch.float32).reshape(1, 8).div(8)
     expected = torch.softmax(query @ resident.float().T, dim=-1) @ resident.float()
     keys.copy_(resident)
-    saved = raw[first][stride : stride + 64].clone()
-    raw[later][stride : stride + 64].fill_(255)
-    raw[first][stride : stride + 64].copy_(saved)
+    saved = first.clone()
+    later.fill_(255)
+    assert not torch.equal(keys, resident)
+    first.copy_(saved)
     actual = torch.softmax(query @ keys.float().T, dim=-1) @ keys.float()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
