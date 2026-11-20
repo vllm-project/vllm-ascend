@@ -1,0 +1,8 @@
+pr: 20289
+entries:
+  - category: performance
+    text: >-
+      Replaced per-layer synchronous D2H KV copies in sparse KV offload with a
+      delayed batch pipeline that overlaps the forward pass on Model Runner
+      V2, and re-enabled the prolog_v3/mlapo fused preprocessing under
+      offload, improving decode throughput for long-context serving.

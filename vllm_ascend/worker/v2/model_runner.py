@@ -93,7 +93,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
+    d2h_record_source_ready,
+    d2h_retire,
     init_sparse_kv_offload_manager,
+    make_d2h_plan_launch_hook,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.kv_trace.kv_trace_runner import install_trace
@@ -393,6 +396,7 @@ class NPUModelRunner(GPUModelRunner):
         state = self.execute_model_state
         self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
+        d2h_record_source_ready(self)
         self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
@@ -501,9 +505,9 @@ class NPUModelRunner(GPUModelRunner):
         persistent_draft_names.update(getattr(kv_cache_config, "dflash_draft_layer_names", ()))
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
         if sparse_cfg.enabled:
-            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
-                self.vllm_config, kv_cache_config, sparse_cfg
-            )
+            offload_manager = init_sparse_kv_offload_manager(self.vllm_config, kv_cache_config, sparse_cfg)
+            self.sparse_kv_offload_manager = offload_manager
+            self.model_state.runner_plan_launch_d2h = make_d2h_plan_launch_hook(self)
             self.model_state._offload_live_req_ids = self.req_states.req_id_to_index
             self.model_state._offload_draft_layer_names = (
                 getattr(self.speculator, "draft_attn_layer_names", set[str]()) - resident_draft_names
@@ -763,6 +767,7 @@ class NPUModelRunner(GPUModelRunner):
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
         with dp_coordination_context:
+            d2h_retire(self, getattr(scheduler_output, "preempted_req_ids", None))
             try:
                 output = super().execute_model(
                     scheduler_output,
