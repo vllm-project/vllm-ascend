@@ -1035,6 +1035,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
                     return False
                 if not all(put_result):
+                    # PP expansion keeps each logical key's physical keys
+                    # contiguous. Publish only fully stored logical blocks.
+                    physical_keys_per_logical = len(put_result) // logical_key_count
+                    successful_ranges = [
+                        stored_range
+                        for index, stored_range in enumerate(stored_ranges)
+                        if all(put_result[index * physical_keys_per_logical : (index + 1) * physical_keys_per_logical])
+                    ]
+                    self._record_cpu_store_events(req_meta, group_id, token_len, successful_ranges)
                     logger.error("KV store backend partially failed to put request %s", req_id)
                     return False
             elif put_result is False:

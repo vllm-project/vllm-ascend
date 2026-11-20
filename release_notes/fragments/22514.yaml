@@ -1,0 +1,4 @@
+pr: 22514
+entries:
+  - category: bugfix
+    text: Fixed missing blockwise AscendStore CPU KV events for blocks saved by individual workers and fully stored blocks in partially successful PUT batches.

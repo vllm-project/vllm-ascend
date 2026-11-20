@@ -740,7 +740,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 ):
                     thread._handle_request(request)
                 self.assertEqual(len(store.put_calls[0][0]), 2)
-                expected = [b"h1", b"h2"] if put_result is None else []
+                expected = [b"h1", b"h2"] if put_result is None else [b"h1"]
                 self.assertEqual(
                     [e.block_hashes for e in thread.get_kv_events()], [[maybe_convert_block_hash(h)] for h in expected]
                 )
@@ -847,7 +847,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         events = t.get_kv_events()
         self.assertEqual(events, [])
 
-    def test_partial_put_does_not_publish_events(self):
+    def test_partial_put_publishes_successful_blocks(self):
         t, store = self._make_thread([0, 0], enable_kv_event=True)
         store.put = MagicMock(return_value=[True, False])
         req = ReqMeta(
@@ -863,7 +863,49 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         with self.assertLogs("vllm", level="ERROR"):
             t._handle_request(req)
         events = t.get_kv_events()
-        self.assertEqual(events, [])
+        self.assertEqual([event.block_hashes for event in events], [[maybe_convert_block_hash(b"h0")]])
+        self.assertEqual(events[0].token_ids, list(range(16)))
+        self.assertIsNone(events[0].parent_block_hash)
+
+    def test_partial_pp_put_publishes_only_complete_logical_blocks(self):
+        for results, expected_indices in (
+            ([True, True, True, False], [0]),
+            ([False, True, True, True], [1]),
+            ([True, False, False, True], []),
+            ([False, False, False, False], []),
+            ([True], []),
+        ):
+            with self.subTest(results=results):
+                thread, store = self._make_thread([0, 0], enable_kv_event=True)
+                thread.kv_role = "kv_consumer"
+                thread._decode_adaptor_prefill_pp = MagicMock(
+                    return_value=(["a/0", "a/1", "b/0", "b/1"], [[1]] * 4, [[16]] * 4)
+                )
+                store.put = MagicMock(return_value=results)
+                request = ReqMeta(
+                    req_id="partial-pp",
+                    token_len_chunk=32,
+                    block_ids=[1, 2],
+                    block_hashes=[b"h0", b"h1"],
+                    token_ids=list(range(32)),
+                    original_block_size=16,
+                )
+                thread.add_stored_request(request)
+                with self.assertLogs("vllm", level="ERROR"):
+                    self.assertFalse(thread._handle_stored_request(request))
+                events = thread.get_kv_events()
+                self.assertEqual(
+                    [event.block_hashes for event in events],
+                    [[maybe_convert_block_hash(request.block_hashes[index])] for index in expected_indices],
+                )
+                self.assertEqual(
+                    [event.token_ids for event in events],
+                    [list(range(index * 16, (index + 1) * 16)) for index in expected_indices],
+                )
+                self.assertEqual(
+                    [event.parent_block_hash for event in events],
+                    [maybe_convert_block_hash(b"h0") if index else None for index in expected_indices],
+                )
 
     def test_cpu_events_skip_empty_or_partial_grains(self):
         t, _ = self._make_thread(enable_kv_event=True, block_size=128)
