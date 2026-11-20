@@ -95,22 +95,32 @@ class AscendDeepseekV41ForCausalLM(
     def build_lora_weights_mapper(cls) -> WeightsMapper:
         """Map HF adapter keys onto the multimodal-wrapped module tree.
 
-        Adapters are trained against the HF text backbone, so their keys start
-        at ``model.layers.`` and use the checkpoint spelling ``.attn.``. The
-        module tree spells the same layer ``.self_attn.`` (see the rename table
-        in ``AscendDeepseekV41LLMForCausalLM.load_weights``). The substring
-        rule has to live here too: the LoRA loader resolves adapter keys before
-        it walks the model, and a key that misses its module is dropped without
-        an error because the base layer keeps answering ``weight``.
+        Adapters are trained against the HF text backbone, which spells the
+        attention block ``.attn.``, MoE block ``.ffn.``, and expert projections
+        ``.w1.`` / ``.w2.`` / ``.w3.``; the module tree registers them under
+        ``.self_attn.``, ``.mlp.``, and ``.gate_proj.`` / ``.down_proj.`` /
+        ``.up_proj.`` (see ``AscendDeepseekV41LLMForCausalLM.load_weights``). The
+        rename rules have to live here too: the LoRA loader resolves adapter keys
+        before it walks the model, and a key that misses its module is dropped
+        without an error because the base layer keeps answering ``weight``.
 
         The mapper is applied to the instance rather than the class on purpose:
         the class-level attribute is also read by ``configure_quant_config``
         and the base weight loader, which must keep seeing raw HF names.
         """
         return WeightsMapper(
-            # HF text checkpoints name the block ``attn``; the model tree keeps
-            # ``self_attn``.
-            orig_to_new_substr={".attn.": ".self_attn."},
+            orig_to_new_substr={
+                ".attn.": ".self_attn.",
+                ".ffn.": ".mlp.",
+                ".w1.": ".gate_proj.",
+                ".w2.": ".down_proj.",
+                ".w3.": ".up_proj.",
+            },
+            orig_to_new_suffix={
+                ".w1": ".gate_proj",
+                ".w2": ".down_proj",
+                ".w3": ".up_proj",
+            },
             orig_to_new_prefix={
                 "model.layers.": "language_model.model.layers.",
                 "layers.": "language_model.model.layers.",

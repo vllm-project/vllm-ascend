@@ -50,3 +50,32 @@ def test_lm_head_adapter_key_reaches_the_wrapped_head():
         _rename_mapper(),
     )
     assert module_name == "language_model.lm_head"
+
+
+def test_hf_ffn_moe_and_shared_expert_keys_reach_mlp_modules():
+    expected = [
+        (
+            "base_model.model.model.layers.5.ffn.experts.12.w1.lora_A.weight",
+            "language_model.model.layers.5.mlp.experts.12.gate_proj",
+            True,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.experts.12.w2.lora_B.weight",
+            "language_model.model.layers.5.mlp.experts.12.down_proj",
+            False,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.experts.12.w3.lora_A.weight",
+            "language_model.model.layers.5.mlp.experts.12.up_proj",
+            True,
+        ),
+        (
+            "base_model.model.model.layers.5.ffn.shared_experts.w1.lora_A.weight",
+            "language_model.model.layers.5.mlp.shared_experts.gate_proj",
+            True,
+        ),
+    ]
+    for raw_key, expected_module, expected_is_a in expected:
+        module_name, is_lora_a = parse_fine_tuned_lora_name(raw_key, _rename_mapper())
+        assert module_name == expected_module
+        assert is_lora_a is expected_is_a

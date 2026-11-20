@@ -779,6 +779,39 @@ def test_allgather_w8a8_lora_controls_dispatch_quantization(
     assert (output.dynamic_scale is not None) == expect_dynamic_scale
 
 
+def test_allgather_w4a8_base_batch_disables_quant_when_layer_has_loaded_adapter():
+    dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
+    dispatcher.set_lora_context(
+        SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+            layer_lora_slots={0},
+            use_ep=False,
+        )
+    )
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    token_dispatch_input = build_token_dispatch_input_fixture(
+        hidden_states=hidden_states,
+        topk_weights=torch.ones(2, 1),
+        topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+        quant_type=QuantType.W4A8,
+    )
+    init_routing_output = (
+        hidden_states,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([1, 1], dtype=torch.int32),
+        torch.randn(2),
+    )
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+        return_value=init_routing_output,
+    ) as mock_init_routing:
+        output = dispatcher.token_dispatch(token_dispatch_input)
+
+    assert mock_init_routing.call_args.kwargs["quant_mode"] == -1
+    assert output.dynamic_scale is None
+
+
 def test_allgather_bf16_lora_skips_quant_backend_validation():
     dispatcher = TokenDispatcherWithAllGather(top_k=1, num_experts=2)
     dispatcher.set_lora_context(MagicMock(punica_wrapper=MagicMock(no_lora=False)))
@@ -1373,6 +1406,41 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_dynamic_quant.assert_called_once()
         self.assertIsNotNone(result.dynamic_scale)
         self.assertEqual(self.mock_async_all_to_all.call_count, 2)
+
+    def test_all2all_skips_lora_index_exchange_when_no_moe_adapter_loaded(self):
+        hidden_states = torch.randn(8, 16, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.dispatcher.set_lora_context(
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={0}),
+                layer_lora_slots=set(),
+                replicated_batch=False,
+                split_lora_indices=None,
+            )
+        )
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W8A8,
+        )
+
+        with (
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_pre,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_post,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        mock_pre.assert_not_called()
+        mock_all2all.assert_not_called()
+        mock_post.assert_not_called()
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):

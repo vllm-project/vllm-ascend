@@ -35,7 +35,10 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 # Registers torch.ops.vllm.ascend_sp_padding_mask_impl.
 import vllm_ascend.models.common.ops.sequence_parallel  # noqa: F401
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.lora.fused_moe import prepare_lora_indices
+from vllm_ascend.lora.fused_moe import (
+    prepare_lora_indices,
+    should_exchange_all2all_lora_indices,
+)
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
 from vllm_ascend.quantization.quant_type import QuantType
@@ -158,7 +161,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
-            if self.lora_context is not None:
+            if should_exchange_all2all_lora_indices(self.lora_context):
                 prepare_lora_indices(
                     self.lora_context,
                     num_tokens=self.num_tokens,

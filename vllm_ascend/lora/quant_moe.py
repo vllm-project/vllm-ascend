@@ -36,6 +36,7 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
+    reset_lora_indices,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -71,6 +72,11 @@ def register_quant_moe_lora_impl(
         return apply
 
     return decorator
+
+
+def has_quant_moe_lora_impl(quant_type: QuantType) -> bool:
+    """Return whether ``quant_type`` has a registered quantized MoE LoRA backend."""
+    return quant_type in _QUANT_MOE_LORA_IMPLS
 
 
 def _get_quant_moe_lora_impl(quant_type: QuantType) -> QuantMoELoRAImpl:
@@ -111,9 +117,20 @@ def _apply_moe_activation(
     swiglu_limit: float,
     swiglu_alpha: float,
     swiglu_beta: float,
+    *,
+    activation_situ_beta: float | None = None,
+    activation_situ_linear_beta: float | None = None,
 ) -> torch.Tensor:
     """Match the activation semantics of the common unquantized MoE path."""
     act_name = getattr(activation, "value", activation)
+    if activation == MoEActivation.SITU:
+        from vllm_ascend.ops.fused_moe.moe_mlp import _apply_situ
+
+        return _apply_situ(
+            gate_up_out,
+            beta=1.0 if activation_situ_beta is None else activation_situ_beta,
+            linear_beta=activation_situ_linear_beta,
+        )
     if activation == MoEActivation.SWIGLUOAI:
         return AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out)
     if act_name == "swigluoai_uninterleave":
@@ -244,6 +261,8 @@ def _apply_dynamic_int8_moe_lora(
         mlp_compute_input.swiglu_limit,
         mlp_compute_input.swiglu_alpha,
         mlp_compute_input.swiglu_beta,
+        activation_situ_beta=mlp_compute_input.activation_situ_beta,
+        activation_situ_linear_beta=mlp_compute_input.activation_situ_linear_beta,
     )
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
@@ -320,7 +339,10 @@ def _apply_w4a8_moe_lora(
     if hidden_states.shape[0] == 0:
         # An EP rank may receive no routed tokens. Keep participating in the
         # surrounding AlltoAll collectives, but avoid empty-tensor NPU kernels.
-        return hidden_states, None
+        # Shared activation overlap still expects a milestone event here.
+        if lora_context is not None:
+            reset_lora_indices(lora_context)
+        return hidden_states, torch.npu.current_stream().record_event()
 
     if quant_method is None:
         raise NotImplementedError("INT4 MoE LoRA requires the quantization method that owns the expert weights.")
@@ -402,6 +424,8 @@ def _apply_w4a8_moe_lora(
         mlp_compute_input.swiglu_limit,
         mlp_compute_input.swiglu_alpha,
         mlp_compute_input.swiglu_beta,
+        activation_situ_beta=mlp_compute_input.activation_situ_beta,
+        activation_situ_linear_beta=mlp_compute_input.activation_situ_linear_beta,
     )
     if mlp_compute_input.topk_scales is not None:
         activated *= mlp_compute_input.topk_scales
@@ -435,6 +459,7 @@ def _apply_w4a8_moe_lora(
 
 
 __all__ = [
+    "has_quant_moe_lora_impl",
     "quant_apply_mlp_with_moe_lora",
     "register_quant_moe_lora_impl",
     "validate_quant_moe_lora_activation_input",

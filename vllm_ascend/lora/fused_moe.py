@@ -32,6 +32,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 from vllm import envs
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
@@ -69,7 +70,8 @@ def has_moe_lora(lora_context) -> bool:
         return True
     if not has_lora(lora_context):
         return False
-    active = getattr(lora_context.punica_wrapper, "active_lora_slots", None)
+    punica_wrapper = getattr(lora_context, "punica_wrapper", None)
+    active = getattr(punica_wrapper, "active_lora_slots", None)
     return slots is None or active is None or bool(slots.intersection(active))
 
 
@@ -92,8 +94,51 @@ def should_disable_all2all_quant_for_lora(lora_context) -> bool:
         return True
     if not has_lora(lora_context):
         return False
-    active = getattr(lora_context.punica_wrapper, "active_lora_slots", None)
+    punica_wrapper = getattr(lora_context, "punica_wrapper", None)
+    active = getattr(punica_wrapper, "active_lora_slots", None)
     return slots is None or active is None or bool(slots.intersection(active))
+
+
+def should_exchange_all2all_lora_indices(lora_context) -> bool:
+    """Return whether AlltoAll dispatch must exchange per-token LoRA indices.
+
+    Shares the exact rank-consistent predicate as
+    ``should_disable_all2all_quant_for_lora`` so every EP rank issues the same
+    ``all_to_all`` count, skipping index preparation, argsort, and collective
+    exchange whenever no MoE adapter applies to this layer/batch.
+    """
+    return should_disable_all2all_quant_for_lora(lora_context)
+
+
+def _is_lora_graph_capturing() -> bool:
+    if is_forward_context_available():
+        if getattr(get_forward_context(), "capturing", False) is True:
+            return True
+        return getattr(_EXTRA_CTX, "capturing", False) is True
+    # Unit tests may patch _EXTRA_CTX with a plain namespace outside a
+    # ForwardContext; reading the real proxy without an active context raises.
+    if type(_EXTRA_CTX).__name__ != "_ExtraForwardContextProxy":
+        return getattr(_EXTRA_CTX, "capturing", False) is True
+    return False
+
+
+def should_use_unfused_quant_moe_for_lora(lora_context, quant_type) -> bool:
+    """Keep quantized MoE on its unfused BF16 boundary for zero-delta parity.
+
+    When an expert adapter is loaded or ACL graph capture is running for a
+    LoRA-capable quantized MoE type, base requests stay on the same unfused
+    quant -> gmm1 -> activation -> quant -> gmm2 sequence as the quantized MoE
+    LoRA backend while skipping the LoRA kernels themselves.
+    """
+    if lora_context is None:
+        return False
+    from vllm_ascend.lora.quant_moe import has_quant_moe_lora_impl
+
+    if not has_quant_moe_lora_impl(quant_type):
+        return False
+    slots = getattr(lora_context, "layer_lora_slots", None)
+    has_loaded_slots = isinstance(slots, (set, frozenset, list, tuple)) and bool(slots)
+    return has_moe_lora(lora_context) or has_loaded_slots or _is_lora_graph_capturing()
 
 
 def reset_lora_indices(lora_context) -> None:
@@ -116,7 +161,14 @@ def prepare_lora_indices(
     Caller must ensure ``lora_context`` is not ``None``.
     """
     token_indices = lora_context.punica_wrapper.token_lora_indices
-    token_indices = token_indices[:num_tokens]
+    if token_indices.numel() < num_tokens:
+        token_indices = torch.nn.functional.pad(
+            token_indices,
+            (0, num_tokens - token_indices.numel()),
+            value=-1,
+        )
+    else:
+        token_indices = token_indices[:num_tokens]
     if pad_size > 0:
         token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
     if tp_size > 1:
@@ -145,6 +197,9 @@ def preprocess_lora_indices(
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
+    if split_indices.numel() == 0 or reversed_permutation_mapping.numel() == 0:
+        lora_context.permuted_lora_indices = split_indices.new_empty((0,))
+        return
     expanded = split_indices.repeat_interleave(topk_ids.shape[1])
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
     lora_context.permuted_lora_indices = expanded[permutation]
@@ -167,6 +222,9 @@ def postprocess_lora_indices(
     """
     exchanged = getattr(lora_context, "exchanged_lora_indices", None)
     if exchanged is None:
+        return
+    if exchanged.numel() == 0 or reversed_permutation_mapping.numel() == 0:
+        lora_context.exchanged_lora_indices = exchanged.reshape(-1)
         return
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
     lora_context.exchanged_lora_indices = exchanged[permutation]
@@ -328,22 +386,24 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
     """
     expert_per_row, lora_per_row = lora_routing
     # EP rank may receive 0 dispatched tokens; skip LoRA to avoid NPU
-    # kernel crashes with empty tensors.
-    if expert_per_row.numel() == 0:
-        return
-    lora_context.punica_wrapper.add_lora_fused_moe(
-        y=down_out,
-        x=silu_out,
-        lora_a_stacked=lora_context.w2_lora_a_stacked,
-        lora_b_stacked=lora_context.w2_lora_b_stacked,
-        expert_ids=expert_per_row,
-        adapter_enabled=lora_context.adapter_enabled,
-        token_lora_mapping=lora_per_row,
-    )
-    # Clear per-forward intermediate indices now that the LoRA delta
-    # for this layer has been fully applied — they are not needed for
-    # the remaining combine/finalize stages.
-    reset_lora_indices(lora_context)
+    # kernel crashes with empty tensors, but still clear per-forward indices.
+    try:
+        if expert_per_row.numel() == 0:
+            return
+        lora_context.punica_wrapper.add_lora_fused_moe(
+            y=down_out,
+            x=silu_out,
+            lora_a_stacked=lora_context.w2_lora_a_stacked,
+            lora_b_stacked=lora_context.w2_lora_b_stacked,
+            expert_ids=expert_per_row,
+            adapter_enabled=lora_context.adapter_enabled,
+            token_lora_mapping=lora_per_row,
+        )
+    finally:
+        # Clear per-forward intermediate indices now that the LoRA delta
+        # for this layer has been fully applied — they are not needed for
+        # the remaining combine/finalize stages.
+        reset_lora_indices(lora_context)
 
 
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
@@ -397,7 +457,13 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         self._lora_slots.discard(index)
 
     def set_lora(self, index: int, lora_a, lora_b) -> None:
-        super().set_lora(index, lora_a, lora_b)
+        try:
+            super().set_lora(index, lora_a, lora_b)
+        except RuntimeError as err:
+            module_name = getattr(self.base_layer, "prefix", "") or type(self).__name__
+            raise ValueError(
+                f"Failed to load MoE LoRA weights for module '{module_name}' at slot {index}: {err}"
+            ) from err
         self._lora_slots.add(index)
 
     def _build_lora_context(self):

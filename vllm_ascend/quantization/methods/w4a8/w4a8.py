@@ -236,6 +236,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
+                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
                 is_per_channel_weight=self.is_per_channel_weight,
             ),
             quant_method=self,

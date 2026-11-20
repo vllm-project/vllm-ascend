@@ -512,3 +512,81 @@ def test_mc2_comm_type_is_unsupported() -> None:
         extra_ctx.moe_comm_type = MoECommType.MC2
         with pytest.raises(NotImplementedError, match="AllGather TP"):
             quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_input())
+
+
+def test_w4a8_all2all_lora_handles_empty_ep_rank_and_resets_indices() -> None:
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        split_lora_indices=torch.tensor([0]),
+        permuted_lora_indices=torch.tensor([0]),
+        exchanged_lora_indices=torch.empty((0,), dtype=torch.long),
+    )
+    mlp_input = _make_w4a8_input(
+        hidden_states=torch.empty(0, 4, dtype=torch.bfloat16),
+        group_list=torch.zeros(2, dtype=torch.int64),
+        expanded_row_idx=None,
+        topk_ids=None,
+        lora_context=lora_context,
+    )
+    event = object()
+    stream = SimpleNamespace(record_event=Mock(return_value=event))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch(f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant") as dynamic_quant,
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLTOALL
+        output, output_event = quant_apply_mlp_with_moe_lora(
+            mlp_compute_input=mlp_input,
+            quant_method=_make_w4a8_method(),
+        )
+
+    assert output is mlp_input.hidden_states
+    assert output_event is event
+    stream.record_event.assert_called_once_with()
+    dynamic_quant.assert_not_called()
+    assert not hasattr(lora_context, "exchanged_lora_indices")
+
+
+def test_apply_moe_activation_handles_situ() -> None:
+    gate_up = torch.randn(2, 8)
+    out = _apply_moe_activation(
+        gate_up,
+        MoEActivation.SITU,
+        0.0,
+        1.0,
+        0.0,
+        activation_situ_beta=4.0,
+        activation_situ_linear_beta=25.0,
+    )
+    gate, up = gate_up.chunk(2, dim=-1)
+    expected = (4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate)) * (25.0 * torch.tanh(up / 25.0))
+    torch.testing.assert_close(out, expected)
+
+
+def test_w4a8_method_apply_forwards_moe_lora_context() -> None:
+    from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
+
+    method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+    method.use_expert_weight_list = False
+    method.is_per_channel_weight = True
+    sentinel_ctx = object()
+    layer = SimpleNamespace(
+        ascend_expert_map=None,
+        global_redundant_expert_num=0,
+        ascend_mc2_mask=None,
+        apply_router_weight_on_input=False,
+        ascend_pertoken_scale=None,
+        activation="silu",
+        _ascend_moe_lora_context=sentinel_ctx,
+    )
+    comm_method = Mock(fused_experts=Mock(return_value="done"))
+    with (
+        patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX", SimpleNamespace(moe_comm_method=comm_method)),
+        patch("vllm_ascend.quantization.methods.w4a8.w4a8.build_fused_experts_input", return_value="built") as build,
+    ):
+        assert method.apply(layer, torch.randn(2, 4), torch.ones(2, 1), torch.zeros(2, 1), None, None) == "done"
+
+    assert build.call_args.kwargs["lora_context"] is sentinel_ctx
+    comm_method.fused_experts.assert_called_once_with(fused_experts_input="built", quant_method=method)

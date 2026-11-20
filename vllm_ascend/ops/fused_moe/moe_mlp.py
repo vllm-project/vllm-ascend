@@ -56,8 +56,12 @@ def apply_moe_mlp(
     """
 
     # When LoRA adapter is used in quantized weight, use individual lora impl.
+    use_unfused_for_lora = False
     if mlp_compute_input.quant.is_quant and mlp_compute_input.lora_context is not None:
-        from vllm_ascend.lora.fused_moe import has_moe_lora
+        from vllm_ascend.lora.fused_moe import (
+            has_moe_lora,
+            should_use_unfused_quant_moe_for_lora,
+        )
 
         if has_moe_lora(mlp_compute_input.lora_context):
             from vllm_ascend.lora.quant_moe import quant_apply_mlp_with_moe_lora
@@ -66,8 +70,15 @@ def apply_moe_mlp(
                 mlp_compute_input=mlp_compute_input,
                 quant_method=quant_method,
             )
+        use_unfused_for_lora = should_use_unfused_quant_moe_for_lora(
+            mlp_compute_input.lora_context,
+            mlp_compute_input.quant.quant_type,
+        )
 
-    if quant_method.supports_fused_activation(mlp_compute_input.activation):
+    if use_unfused_for_lora and mlp_compute_input.hidden_states.shape[0] == 0:
+        return mlp_compute_input.hidden_states, maybe_record_event()
+
+    if not use_unfused_for_lora and quant_method.supports_fused_activation(mlp_compute_input.activation):
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:
         hidden_states = quant_method.apply_gmm1(mlp_compute_input)

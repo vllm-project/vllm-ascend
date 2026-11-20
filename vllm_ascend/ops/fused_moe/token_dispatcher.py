@@ -39,6 +39,8 @@ from vllm_ascend.lora.fused_moe import (
     postprocess_lora_indices,
     preprocess_lora_indices,
     should_disable_all2all_quant_for_lora,
+    should_exchange_all2all_lora_indices,
+    should_use_unfused_quant_moe_for_lora,
 )
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
@@ -375,7 +377,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         # is quantized again inside the MLP path.
         with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP
         with_quant = with_quant and not unquantized_mxfp4_dispatch
-        if has_moe_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+        if token_dispatch_input.quant.is_quant and (
+            has_moe_lora(self.lora_context) or should_use_unfused_quant_moe_for_lora(self.lora_context, quant_type)
+        ):
             validate_quant_moe_lora_activation_input(
                 quant_type=quant_type,
                 hidden_states=token_dispatch_input.hidden_states,
@@ -590,7 +594,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
-        if self.lora_context is not None:
+        if should_exchange_all2all_lora_indices(self.lora_context):
             all2all_lora_indices(
                 self.lora_context,
                 output_splits=output_splits,
@@ -667,7 +671,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             num_out_tokens=num_out_tokens,
         )
 
-        if self.lora_context is not None:
+        if should_exchange_all2all_lora_indices(self.lora_context):
             preprocess_lora_indices(
                 self.lora_context,
                 topk_ids=topk_ids,
@@ -775,7 +779,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 global_input_tokens, global_input_tokens_local_experts_indices
             )
-        if self.lora_context is not None:
+        if should_exchange_all2all_lora_indices(self.lora_context):
             postprocess_lora_indices(
                 self.lora_context,
                 reversed_permutation_mapping=reversed_global_input_permutation_mapping,

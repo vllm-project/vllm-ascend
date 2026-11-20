@@ -25,6 +25,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.logger import logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import (
     SiluAndMul,
     SiluAndMulWithClamp,
@@ -139,6 +140,7 @@ class AscendSharedExperts:
         self.situ_activation = layer.act_fn if isinstance(layer.act_fn, SituAndMul) else None
         self.quant_type = quant_type
         self.lora_context = None
+        self._force_lora_linear_path = False
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
@@ -543,8 +545,23 @@ class AscendSharedExperts:
         self._megamoe_shared_parts.clear()
         self._megamoe_shared_fusion.weights = None
 
+    def _refresh_force_lora_linear_path(self) -> None:
+        """Keep both base and adapter requests on linear wrappers when wrapped.
+
+        When LoRA is enabled and shared-expert linears are wrapped, keep both
+        base and adapter requests on ``LINEAR_WRAPPER`` so zero-delta adapters
+        and base requests share identical BF16 activation/dequant numerics across
+        prefill and ACL-graph decode.
+        """
+        layer = getattr(self, "layer", None)
+        self._force_lora_linear_path = layer is not None and any(
+            isinstance(getattr(layer, attr, None), BaseLayerWithLoRA)
+            for attr in ("gate_up_proj", "down_proj", "expert_gate")
+        )
+
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
+        self._refresh_force_lora_linear_path()
 
     def validate_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
@@ -815,6 +832,7 @@ class AscendSharedExperts:
         if not self.multistream_overlap:
             return None
 
+        self._refresh_force_lora_linear_path()
         mode = self.parallel_mode()
         milestones = RoutedMoEMilestones(shared_input_ready=shared_input_ready)
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
@@ -848,7 +866,11 @@ class AscendSharedExperts:
         hidden_states: LinearInput,
     ) -> LinearInput:
         """Run scheme-owned Vector/AIV preparation before a stage barrier."""
-        if not self.multistream_overlap or has_lora(self.lora_context):
+        if (
+            not self.multistream_overlap
+            or has_lora(self.lora_context)
+            or getattr(self, "_force_lora_linear_path", False)
+        ):
             return hidden_states
         if not isinstance(hidden_states, torch.Tensor):
             # Activation may have already quantized the Down input and scale.
@@ -1017,7 +1039,11 @@ class AscendSharedExperts:
         return self.part2(submitted_gate_up.hidden_states, (quantized_x, swiglu_out_scale))
 
     def _can_fuse_w8a8_mxfp_activation(self, gate_up: torch.Tensor) -> bool:
-        if self.quant_type != QuantType.W8A8MXFP or has_lora(self.lora_context):
+        if (
+            self.quant_type != QuantType.W8A8MXFP
+            or has_lora(self.lora_context)
+            or getattr(self, "_force_lora_linear_path", False)
+        ):
             return False
 
         # Lazy import: the quantization module imports routed/shared MoE code.
@@ -1102,8 +1128,9 @@ class AscendSharedExperts:
         W8A8FP, W4A4MXFP and other schemes use the generic wrapper path.
         Active LoRA always uses that generic path to preserve its adapters.
         """
+        uses_lora_linear = has_lora(self.lora_context) or getattr(self, "_force_lora_linear_path", False)
         has_quantized_shared_without_lora = (
-            not has_lora(self.lora_context)
+            not uses_lora_linear
             and hasattr(self.layer.gate_up_proj, "weight_scale")
             and hasattr(self.layer.down_proj, "weight_scale")
         )
@@ -1117,7 +1144,7 @@ class AscendSharedExperts:
             return SharedExpertMLPPath.A8_MXFP_FUSED
         # Selecting this path does not guarantee fusion: tensor metadata and
         # the Down scheme are checked after the registered Gate-Up linear.
-        if not has_lora(self.lora_context) and self.quant_type == QuantType.W8A8MXFP:
+        if not uses_lora_linear and self.quant_type == QuantType.W8A8MXFP:
             return SharedExpertMLPPath.W8A8_MXFP_LINEAR
         return SharedExpertMLPPath.LINEAR_WRAPPER
 
@@ -1135,6 +1162,7 @@ class AscendSharedExperts:
         defer_output_wait: bool = False,
         submitted_gate_up: SubmittedSharedExpertGateUp | None = None,
     ) -> torch.Tensor:
+        self._refresh_force_lora_linear_path()
         mode = self.parallel_mode()
         if submitted_gate_up is None:
             with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):

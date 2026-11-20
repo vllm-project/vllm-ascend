@@ -23,9 +23,12 @@ from vllm_ascend.lora.fused_moe import (
     preprocess_lora_indices,
     reset_lora_indices,
     should_disable_all2all_quant_for_lora,
+    should_exchange_all2all_lora_indices,
+    should_use_unfused_quant_moe_for_lora,
     sync_lora_context,
 )
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _make_base_layer(*, num_local_experts=256, is_act_and_mul=True, shared_experts=None, use_ep=False):
@@ -528,3 +531,87 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
 )
 def test_should_disable_all2all_quant_for_lora(context, expected):
     assert should_disable_all2all_quant_for_lora(context) is expected
+    assert should_exchange_all2all_lora_indices(context) is expected
+
+
+def test_all2all_lora_index_helpers_handle_empty_and_short_tensors() -> None:
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([0])),
+    )
+    prepare_lora_indices(context, num_tokens=3, pad_size=1, tp_size=1, tp_rank=0)
+    assert context.split_lora_indices.tolist() == [0, -1, -1, -1]
+
+    context.split_lora_indices = torch.empty((0,), dtype=torch.long)
+    with patch("vllm_ascend.lora.fused_moe.torch.argsort") as mock_argsort:
+        preprocess_lora_indices(
+            context,
+            topk_ids=torch.empty((0, 2), dtype=torch.long),
+            reversed_permutation_mapping=torch.empty((0,), dtype=torch.int64),
+        )
+        assert context.permuted_lora_indices.numel() == 0
+
+        context.exchanged_lora_indices = torch.empty((0,), dtype=torch.long)
+        postprocess_lora_indices(
+            context,
+            reversed_permutation_mapping=torch.empty((0,), dtype=torch.int64),
+        )
+        assert context.exchanged_lora_indices.numel() == 0
+    mock_argsort.assert_not_called()
+
+
+def test_moe_lora_apply_w2_resets_indices_when_empty_rows() -> None:
+    context = SimpleNamespace(
+        punica_wrapper=Mock(),
+        split_lora_indices=torch.tensor([0]),
+        permuted_lora_indices=torch.tensor([0]),
+        exchanged_lora_indices=torch.tensor([0]),
+    )
+    moe_lora_apply_w2(
+        context,
+        down_out=torch.empty((0, 4)),
+        silu_out=torch.empty((0, 4)),
+        lora_routing=(torch.empty((0,), dtype=torch.long), torch.empty((0,), dtype=torch.long)),
+    )
+    context.punica_wrapper.add_lora_fused_moe.assert_not_called()
+    assert not hasattr(context, "split_lora_indices")
+    assert not hasattr(context, "permuted_lora_indices")
+    assert not hasattr(context, "exchanged_lora_indices")
+
+
+def test_should_use_unfused_quant_moe_for_lora() -> None:
+    assert not should_use_unfused_quant_moe_for_lora(None, QuantType.W4A8)
+
+    empty_ctx = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+        layer_lora_slots=set(),
+        use_ep=False,
+    )
+    assert not should_use_unfused_quant_moe_for_lora(empty_ctx, QuantType.W4A8)
+    assert not should_use_unfused_quant_moe_for_lora(empty_ctx, QuantType.W4A8MXFP)
+
+    loaded_ctx = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+        layer_lora_slots={0},
+        use_ep=False,
+    )
+    assert should_use_unfused_quant_moe_for_lora(loaded_ctx, QuantType.W4A8)
+    assert should_use_unfused_quant_moe_for_lora(loaded_ctx, QuantType.W8A8)
+    assert not should_use_unfused_quant_moe_for_lora(loaded_ctx, QuantType.W4A8MXFP)
+
+    with patch("vllm_ascend.lora.fused_moe._EXTRA_CTX", SimpleNamespace(capturing=True)):
+        assert should_use_unfused_quant_moe_for_lora(empty_ctx, QuantType.W4A8)
+
+
+def test_ascend_fused_moe_set_lora_wraps_shape_runtime_error() -> None:
+    base_layer = _make_base_layer()
+    base_layer.prefix = "model.layers.2.mlp.experts"
+    with (
+        patch("vllm_ascend.lora.fused_moe._assert_ascend_moe_lora_supported"),
+        patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
+    ):
+        wrapper = AscendFusedMoEWithLoRA(base_layer)
+    with (
+        patch.object(FusedMoEWithLoRA, "set_lora", side_effect=RuntimeError("shape mismatch")),
+        pytest.raises(ValueError, match="model.layers.2.mlp.experts.*slot 1.*shape mismatch"),
+    ):
+        wrapper.set_lora(1, [], [])

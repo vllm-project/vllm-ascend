@@ -563,6 +563,53 @@ class TestApplyMoeMlp(unittest.TestCase):
         self.assertEqual(out, "final_out")
         mock_lora.assert_not_called()
 
+    def test_lora_unfused_boundary_for_base_batch_with_loaded_slots(self):
+        quant_method = self._quant_method(fused=True)
+        mlp_compute_input = _mlp_compute_input(
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+            lora_context=SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                use_ep=False,
+            ),
+        )
+        with (
+            patch("vllm_ascend.lora.quant_moe.quant_apply_mlp_with_moe_lora") as mock_lora,
+            patch(f"{MOE_MLP}.torch.npu.current_stream", MagicMock()),
+            patch(f"{MOE_MLP}.torch_npu.npu_swiglu", return_value="silu_out", create=True),
+        ):
+            out, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+
+        self.assertEqual(out, "final_out")
+        mock_lora.assert_not_called()
+        quant_method.apply_gmm1_act_quant.assert_not_called()
+        quant_method.apply_gmm1.assert_called_once_with(mlp_compute_input)
+        quant_method.apply_act_quant.assert_called_once()
+        quant_method.apply_gmm2.assert_called_once()
+
+    def test_lora_unfused_boundary_returns_early_on_empty_rows(self):
+        quant_method = self._quant_method(fused=True)
+        empty_hidden = torch.empty(0, 8, dtype=torch.bfloat16)
+        mlp_compute_input = _mlp_compute_input(
+            hidden_states=empty_hidden,
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+            lora_context=SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                use_ep=False,
+            ),
+        )
+        with (
+            patch(f"{MOE_MLP}.maybe_record_event", return_value="evt") as mock_evt,
+        ):
+            out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
+
+        self.assertIs(out, empty_hidden)
+        self.assertEqual(evt, "evt")
+        mock_evt.assert_called_once_with()
+        quant_method.apply_gmm1.assert_not_called()
+        quant_method.apply_gmm2.assert_not_called()
+
 
 class TestUnifiedApplyActivation(unittest.TestCase):
     def _quant_method(self):
