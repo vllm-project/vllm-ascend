@@ -11,7 +11,7 @@ import torch
 from vllm_ascend.models.kimi_k3 import kimi_k3
 
 
-def test_dsa_gate_reuses_stream_and_waits_at_each_consumer(monkeypatch):
+def test_dsa_gate_shares_stream_across_layers_and_waits_at_each_consumer(monkeypatch):
     producer, project_stream, finish_stream, comm = (Mock() for _ in range(4))
     create_stream = Mock(return_value=comm)
     current = producer
@@ -57,16 +57,19 @@ def test_dsa_gate_reuses_stream_and_waits_at_each_consumer(monkeypatch):
 
     monkeypatch.setattr(torch.npu, "current_stream", lambda: current)
     monkeypatch.setattr(torch.npu, "Stream", create_stream)
+    monkeypatch.setattr(kimi_k3, "_DSA_GATE_COMM_STREAMS", {})
     monkeypatch.setattr(kimi_k3, "npu_stream_switch", switch)
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: records.append((id(tensor), stream)))
     monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", gather)
     monkeypatch.setattr(torch.distributed, "all_to_all_single", exchange)
     monkeypatch.setattr(kimi_k3.KDAInputProjectionTPLayout, "prepare_input", staticmethod(lambda x: (x, x.shape[0])))
-    begin_gate = kimi_k3._make_dsa_gate_projection(project, group, 2, 2)
+    first_layer = kimi_k3._make_dsa_gate_projection(project, group, 2, 2)
+    second_layer = kimi_k3._make_dsa_gate_projection(project, group, 2, 2)
+    hidden = torch.zeros(2, 4)[:, ::2]
     create_stream.assert_not_called()
-    for _ in range(2):
+    for begin_gate in (first_layer, second_layer, first_layer):
         current = producer
-        project_gate = begin_gate(torch.zeros(2, 4)[:, ::2])
+        project_gate = begin_gate(hidden)
         assert trace == ["AG"]
         current = project_stream
         finish_gate = project_gate()
@@ -85,5 +88,5 @@ def test_dsa_gate_reuses_stream_and_waits_at_each_consumer(monkeypatch):
         torch.testing.assert_close(gate, torch.ones(2, 2, 2))
         trace.clear()
         records.clear()
-    create_stream.assert_called_once_with()
-    assert comm.wait_stream.call_args_list == [call(producer), call(project_stream)] * 2
+    create_stream.assert_called_once_with(device=hidden.device)
+    assert comm.wait_stream.call_args_list == [call(producer), call(project_stream)] * 3

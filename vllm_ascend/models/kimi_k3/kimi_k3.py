@@ -637,14 +637,19 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         return self.mla_attn(positions, hidden_states)
 
 
+_DSA_GATE_COMM_STREAMS: dict[torch.device, torch.npu.Stream] = {}
+
+
 def _make_dsa_gate_projection(g_proj: nn.Module, group: GroupCoordinator, num_heads: int, head_dim: int):
     layout = KDAInputProjectionTPLayout(group, num_heads, head_dim)
-    comm_stream = None
 
     def begin_gate(hidden: torch.Tensor) -> Callable[[], Callable[[], torch.Tensor]]:
-        nonlocal comm_stream
+        device = hidden.device
+        comm_stream = _DSA_GATE_COMM_STREAMS.get(device)
         if comm_stream is None:
-            comm_stream = torch.npu.Stream()
+            # Each layer consumes its gate before the next layer starts.
+            comm_stream = torch.npu.Stream(device=device)
+            _DSA_GATE_COMM_STREAMS[device] = comm_stream
         owner, capacity = layout.prepare_input(hidden)
         owner = owner.contiguous()
         comm_stream.wait_stream(torch.npu.current_stream())
