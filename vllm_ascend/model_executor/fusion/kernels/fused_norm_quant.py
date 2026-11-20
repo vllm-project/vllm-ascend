@@ -32,7 +32,7 @@ def _add_rms_norm_quant(
     )
     quantized_output = output[0]
     out1 = output[2]
-    logger.info("norm and quant fused!!!")
+    logger.info_once("norm and quant fused!!!")
     return QuantizedActivation(
         data=quantized_output,
         scale=linear.aclnn_input_scale,
