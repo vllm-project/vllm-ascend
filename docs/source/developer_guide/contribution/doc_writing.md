@@ -6,14 +6,7 @@
 
 ## Guide to Writing Triton Operator Docs
 
-New Triton implementations belong under
-`vllm_ascend/ops/triton/`, with their operator documents under
-`vllm_ascend/ops/triton/docs/`. The `v2/` namespace is retired by the operator
-layout refactor.
-
-Use the [operator documentation template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md)
-for the placement rules and the operator inventory before adding or moving an
-operator document.
+Follow the [Triton contribution guide](triton_operators.md#documenting-an-operator) for placement and scope. Start with the [operator template](triton_operator_template.md) and add the callable to the [reference index](../operator_reference/triton/index.md).
 
 ## Multi-row table headers
 

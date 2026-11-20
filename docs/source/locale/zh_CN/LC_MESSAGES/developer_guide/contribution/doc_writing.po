@@ -66,25 +66,6 @@ msgstr "对于 HTML 表格，请直接将属性添加到 `<table>`。此设置�
 msgid "## Guide to Writing Triton Operator Docs"
 msgstr "## Triton 算子文档编写指南"
 
-msgid ""
-"New Triton implementations belong under\n"
-"`vllm_ascend/ops/triton/`, with their operator documents under\n"
-"`vllm_ascend/ops/triton/docs/`. The `v2/` namespace is retired by the operator\n"
-"layout refactor."
-msgstr ""
-"新的 Triton 实现应放在\n"
-"`vllm_ascend/ops/triton/` 下，其算子文档应放在\n"
-"`vllm_ascend/ops/triton/docs/` 下。经过算子\n"
-"布局重构后，`v2/` 命名空间已废弃。"
-
-msgid ""
-"Use the [operator documentation template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md)\n"
-"for the placement rules and the operator inventory before adding or moving an\n"
-"operator document."
-msgstr ""
-"在添加或移动算子文档之前，请使用[算子文档模板](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md)\n"
-"了解放置规则和算子清单。"
-
 msgid "## Preview your changes"
 msgstr "## 预览您的更改"
 
@@ -128,3 +109,6 @@ msgid ""
 msgstr ""
 "翻译提取器会将所有表头行作为一个 PO 条目保留在一起，并省略仅包含数据的行。在翻译中请保留竖线、空单元格、`^^` "
 "以及链接目标。这样既能避免将模型矩阵放入冗长的翻译请求中，又能保留其分组表头。"
+
+msgid "Follow the [Triton contribution guide](triton_operators.md#documenting-an-operator) for placement and scope. Start with the [operator template](triton_operator_template.md) and add the callable to the [reference index](../operator_reference/triton/index.md)."
+msgstr "参见 [Triton 贡献指南](triton_operators.md#documenting-an-operator)中的放置规则与范围。请使用[算子模板](triton_operator_template.md)，并将封装入口加入[算子总览](../operator_reference/triton/index.md)。"

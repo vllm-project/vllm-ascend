@@ -24,14 +24,6 @@ msgstr ""
 msgid "## Deliverables checklist"
 msgstr ""
 
-msgid ""
-"- [ ] PR description.\n"
-"- [ ] Source files.\n"
-"- [ ] Markdown operator document: `vllm_ascend/ops/triton/docs/<operator>.md`.\n"
-"- [ ] Test files: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/`; warmup unit tests, when applicable: `tests/ut/model_executor/warmup/`.\n"
-"- [ ] Repository-wide deliverables: see the [contribution guide](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html) and [release note guide](https://github.com/vllm-project/vllm-ascend/blob/main/release_notes/README.md)."
-msgstr ""
-
 msgid "## Overall objectives"
 msgstr ""
 
@@ -56,16 +48,6 @@ msgid ""
 msgstr ""
 
 msgid "### Functionality"
-msgstr ""
-
-msgid ""
-"- [ ] The PR description includes:\n"
-"    - [ ] Functionality, inputs and outputs, production callers, and whether the operator is framework-wide or model-specific.\n"
-"    - [ ] Motivation, such as model support, a bug fix, performance optimization, or temporary compatibility. Temporary implementations include a replacement and removal plan.\n"
-"    - [ ] Cross-device compatibility and actual validation results. Operators should not be restricted to one particular device; device-specific optimization preserves functionality and correctness on other applicable devices.\n"
-"- [ ] The Markdown document follows the [operator template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md), describing functionality, algorithm, parameters, constraints, origin and differences, and test entry points.\n"
-"- [ ] The implementation matches the documented inputs, outputs, and behavior.\n"
-"- [ ] The operator is integrated into the corresponding model or shared operator call path in vLLM-Ascend."
 msgstr ""
 
 msgid "### Accuracy"

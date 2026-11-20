@@ -349,6 +349,8 @@ nav:
         - developer_guide/contribution/e2e_ci_test.md
         - developer_guide/contribution/dependency_version_management.md
         - developer_guide/contribution/triton_operators.md
+    - Operator Reference:
+        - developer_guide/operator_reference/triton/index.md
     - Design Documents:
         - developer_guide/Design_Documents/index.md
         - developer_guide/Design_Documents/triton_jit_warmup.md

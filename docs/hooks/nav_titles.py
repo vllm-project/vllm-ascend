@@ -16,6 +16,7 @@ also relies on ``tools/generate_zh_docs.py`` to translate those H1s from
 import os
 
 TITLES = {
+    "developer_guide/operator_reference/triton/index.md": {"en": "Triton Operators", "zh": "Triton 算子"},
     "community/contributors.md": {"en": "Contributors", "zh": "贡献者"},
     "community/governance.md": {"en": "Governance", "zh": "治理"},
     "community/index.md": {"en": "Overview", "zh": "概览"},
@@ -260,6 +261,7 @@ SECTION_TITLES = {
     "Configuration": {"en": "Configuration", "zh": "配置"},
     "Feature Guide": {"en": "Feature Guide", "zh": "特性指南"},
     "Deployment Guide": {"en": "Deployment Guide", "zh": "部署指南"},
+    "Operator Reference": {"en": "Operator Reference", "zh": "算子参考"},
     "Developer Guide": {"en": "Developer Guide", "zh": "开发者指南"},
     "Contribution": {"en": "Contribution", "zh": "贡献"},
     "Design Documents": {"en": "Design Documents", "zh": "设计文档"},
