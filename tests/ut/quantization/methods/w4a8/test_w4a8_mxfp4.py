@@ -228,6 +228,35 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_odd_tp_mxfp4_pads_down_proj_and_restores_checkpoint(self, mock_npu, mock_megamoe, mock_vllm):
+        mock_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+        layer = nn.Module()
+        layer.activation = "silu"
+        originals = {
+            "w13_weight": torch.randint(0, 256, (2, 576, 64), dtype=torch.uint8),
+            "w13_weight_scale": torch.randint(0, 255, (2, 576, 4), dtype=torch.uint8),
+            "w2_weight": torch.randint(0, 256, (2, 128, 144), dtype=torch.uint8),
+            "w2_weight_scale": torch.randint(0, 255, (2, 128, 9), dtype=torch.uint8),
+        }
+        for name, data in originals.items():
+            setattr(layer, name, nn.Parameter(data.clone(), requires_grad=False))
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer._mxfp4_swiglu_padding, 32)
+        self.assertEqual(layer.w2_weight.shape, (2, 160, 128))
+        torch.testing.assert_close(layer.w2_weight[:, :144].transpose(1, 2), originals["w2_weight"])
+        self.assertEqual(layer.w2_weight[:, 144:].count_nonzero().item(), 0)
+        self.assertEqual(layer.w2_weight_scale.shape, (2, 5, 128, 2))
+        self.assertEqual(layer.w2_weight_scale[:, -1, :, 1].count_nonzero().item(), 0)
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+        for name, data in originals.items():
+            torch.testing.assert_close(getattr(layer, name), data, rtol=0, atol=0)
+
     @staticmethod
     def _make_moe_layer():
         layer = nn.Module()
