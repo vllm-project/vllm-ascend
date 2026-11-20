@@ -129,8 +129,8 @@ def resolve_mrv2_varlen_decode_token_sizes(
 
 def _patch_config_resolver(cls, name: str, marker: str, resolve: Callable) -> None:
     """Wrap one c410 graph resolver once, preserving its upstream callable."""
-    upstream = getattr(cls, name)
-    if getattr(upstream, marker, False):
+    upstream = getattr(cls, name, None)
+    if upstream is None or getattr(upstream, marker, False):
         return
 
     @wraps(upstream)

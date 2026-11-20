@@ -28,7 +28,7 @@ def test_indexer_accepts_main_packed_inputs_without_fused_preparation() -> None:
     layer._update_and_compress = Mock()
     selected = torch.zeros((2, 3), dtype=torch.int32)
     layer._select = Mock(return_value=selected)
-    hidden_states = torch.empty((4, 8))
+    hidden_states = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     positions = torch.arange(4)
     gate = torch.full((2, 2, 4), 7.0)
 
