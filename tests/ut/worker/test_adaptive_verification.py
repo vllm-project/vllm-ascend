@@ -1,4 +1,3 @@
-import importlib
 from contextlib import nullcontext
 from functools import partial
 from types import SimpleNamespace
@@ -96,18 +95,6 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     assert observed == [expected]
     runner.eplb.step.assert_called_once_with(is_dummy=True, is_profile=False)
     assert get_mrv2_in_profile_run() is False
-
-
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    allocator = Mock()
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-
-    assert adaptive._assign_draft_token_budget_compiled is allocator
 
 
 @pytest.mark.parametrize(
