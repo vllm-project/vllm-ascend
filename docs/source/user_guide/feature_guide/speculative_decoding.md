@@ -978,6 +978,11 @@ persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
 the connector does not validate the peer's convolution layout or all other peer
 settings.
 
+To try non-layerwise MemCache pooling, set the top-level `kv_connector` to
+`MultiConnector`. List `MooncakeConnectorV2` first and `AscendStoreConnector`
+second. Set `backend` to `memcache` and `use_layerwise` to `false` on the
+Store connector.
+
 !!! warning
 
     This feature is experimental. An A5 P/D functional test with PP4/TP8 on

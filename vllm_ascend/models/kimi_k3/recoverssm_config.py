@@ -51,7 +51,26 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
             f"Kimi RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
         )
     transfer = vllm_config.kv_transfer_config
-    if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
+    if transfer is None:
+        return
+    if transfer.kv_connector == "MultiConnector":
+        children = transfer.kv_connector_extra_config.get("connectors")
+        if (
+            not isinstance(children, list)
+            or not all(isinstance(child, dict) for child in children)
+            or [child.get("kv_connector") for child in children] != ["MooncakeConnectorV2", "AscendStoreConnector"]
+        ):
+            raise ValueError(
+                "Kimi RecoverSSM MultiConnector requires MooncakeConnectorV2 followed by AscendStoreConnector"
+            )
+        store_config = children[1].get("kv_connector_extra_config", {})
+        if (
+            not isinstance(store_config, dict)
+            or store_config.get("backend") != "memcache"
+            or store_config.get("use_layerwise", False)
+        ):
+            raise ValueError("Kimi RecoverSSM MultiConnector requires non-layerwise MemCache pooling")
+    elif transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
         raise ValueError("KDA RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
-    if transfer is not None and is_conv_state_dim_first():
+    if is_conv_state_dim_first():
         raise ValueError("Kimi RecoverSSM Mooncake P/D requires SD convolution cache layout")
