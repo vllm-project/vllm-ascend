@@ -10,7 +10,7 @@ from tests.e2e.common.multi_node.utils import (
 )
 
 DISAGGEGATED_PREFILL_PORT = 5333
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/cases/models/configs/DeepSeek/"
+DEFAULT_CONFIG_BASE_PATH = "tests/SIT/cases/models/configs/DeepSeek/"
 CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or DEFAULT_CONFIG_BASE_PATH
 DEFAULT_SERVER_PORT = 8080
 

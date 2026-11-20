@@ -39,11 +39,13 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
+    reset_sparse_kv_offload_request_owners,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -60,6 +62,7 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 
 
 if TYPE_CHECKING:
+    from vllm_ascend.ascend_config import XliteGraphConfig
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
@@ -89,11 +92,15 @@ class AscendModelState(DefaultModelState):
         self._offload_pool_slots: CpuGpuBuffer | None = None
         self._offload_pool_active: CpuGpuBuffer | None = None
         self._offload_request_states: CopySfaRequestStates | None = None
+        self._offload_request_identity: RequestIdentityRegistry | None = None
         self._offload_live_req_ids: Collection[str] = ()
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
         if sparse_cfg.enabled:
+            self._offload_request_identity = RequestIdentityRegistry(
+                on_wrap=lambda: reset_sparse_kv_offload_request_owners(self.vllm_config)
+            )
             pin_memory = is_pin_memory_available()
             self._offload_req_ids = CpuGpuBuffer(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -335,6 +342,8 @@ class AscendModelState(DefaultModelState):
 
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
+        if self._offload_request_identity is not None:
+            self._offload_request_identity.remove(req_id)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
 
@@ -373,6 +382,32 @@ class AscendModelState(DefaultModelState):
             "slot_mapping": slot_mappings[group_id],
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
+
+    def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if input_ids is not None:
+            return super().dummy_inputs_embeds(num_tokens, input_ids)
+
+        if embedding_tp_enable():
+            if not hasattr(self, "_embedding_tp_dummy_join"):
+                from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
+
+                self._embedding_tp_dummy_join = None
+                for module in self.model.modules():
+                    if (
+                        isinstance(module, AscendVocabParallelEmbedding)
+                        and module.parallel_mode == VocabParallelMode.FINE_GRAINED
+                        and module.token_exchange_group is not None
+                    ):
+                        capacity = module.embedding_tp_capacity
+                        assert capacity is not None
+                        token_ids = torch.zeros(capacity, dtype=torch.int32, device=self.device)
+                        self._embedding_tp_dummy_join = (module, token_ids)
+                        break
+            if self._embedding_tp_dummy_join is not None:
+                module, token_ids = self._embedding_tp_dummy_join
+                module(token_ids)
+
+        return super().dummy_inputs_embeds(num_tokens)
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream
@@ -466,6 +501,7 @@ class AscendModelState(DefaultModelState):
         offload_token_to_req = getattr(self, "_offload_token_to_req", None)
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
+            assert self._offload_request_identity is not None
             update_sparse_kv_offload_metadata(
                 input_batch.num_tokens,
                 input_batch.num_reqs,
@@ -475,6 +511,8 @@ class AscendModelState(DefaultModelState):
                 input_batch.query_start_loc_np,
                 offload_req_ids,
                 offload_token_to_req,
+                request_identity=self._offload_request_identity,
+                is_dummy=getattr(input_batch, "is_dummy", False),
             )
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
@@ -510,10 +548,15 @@ class AscendModelState(DefaultModelState):
                     block_table=block_tables[0],
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # Varlen graphs capture one-token dummy requests but may replay wider
+        # verification rows. Preserve the descriptor's promised bound for C2
+        # compressor launch grids and attention/indexer tiling.
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-            if self.pcp_manager is not None
+            if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
             else None
         )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
@@ -526,6 +569,7 @@ class AscendModelState(DefaultModelState):
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
+        xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -562,9 +606,9 @@ class AscendModelState(DefaultModelState):
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
             common_metadata_callback=(
                 lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
-                if self.decoder_replay is not None
-                else None
-            ),
+            )
+            if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
+            else None,
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:

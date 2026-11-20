@@ -1,0 +1,4 @@
+pr: 20861
+entries:
+  - category: bugfix
+    text: Fixed incorrect FP8 quantization of layers excluded by the checkpoint when a model wrapper adds a prefix, restoring GLM-5.3-Flash native FP8 accuracy.

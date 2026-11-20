@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -76,6 +77,79 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state.num_actual_tokens == 9
     assert state.dropped_before.np[:4].tolist() == [0, 0, 0, 4]
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
+
+
+@pytest.mark.parametrize("uses_pcp_replay", [False, True])
+def test_only_pcp_compaction_waits_for_batch_producer(state, monkeypatch, uses_pcp_replay):
+    producer = object()
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(state, "_prepare_compact_replay", calls.prepare_compact_replay)
+    replay_inputs = replace(inputs(), metadata_producer_stream=producer)
+    plan = replace(state._build_replay_plan(replay_inputs), uses_pcp_replay=uses_pcp_replay)
+    monkeypatch.setattr(state, "_build_replay_plan", lambda _: plan)
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+
+    calls.prepare_compact_replay.assert_called_once()
+    if uses_pcp_replay:
+        calls.stream.wait_stream.assert_called_once_with(producer)
+        assert calls.mock_calls[0][0] == "stream.wait_stream"
+    else:
+        calls.stream.wait_stream.assert_not_called()
+
+
+@pytest.mark.parametrize("has_tasks", [False, True])
+@pytest.mark.parametrize("task_fails", [False, True])
+def test_compact_metadata_orders_production_and_first_consumption(state, monkeypatch, has_tasks, task_fails):
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.main)
+
+    @contextmanager
+    def producer_scope(stream):
+        assert stream is calls.producer
+        calls.enter_producer()
+        yield
+
+    monkeypatch.setattr(torch.npu, "stream", producer_scope)
+    metadata = {"swa": object()}
+
+    def run():
+        calls.run()
+        if task_fails:
+            raise RuntimeError("planner failed")
+
+    def build(*args, tasks):
+        if has_tasks:
+            tasks.append(SimpleNamespace(run=run))
+        return metadata
+
+    monkeypatch.setattr(state, "_build_metadata", build)
+    if has_tasks and task_fails:
+        with pytest.raises(RuntimeError, match="planner failed"):
+            state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+        calls.main.wait_stream.assert_called_once_with(calls.producer)
+        calls.producer.record_event.assert_not_called()
+        assert state.metadata_ready is None
+        return
+
+    state._submit_compact_metadata(inputs(), np.array([0, 1]), calls.producer)
+    assert state.metadata is metadata
+    if has_tasks:
+        assert [call[0] for call in calls.mock_calls] == [
+            "producer.wait_stream",
+            "enter_producer",
+            "run",
+            "producer.record_event",
+        ]
+        calls.producer.wait_stream.assert_called_once_with(calls.main)
+        calls.main.wait_event.assert_not_called()
+        state.wait_for_metadata()
+        state.wait_for_metadata()
+        calls.main.wait_event.assert_called_once_with(calls.producer.record_event.return_value)
+    else:
+        assert not calls.mock_calls
+    assert state.metadata_ready is None
 
 
 @pytest.mark.parametrize(
@@ -178,20 +252,24 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
     prepared.assert_called_once_with()
 
 
-@pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens):
+@pytest.mark.parametrize("world", [1, 2, 16])
+@pytest.mark.parametrize("num_reqs,actual_tokens", [(0, 0), (1, 0), (1, 2)])
+@pytest.mark.parametrize("batch_max_query_len", [0, 4])
+def test_replay_metadata_preserves_pcp_layout_contract(
+    state, monkeypatch, actual_tokens, world, num_reqs, batch_max_query_len
+):
     state.num_tokens = 2
     state.num_actual_tokens = actual_tokens
     state.config.model_config = SimpleNamespace(max_model_len=16)
     state.slots = torch.arange(64).reshape(2, 32)
-    state.replay_pcp_context = SimpleNamespace(global_batch=object())
-    offsets = np.array([0, actual_tokens], dtype=np.int32)
-    state.offsets[:2] = torch.from_numpy(offsets)
+    state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
+    offsets = np.array([0, actual_tokens][: num_reqs + 1], dtype=np.int32)
+    state.offsets[: num_reqs + 1] = torch.from_numpy(offsets)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         replay_mod,
         "get_pcp_group",
-        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat((tensor, tensor), dim=dim)),
+        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat([tensor] * world, dim=dim)),
     )
     metadata = object()
 
@@ -199,20 +277,24 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
         # Exercise the same layout guard as the real PCP attention builder.
         # Gathered slots are invalid unless the common metadata owns a context,
         # including on ranks with no retained suffix queries.
-        assert uses_pcp_sharded_layout(common, True)
+        assert uses_pcp_sharded_layout(common, True) == (world > 1)
         assert common.pcp_context is state.replay_pcp_context
-        assert common.pcp_cache_group_idx == 1
-        assert common.slot_mapping.numel() == 4
+        assert common.pcp_cache_group_idx == (1 if world > 1 else None)
+        assert common.slot_mapping.tolist() == [32, 33] * world
+        if world == 1:
+            assert common.slot_mapping.data_ptr() == state.slots[1].data_ptr()
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
+        assert common.num_reqs == num_reqs
+        assert common.max_query_len == max(actual_tokens, batch_max_query_len)
         return metadata
 
     state.builders = [(1, ["decoder.swa_cache"], SimpleNamespace(build=build, take_device_metadata_tasks=lambda: []))]
     batch = SimpleNamespace(
-        num_reqs=1,
+        num_reqs=num_reqs,
         seq_lens=torch.tensor([8], dtype=torch.int32),
         seq_lens_np=np.array([8], dtype=np.int32),
-        max_query_len=4,
+        max_query_len=batch_max_query_len,
         attn_state=None,
         is_prefilling_np=np.array([True]),
     )
@@ -416,14 +498,37 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
     assert gather_padding.call_count == int(sequence_parallel)
 
 
-@pytest.mark.parametrize("prompt_logprobs", [None, 0, 3])
-def test_request_reuse_refreshes_prompt_logprob_retention(state, monkeypatch, prompt_logprobs):
+@pytest.mark.parametrize(
+    ("sampling_params", "keeps_rows"),
+    [
+        pytest.param(None, False, id="no-sampling-params"),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=None, prompt_logprob_token_ids=None),
+            False,
+            id="generation",
+        ),
+        pytest.param(
+            SimpleNamespace(prompt_logprobs=0, prompt_logprob_token_ids=None),
+            True,
+            id="prompt-logprobs",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                prompt_logprobs=None,
+                prompt_logprob_token_ids=np.array([[1]], dtype=np.int32),
+            ),
+            True,
+            id="target-token-scoring",
+        ),
+    ],
+)
+def test_request_reuse_refreshes_prompt_scoring_retention(state, monkeypatch, sampling_params, keeps_rows):
     monkeypatch.setattr(AscendModelState, "add_request", lambda *args: None)
     model_state = EngramModelState.__new__(EngramModelState)
     model_state.decoder_replay_state = state
     model_state._replay_start_np = np.zeros(4, dtype=np.int32)
     state.keeps_rows[1] = True
-    request = SimpleNamespace(replay_start=7, sampling_params=SimpleNamespace(prompt_logprobs=prompt_logprobs))
+    request = SimpleNamespace(replay_start=7, sampling_params=sampling_params)
     model_state.add_request(1, request)
-    assert state.keeps_rows[1] == (prompt_logprobs is not None)
+    assert state.keeps_rows[1] == keeps_rows
     assert model_state._replay_start_np[1] == 7

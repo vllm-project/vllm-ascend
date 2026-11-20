@@ -31,7 +31,9 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
+
+# DeepseekV4Config is provided by Transformers on both supported versions.
+from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -48,17 +50,8 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.utils import (
     npu_stream_switch,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
-
-# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.32.0 lane still ships it under
-# `vllm.transformers_utils.configs.deepseek_v4`.
-if vllm_version_is("0.32.0"):
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config  # type: ignore[import-not-found]
-else:
-    from transformers import DeepseekV4Config
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:

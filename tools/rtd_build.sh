@@ -55,14 +55,6 @@ if [ "$DOCS_LANG" = "zh" ]; then
     echo "[rtd-build] Generating Chinese sources from .po files..."
     python -m tools.generate_zh_docs
 
-    # Mirror shared static assets into the Chinese DOCS_DIR. mkdocs resolves
-    # `extra_css` and other static paths relative to DOCS_DIR, so anything
-    # we want served on both language builds must physically live under
-    # docs/source/zh/. The English DOCS_DIR is docs/source/, so the source
-    # of truth stays there and we copy at build time.
-    echo "[rtd-build] Mirroring shared static assets into docs/source/zh/..."
-    mkdir -p docs/source/zh/stylesheets
-    cp docs/source/stylesheets/extra.css docs/source/zh/stylesheets/extra.css
 else
     export DOCS_BETTEREM_SMART_ENABLE="${DOCS_BETTEREM_SMART_ENABLE:-all}"
 fi

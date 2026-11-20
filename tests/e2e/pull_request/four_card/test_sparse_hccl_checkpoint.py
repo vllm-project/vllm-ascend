@@ -27,7 +27,7 @@ from transformers import Qwen3MoeConfig
 from vllm.distributed import get_dp_group
 from vllm.distributed.weight_transfer import HTTPVLLMWeightSyncClient, WeightTransferTrainerFactory
 
-from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import register_engines_once
+from tests.e2e.common.rlhf.common import register_engines_once
 from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
     SparseHCCLTrainerInitInfo,
     SparseWeightPatch,
@@ -302,6 +302,11 @@ def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, dp_size):
                     indent=2,
                 )
             )
+        except BaseException:
+            # Runtime RPC failures otherwise expose only HTTP 500; retain the
+            # server's original traceback before the temporary directory exits.
+            print((tmp_path / "server.log").read_text(errors="replace"), flush=True)
+            raise
         finally:
             if engine is not None:
                 engine.shutdown()

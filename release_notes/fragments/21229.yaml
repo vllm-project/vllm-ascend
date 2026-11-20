@@ -1,0 +1,8 @@
+pr: 21229
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the Ascend hybrid HBM coordinator and AscendStore to honor
+      --prefix-cache-retention-interval after removal of the legacy environment
+      variable in upstream vLLM. Omitting the option now uses the upstream default
+      of 0; pass --prefix-cache-retention-interval None to preserve dense retention.

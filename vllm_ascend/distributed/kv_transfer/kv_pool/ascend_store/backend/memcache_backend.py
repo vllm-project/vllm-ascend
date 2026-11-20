@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 
 def _is_device_sdma() -> bool:
@@ -100,25 +101,6 @@ def make_full_key(
     return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
 
 
-def make_hit_check_keys(
-    model_name: str,
-    group_id: int,
-    block_hash_hex: str,
-    num_ranks: int,
-    num_groups: int,
-    pp_size: int = 1,
-) -> list[str]:
-    """All-rank keys for scheduler-side hit check.
-
-    Returns one key per PP stage and head_or_tp_rank.
-    """
-    return [
-        make_full_key(model_name, group_id, block_hash_hex, rank, num_groups, pp_rank, pp_size)
-        for pp_rank in range(pp_size)
-        for rank in range(num_ranks)
-    ]
-
-
 def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
     """Inject the QoS from kv_connector_extra_config into MF_DEVICE_UB_QOS.
 
@@ -154,27 +136,15 @@ class MemcacheBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         num_groups = len(grouped_block_size)
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        parallel = vllm_config.parallel_config
+        pp_size = parallel.pipeline_parallel_size
+        pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
 
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size)
-
-    @classmethod
-    def make_partial_key(
-        cls,
-        model_name: str,
-        req_id: str,
-        group_id: int,
-        block_index: int,
-        end_token: int,
-        head_or_tp_rank: int,
-        pp_rank: int = 0,
-        pp_size: int = 1,
-    ) -> str:
-        pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
-        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     def __init__(
         self,

@@ -290,6 +290,7 @@ def make_state(model, monkeypatch):
     state.rope_state = None
     state.supports_mm_inputs = False
     state.prompt_embeds_state = None
+    state.decoder_replay_state = None
     state.model = model
     state.lookback_token_ids = torch.full((4, 2), -1, dtype=torch.int32)
     state._cg_mode = CUDAGraphMode.FULL
@@ -572,6 +573,9 @@ def test_graph_producer_capability_excludes_slot_cache_and_collectives(runtime, 
     for layer in model.layers:
         layer.engram.embed_tokens.dp_size = layer.engram.embed_tokens.tp_size = 1
     assert model.can_capture_engram_producer()
+    model._engram_remote_reader = object()
+    assert not model.can_capture_engram_producer()
+    model._engram_remote_reader = None
     for owner, field, disabled_value in (
         (model, "has_engram", False),
         (model, "_engram_overlap_enabled", False),

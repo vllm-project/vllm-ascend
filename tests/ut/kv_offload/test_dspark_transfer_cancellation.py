@@ -137,27 +137,34 @@ def _fixture(names=("cancel",), *, admit=True):
         scheduler._metaserver_futures[internal] = Mock()
         scheduler._metaserver_retry_timers[internal] = Mock()
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
-    connector.connector_scheduler = scheduler
+    connector.connector_scheduler = scheduler  # type: ignore[assignment]
     connector.is_consumer = True
     connector.is_producer = False
     upstream = Scheduler.__new__(Scheduler)
+    upstream._pending_encoder_input_ids = {}
     upstream.requests = {request.request_id: request for request in requests.values()}
     upstream.running = []
     upstream.waiting = Mock()
     upstream.skipped_waiting = Mock()
     upstream.kv_holding_waiting = Mock()
+    upstream.async_kv_waiting = Mock()
+    upstream._aborted_kv_loads = set()
     upstream.deferred_waiting = set()
     upstream.finished_recving_kv_req_ids = set()
     upstream.failed_recving_kv_req_ids = set()
     upstream.finished_req_ids = set()
     upstream.finished_req_ids_dict = None
     upstream._inflight_prefills = set()
+    upstream._parked_reservations = {}
+    upstream._parked_reserved_blocks = 0
     upstream._kv_fetch_stages = None
     upstream.aux_output_connector = None
     upstream.ec_connector = None
     upstream.encoder_cache_manager = Mock()
     upstream.connector = connector
     upstream.defer_block_free = False
+    # Upstream main records deferred async connector loads here.
+    upstream.deferred_loads = {}
     upstream.vllm_config = SimpleNamespace(kv_transfer_config=None)
     upstream.kv_cache_config = SimpleNamespace(kv_cache_groups=[None, None, None])
     upstream.kv_cache_manager = Mock()

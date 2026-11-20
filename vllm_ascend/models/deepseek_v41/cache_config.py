@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Framework-side V4.1 layer-outermost cache placement and allocation."""
+"""Framework-side V4.1 cache placements within a shared allocation."""
 
 from dataclasses import replace
 
 import torch
 from vllm.config import VllmConfig
+
+# Both supported versions expose planning helpers in kv_cache_planning.
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -23,14 +26,6 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #61183 moved `may_override_num_blocks` to `kv_cache_planning` on main;
-# the v0.32.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
-else:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 STATE_RING_ROWS = 32
 
@@ -273,22 +268,33 @@ def get_deepseek_v41_kv_cache_config(
     groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Allocate independent layer slots backed by one global block-ID pool."""
-    page_sizes, layer_tuples = get_layer_tuples(_specs_from_groups(groups))
+    """Place resource pages in layer slots within one shared backing pool."""
+    specs = _specs_from_groups(groups)
+    page_sizes, layer_tuples = get_layer_tuples(specs)
     capacity = max(available_memory // sum(page_sizes), 0)
     num_blocks = may_override_num_blocks(vllm_config, capacity)
+    backing_size = num_blocks * sum(page_sizes)
     tensors: list[KVCacheTensor] = []
+    slot_offset = 0
     for page_size, layer_names in zip(page_sizes, layer_tuples):
-        size = num_blocks * page_size
-        tensors.append(
-            KVCacheTensor(
-                size=size,
-                layers=list(layer_names),
-                offset=0,
-                layer_stride=0,
-                block_stride=page_size,
+        # Long KV, split indexer and optional folded indexer are consecutive
+        # within a page. State/SWA groups reuse that page from its beginning.
+        component_offset = 0
+        for name in layer_names:
+            spec = specs[name]
+            is_mla = isinstance(spec, AscendMLAAttentionSpec)
+            tensors.append(
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[name],
+                    offset=slot_offset + (component_offset if is_mla else 0),
+                    layer_stride=num_blocks * page_size,
+                    block_stride=page_size,
+                )
             )
-        )
+            if is_mla:
+                component_offset += spec.unpadded_page_size_bytes
+        slot_offset += num_blocks * page_size
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,

@@ -15,23 +15,16 @@
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
 from dataclasses import replace
-from typing import Protocol, TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 import torch
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.models.qwen4_exp.amd import (
-    indexer_qsa as upstream_indexer,
-)
 
 # Upstream model and QSA import each other; initialize the model first when
 # this submodule is imported directly, independently of lazy package exports.
 from vllm.models.qwen4_exp.amd import model as _upstream_model  # noqa: F401
 from vllm.models.qwen4_exp.amd import qsa as upstream_qsa
-from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import (
-    QSAForwardMetadata,
-)
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
@@ -52,10 +45,29 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
+from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import qsa_select_paged_tokens_lightning
+from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+
+if vllm_version_is("0.33.0"):
+    import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
+    import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
+
+    QSAIndexerBackend = qsa_indexer.QSAStateBackend
+else:
+    import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer  # type: ignore[import-not-found]
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
+
+    QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
+
+# The upstream backend class is renamed per tree; the class definition below
+# carries the resulting valid-type/misc ignores.
+if vllm_version_is("0.33.0"):
+    UpstreamQSABackend = upstream_qsa.Qwen4ExpQSAFlashAttentionBackend  # type: ignore[attr-defined]
+else:
+    UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
@@ -83,7 +95,7 @@ def _compress_qsa_groups(
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
+    result = qsa_compress_groups_with_ratio_fused(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -95,13 +107,8 @@ def _compress_qsa_groups(
         compress_ratio,
         rope_cache,
     )
-
-
-class QSAForwardMetadataProtocol(Protocol):
-    """Metadata fields consumed by the Ascend sparse QSA implementation."""
-
-    num_actual_tokens: int
-    block_table: torch.Tensor
+    assert result is not None
+    return result
 
 
 def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
@@ -172,16 +179,16 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
     def _metadata(
         self,
-    ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
+    ) -> tuple[QSAIndexerMetadataProtocol, QSAIndexerMetadataProtocol] | None:
         """Read paired QSA metadata without a graph-breaking host sync."""
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             return None
-        raw = cast(QSAForwardMetadata, metadata[self.raw_key_cache.prefix])
+        raw = cast(QSAIndexerMetadataProtocol, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAForwardMetadata,
+            QSAIndexerMetadataProtocol,
             metadata[self.compressed_key_cache.prefix],
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
@@ -219,12 +226,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> torch.Tensor:
         logger.info_once("QSA indexer is using fused RMSNorm + MRoPE.")
         cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
         return torch.ops.vllm.triton_qsa_rmsnorm_mrope(
             tensor=tensor,
             weight=norm.weight,
-            cos_sin=cos_sin,
+            cos_sin=cache,
+            positions=positions,
             eps=norm.variance_epsilon,
             mrope_section=list(self.rotary_emb.mrope_section),
             rope_dim=self.rotary_emb.rotary_dim,
@@ -236,59 +242,119 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize and rotate compressed Indexer keys."""
+        original_pooled = pooled
+        original_positions = first_positions
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return super().normalize_compressed_keys(
+                original_pooled,
+                original_positions,
+            )
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
             first_positions,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Run the fused Ascend QSA path."""
-        metadata = self._metadata()
-        if metadata is None:
-            # Preserve step-0 indices when later MTP steps reuse the buffer.
-            if self.skip_topk and out is not None:
-                return out
-            result = torch.full(
-                (hidden_states.shape[0], self.output_width),
-                -1,
-                dtype=torch.int32,
-                device=hidden_states.device,
+    if vllm_version_is("0.33.0"):
+
+        def forward(  # type: ignore[misc, override]
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            out: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            """Run the fused Ascend QSA path."""
+            metadata = self._metadata()
+            if metadata is None:
+                # Preserve step-0 indices when later MTP steps reuse the buffer.
+                if self.skip_topk and out is not None:
+                    return out
+                if out is not None:
+                    # hidden_states is not sliced to num_tokens without
+                    # metadata, so fill the caller's real-token buffer instead
+                    # of copying a possibly larger tensor into it.
+                    out.fill_(-1)
+                    return out
+                return torch.full(
+                    (hidden_states.shape[0], self.output_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=hidden_states.device,
+                )
+
+            raw_metadata, compressed_metadata = metadata
+            num_tokens = raw_metadata.num_actual_tokens
+            hidden_states = hidden_states[:num_tokens]
+            positions = positions[..., :num_tokens]
+            query, token_k = self.project_qk(hidden_states, positions)
+            self._update_and_compress(
+                token_k,
+                positions,
+                raw_metadata,
+                compressed_metadata,
             )
-            if out is not None:
-                out.copy_(result)
+
+            if self.skip_topk:
+                if out is None:
+                    raise RuntimeError("QSA top-k reuse requires an output buffer")
                 return out
-            return result
+            return self._select(query, compressed_metadata, out)
 
-        raw_metadata, compressed_metadata = metadata
-        num_tokens = raw_metadata.num_actual_tokens
-        hidden_states = hidden_states[:num_tokens]
-        positions = positions[..., :num_tokens]
-        query, token_k = self.project_qk(hidden_states, positions)
-        self._update_and_compress(
-            token_k,
-            positions,
-            raw_metadata,
-            compressed_metadata,
-        )
+    else:
 
-        if self.skip_topk:
-            if out is None:
-                raise RuntimeError("QSA top-k reuse requires an output buffer")
-            return out
-        return self._select(query, compressed_metadata, out)
+        def forward(  # type: ignore[misc, override]
+            self,
+            hidden_states: torch.Tensor,
+            positions: torch.Tensor,
+            out: torch.Tensor | None = None,
+            *,
+            attn: object,
+            qkv: torch.Tensor | None = None,
+            slot_mapping: torch.Tensor | None = None,
+            gate_out: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+            """Run the fused Ascend QSA path (main's fused-prepare signature)."""
+            del attn, qkv, slot_mapping, gate_out
+            metadata = self._metadata()
+            if metadata is None:
+                # Preserve step-0 indices when later MTP steps reuse the buffer.
+                if self.skip_topk and out is not None:
+                    return out, None
+                if out is not None:
+                    # hidden_states is not sliced to num_tokens without
+                    # metadata, so fill the caller's real-token buffer instead
+                    # of copying a possibly larger tensor into it.
+                    out.fill_(-1)
+                    return out, None
+                return torch.full(
+                    (hidden_states.shape[0], self.output_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=hidden_states.device,
+                ), None
+
+            raw_metadata, compressed_metadata = metadata
+            num_tokens = raw_metadata.num_actual_tokens
+            hidden_states = hidden_states[:num_tokens]
+            positions = positions[..., :num_tokens]
+            query, token_k = self.project_qk(hidden_states, positions)
+            self._update_and_compress(
+                token_k,
+                positions,
+                raw_metadata,
+                compressed_metadata,
+            )
+
+            if self.skip_topk:
+                if out is None:
+                    raise RuntimeError("QSA top-k reuse requires an output buffer")
+                return out, None
+            return self._select(query, compressed_metadata, out), None
 
     def project_qk(
         self,
@@ -305,7 +371,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+            return super().project_qk(hidden_states, positions)
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
@@ -313,8 +379,8 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         self,
         token_k: torch.Tensor,
         positions: torch.Tensor,
-        raw_metadata: QSAForwardMetadata,
-        compressed_metadata: QSAForwardMetadata,
+        raw_metadata: QSAIndexerMetadataProtocol,
+        compressed_metadata: QSAIndexerMetadataProtocol,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
@@ -322,27 +388,51 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         if rope_position_cache is None:
             position_rows = raw_metadata.logical_positions.view(-1, 1, 1).expand(-1, 1, 3)
         else:
-            position_rows = qsa_cache.canonical_qsa_rope_positions(positions)[:num_tokens].to(
+            position_rows = qsa_indexer.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = _compress_qsa_groups(
-            token_k[:num_tokens],
-            position_rows,
-            raw_key_cache,
-            raw_metadata.block_table,
-            raw_metadata.token_to_req,
-            raw_metadata.query_start_loc,
-            raw_metadata.logical_positions,
-            compressed_metadata.slot_mapping,
-            self.compress_ratio,
-            rope_position_cache,
-        )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        if self._fused_norm_rope_eligible(token_k, positions):
+            rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+            qsa_compress_groups_with_ratio_fused(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+                norm_weight=self.k_layernorm.weight,
+                rotary_cache=rotary_cache,
+                compressed_cache=self.compressed_key_cache.kv_cache,
+                norm_eps=self.k_layernorm.variance_epsilon,
+            )
+        else:
+            pooled, first_positions = _compress_qsa_groups(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+            )
+            normalized = self.normalize_compressed_keys(
+                pooled,
+                first_positions,
+            )
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
+        # Keep ring writes after the fused launch: other rows can still read
+        # the previous ring contents while producing compressed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -354,18 +444,14 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _select(
         self,
         query: torch.Tensor,
-        metadata: QSAForwardMetadata,
+        metadata: QSAIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        logger.info_once("QSA is using the CANN Lightning Indexer v2 backend.")
-        return qsa_select_paged_tokens_lightning(
+        logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
+        return qsa_select_paged_tokens_lightning_v2(
             query,
             self.compressed_key_cache.kv_cache,
-            metadata.block_table,
-            metadata.token_to_req,
-            metadata.logical_positions,
-            metadata.seq_lens,
-            metadata.query_start_loc,
+            metadata,
             self.token_topk,
             self.compress_ratio,
             out,
@@ -378,18 +464,41 @@ class AscendQSAImpl:
     supports_dcp = False
     supports_pcp = False
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        del kwargs
-        self.num_heads = cast(int, args[0])
-        self.head_size = cast(int, args[1])
-        self.scale = cast(float, args[2])
-        self.num_kv_heads = cast(int, args[3])
-        self.kv_cache_dtype = cast(str, args[6])
-        self.attn_type = args[8]
-        self.alibi_slopes = None
-        self.sinks = None
-        self.sliding_window = (-1, -1)
-        self.supports_quant_query_input = False
+    if vllm_version_is("0.33.0"):
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del kwargs
+            self.num_heads = cast(int, args[0])
+            self.head_size = cast(int, args[1])
+            self.scale = cast(float, args[2])
+            self.num_kv_heads = cast(int, args[3])
+            self.kv_cache_dtype = cast(str, args[6])
+            self.attn_type = args[8]
+            self.alibi_slopes = None
+            self.sinks = None
+            self.sliding_window = (-1, -1)
+            self.supports_quant_query_input = False
+
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            num_heads: int,
+            head_size: int,
+            scale: float,
+            num_kv_heads: int,
+            kv_cache_dtype: str,
+        ) -> None:
+            self.num_heads = num_heads
+            self.head_size = head_size
+            self.scale = float(scale)
+            self.num_kv_heads = num_kv_heads
+            self.kv_cache_dtype = kv_cache_dtype
+            self.attn_type = None
+            self.alibi_slopes = None
+            self.sinks = None
+            self.sliding_window = (-1, -1)
+            self.supports_quant_query_input = False
 
     def do_kv_cache_update(
         self,
@@ -404,23 +513,88 @@ class AscendQSAImpl:
         _store_qsa_cache_rows(key_cache, slot_mapping, key)
         _store_qsa_cache_rows(value_cache, slot_mapping, value)
 
-    def forward_qsa(
+    if vllm_version_is("0.33.0"):
+
+        def forward_qsa(
+            self,
+            layer: torch.nn.Module,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: QSAKVCache,
+            attn_metadata: QSAIndexerMetadataProtocol,
+            output: torch.Tensor,
+            token_to_req: torch.Tensor,
+            logical_positions: torch.Tensor,
+            seq_lens: torch.Tensor,
+            output_scale: torch.Tensor | None = None,
+            output_block_scale: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            if output_scale is not None or output_block_scale is not None:
+                raise NotImplementedError("QSA output quantization is not supported on Ascend")
+            return self._dispatch_qsa(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                token_to_req,
+                logical_positions,
+                seq_lens,
+            )
+
+    else:
+
+        def forward(  # type: ignore[misc]
+            self,
+            layer: torch.nn.Module,
+            query: torch.Tensor,
+            kv_cache: QSAKVCache,
+            attn_metadata: QSAIndexerMetadataProtocol,
+            output: torch.Tensor,
+            *,
+            token_to_req: torch.Tensor,
+            logical_positions: torch.Tensor | None = None,
+            seq_lens: torch.Tensor | None = None,
+            key: torch.Tensor | None = None,
+            value: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            # The base ABI forwards only `token_to_req`; the GBSA kernel also
+            # needs the indexer-side positions/lengths, supplied by the Ascend
+            # owner. Fail loudly rather than silently reading the wrong rows.
+            if logical_positions is None or seq_lens is None:
+                raise NotImplementedError(
+                    "Ascend QSA GBSA attention needs the indexer metadata; call it through AscendQwen4ExpQSAAttention."
+                )
+            return self._dispatch_qsa(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                token_to_req,
+                logical_positions,
+                seq_lens,
+            )
+
+    def _dispatch_qsa(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         kv_cache: QSAKVCache,
-        attn_metadata: QSAForwardMetadataProtocol,
+        attn_metadata: QSAIndexerMetadataProtocol,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
         seq_lens: torch.Tensor,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError("QSA output quantization is not supported on Ascend")
+        """Run GBSA, or the FIA/GBSA split planned for this step."""
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
         if num_tokens == 0:
@@ -433,6 +607,7 @@ class AscendQSAImpl:
         compact_indices = selected_indices[:, :packed_width]
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
+            logger.info_once("QSA attention is using the CANN GBSA backend.")
             return qsa_gbsa_attention(
                 query[:num_tokens],
                 key_cache,
@@ -443,11 +618,19 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(
+                    attn_metadata,
+                    "qsa_gbsa_metadata",
+                    None,
+                ),
             )
+        # main's ABI does not carry the freshly projected K/V; the dispatcher
+        # then gathers them from the paged cache that `do_kv_cache_update`
+        # already filled for this step.
         return dispatch_qsa_attention(
             query[:num_tokens],
-            key[:num_tokens],
-            value[:num_tokens],
+            None if key is None else key[:num_tokens],
+            None if value is None else value[:num_tokens],
             key_cache,
             value_cache,
             compact_indices,
@@ -502,7 +685,10 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         return metadata
 
 
-class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
+class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
+    # `get_builder_cls` returns the Ascend builder below rather than main's
+    # ROCm builder, which only reserves Octave workspace for Octave cache
+    # dtypes that Ascend's BF16/FP8 QSA cache never selects.
     # QSA pages are represented by descriptor-backed views. Consecutive
     # logical blocks may be separated by other cache owners in the common
     # vLLM pool, while each individual page remains dense.
@@ -549,23 +735,87 @@ class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
 # structure, cache specifications and weight mapping in upstream vLLM.
 upstream_indexer.apply_qsa_rope = apply_qsa_rope
 upstream_qsa.QSAIndexer = AscendQSAIndexer
-upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl
-upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend
+if vllm_version_is("0.33.0"):
+    upstream_qsa.Qwen4ExpQSAFlashAttentionImpl = AscendQSAImpl  # type: ignore[attr-defined]
+    upstream_qsa.Qwen4ExpQSAFlashAttentionBackend = AscendQSABackend  # type: ignore[attr-defined]
+else:
+    upstream_qsa.Qwen4ExpQSAImpl = AscendQSAImpl  # type: ignore[attr-defined]
+    upstream_qsa.Qwen4ExpQSABackend = AscendQSABackend  # type: ignore[attr-defined]
 
 
-# Side-cache descriptors use the same block-outermost layout as main QSA KV.
+# Indexer-cache descriptors use the same block-outermost layout as main QSA KV.
 # Their physical block stride is honored by the runner, so no compact copy is
 # required before LightningIndexer or the Triton QSA selector consumes them.
-qsa_cache.QSAStateBackend.uses_descriptor_cache_view = True
+QSAIndexerBackend.uses_descriptor_cache_view = True
 
-
-# qsa_cache selects its Triton metadata builder at import time. The upstream
-# kernel uses CUDA PDL intrinsics, so Ascend must use the equivalent Torch path.
-qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
+# The indexer module selects its Triton metadata builder at import time. The
+# upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
+qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def _main_fused_norm_rope_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            self.attn_output_gate
+            and qkv.is_contiguous()
+            and qkv.dtype == torch.bfloat16
+            and qkv.ndim == 2
+            and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
+            and self.num_heads > 0
+            and self.num_kv_heads > 0
+            and self.head_dim == 256
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        # Preserve the MTP fallback until draft FULL-graph replay is validated
+        # separately. Removing the gathered temporary alone does not establish
+        # draft-model state parity.
+        # ForwardContext has no draft-model flag. The layer name is fixed when
+        # the target or MTP model is built and remains stable during graph replay.
+        if self.layer_name.startswith("mtp."):
+            return super()._project_qkv_gate(qkv, positions)
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
+            # Graph warmup and high-TP execution can use padded or locally
+            # sharded projection geometry outside the fused kernel ABI.
+            # Preserve correctness through the portable upstream path.
+            return super()._project_qkv_gate(qkv, positions)
+
+        # Gather directly from the stable rotary cache using the current graph
+        # inputs; padded rows are clamped inside the kernel.
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+            qkv=qkv,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            cos_sin=cache,
+            positions=positions,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            is_interleaved=self.rotary_emb.mrope_interleaved,
+            rope_dim=self.rotary_emb.rotary_dim,
+            has_gate=True,
+        )
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
@@ -613,11 +863,24 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                 raise RuntimeError("Fused QSA preparation requires an output gate")
             gate.copy_(projected_gate.view_as(gate))
 
-        selected = self.indexer(
-            hidden_states,
-            positions,
-            self.topk_indices_buffer[:num_tokens],
-        )
+        if vllm_version_is("0.33.0"):
+            selected = cast(
+                torch.Tensor,
+                self.indexer(  # type: ignore[call-arg]
+                    hidden_states,
+                    positions,
+                    self.topk_indices_buffer[:num_tokens],
+                ),
+            )
+        else:
+            # Main's indexer returns (selection, prepared main outputs); Ascend
+            # fuses its own Q/K/V preparation, so the second element stays None.
+            selected = self.indexer(
+                hidden_states,
+                positions,
+                self.topk_indices_buffer[:num_tokens],
+                attn=self,  # type: ignore[call-arg]
+            )[0]
         if selected.shape != (num_tokens, self.indexer.output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if query is None or key is None or value is None:
@@ -629,19 +892,38 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
+        # `impl` is the class patched onto the upstream module, so its method
+        # name and signature follow the tree's upstream ABI.
+        impl: Any = self.impl
         with attention_transfer_window():
-            self.impl.forward_qsa(
-                self,
-                query,
-                key,
-                value,
-                self.kv_cache,
-                main_metadata,
-                output,
-                token_to_req=side_metadata.token_to_req,
-                logical_positions=side_metadata.logical_positions,
-                seq_lens=side_metadata.seq_lens,
-            )
+            if vllm_version_is("0.33.0"):
+                impl.forward_qsa(
+                    self,
+                    query,
+                    key,
+                    value,
+                    self.kv_cache,
+                    main_metadata,
+                    output,
+                    token_to_req=side_metadata.token_to_req,
+                    logical_positions=side_metadata.logical_positions,
+                    seq_lens=side_metadata.seq_lens,
+                )
+            else:
+                # main's ABI drops K/V from the signature; pass them back so
+                # the FIA prefill path can skip the paged gather.
+                impl.forward(
+                    self,
+                    query,
+                    self.kv_cache,
+                    main_metadata,
+                    output,
+                    token_to_req=side_metadata.token_to_req,
+                    logical_positions=side_metadata.logical_positions,
+                    seq_lens=side_metadata.seq_lens,
+                    key=key,
+                    value=value,
+                )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 
 
