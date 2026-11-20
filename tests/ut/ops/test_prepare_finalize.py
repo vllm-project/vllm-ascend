@@ -112,6 +112,13 @@ class TestPrepareAndFinalize(unittest.TestCase):
                     prepared_ids = layer.pad_and_split_input_ids(input_ids)
                     torch.testing.assert_close(prepared_ids[:shard_size], input_ids)
                     self.assertEqual(len(prepared_ids), len(expected_mask))
+                    # Prepared image masks follow the exact ID partition; padding
+                    # must stay False even when the original tail is an image.
+                    image_mask = input_ids.remainder(2) == 0
+                    prepared_image_mask = layer.pad_and_split_input_ids(image_mask)
+                    torch.testing.assert_close(prepared_image_mask[:shard_size], image_mask)
+                    self.assertFalse(prepared_image_mask[shard_size:].any())
+                    self.assertTrue(prepared_image_mask.is_contiguous())
                     full_ids = torch.arange(num_tokens) + 1
                     local_ids = torch.nn.functional.pad(full_ids, (0, shard_size * 4 - num_tokens)).chunk(4)[rank]
                     with (

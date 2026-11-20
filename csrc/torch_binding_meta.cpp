@@ -738,7 +738,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     bool out_flag,
     const c10::optional<at::Tensor>& bias_vl_opt,
     int64_t image_sentinel_lo,
-    int64_t image_sentinel_count)
+    int64_t image_sentinel_count,
+    const c10::optional<at::Tensor>& image_mask_opt)
 {
     TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
     TORCH_CHECK(
