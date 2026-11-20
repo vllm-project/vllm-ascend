@@ -3,7 +3,6 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
@@ -303,14 +302,6 @@ class AscendDSABackend(AttentionBackend):
         # vLLM #60271 added the batch-invariance support check in
         # `init_attn_backend` in both supported vLLM revisions.
         return True
-
-    @classmethod
-    def initialize_kernels(cls, vllm_config: VllmConfig) -> None:
-        # These DSA implementations use the CANN package independently of
-        # whether this worker owns any local query tokens.
-        uses_cann_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-        if uses_cann_cache or is_turboquant(vllm_config):
-            import_module("cann_ops_transformer")
 
     @staticmethod
     def get_builder_cls():

@@ -15,7 +15,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
 )
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
@@ -59,23 +58,6 @@ def _on(device_type):
 def test_get_dsa_attn_kv_plan_requires_vllm_config():
     with pytest.raises(TypeError):
         get_dsa_attn_kv_plan()
-
-
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
-@pytest.mark.parametrize("cache_dtype", ["bfloat16", "fp8", "turboquant_4bit_nc"])
-def test_dsa_initializes_cann_only_for_selected_kernel_plan(device_type, cache_dtype):
-    with (
-        mock.patch(
-            "vllm_ascend.attention.dsa_v1.get_current_hardware_profile",
-            return_value=get_hardware_profile(device_type),
-        ),
-        mock.patch("vllm_ascend.attention.dsa_v1.import_module") as load,
-    ):
-        AscendDSABackend.initialize_kernels(_cache_config(cache_dtype))
-        if device_type == AscendDeviceType.A5 or cache_dtype == "turboquant_4bit_nc":
-            load.assert_called_once_with("cann_ops_transformer")
-        else:
-            load.assert_not_called()
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])

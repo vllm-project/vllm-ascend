@@ -116,7 +116,6 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_custom_op,
     enable_sp,
-    initialize_attn_backend_kernels,
     register_ascend_customop,
     register_ascend_fla_customop,
     register_device_print,
@@ -1130,10 +1129,6 @@ class NPUWorker(GPUWorker):
 
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
-
-        # Backends are selected during model construction. Initialize their
-        # packages on every rank, outside the sleep-mode weights memory pool.
-        initialize_attn_backend_kernels(self.vllm_config)
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()

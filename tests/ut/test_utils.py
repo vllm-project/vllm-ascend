@@ -66,31 +66,6 @@ def test_register_customop_selects_gdn_before_import(device_type):
         assert register.call_count == len(utils.REGISTERED_ASCEND_OPS)
 
 
-def test_initialize_attn_backend_kernels_uses_selected_backends_once():
-    initialize = mock.Mock()
-    backend = type("SelectedBackend", (), {"initialize_kernels": staticmethod(initialize)})
-    layers = {
-        "first": SimpleNamespace(get_attn_backend=lambda: backend),
-        "second": SimpleNamespace(get_attn_backend=lambda: backend),
-        "other": SimpleNamespace(get_attn_backend=lambda: object),
-    }
-    config = object()
-    with mock.patch("vllm.config.get_layers_from_vllm_config", return_value=layers):
-        utils.initialize_attn_backend_kernels(config)
-    initialize.assert_called_once_with(config)
-
-
-def test_initialize_attn_backend_kernels_preserves_required_package_errors():
-    initialize = mock.Mock(side_effect=ImportError("missing backend dependency"))
-    backend = type("SelectedBackend", (), {"initialize_kernels": staticmethod(initialize)})
-    layers = {"layer": SimpleNamespace(get_attn_backend=lambda: backend)}
-    with (
-        mock.patch("vllm.config.get_layers_from_vllm_config", return_value=layers),
-        pytest.raises(ImportError, match="missing backend dependency"),
-    ):
-        utils.initialize_attn_backend_kernels(object())
-
-
 def test_cp_decode_stream_is_cached_and_separate_from_chunked_prefill():
     decode_stream, prefill_stream = object(), object()
     with (

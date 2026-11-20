@@ -1025,19 +1025,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-def initialize_attn_backend_kernels(vllm_config: VllmConfig) -> None:
-    """Initialize kernel dependencies of the worker's selected attention backends."""
-    from vllm.config import get_layers_from_vllm_config
-    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
-    backends = dict.fromkeys(layer.get_attn_backend() for layer in layers.values())
-    for backend in backends:
-        initialize = getattr(backend, "initialize_kernels", None)
-        if initialize is not None:
-            initialize(vllm_config)
-
-
 def register_ascend_fla_customop():
     """Resolve the FLA subclass after selecting a device, before model loading.
 
