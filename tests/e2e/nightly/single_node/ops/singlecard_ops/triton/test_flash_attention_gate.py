@@ -11,23 +11,26 @@ from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, 
 
 
 @pytest.mark.parametrize(
-    "tokens,hidden",
+    "tokens,hidden,dtype,strided",
     [
-        (1, 1536),
-        (4, 1536),
-        (8, 1536),
-        (32, 1536),
-        (64, 1536),
-        (128, 1536),
-        (1024, 1536),
-        (8, 768),
-        (8, 3072),
-        (8, 12288),
-        (17, 129),
+        (tokens, hidden, dtype, strided)
+        for tokens, hidden in ((1024, 1536), (17, 129))
+        for dtype in (torch.bfloat16, torch.float16, torch.float32)
+        for strided in (False, True)
+    ]
+    + [
+        (tokens, hidden, dtype, strided)
+        for tokens, hidden, strided_for_bf16 in (
+            # Keep the widest original projection; warmup tests cover intermediate block tiers.
+            (8, 12288, True),
+        )
+        for dtype, strided in (
+            (torch.bfloat16, strided_for_bf16),
+            (torch.float16, not strided_for_bf16),
+            (torch.float32, strided_for_bf16),
+        )
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
-@pytest.mark.parametrize("strided", [False, True])
 @torch.inference_mode()
 def test_gate_matches_materialized_sigmoid(tokens, hidden, dtype, strided):
     torch.manual_seed(42)

@@ -28,13 +28,14 @@ def rms_norm_ref(x: torch.Tensor, eps: float) -> torch.Tensor:
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
-    ("shape", "eps"),
+    ("shape", "eps", "dtype"),
     [
-        pytest.param((1, 1, 128), 1e-6, id="single-row"),
-        pytest.param((2, 8, 512), 1e-5, id="multi-head"),
-        pytest.param((1, 17, 2048), 1e-5, id="max-hidden-size"),
+        pytest.param((1, 1, 128), 1e-6, torch.float16, id="single-row-dtype0"),
+        pytest.param((1, 1, 128), 1e-6, torch.bfloat16, id="single-row-dtype1"),
+        pytest.param((2, 8, 512), 1e-5, torch.bfloat16, id="multi-head-dtype1"),
+        pytest.param((1, 17, 2048), 1e-5, torch.bfloat16, id="max-hidden-size-dtype1"),
+        pytest.param((1, 17, 2048), 1e-5, torch.float32, id="max-hidden-size-dtype2"),
     ],
 )
 @torch.inference_mode()

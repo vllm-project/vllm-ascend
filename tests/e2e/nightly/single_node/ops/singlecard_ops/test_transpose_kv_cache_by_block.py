@@ -75,17 +75,20 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
     )
     def test_transpose_kv_cache_by_block(self):
         # (layers, block_num, block_size, num_kv_head, head_dim, num_need_pulls)
-        test_cases = [
-            (16, 128, 128, 4, 128, 4),
-            (16, 128, 128, 4, 128, 2),
-            (16, 128, 128, 4, 128, 1),
-            (16, 128, 128, 8, 128, 8),
-            (16, 128, 128, 8, 128, 4),
-            (16, 128, 128, 8, 128, 2),
-        ]
-        dtypes = [torch.float16, torch.bfloat16]
-        for dtype in dtypes:
-            for layers, block_num, block_size, num_kv_head, head_dim, num_need_pulls in test_cases:
+        # Pair original shapes with dtypes; retain heads/pulls ratios 1, 2 and 4.
+        test_cases = {
+            torch.float16: [
+                (16, 128, 128, 4, 128, 2),
+                (16, 128, 128, 8, 128, 8),
+            ],
+            torch.bfloat16: [
+                (16, 128, 128, 4, 128, 4),
+                (16, 128, 128, 4, 128, 1),
+                (16, 128, 128, 8, 128, 4),
+            ],
+        }
+        for dtype, cases in test_cases.items():
+            for layers, block_num, block_size, num_kv_head, head_dim, num_need_pulls in cases:
                 with self.subTest(
                     dtype=dtype,
                     shape=f"({layers}, {block_num}, {block_size}, {num_kv_head}, {head_dim}, {num_need_pulls})",
@@ -119,6 +122,7 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
                     for i in range(layers):
                         self.assert_tensors_almost_equal(k_caches[i], cloned_k_caches[i], dtype)
                         self.assert_tensors_almost_equal(v_caches[i], cloned_v_caches[i], dtype)
+                gc.collect()
         gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
@@ -315,6 +319,5 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
             )
 
         self.assertLessEqual(max_diff, atol, f"Absolute error too large: {max_diff} > {atol}")
-        gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()

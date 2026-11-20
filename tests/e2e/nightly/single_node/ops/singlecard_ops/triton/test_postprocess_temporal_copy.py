@@ -24,8 +24,21 @@ def _copy_temporal_test_kernel(src, dst, size, TILES: tl.constexpr):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("size", [0, 7, 1027, 786432, 786435, 786443])
-@pytest.mark.parametrize("offsets", [(0, 0), (1, 1), (1, 3), (0, 8)])
+@pytest.mark.parametrize(
+    "size,offsets",
+    [
+        (0, (0, 0)),
+        (7, (0, 0)),
+        (7, (1, 1)),
+        (1027, (1, 3)),
+        (786432, (0, 0)),
+        (786435, (0, 0)),
+        (786435, (1, 1)),
+        (786435, (1, 3)),
+        (786443, (0, 8)),
+        (786443, (1, 3)),
+    ],
+)
 @pytest.mark.parametrize("tiles", [1, 4])
 def test_temporal_copy_preserves_bytes_and_guards(size, offsets, tiles):
     src_offset, dst_offset = offsets
@@ -67,19 +80,30 @@ def test_temporal_copy_config_derived_sizes(state_shape, dtype, tiles):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("precomputed", [False, True])
-@pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize(
-    "state_types,state_bytes,conv_width,conv_inner",
+    "state_types,state_bytes,conv_width,conv_inner,graph_mode,precomputed",
     [
-        pytest.param(("conv", "temporal"), 1027, 7, 12, id="mixed-unaligned-tail"),
-        pytest.param(("conv", "temporal"), 262144, 7, 12, id="qwen3-next-gdn-tp4"),
-        pytest.param(("conv", "temporal"), 3145728, 10, 18432, id="kimi-k3-dspark7-tp2"),
-        pytest.param(("conv", "temporal"), 1572864, 10, 9216, id="kimi-k3-dspark7-tp4"),
-        pytest.param(("conv", "temporal"), 1572864, 8, 9216, id="kimi-k3-dspark5-tp4"),
-        pytest.param(("conv", "temporal"), 1572864, 4, 9216, id="kimi-k3-mtp1-tp4"),
-        pytest.param(("conv", "temporal"), 786432, 10, 4608, id="kimi-k3-dspark7-tp8"),
-        pytest.param(("conv", "temporal"), 393216, 10, 2304, id="kimi-k3-dspark7-tp16"),
+        pytest.param(
+            ("conv", "temporal"),
+            state_bytes,
+            conv_width,
+            conv_inner,
+            graph_mode,
+            precomputed,
+            id=f"{name}-{graph_mode}-{precomputed}",
+        )
+        # Keep all (graph_mode, precomputed) pairs for the unaligned tail.
+        for state_bytes, conv_width, conv_inner, name, modes in (
+            (1027, 7, 12, "mixed-unaligned-tail", ((False, False), (False, True), (True, False), (True, True))),
+            (262144, 7, 12, "qwen3-next-gdn-tp4", ((False, False), (True, True))),
+            (3145728, 10, 18432, "kimi-k3-dspark7-tp2", ((False, True), (True, False))),
+            (1572864, 10, 9216, "kimi-k3-dspark7-tp4", ((False, False), (True, True))),
+            (1572864, 8, 9216, "kimi-k3-dspark5-tp4", ((False, True), (True, False))),
+            (1572864, 4, 9216, "kimi-k3-mtp1-tp4", ((False, False), (True, True))),
+            (786432, 10, 4608, "kimi-k3-dspark7-tp8", ((False, True), (True, False))),
+            (393216, 10, 2304, "kimi-k3-dspark7-tp16", ((False, False), (True, True))),
+        )
+        for graph_mode, precomputed in modes
     ],
 )
 def test_mixed_postprocess_replay_uses_updated_metadata(

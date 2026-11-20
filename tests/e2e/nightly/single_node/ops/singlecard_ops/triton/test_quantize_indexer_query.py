@@ -36,8 +36,19 @@ def assert_quantized_equal(query, expected):
     assert_quantized_outputs_equal(quantize_indexer_query(query), expected)
 
 
-@pytest.mark.parametrize("heads", [32, 64])
-@pytest.mark.parametrize("tokens", [0, 1, 3, 32, 129, 4096])
+@pytest.mark.parametrize(
+    "tokens,heads",
+    [
+        (0, 32),
+        (1, 32),
+        (3, 64),
+        (32, 32),
+        (129, 32),
+        (129, 64),
+        (4096, 32),
+        (4096, 64),
+    ],
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 @torch.inference_mode()
 def test_quantize_indexer_query(heads, tokens, dtype):

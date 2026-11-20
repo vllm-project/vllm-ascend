@@ -24,16 +24,18 @@ def _check_output_accuracy(expected: torch.Tensor, actual: torch.Tensor) -> tupl
     return pass_ratio, max_abs
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "channels,kernel_size,dilation,spec_query_len",
+    "dtype,channels,kernel_size,dilation,spec_query_len,mapped,outer_enabled",
     [
-        (256, 4, 3, 3),
-        (1031, 3, 2, 2),  # channel tail
-        (257, 4, 1, 4),
+        # Pair dtype and mapped/outer mode while retaining both modes at each shape.
+        (torch.bfloat16, 1031, 3, 2, 2, True, True),
+        (torch.float16, 1031, 3, 2, 2, False, False),
+        (torch.bfloat16, 256, 4, 3, 3, True, True),
+        (torch.float16, 256, 4, 3, 3, False, False),
+        (torch.bfloat16, 257, 4, 1, 4, False, False),
+        (torch.float16, 257, 4, 1, 4, True, True),
     ],
 )
-@pytest.mark.parametrize("mapped,outer_enabled", [(True, True), (False, False)])
 def test_spec_matches_upstream(dtype, channels, kernel_size, dilation, spec_query_len, mapped, outer_enabled):
     torch.manual_seed(2026)
     num_reqs = 5

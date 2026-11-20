@@ -31,8 +31,8 @@ def gmm_swiglu_quant(
         quantOutput (torch.Tensor): Quantized output tensor with shape (m, k // 2).
         quantScaleOutput (torch.Tensor): Quantization scaling factor with shape (m,).
     """
-    # Perform matrix multiplication with int32 precision
-    c_temp1 = torch.matmul(x.to(torch.int32), weight.to(torch.int32))
+    # These int8 dot products fit int32 and are exact in float64.
+    c_temp1 = torch.matmul(x.to(torch.float64), weight.to(torch.float64)).to(torch.int32)
     c_temp1 = c_temp1.to(torch.float32)  # Convert back to float32 for scaling
 
     # Apply per-channel and per-token scaling

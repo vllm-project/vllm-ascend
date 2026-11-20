@@ -1405,11 +1405,14 @@ def test_prefill_sparse_attention_production_shape(
 
 
 @pytest.mark.parametrize(
-    "seq_lens_list",
-    [(130, 257), (129, 200, 384)],
+    "seq_lens_list,decode_query_len,num_padded_reqs",
+    [
+        ((130, 257), 1, 0),
+        ((130, 257), 4, 2),
+        ((129, 200, 384), 1, 2),
+        ((129, 200, 384), 4, 0),
+    ],
 )
-@pytest.mark.parametrize("decode_query_len", [1, 4])
-@pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
     msa_m3_sparse_backend: SparseAttnBackend,
     seq_lens_list: tuple[int, ...],

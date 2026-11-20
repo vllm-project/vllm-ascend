@@ -106,13 +106,16 @@ def test_linear_persistent_kernel_precision(dtype, m, k, n):
 @pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
-    ("shape", "dim", "keepdim"),
+    ("shape", "dim", "keepdim", "dtype"),
     [
-        pytest.param((3, 1031, 17), 1, False, id="middle-dim-multi-block"),
-        pytest.param((5, 7, 2051), -1, True, id="negative-last-dim-keepdim"),
-        pytest.param((2051, 3), 0, True, id="first-dim-keepdim"),
+        pytest.param(shape, dim, keepdim, dtype, id=f"{name}-{dtype_name}")
+        for shape, dim, keepdim, name, low_precision_dtype in (
+            ((3, 1031, 17), 1, False, "middle-dim-multi-block", (torch.bfloat16, "dtype1")),
+            ((5, 7, 2051), -1, True, "negative-last-dim-keepdim", (torch.bfloat16, "dtype1")),
+            ((2051, 3), 0, True, "first-dim-keepdim", (torch.float16, "dtype0")),
+        )
+        for dtype, dtype_name in (low_precision_dtype, (torch.float32, "dtype2"))
     ],
 )
 def test_mean_kernel_precision(dtype, shape, dim, keepdim):

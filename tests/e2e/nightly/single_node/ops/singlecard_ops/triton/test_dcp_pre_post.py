@@ -63,8 +63,17 @@ def test_query_prep_broadcast_positional_heads(rows, nope, rope):
     torch.testing.assert_close(prep_query_head_major(query, positional), expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("world,interleave", [(2, 1), (8, 128), (8, 768)])
-@pytest.mark.parametrize("requests", [4, 32, 33])
+@pytest.mark.parametrize(
+    "world,interleave,requests",
+    [
+        (2, 1, 4),
+        (2, 1, 32),
+        (2, 1, 33),
+        # Cover both sides of the request-count dispatch at world size 8.
+        (8, 128, 32),
+        (8, 768, 33),
+    ],
+)
 def test_local_lengths_changed_graph_inputs(world, interleave, requests):
     seq = torch.tensor([0, 7, 131072, 1048576] + [1048576] * (requests - 4), dtype=torch.int32).npu()
     ends = torch.tensor([0, 2, 6, 14] + [14] * (requests - 4), dtype=torch.int32).npu()
@@ -202,8 +211,18 @@ def test_remap_exact_integer_boundaries_and_graph_replay(rows, topk, world, rank
     graph.reset()
 
 
-@pytest.mark.parametrize("tokens,world,heads", [(1, 1, 12), (17, 2, 6), (129, 8, 12), (512, 8, 12)])
-@pytest.mark.parametrize("with_local", [False, True])
+@pytest.mark.parametrize(
+    "with_local,tokens,world,heads",
+    [
+        # Keep both modes at the endpoints and alternate them at intermediate sizes.
+        (False, 1, 1, 12),
+        (False, 129, 8, 12),
+        (False, 512, 8, 12),
+        (True, 1, 1, 12),
+        (True, 17, 2, 6),
+        (True, 512, 8, 12),
+    ],
+)
 def test_output_pack_and_combine_changed_graph_inputs(tokens, world, heads, with_local):
     torch.manual_seed(43)
     # Both feature and statistics strides differ from the timing fixtures.
@@ -238,8 +257,17 @@ def test_output_pack_and_combine_changed_graph_inputs(tokens, world, heads, with
     graph.reset()
 
 
-@pytest.mark.parametrize("tokens,local_heads", [(1, 2), (17, 2), (191, 32), (512, 32), (257, 64)])
-@pytest.mark.parametrize("from_stats", [False, True])
+@pytest.mark.parametrize(
+    "tokens,local_heads,from_stats",
+    [
+        (1, 2, False),
+        (17, 2, True),
+        (191, 32, True),
+        (512, 32, False),
+        (257, 64, False),
+        (257, 64, True),
+    ],
+)
 def test_exchange_statistics_with_identity_transport(monkeypatch, tokens, local_heads, from_stats):
     from vllm_ascend.ops.triton.dcp import sfa_dcp_exchange as exchange
 

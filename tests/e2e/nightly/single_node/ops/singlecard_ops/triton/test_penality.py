@@ -13,11 +13,8 @@ from vllm_ascend.worker.v2.sample.penalties import (
     apply_penalties,
 )
 
-NUM_TOKENS = [1, 4]
 VOCAB_SIZE = [1000]
-NUM_STATUS = [1, 4]
 NUM_SPECULATIVE_TOKENS = [0, 1, 3]
-DTYPES = [torch.bfloat16, torch.float16]
 SEEDS = [42]
 DEVICES = [f"npu:{0}"]
 
@@ -294,6 +291,12 @@ def launch_with_num_workers(data, num_workers: int, block_size: int = VOCAB_BLOC
     )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _collect_garbage_after_module():
+    yield
+    gc.collect()
+
+
 @pytest.fixture(autouse=True)
 def _init_triton_device_properties():
     """apply_penalties reads get_vectorcore_num(), which asserts unless device
@@ -304,7 +307,6 @@ def _init_triton_device_properties():
 
 
 def cleanup() -> None:
-    gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
 
@@ -314,11 +316,17 @@ class TestApplyPenalties:
     @pytest.mark.skipif(
         get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
     )
-    @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+    @pytest.mark.parametrize(
+        "num_tokens,num_status,dtype",
+        [
+            (1, 1, torch.bfloat16),
+            (1, 4, torch.float16),
+            (4, 1, torch.float16),
+            (4, 4, torch.bfloat16),
+        ],
+    )
     @pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
-    @pytest.mark.parametrize("num_status", NUM_STATUS)
     @pytest.mark.parametrize("num_speculative_tokens", NUM_SPECULATIVE_TOKENS)
-    @pytest.mark.parametrize("dtype", DTYPES)
     @pytest.mark.parametrize("seed", SEEDS)
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
@@ -341,6 +349,7 @@ class TestApplyPenalties:
             device=device,
             dtype=dtype,
             seed=seed,
+            spec_decode_groups=True,
         )
 
         logits_pytorch = logits_triton.clone()
@@ -375,16 +384,25 @@ class TestApplyPenalties:
             atol = 1e-02
             rtol = 1e-02
         assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
-        gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
 
     # The test above runs at vocab_size=1000, a single block, so it never
     # exercises the per-block address arithmetic or the masked tail.
-    @pytest.mark.parametrize("vocab_size", MULTI_BLOCK_VOCAB + EXACT_BLOCK_VOCAB)
-    @pytest.mark.parametrize("num_tokens", [1, 64])
-    @pytest.mark.parametrize("num_speculative_tokens", [0, 3])
-    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize(
+        "vocab_size,num_tokens,num_speculative_tokens,dtype",
+        # At each vocab boundary, cover all dtype/speculation pairs across both row counts.
+        [
+            (vocab_size, num_tokens, num_speculative_tokens, dtype)
+            for vocab_size in (MULTI_BLOCK_VOCAB[-1], *EXACT_BLOCK_VOCAB)
+            for num_tokens, num_speculative_tokens, dtype in (
+                (1, 0, torch.bfloat16),
+                (1, 3, torch.float32),
+                (64, 0, torch.float32),
+                (64, 3, torch.bfloat16),
+            )
+        ],
+    )
     @pytest.mark.parametrize("device", DEVICES)
     @torch.inference_mode()
     def test_apply_penalties_multi_vocab_block(self, vocab_size, num_tokens, num_speculative_tokens, dtype, device):
@@ -544,6 +562,7 @@ class TestApplyPenalties:
             device=device,
             dtype=dtype,
             seed=seed,
+            spec_decode_groups=True,
         )
 
         apply_penalties(
@@ -572,6 +591,5 @@ class TestApplyPenalties:
             prompt_bin_mask,
             output_bin_counts,
         )
-        gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()

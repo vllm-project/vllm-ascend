@@ -38,10 +38,17 @@ def test_stable_gumbel_matches_fp64_reference():
     torch.testing.assert_close(actual, reference, atol=4e-6, rtol=2e-6)
 
 
-@pytest.mark.parametrize("use_triton", [False, True])
-@pytest.mark.parametrize("is_neox_style", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("mrope", [False, True])
+@pytest.mark.parametrize(
+    "mrope,dtype,is_neox_style,use_triton",
+    [
+        pytest.param(mrope, dtype, neox, use_triton, id=f"{mrope}-dtype{dtype_id}-{neox}-{use_triton}")
+        for mrope in (False, True)
+        for dtype_id, dtype in enumerate((torch.float16, torch.bfloat16))
+        for neox in (False, True)
+        # Text-only M-RoPE uses the same key-only path regardless of HAS_TRITON.
+        for use_triton in ((True,) if mrope else (False, True))
+    ],
+)
 def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_style, dtype, mrope):
     """Both NPU RoPE backends must write rotated context K, including key-only calls."""
     import vllm_ascend.ops.rotary_embedding as rope_module

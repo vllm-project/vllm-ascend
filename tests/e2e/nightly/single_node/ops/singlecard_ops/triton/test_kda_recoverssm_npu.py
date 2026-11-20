@@ -229,10 +229,18 @@ def page_view(shape, dtype, padding, head_padding=0):
     return backing, backing.as_strided(shape, (elements + padding, *inner_strides))
 
 
-@pytest.mark.parametrize("head_padding", [0, 128])
-@pytest.mark.parametrize("heads", [2, 32, 64])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("padding", [0, 128])
+@pytest.mark.parametrize(
+    "heads,state_dtype,padding,head_padding",
+    # Keep grouped FP32 dense/padded paths and pairwise head/dtype/stride coverage.
+    [
+        (64, torch.float32, 0, 0),
+        (64, torch.float32, 128, 128),
+        (64, torch.bfloat16, 0, 0),
+        (2, torch.float32, 0, 0),
+        (2, torch.bfloat16, 0, 128),
+        (2, torch.bfloat16, 128, 0),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
@@ -485,10 +493,27 @@ def reference(q, k, v, raw_g, raw_beta, a_log, bias, lower_bound, state, starts,
     return output, final, records
 
 
-@pytest.mark.parametrize("num_spec", [0, 1, 3, 5, 7])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("activation_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.parametrize(
+    "num_spec,state_dtype,activation_dtype,lower_bound",
+    # Keep all pairwise span, dtype, and gate coverage across the original cases.
+    [
+        (0, torch.float32, torch.bfloat16, -5.0),
+        (0, torch.bfloat16, torch.bfloat16, None),
+        (0, torch.bfloat16, torch.float16, -5.0),
+    ]
+    # Keep both dtypes and gate settings at the longest speculative span.
+    + [
+        (7, torch.float32, torch.bfloat16, None),
+        (7, torch.bfloat16, torch.bfloat16, -5.0),
+        (7, torch.bfloat16, torch.float16, None),
+    ]
+    # Keep both dtypes and gate settings at the first speculative span.
+    + [
+        (1, torch.float32, torch.bfloat16, -5.0),
+        (1, torch.float32, torch.float16, None),
+        (1, torch.bfloat16, torch.float16, -5.0),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_recoverssm_preserves_accepted_state_across_steps(
@@ -883,8 +908,11 @@ def test_kimi_recoverssm_matches_native_over_multiple_windows(heads, record_prop
         previous_counts = counts
 
 
-@pytest.mark.parametrize("key_dim,value_dim", [(7, 5), (7, 8), (8, 5)])
-@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@pytest.mark.parametrize(
+    "lower_bound,key_dim,value_dim",
+    # Use both gate modes when both tiles need masking.
+    [(-5.0, 7, 5), (-5.0, 7, 8), (None, 7, 5), (None, 8, 5)],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_property):
@@ -918,21 +946,48 @@ def test_recoverssm_ragged_tiles(key_dim, value_dim, lower_bound, record_propert
     assert_accuracy(state, expected_state, record_property, "commit_ragged")
 
 
-@pytest.mark.parametrize("mode", ["cross", "exact", "no_cross", "mixed", "no_cross_inplace"])
-@pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.parametrize(
-    "state_dtype,heads,key_dim,value_dim",
+    "state_dtype,heads,key_dim,value_dim,mode,graph_mode",
+    # Replay all modes on the FP32 model path, which also covers A5's grouped commit.
+    # BF16 exact and no-cross replay are covered by the small and masked shapes below.
     [
-        (torch.float32, 2, 128, 128),
-        (torch.bfloat16, 2, 128, 128),
-        (torch.float32, None, 128, 128),
-        (torch.float32, 16, 128, 128),
-        (torch.float32, 8, 128, 128),
-        (torch.bfloat16, None, 128, 128),
-        (torch.float32, 2, 7, 5),
-        (torch.bfloat16, 2, 7, 8),
+        pytest.param(dtype, None, 128, 128, mode, graph_mode, id=f"{name}-{mode}-{graph_mode}")
+        for dtype, name, mode_cases in (
+            (
+                torch.float32,
+                "fp32_model",
+                (
+                    ("cross", False),
+                    ("cross", True),
+                    ("exact", True),
+                    ("no_cross", True),
+                    ("mixed", True),
+                    ("no_cross_inplace", True),
+                ),
+            ),
+            (
+                torch.bfloat16,
+                "bf16_model",
+                (("cross", False), ("cross", True), ("mixed", True), ("no_cross_inplace", True)),
+            ),
+        )
+        for mode, graph_mode in mode_cases
+    ]
+    + [
+        pytest.param(torch.float32, 2, 128, 128, "cross", True, id="fp32_small-cross-True"),
+        pytest.param(torch.bfloat16, 2, 128, 128, "exact", True, id="bf16_small-exact-True"),
+        pytest.param(torch.float32, 16, 128, 128, "mixed", True, id="tp4-mixed-True"),
+        pytest.param(torch.float32, 8, 128, 128, "no_cross_inplace", True, id="tp8-no_cross_inplace-True"),
+    ]
+    # Preserve both sides of the alignment boundary for the masked tiles.
+    + [
+        pytest.param(dtype, 2, key_dim, value_dim, mode, graph_mode, id=f"{name}-{mode}-{graph_mode}")
+        for dtype, key_dim, value_dim, name in (
+            (torch.float32, 7, 5, "masked_kv"),
+            (torch.bfloat16, 7, 8, "bf16_masked_k"),
+        )
+        for mode, graph_mode in (("cross", False), ("no_cross", True))
     ],
-    ids=["fp32_small", "bf16_small", "fp32_model", "tp4", "tp8", "bf16_model", "masked_kv", "bf16_masked_k"],
 )
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
@@ -1094,9 +1149,17 @@ def test_context_input_constraints():
         KDARecoverSSMCommitContext.create([], spec_query_len=6, max_num_reqs=4)
 
 
-@pytest.mark.parametrize("num_layers", [11, 12, 34])
-@pytest.mark.parametrize("batch", [11, 12])
-@pytest.mark.parametrize("graph_mode", [False, True])
+@pytest.mark.parametrize(
+    "graph_mode,batch,num_layers",
+    [
+        (False, 11, 11),
+        (False, 11, 34),
+        (False, 12, 12),
+        (True, 11, 11),
+        (True, 12, 12),
+        (True, 12, 34),
+    ],
+)
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_model_commit_context(batch, graph_mode, num_layers, record_property):
@@ -1184,17 +1247,19 @@ def test_model_commit_context(batch, graph_mode, num_layers, record_property):
 
 
 @pytest.mark.parametrize(
-    "span,heads,activation_dtype,lower_bound",
-    [(span, heads, torch.bfloat16, -5.0) for heads in (32, 64) for span in (1, 2, 4, 6, 8)]
-    + [
-        (4, 64, torch.float16, -5.0),
-        (8, 64, torch.float16, None),
-        (2, 32, torch.bfloat16, None),
-        (8, 64, torch.bfloat16, None),
-        (6, 16, torch.bfloat16, -5.0),
+    "graph_mode,span,heads,activation_dtype,lower_bound",
+    [
+        # Pair eager and graph at the shortest and longest windows and on the 16-head path.
+        (False, 1, 32, torch.bfloat16, -5.0),
+        (False, 8, 64, torch.float16, None),
+        (False, 6, 16, torch.bfloat16, -5.0),
+        (True, 1, 32, torch.bfloat16, -5.0),
+        (True, 8, 64, torch.bfloat16, -5.0),
+        (True, 8, 64, torch.float16, None),
+        (True, 8, 64, torch.bfloat16, None),
+        (True, 6, 16, torch.bfloat16, -5.0),
     ],
 )
-@pytest.mark.parametrize("graph_mode", [False, True])
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
 def test_commit_window_uses_device_path(

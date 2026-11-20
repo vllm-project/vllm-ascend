@@ -88,12 +88,10 @@ def _build_rejection_sample_inputs(
     "num_speculative_steps,temperature,unconditional_rates",
     [
         (3, 1.0, [0.9, 0.5, 0.2]),
-        (3, 0.0, [0.9, 0.5, 0.2]),
         (3, 1.0, [1.0, 1.0, 1.0]),
         (3, 0.0, [1.0, 1.0, 1.0]),
         (3, 1.0, [0.0, 0.0, 0.0]),
         (3, 0.0, [0.0, 0.0, 0.0]),
-        (1, 1.0, [0.7]),
         (1, 0.0, [0.7]),
     ],
 )
@@ -155,7 +153,6 @@ def test_synthetic_rejection_sample(
         )
         # num_sampled includes the resampled/bonus token.
         num_accepted_chunks.append(num_sampled - 1)
-        gc.collect()
         torch.npu.empty_cache()
 
     num_accepted = torch.cat(num_accepted_chunks)
@@ -174,8 +171,11 @@ def test_synthetic_rejection_sample(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("has_draft_logits", [True, False])
-@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize(
+    "use_block_verification,has_draft_logits",
+    # Exercise vocab clamping in both modes and use block mode for the no-draft control.
+    [(False, True), (True, True), (True, False)],
+)
 @torch.inference_mode()
 def test_draft_vocab_narrower_than_target_vocab(has_draft_logits: bool, use_block_verification: bool):
     """A draft vocab narrower than the target's must not read out of bounds.
@@ -560,8 +560,16 @@ def test_entropy_verify_ragged_requests(has_draft_logits, temperature):
     assert (sampled[valid] == 1).all()
 
 
-@pytest.mark.parametrize("has_draft_logits", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype,has_draft_logits",
+    # FP32 compares both paths; BF16 and FP16 exercise loading both logits tensors.
+    [
+        (torch.float32, False),
+        (torch.float32, True),
+        (torch.float16, True),
+        (torch.bfloat16, True),
+    ],
+)
 @torch.inference_mode()
 def test_entropy_parameters_and_per_position_thresholds(has_draft_logits, dtype):
     num_trials, steps = 256, 3

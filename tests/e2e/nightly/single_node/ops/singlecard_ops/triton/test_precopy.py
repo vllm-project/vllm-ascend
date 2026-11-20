@@ -75,8 +75,7 @@ def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first)
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("conv_dim_first", [False, True])
-@pytest.mark.parametrize("has_idx_mapping", [False, True])
-@pytest.mark.parametrize("temporal_tiles", [1, 4])
+@pytest.mark.parametrize("temporal_tiles,has_idx_mapping", [(1, True), (4, False), (4, True)])
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
 def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_tiles):
     device = torch.device("npu:0")

@@ -19,14 +19,17 @@ from vllm_ascend.worker.v2.block_table import (
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("replicated_draft", [False, True])
 @pytest.mark.parametrize(
-    ("cp_size", "cp_rank", "cp_interleave"),
+    ("cp_size", "cp_rank", "cp_interleave", "replicated_draft"),
     [
-        pytest.param(1, 0, 1, id="cp1"),
-        pytest.param(2, 1, 2, id="cp2_interleaved"),
-        pytest.param(4, 2, 1, id="cp4_interleaved"),
-        pytest.param(4, 2, 128, id="cp4_logical_block_interleaved"),
+        # CP_SIZE=1 uses the same mapping for either draft layout.
+        pytest.param(1, 0, 1, False, id="cp1-False"),
+        pytest.param(2, 1, 2, False, id="cp2_interleaved-False"),
+        pytest.param(2, 1, 2, True, id="cp2_interleaved-True"),
+        pytest.param(4, 2, 1, False, id="cp4_interleaved-False"),
+        pytest.param(4, 2, 1, True, id="cp4_interleaved-True"),
+        pytest.param(4, 2, 128, False, id="cp4_logical_block_interleaved-False"),
+        pytest.param(4, 2, 128, True, id="cp4_logical_block_interleaved-True"),
     ],
 )
 def test_compute_slot_mapping_npu_kernel_cp(

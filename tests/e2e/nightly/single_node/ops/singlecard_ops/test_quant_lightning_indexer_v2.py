@@ -336,8 +336,10 @@ def test_candidate_consumer_preserves_each_query_mask(ratio, query_count):
         assert torch.isin(indices // 8, candidates_cpu[row]).all(), f"wrong candidate row at query {row}"
 
 
-@pytest.mark.parametrize("queries", [1, 5])
-@pytest.mark.parametrize("context", [1536, 8192, 32768])
+@pytest.mark.parametrize(
+    "queries,context",
+    [(1, 1536), (5, 8192), (1, 32768), (5, 32768)],
+)
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", [1, 2, 3])
 @pytest.mark.parametrize("topk", [64, 512])

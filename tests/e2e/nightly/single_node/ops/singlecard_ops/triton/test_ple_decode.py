@@ -11,13 +11,15 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm_ascend.ops.triton_ple import ple_conv_decode
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "tokens,channels,kernel_size,dilation,mapped,strided_indices,window_contiguous",
+    "tokens,channels,kernel_size,dilation,mapped,strided_indices,window_contiguous,dtype",
     [
-        (7, 1031, 4, 3, True, True, False),  # channel tail and mixed-token map
-        (5, 256, 2, 1, False, False, True),  # one-element state window
-        (6, 257, 3, 2, False, True, True),  # different dilation and state layout
+        # Channel tail and mixed-token map cover both dtypes.
+        pytest.param(7, 1031, 4, 3, True, True, False, torch.bfloat16, id="7-1031-4-3-True-True-False-dtype0"),
+        pytest.param(7, 1031, 4, 3, True, True, False, torch.float16, id="7-1031-4-3-True-True-False-dtype1"),
+        # Cover a one-element window and a dilated transposed window.
+        pytest.param(5, 256, 2, 1, False, False, True, torch.bfloat16, id="5-256-2-1-False-False-True-dtype0"),
+        pytest.param(6, 257, 3, 2, False, True, True, torch.float16, id="6-257-3-2-False-True-True-dtype1"),
     ],
 )
 def test_decode_parameter_categories(

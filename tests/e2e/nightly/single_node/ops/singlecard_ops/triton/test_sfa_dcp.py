@@ -13,8 +13,15 @@ from vllm_ascend.ops.triton.sfa_indexer_store import store_indexer_key_scale  # 
 from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton  # noqa: E402
 
 
-@pytest.mark.parametrize("tokens,local_heads,head_dim", [(513, 32, 512), (257, 64, 512), (1, 64, 1024)])
-@pytest.mark.parametrize("head_major_lse", [False, True])
+@pytest.mark.parametrize(
+    "head_major_lse,tokens,local_heads,head_dim",
+    [
+        (False, 257, 64, 512),
+        # A single token has the same LSE strides in either layout.
+        (False, 1, 64, 1024),
+        (True, 513, 32, 512),
+    ],
+)
 def test_tiled_pack_preserves_raw_bits(tokens, local_heads, head_dim, head_major_lse):
     ranks, heads = 2, 2 * local_heads
     bits = torch.tensor([0, -32768, 1, 16256, 32640, -128, 32705, -63], dtype=torch.int16)
@@ -204,8 +211,16 @@ def test_remap_empty_input(shape):
     assert remap_sparse_indices_triton(value, 8, 0, 128) is value
 
 
-@pytest.mark.parametrize("ranks,interleave", [(4, 128), (8, 64), (2, 1), (3, 127)])
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize(
+    "ranks,interleave,dtype",
+    # Keep minimum/maximum power-of-two layouts and both dtypes for the odd layout.
+    [
+        (8, 64, torch.int64),
+        (2, 1, torch.int32),
+        (3, 127, torch.int32),
+        (3, 127, torch.int64),
+    ],
+)
 def test_remap_integer_layout_boundaries_and_graph(ranks, interleave, dtype):
     torch.npu.set_device(0)
     rng = torch.Generator().manual_seed(16350)

@@ -63,6 +63,8 @@ VOCAB_SIZES = [
 
 # Different topk values to test
 TOPK_VALUES = [1, 2, 5, 10, 32, 64]
+# Generate the original batch-size draws before selecting representative combinations.
+TOPK_CASES = [(random.randint(1, 64), vocab_size, topk) for vocab_size in VOCAB_SIZES for topk in TOPK_VALUES]
 
 
 @pytest.mark.skipif(
@@ -71,7 +73,11 @@ TOPK_VALUES = [1, 2, 5, 10, 32, 64]
 )
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
-    [(random.randint(1, 64), vocab_size, topk) for vocab_size in VOCAB_SIZES for topk in TOPK_VALUES],
+    [
+        (batch_size, vocab_size, topk)
+        for batch_size, vocab_size, topk in TOPK_CASES
+        if topk in (1, 64) or vocab_size == VOCAB_SIZES[-1]
+    ],
 )
 def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
     """

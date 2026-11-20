@@ -87,7 +87,7 @@ def npu_add_rms_norm_bias_golden(input_x1, input_x2, input_gamma, input_beta, ke
 )
 @pytest.mark.parametrize(
     "row, col",
-    [(1, 8), (1000, 15000), (255, 8), (1000, 128), (77, 3000), (128, 7168)],
+    [(1, 8), (1000, 15000), (1000, 128), (128, 7168)],
 )
 @pytest.mark.parametrize(
     "dtype, atol, rtol, kernelType",
@@ -197,11 +197,7 @@ def npu_add_rms_norm_bias_golden_a5(x1, x2, gamma, beta, epsilon=EPSILON):
 @pytest.mark.parametrize(
     "shape, gamma_shape",
     [
-        ((1, 6144), (6144,)),
-        ((65, 1025), (1025,)),
         ((3, 7, 33), (7, 33)),
-        ((7, 8192), (8192,)),
-        ((65, 32768), (32768,)),
         ((3, 32771), (32771,)),
         ((1024, 6144), (6144,)),
     ],

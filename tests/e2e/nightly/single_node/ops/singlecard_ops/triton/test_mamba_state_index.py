@@ -23,15 +23,20 @@ pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("padding", [0, 13])
-@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize(
-    "state_shape",
+    "state_shape,index_dtype,padding",
     [
-        (1, 1, STATE_IO_BLOCK_SIZE - 1),
-        (1, 1, STATE_IO_BLOCK_SIZE),
-        (1, 1, STATE_IO_BLOCK_SIZE + 1),
-        (8, 128, 128),
+        pytest.param(shape, index_dtype, padding, id=f"state_shape{shape_id}-index_dtype{dtype_id}-{padding}")
+        for shape_id, (shape, paddings) in enumerate(
+            [
+                ((1, 1, STATE_IO_BLOCK_SIZE - 1), (13,)),
+                ((1, 1, STATE_IO_BLOCK_SIZE), (0,)),
+                ((1, 1, STATE_IO_BLOCK_SIZE + 1), (0, 13)),
+                ((8, 128, 128), (0, 13)),
+            ]
+        )
+        for dtype_id, index_dtype in enumerate((torch.int32, torch.int64))
+        for padding in paddings
     ],
 )
 def test_gather_and_scatter_ssm_states(

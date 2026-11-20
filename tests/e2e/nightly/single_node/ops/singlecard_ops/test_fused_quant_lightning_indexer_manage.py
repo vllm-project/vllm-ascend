@@ -97,6 +97,16 @@ ROUTE_STATE_SCENARIOS = tuple(
     pytest.param(q, state, offload_len, cache_tokens, id=f"q{q}-state{state}")
     for q, offload_len, cache_tokens in ALL_ROUTE_SCENARIOS
     for state in (REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY)
+    # These 32-head inputs are already exercised by HEAD_ROUTE_SCENARIOS.
+    if (q, state)
+    not in (
+        (1, REQUEST_STATE_NON_OFFLOAD),
+        (4, REQUEST_STATE_FIRST_DECODE),
+        (7, REQUEST_STATE_STEADY),
+        (8, REQUEST_STATE_NON_OFFLOAD),
+        (12, REQUEST_STATE_FIRST_DECODE),
+        (14, REQUEST_STATE_STEADY),
+    )
 )
 
 HEAD_ROUTE_SCENARIOS = tuple(

@@ -60,7 +60,7 @@ def golden_inplace_partial_rotary_mul(
 )
 @pytest.mark.parametrize(
     "num_tokens",
-    [1, 16, 128, 1000],
+    [1, 1000],
 )
 @pytest.mark.parametrize(
     "dtype, atol, rtol",

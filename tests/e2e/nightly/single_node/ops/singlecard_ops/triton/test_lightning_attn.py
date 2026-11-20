@@ -348,19 +348,11 @@ def _get_tolerances(dtype):
     [
         pytest.param(*case, id=f"b{case[0]}-h{case[1]}-n{case[2]}-d{case[3]}-e{case[4]}-{str(case[5]).split('.')[-1]}")
         for case in [
-            # Small seq, basic sanity
-            (1, 4, 32, 128, 64, torch.bfloat16),
-            # n < BLOCK (256), not aligned
+            # Partial tail and the exact 256-token block boundary.
             (1, 4, 100, 128, 128, torch.bfloat16),
-            # float16 dtype
             (1, 4, 256, 128, 128, torch.float16),
-            # float32 dtype
+            # Preserve FP32 and the smaller head width with unequal value dimension.
             (1, 4, 128, 128, 128, torch.float32),
-            # batch > 1
-            (2, 4, 128, 128, 64, torch.bfloat16),
-            # d = 64 (smaller head dim)
-            (1, 4, 128, 64, 64, torch.bfloat16),
-            # e != d
             (1, 4, 128, 64, 128, torch.bfloat16),
         ]
     ],

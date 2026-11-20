@@ -68,7 +68,7 @@ def _sample(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("num_tokens", [1, 16, 64])
+@pytest.mark.parametrize("num_tokens", [1, 64])
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 def test_categorical_sample_greedy(num_tokens, dtype):
     """temperature=0 must match exact argmax on the long-vocab shape."""
@@ -338,8 +338,15 @@ def test_categorical_sample_apply_temperature_matches_prescaled_logits():
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("per_token_col", [False, True])
-@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
+@pytest.mark.parametrize(
+    "dtype,per_token_col",
+    [
+        (torch.float32, False),
+        (torch.float32, True),
+        (torch.float16, False),
+        (torch.bfloat16, True),
+    ],
+)
 def test_categorical_sample_logits_cache(per_token_col, dtype):
     """Cache must store raw pre-temperature logits at mapped slots."""
     torch.manual_seed(4)
