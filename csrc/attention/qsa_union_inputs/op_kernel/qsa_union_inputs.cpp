@@ -276,15 +276,10 @@ private:
             if (current == COUNTS_PER_BLOCK) {
                 DataCopy(union_count_gm_[base], compact, COUNTS_PER_BLOCK);
             } else {
-                event_t scalar_ready = static_cast<event_t>(
-                    GetTPipePtr()->FetchEventID(HardEvent::MTE3_S));
-                SetFlag<HardEvent::MTE3_S>(scalar_ready);
-                WaitFlag<HardEvent::MTE3_S>(scalar_ready);
-                for (uint32_t index = 0; index < current; ++index) {
-                    union_count_gm_.SetValue(
-                        base + index, compact.GetValue(index));
-                }
-                continue;
+                // Keep tail counts on the DMA path without writing past output.
+                DataCopyPad(union_count_gm_[base], compact,
+                            DataCopyExtParams(1, current * sizeof(int32_t),
+                                              0, 0, 0));
             }
             event_t complete = static_cast<event_t>(
                 GetTPipePtr()->FetchEventID(HardEvent::MTE3_S));

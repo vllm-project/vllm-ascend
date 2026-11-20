@@ -30,6 +30,20 @@ def test_qsa_union_inputs_matches_torch(rows, input_groups):
         torch.testing.assert_close(actual_tensor.cpu(), expected_tensor, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("groups", [1021, 1022, 1023, 1024])
+@torch.inference_mode()
+def test_qsa_union_inputs_count_writeback(groups):
+    rows = groups * 8
+    compact = torch.full((rows, 515), -1, dtype=torch.int32, device="npu")
+    compact[:, :128] = torch.arange(128, dtype=torch.int32, device="npu")
+    visible = torch.full((rows,), 131072, dtype=torch.int32, device="npu")
+    row_map = torch.arange(rows, dtype=torch.int32, device="npu").reshape(groups, 8)
+    expected = torch.full((1, groups), 128, dtype=torch.int32)
+    for _ in range(32):
+        _, counts, _ = torch.ops._C_ascend.qsa_union_inputs(compact, visible, row_map)
+        torch.testing.assert_close(counts.cpu(), expected, rtol=0, atol=0)
+
+
 def test_qsa_union_inputs_rejects_non_power_of_two_width():
     with pytest.raises(ValueError, match="positive power of two"):
         build_qsa_union_inputs_from_compact(torch.zeros(8, 11), torch.zeros(8), torch.zeros(1, 8))
