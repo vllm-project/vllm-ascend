@@ -1836,12 +1836,18 @@ def test_producer_passes_lease_duration_to_control_thread(monkeypatch) -> None:
 @pytest.mark.parametrize("extra, duration, interval", [({}, 120, 20), ({"kv_lease_duration": 60}, 60, 10)])
 def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, extra, duration, interval) -> None:
     config = SimpleNamespace(
+        kv_role="kv_consumer",
         is_kv_consumer=True,
         get_from_extra_config=extra.get,
     )
-    monkeypatch.setattr(
-        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
-    )
+
+    def init_base(self, vllm_config, engine_id, kv_cache_config):
+        self.kv_transfer_config = config
+        self.engine_id = engine_id
+
+    monkeypatch.setattr(MooncakeBaseConnectorScheduler, "__init__", init_base)
+    logger = MagicMock()
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
     receiver = MagicMock()
 
     def create_receiver(ready):
@@ -1852,6 +1858,12 @@ def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, 
     heartbeat = MagicMock()
     monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat)
     scheduler = MooncakePullConnectorScheduler(MagicMock(), "engine", MagicMock())
+    logger.debug.assert_called_once()
+    message, *args = logger.debug.call_args.args
+    assert message % tuple(args) == (
+        "MooncakeHeartbeat event=config engine_id=engine kv_role=kv_consumer "
+        f"initial_lease_s={duration} renewal_window_s={duration * 2 // 3} heartbeat_interval_s={interval}"
+    )
     assert scheduler._kv_lease_duration == duration
     assert isinstance(scheduler._validated_producer_leases, TTLCache)
     assert scheduler._validated_producer_leases.ttl == 600
