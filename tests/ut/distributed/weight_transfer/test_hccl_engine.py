@@ -41,10 +41,9 @@ def _npu_context():
 
 
 def _make_engine():
-    engine = object.__new__(HCCLWeightTransferEngine)
-    engine.model = MagicMock()
-    engine.model_config = MagicMock()
-    engine.device = torch.device("cpu")
+    engine = HCCLWeightTransferEngine(
+        config=MagicMock(), vllm_config=MagicMock(), device=torch.device("cpu"), model=MagicMock()
+    )
     engine._last_hccl_update_info = {}
     engine._bounded_streams = None
     return engine
@@ -64,7 +63,10 @@ def test_finish_weight_update_finalizes_layerwise_reload():
     engine = _make_engine()
 
     finish = "finalize_layerwise_reload" if vllm_version_is("0.33.0") else "finish_reload"
-    with patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize:
+    with (
+        patch(f"vllm.model_executor.model_loader.reload.{finish}") as finalize,
+        patch("torch.accelerator.empty_cache"),
+    ):
         engine.finish_weight_update()
 
     args: tuple[Any, ...] = (engine.model, engine.model_config)
