@@ -1,4 +1,4 @@
-pr: 20242
+pr: 22640
 entries:
   - category: performance
     text: MC2 and FusedMC2 MoE dispatch on Model Runner V2 now skip graph padding rows when `VLLM_MOE_SKIP_PADDING` is enabled (the default), avoiding the expert hotspot caused by those rows in FULL decode graphs. Set `VLLM_MOE_SKIP_PADDING=0` to restore the previous behavior.
