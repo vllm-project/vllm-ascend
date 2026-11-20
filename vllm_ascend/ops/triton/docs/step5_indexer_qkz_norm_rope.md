@@ -54,10 +54,10 @@
       same-dtype outputs take the second cast as a no-op. `index_z` is a
       bit-exact passthrough.
 - **Algorithm flow** (persistent-style grid over tokens):
-    1. Grid `min(max(tiles_q, tiles_kz), num_vector_cores)`;
-       `ROWS_PER_PROGRAM_Q` / `ROWS_PER_PROGRAM_KZ` are autotuned per
-       (`M_q`, `M_k`, `head_dim`, `rotary_dim`) bucket — decode (1 token)
-       and prefill (large tiles) settle on different tiles-per-program.
+   1. Grid `min(max(tiles_q, tiles_kz), num_vector_cores)`;
+      `ROWS_PER_PROGRAM_Q` / `ROWS_PER_PROGRAM_KZ` are selected once per
+      layer shape (`head_dim`, `rotary_dim`) and reused for all token
+      counts, instead of being retuned for each token-count bucket.
     2. Q stage: each program loops over its token tiles; per tile the
        head axis is chunked (`H_CHUNK` sized to a 4096-lane budget) and
        each chunk is normed, rotated and stored through block pointers.
@@ -115,7 +115,7 @@
   comes from the `constexpr` head counts and flags (required: head chunking
   and the static head loops derive from them; fixed per layer shape) and
   from Triton's value/alignment classes of the runtime integer arguments
-  (`M_q`, `M_k`, the strides; classes `==1`, multiples of 16, other). The
+  (`tokens`, the strides; classes `==1`, multiples of 16, other). The
   autotuner keys only on `head_dim` and `rotary_dim`, deliberately excluding
   token counts: the first call at each layer shape benchmarks the config
   list once, and all subsequent token counts reuse that selection instead

@@ -297,8 +297,7 @@ def _indexer_qkz_norm_rope_kernel(
     cos_ptr,
     sin_ptr,
     positions_ptr,
-    M_q,
-    M_k,
+    tokens,
     stride_x_q,
     stride_x_k,
     stride_x_z,
@@ -346,7 +345,7 @@ def _indexer_qkz_norm_rope_kernel(
         b_all_q = tl.zeros((BLOCK_D,), dtype=tl.float32)
         b_real_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
         b_imag_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
-    num_q_tokens = M_q // num_q_heads
+    num_q_tokens = tokens
     num_q_tiles = (num_q_tokens + ROWS_PER_PROGRAM_Q - 1) // ROWS_PER_PROGRAM_Q
     for t in range(pid, num_q_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_Q
@@ -375,7 +374,7 @@ def _indexer_qkz_norm_rope_kernel(
         b_all_k = tl.zeros((BLOCK_D,), dtype=tl.float32)
         b_real_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
         b_imag_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
-    num_k_tokens = M_k // num_k_heads
+    num_k_tokens = tokens
     num_k_tiles = (num_k_tokens + ROWS_PER_PROGRAM_KZ - 1) // ROWS_PER_PROGRAM_KZ
     for t in range(pid, num_k_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_KZ
@@ -477,9 +476,6 @@ def _fused_indexer_qkz_norm_rope_impl(
     out_k = torch.empty((tokens, num_k_heads * head_dim), device=index_q.device, dtype=index_k.dtype)
     out_z = torch.empty((tokens, num_k_heads * head_dim), device=index_q.device, dtype=index_z.dtype)
 
-    m_q = tokens * num_q_heads
-    m_k = tokens * num_k_heads
-
     grid = lambda meta: (
         min(
             max(
@@ -503,8 +499,7 @@ def _fused_indexer_qkz_norm_rope_impl(
         cos,
         sin,
         positions,
-        m_q,
-        m_k,
+        tokens,
         index_q.stride(0),
         index_k.stride(0),
         index_z.stride(0),
