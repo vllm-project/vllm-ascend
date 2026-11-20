@@ -75,7 +75,7 @@ def has_moe_lora(lora_context) -> bool:
     return slots is None or active is None or bool(slots.intersection(active))
 
 
-def should_disable_all2all_quant_for_lora(lora_context) -> bool:
+def should_disable_all2all_quant_for_lora(lora_context, quant_type=None) -> bool:
     """Return whether AlltoAll dispatch must stay floating-point for MoE LoRA.
 
     Every EP rank must agree on whether to issue the extra activation-scale
@@ -84,9 +84,16 @@ def should_disable_all2all_quant_for_lora(lora_context) -> bool:
     are also identical across ranks. Under DP>1 (or unknown replication), stay
     conservative whenever the layer has a loaded expert adapter so idle DP peers
     never diverge on collective exchange count.
+
+    When ``quant_type`` is supplied and routes through the unfused LoRA
+    boundary (``should_use_unfused_quant_moe_for_lora``), dispatch must also
+    stay floating-point so base and adapter batches agree across dispatch,
+    MLP, empty EP ranks, and combine.
     """
     if lora_context is None:
         return False
+    if quant_type is not None and should_use_unfused_quant_moe_for_lora(lora_context, quant_type):
+        return True
     slots = getattr(lora_context, "layer_lora_slots", None)
     if slots is not None and not slots:
         return False
@@ -406,6 +413,31 @@ def moe_lora_apply_w2(lora_context, *, down_out, silu_out, lora_routing):
         reset_lora_indices(lora_context)
 
 
+def _describe_moe_lora_tensors(tensors) -> str:
+    if isinstance(tensors, torch.Tensor):
+        return str(tuple(tensors.shape))
+    if isinstance(tensors, (list, tuple)):
+        return str([tuple(t.shape) if isinstance(t, torch.Tensor) else type(t).__name__ for t in tensors])
+    return repr(type(tensors).__name__)
+
+
+def _format_moe_lora_shape_error(layer: nn.Module, index: int, lora_a, lora_b, err: Exception) -> str:
+    module_name = getattr(layer.base_layer, "prefix", "") or type(layer).__name__
+    expected_w13_a = [tuple(t.shape[-3:]) for t in getattr(layer, "w13_lora_a_stacked", ())]
+    expected_w13_b = [tuple(t.shape[-3:]) for t in getattr(layer, "w13_lora_b_stacked", ())]
+    expected_w2_a = [tuple(t.shape[-3:]) for t in getattr(layer, "w2_lora_a_stacked", ())]
+    expected_w2_b = [tuple(t.shape[-3:]) for t in getattr(layer, "w2_lora_b_stacked", ())]
+    return (
+        f"Failed to load MoE LoRA weights for module '{module_name}' at slot {index}: "
+        f"got lora_a={_describe_moe_lora_tensors(lora_a)}, "
+        f"lora_b={_describe_moe_lora_tensors(lora_b)}; "
+        f"expected local expert slice shapes w13_a={expected_w13_a}, w13_b={expected_w13_b}, "
+        f"w2_a={expected_w2_a}, w2_b={expected_w2_b}. "
+        f"Verify that the adapter's hidden/intermediate dimensions match the base model. "
+        f"Original error: {err}"
+    )
+
+
 class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     """Ascend-native MoE-LoRA wrapper.
 
@@ -460,10 +492,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         try:
             super().set_lora(index, lora_a, lora_b)
         except RuntimeError as err:
-            module_name = getattr(self.base_layer, "prefix", "") or type(self).__name__
-            raise ValueError(
-                f"Failed to load MoE LoRA weights for module '{module_name}' at slot {index}: {err}"
-            ) from err
+            raise ValueError(_format_moe_lora_shape_error(self, index, lora_a, lora_b, err)) from err
         self._lora_slots.add(index)
 
     def _build_lora_context(self):

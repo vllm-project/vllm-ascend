@@ -432,6 +432,32 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         self.assertEqual(out, "final_out")
         self.assertEqual(mock_gmm.call_args.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
 
+    def test_apply_gmm1_skips_lora_when_inactive(self):
+        method = self._make_method()
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(2, 8, 16),
+            w2_weight=torch.randn(2, 16, 8),
+            w13_bias=None,
+            w2_bias=None,
+        )
+        lora_context = SimpleNamespace(
+            punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+            layer_lora_slots={0},
+            use_ep=True,
+            replicated_batch=True,
+        )
+        mlp_compute_input = _mlp_compute_input(layer=layer, lora_context=lora_context)
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.routed_experts._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.ALLTOALL),
+            ),
+            patch("torch_npu.npu_grouped_matmul", return_value=["gate_up_out"], create=True),
+        ):
+            out = method.apply_gmm1(mlp_compute_input)
+        self.assertEqual(out, "gate_up_out")
+        self.assertIsNone(method._lora_routing)
+
 
 class TestApplyMoeMlp(unittest.TestCase):
     def _quant_method(self, fused: bool):
@@ -609,6 +635,36 @@ class TestApplyMoeMlp(unittest.TestCase):
         mock_evt.assert_called_once_with()
         quant_method.apply_gmm1.assert_not_called()
         quant_method.apply_gmm2.assert_not_called()
+
+    def test_lora_unfused_boundary_casts_empty_quantized_rows_to_float(self):
+        for quant_type, expected_dtype in (
+            (QuantType.W4A8, torch.bfloat16),
+            (QuantType.W8A8, torch.float16),
+        ):
+            quant_method = self._quant_method(fused=True)
+            quant_method.get_mlp_weights.return_value = MoEWeights(
+                w1=None,
+                w2=None,
+                w2_scale=[torch.ones(1, dtype=expected_dtype)],
+            )
+            mlp_compute_input = _mlp_compute_input(
+                hidden_states=torch.empty(0, 8, dtype=torch.int8),
+                quant=MoEQuantParams(quant_type=quant_type, is_per_channel_weight=True),
+                lora_context=SimpleNamespace(
+                    punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                    layer_lora_slots={0},
+                    use_ep=True,
+                    replicated_batch=True,
+                ),
+            )
+            with patch(f"{MOE_MLP}.maybe_record_event", return_value="evt"):
+                out, evt = apply_moe_mlp(mlp_compute_input, quant_method)
+
+            self.assertEqual(evt, "evt")
+            self.assertEqual(out.shape, (0, 8))
+            self.assertEqual(out.dtype, expected_dtype)
+            quant_method.apply_gmm1.assert_not_called()
+            quant_method.apply_gmm2.assert_not_called()
 
 
 class TestUnifiedApplyActivation(unittest.TestCase):

@@ -84,9 +84,10 @@ This path enables language-model LoRA projections (`wq_a`, `wq_b`, `wkv`, `wo_a`
 - **Quantization & constraints**:
   - W4A8 MoE LoRA requires per-channel weight scales without antiquant offsets or dynamic EPLB. On 8-way TP, W4A8 MoE checkpoints require `--enable-expert-parallel` so the grouped-matmul K dimension satisfies the kernel alignment constraint.
   - Active `wo_a` adapters require a single local output-projection group per rank (`n_local_groups == 1`), no fine-grained output-projection TP, and `--fully-sharded-loras` left off.
-  - Under `DP=1`, layers with no active expert slot skip MoE LoRA delta kernels; under `EP` with `DP>1`, layers with loaded expert slots conservatively run the MoE LoRA path because remote ranks may route adapter tokens. To preserve zero-delta numerical equivalence between base and zero adapters in a LoRA-enabled engine, shared experts and LoRA-capable quantized MoE stay on the linear-wrapper / unfused quantization boundary path.
-- **Latency comparison methodology**:
-  - Always compare base vs adapter latency inside the **same LoRA-enabled engine** (rather than against a separate non-LoRA engine, which runs a different base/shared-expert path) and report exact decode conditions (output length, batch size, and graph/bounded-replay mode).
+  - Under `DP=1`, layers with no active expert slot skip MoE LoRA delta kernels; under `EP` with `DP>1`, layers with loaded expert slots conservatively run the MoE LoRA path because remote ranks may route adapter tokens. To preserve zero-delta numerical equivalence and dispatch/combine dtype consistency between base and adapter requests in a LoRA-enabled engine, shared experts and LoRA-capable quantized MoE stay on the linear-wrapper / floating-point unfused quantization boundary path whenever an adapter is loaded on those layers.
+- **Latency & throughput characteristics**:
+  - Enabling `--enable-lora` routes wrapped base linear layers (including shared experts) through unfused LoRA wrappers instead of fused base kernels, adding a fixed structural decode overhead (~19–23% measured on Atlas A3 W4A8 for both attention-only and MoE adapters, independent of adapter weights).
+  - Always compare base vs adapter latency inside the **same LoRA-enabled engine** (rather than against a separate non-LoRA engine, which runs different base/shared-expert fused kernels) and report exact decode conditions (output length, batch size, and graph/bounded-replay mode).
 
 Set `WEIGHTS_DIR` and `ADAPTER_ROOT` to compatible local artifacts before launching:
 

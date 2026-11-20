@@ -35,7 +35,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.expert_transfer.expert_offload_utils import expert_offload_weights
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
-from vllm_ascend.lora.fused_moe import reset_lora_indices, sync_lora_context
+from vllm_ascend.lora.fused_moe import has_moe_lora, reset_lora_indices, sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
@@ -241,11 +241,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             group_list=mlp_compute_input.group_list,
         )[0]
 
-        # MoE LoRA: only attempt injection when an adapter wraps this layer and
-        # the comm method provided routing metadata in lora_context.
+        # MoE LoRA: only attempt injection when an adapter applies to this layer
+        # and batch and the comm method provided routing metadata in lora_context.
         self._lora_routing = None
         lora_context = mlp_compute_input.lora_context
-        if lora_context is not None:  # LoRA applied
+        if has_moe_lora(lora_context):  # LoRA applied
             from vllm_ascend.lora.fused_moe import (
                 _recover_moe_lora_routing_all2all,
                 _recover_moe_lora_routing_allgather,

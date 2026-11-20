@@ -544,22 +544,27 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
     ):
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
+        quant_type = token_dispatch_input.quant.quant_type
         # This decision selects how many AlltoAll exchanges the dispatch issues
         # (the quantized path sends the token scale in a second exchange), so
         # every EP rank in the group must take the same branch. Relying on
         # ``layer_lora_slots`` (and ``active_lora_slots`` when DP=1) keeps
-        # quantized dispatch active when this layer has no MoE adapter loaded
-        # while staying conservative for loaded layers under DP>1 so idle DP
-        # peers never diverge and hang HCCL.
-        if should_disable_all2all_quant_for_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
+        # quantized dispatch active when this layer has no MoE adapter loaded;
+        # when ``should_use_unfused_quant_moe_for_lora`` applies (for example,
+        # an expert adapter is loaded on W4A8/W8A8), dispatch also stays
+        # floating-point so base and adapter batches agree on the BF16 boundary
+        # across dispatch, empty EP ranks, MLP, and combine.
+        if token_dispatch_input.quant.is_quant and should_disable_all2all_quant_for_lora(
+            self.lora_context, quant_type=quant_type
+        ):
             validate_quant_moe_lora_activation_input(
-                quant_type=token_dispatch_input.quant.quant_type,
+                quant_type=quant_type,
                 hidden_states=token_dispatch_input.hidden_states,
                 dynamic_scale=token_dispatch_input.routing.pertoken_scale,
             )
-            # LoRA A requires the original BF16/FP16 activations. The W8A8
-            # LoRA backend performs dynamic quantization immediately before
-            # each local expert GMM, after the AlltoAll exchange.
+            # LoRA A requires the original BF16/FP16 activations. The quantized
+            # LoRA/unfused path performs dynamic quantization inside the MLP
+            # boundary, after the AlltoAll exchange.
             with_quant = False
         dst_type = token_dispatch_input.quant.get_dst_type
         hidden_states = token_dispatch_input.hidden_states
@@ -800,6 +805,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         permutated_local_input_tokens: torch.Tensor,
         combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
+        assert permutated_local_input_tokens.is_floating_point(), (
+            "TokenDispatcherWithAll2AllV._combine_postprocess requires floating-point "
+            f"activations, got {permutated_local_input_tokens.dtype}."
+        )
         # Unpermutation 1: AlltoAll output to output
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,

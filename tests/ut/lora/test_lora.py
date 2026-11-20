@@ -484,15 +484,17 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
 
 
 @pytest.mark.parametrize(
-    ("context", "expected"),
+    ("context", "quant_type", "expected_disable", "expected_exchange"),
     [
-        (None, False),
+        (None, None, False, False),
         (
             SimpleNamespace(
                 punica_wrapper=SimpleNamespace(no_lora=False, active_lora_slots={0}),
                 layer_lora_slots=set(),
                 replicated_batch=False,
             ),
+            None,
+            False,
             False,
         ),
         (
@@ -501,6 +503,8 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
                 layer_lora_slots={0},
                 replicated_batch=False,
             ),
+            None,
+            True,
             True,
         ),
         (
@@ -509,6 +513,38 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
                 layer_lora_slots={0},
                 replicated_batch=True,
             ),
+            None,
+            False,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            QuantType.W4A8,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            QuantType.W8A8,
+            True,
+            False,
+        ),
+        (
+            SimpleNamespace(
+                punica_wrapper=SimpleNamespace(no_lora=True, active_lora_slots=set()),
+                layer_lora_slots={0},
+                replicated_batch=True,
+            ),
+            QuantType.W4A8MXFP,
+            False,
             False,
         ),
         (
@@ -517,6 +553,8 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
                 layer_lora_slots={0},
                 replicated_batch=True,
             ),
+            None,
+            False,
             False,
         ),
         (
@@ -525,13 +563,15 @@ def test_add_lora_fused_moe_skips_when_adapter_slots_empty():
                 layer_lora_slots={0},
                 replicated_batch=True,
             ),
+            None,
+            True,
             True,
         ),
     ],
 )
-def test_should_disable_all2all_quant_for_lora(context, expected):
-    assert should_disable_all2all_quant_for_lora(context) is expected
-    assert should_exchange_all2all_lora_indices(context) is expected
+def test_should_disable_all2all_quant_for_lora(context, quant_type, expected_disable, expected_exchange):
+    assert should_disable_all2all_quant_for_lora(context, quant_type=quant_type) is expected_disable
+    assert should_exchange_all2all_lora_indices(context) is expected_exchange
 
 
 def test_all2all_lora_index_helpers_handle_empty_and_short_tensors() -> None:
@@ -610,8 +650,17 @@ def test_ascend_fused_moe_set_lora_wraps_shape_runtime_error() -> None:
         patch("vllm_ascend.lora.fused_moe._get_lora_device", return_value=torch.device("cpu")),
     ):
         wrapper = AscendFusedMoEWithLoRA(base_layer)
+    wrapper.w13_lora_a_stacked = (torch.empty(1, 2, 8, 4096),)
+    wrapper.w13_lora_b_stacked = (torch.empty(1, 2, 256, 8),)
+    wrapper.w2_lora_a_stacked = (torch.empty(1, 2, 8, 256),)
+    wrapper.w2_lora_b_stacked = (torch.empty(1, 2, 4096, 8),)
+    lora_a = [torch.empty(2, 8, 5120), torch.empty(2, 8, 256), torch.empty(2, 8, 5120)]
+    lora_b = [torch.empty(2, 256, 8), torch.empty(2, 5120, 8), torch.empty(2, 256, 8)]
     with (
         patch.object(FusedMoEWithLoRA, "set_lora", side_effect=RuntimeError("shape mismatch")),
-        pytest.raises(ValueError, match="model.layers.2.mlp.experts.*slot 1.*shape mismatch"),
+        pytest.raises(
+            ValueError,
+            match="model.layers.2.mlp.experts.*slot 1.*\\(2, 8, 5120\\).*\\(2, 8, 4096\\).*shape mismatch",
+        ),
     ):
-        wrapper.set_lora(1, [], [])
+        wrapper.set_lora(1, lora_a, lora_b)

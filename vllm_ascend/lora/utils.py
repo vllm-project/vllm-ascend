@@ -41,20 +41,77 @@ def _format_lora_shape_error(
     lora_a: torch.Tensor | list[torch.Tensor | None],
     lora_b: torch.Tensor | list[torch.Tensor | None],
     err: Exception,
+    *,
+    expected_full: tuple[int, int] | None = None,
 ) -> str:
     """Build a diagnostic error message with module prefix, slot, and tensor shapes."""
     base_layer = getattr(layer, "base_layer", None)
     module_name = getattr(base_layer, "prefix", "") or type(layer).__name__
     expected_a = [tuple(t.shape[-2:]) for t in getattr(layer, "lora_a_stacked", ())]
     expected_b = [tuple(t.shape[-2:]) for t in getattr(layer, "lora_b_stacked", ())]
+    tp_size = getattr(layer, "tp_size", 1)
+    full_hint = f", expected_full=(in={expected_full[0]}, out={expected_full[1]})" if expected_full is not None else ""
     return (
         f"Failed to load LoRA weights for module '{module_name}' at slot {index}: "
         f"got lora_a={_describe_lora_tensor_shapes(lora_a)}, "
         f"lora_b={_describe_lora_tensor_shapes(lora_b)}; "
         f"expected local slice shapes lora_a={expected_a}, lora_b={expected_b} "
         f"(input_size={getattr(layer, 'input_size', '?')}, "
-        f"output_slices={getattr(layer, 'output_slices', '?')}). Original error: {err}"
+        f"output_slices={getattr(layer, 'output_slices', '?')}, tp_size={tp_size}{full_hint}). "
+        "Verify that the adapter's hidden/projection dimensions match the base model checkpoint "
+        "(for example, DeepSeek-V4 vs DeepSeek-V4.1 differ in hidden_size and q_lora_rank). "
+        f"Original error: {err}"
     )
+
+
+def _validate_single_linear_lora_shapes(
+    layer: nn.Module,
+    index: int,
+    lora_a: torch.Tensor | list[torch.Tensor],
+    lora_b: torch.Tensor | list[torch.Tensor],
+) -> None:
+    if (
+        not isinstance(lora_a, torch.Tensor)
+        or not isinstance(lora_b, torch.Tensor)
+        or lora_a.ndim != 2
+        or lora_b.ndim != 2
+    ):
+        return
+    a_stacked = getattr(layer, "lora_a_stacked", None)
+    b_stacked = getattr(layer, "lora_b_stacked", None)
+    if not a_stacked or not b_stacked:
+        return
+    max_rank_a = a_stacked[0].size(2)
+    max_rank_b = b_stacked[0].size(3)
+    local_in = a_stacked[0].size(3)
+    local_out = b_stacked[0].size(2)
+    tp_size = getattr(layer, "tp_size", 1)
+
+    if isinstance(layer, RowParallelLinearWithLoRA):
+        expected_in, expected_out = local_in * tp_size, local_out
+    elif isinstance(layer, ColumnParallelLinearWithLoRA) and not getattr(layer, "is_merged_col_linear", False):
+        expected_in, expected_out = local_in, local_out * tp_size
+    elif isinstance(layer, ReplicatedLinearWithLoRA):
+        expected_in, expected_out = local_in, local_out
+    else:
+        return
+
+    rank_ok = lora_a.shape[0] <= max_rank_a and lora_b.shape[1] <= max_rank_b and lora_a.shape[0] == lora_b.shape[1]
+    dims = (lora_a.shape[1], lora_b.shape[0])
+    # Warmup (LoRAModelManager.create_dummy_lora) builds dummy tensors from local
+    # sharded stacked buffer sizes even when tp_size > 1.
+    dims_ok = dims == (expected_in, expected_out) or (tp_size > 1 and dims == (local_in, local_out))
+    if not (rank_ok and dims_ok):
+        raise ValueError(
+            _format_lora_shape_error(
+                layer,
+                index,
+                lora_a,
+                lora_b,
+                ValueError("adapter tensor shape does not match target projection"),
+                expected_full=(expected_in, expected_out),
+            )
+        )
 
 
 def _apply_packed_lora(layer, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
@@ -233,6 +290,7 @@ class _TransposedLoRABMixin(BaseLinearLayerWithLoRA):
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
     ) -> None:
+        _validate_single_linear_lora_shapes(self, index, lora_a, lora_b)
         try:
             super().set_lora(index, lora_a, lora_b)
         except RuntimeError as err:
