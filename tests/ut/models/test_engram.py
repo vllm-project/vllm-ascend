@@ -409,6 +409,134 @@ def test_gate_accepts_distinct_rotation_blocks():
     assert torch.equal(result[1], hidden[1])
 
 
+# ---------------------------------------------------------------------------
+# Parametrized numerical-correctness coverage for the bare engram_gate path.
+#
+# 910B/A2 lacks HardwareCapability.ENGRAM_UNROTATED_GATE (A5-only), so it
+# always takes the unfused engram_gate in common.py regardless of rotation.
+# These tests pin that production path's numerics so the upcoming engram
+# fusion work has a regression baseline. The reference below mirrors the
+# exact operation order of engram_gate (common.py:133-156) so a tight
+# tolerance is meaningful.
+# ---------------------------------------------------------------------------
+
+
+def _engram_gate_reference(hidden, key, value, channel_weight, rotation_block, token_mask, eps):
+    """CPU reference that mirrors engram_gate (common.py) operation-for-operation."""
+    dim = hidden.shape[-1]
+    original = hidden.float()
+    if rotation_block is not None:
+        if rotation_block.ndim == 2:
+            original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
+        elif rotation_block.ndim == 3:
+            original = (
+                torch.matmul(
+                    original.unflatten(-1, (rotation_block.shape[0], 32)).unsqueeze(-2),
+                    rotation_block.float().transpose(-1, -2),
+                )
+                .squeeze(-2)
+                .flatten(-2)
+            )
+    key = key.float()
+    rstd = torch.rsqrt(original.square().mean(-1) + eps)
+    rstd = rstd * torch.rsqrt(key.square().mean(-1) + eps)
+    dot = (original * channel_weight.float() * key).sum(-1) * rstd * dim**-0.5
+    magnitude = dot.abs().clamp_min(1e-6).sqrt()
+    gate = torch.sigmoid(torch.where(torch.signbit(dot), -magnitude, magnitude))
+    gate = gate.masked_fill(~token_mask.unsqueeze(-1), 0)
+    return (hidden.float() + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).to(hidden.dtype)
+
+
+@pytest.mark.parametrize("dim", [64, 128])
+@pytest.mark.parametrize("hc_mult", [1, 4])
+@pytest.mark.parametrize("num_tokens", [0, 2, 3])
+def test_engram_gate_numerical_correctness(dim, hc_mult, num_tokens):
+    """engram_gate matches the reference across dim/hc_mult/token counts.
+
+    rotation=None is the 910B/A2 production path (ENGRAM_UNROTATED_GATE is
+    A5-only). num_tokens=0 exercises the empty-tensor edge case.
+    """
+    torch.manual_seed(0)
+    hidden = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    key = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    value = torch.randn(num_tokens, dim, dtype=torch.bfloat16)
+    channel_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16)
+    mask = torch.ones(num_tokens, dtype=torch.bool)
+
+    result = engram_gate(hidden, key, value, channel_weight, None, mask, 1e-6)
+    expected = _engram_gate_reference(hidden, key, value, channel_weight, None, mask, 1e-6)
+
+    assert result.shape == hidden.shape
+    assert result.dtype == hidden.dtype
+    if num_tokens == 0:
+        assert result.numel() == 0
+    else:
+        torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("rotation_kind", ["none", "2d", "3d"])
+def test_engram_gate_rotation_forms(rotation_kind):
+    """engram_gate handles None / 2D block / 3D block-diagonal rotation."""
+    torch.manual_seed(1)
+    dim, hc_mult, num_tokens = 64, 2, 2
+    hidden = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    key = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    value = torch.randn(num_tokens, dim, dtype=torch.bfloat16)
+    channel_weight = torch.randn(hc_mult, dim, dtype=torch.bfloat16)
+    mask = torch.ones(num_tokens, dtype=torch.bool)
+
+    if rotation_kind == "none":
+        rotation = None
+    elif rotation_kind == "2d":
+        # single 64x64 block diagonal (dim divisible by block 32)
+        first = torch.eye(32)
+        second = torch.flip(torch.eye(32), dims=(0,))
+        rotation = torch.block_diag(first, second)
+    else:  # 3d: a block table [num_blocks, 32, 32]
+        first = torch.eye(32)
+        second = torch.flip(torch.eye(32), dims=(0,))
+        rotation = torch.stack((first, second))
+
+    result = engram_gate(hidden, key, value, channel_weight, rotation, mask, 1e-6)
+    expected = _engram_gate_reference(hidden, key, value, channel_weight, rotation, mask, 1e-6)
+
+    assert result.shape == hidden.shape
+    assert result.dtype == hidden.dtype
+    torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
+
+    # rotation must actually change the output vs the unrotated path
+    if rotation_kind != "none":
+        unrotated = engram_gate(hidden, key, value, channel_weight, None, mask, 1e-6)
+        assert not torch.equal(result, unrotated)
+
+
+@pytest.mark.parametrize("mask_kind", ["all_valid", "all_invalid", "partial"])
+def test_engram_gate_token_mask(mask_kind):
+    """Masked tokens contribute zero gate (residual-only); unmasked are gated."""
+    torch.manual_seed(2)
+    dim, hc_mult, num_tokens = 64, 1, 2
+    hidden = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    key = torch.randn(num_tokens, hc_mult, dim, dtype=torch.bfloat16)
+    value = torch.full((num_tokens, dim), 0.25, dtype=torch.bfloat16)
+    channel_weight = torch.ones(hc_mult, dim, dtype=torch.bfloat16)
+    if mask_kind == "all_valid":
+        mask = torch.ones(num_tokens, dtype=torch.bool)
+    elif mask_kind == "all_invalid":
+        mask = torch.zeros(num_tokens, dtype=torch.bool)
+    else:  # partial
+        mask = torch.tensor([True, False])
+
+    result = engram_gate(hidden, key, value, channel_weight, None, mask, 1e-6)
+    expected = _engram_gate_reference(hidden, key, value, channel_weight, None, mask, 1e-6)
+
+    torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
+
+    # When every token is masked, the gate is fully zeroed and the output
+    # collapses to the residual (hidden) alone.
+    if mask_kind == "all_invalid":
+        torch.testing.assert_close(result, hidden, rtol=0, atol=0)
+
+
 def test_loader_applies_mxfp8_checkpoint_scales(tmp_path):
     key = "layers.1.engram.embed.weight"
     scale_key = "layers.1.engram.embed.scale"
