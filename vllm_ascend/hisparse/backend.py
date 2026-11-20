@@ -69,7 +69,7 @@ def _allocate_resolver_workspace(runtime: HiSparseRuntime):
 
 
 def _allocate_attention_lengths(runtime: HiSparseRuntime) -> tuple[torch.Tensor, torch.Tensor] | None:
-    if runtime.kv_dtype != torch.float8_e4m3fn:
+    if runtime.kv_dtype not in (torch.int8, torch.float8_e4m3fn):
         return None
     return (
         torch.arange(runtime.max_swap_rows + 1, dtype=torch.int32, device=runtime.device),
@@ -162,7 +162,7 @@ class AscendHiSparseBackend(HiSparseBackend):
         attention_capacity = 0
         attention_block_stride = None
         attention_lengths = None
-        if runtime.kv_dtype == torch.float8_e4m3fn:
+        if runtime.kv_dtype in (torch.int8, torch.float8_e4m3fn):
             from vllm_ascend.hisparse.c8 import c8_storage_view
 
             # The resolver consumes virtual page rows. Attention consumes dense

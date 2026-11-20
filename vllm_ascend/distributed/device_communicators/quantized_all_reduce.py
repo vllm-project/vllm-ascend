@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Quantized all-reduce for large bf16 TP collectives on Atlas A2.
+"""Quantized all-reduce for large bf16 TP collectives on Atlas A2/A5.
 
 Halves the all-reduce payload (bf16 -> int8 -> reduce -> bf16). Opt-in, and it
 only pays off for large messages, so it is gated by a payload threshold.
@@ -25,54 +25,56 @@ different groups of 910C cards).
 
 Group scope
 -----------
-The wrapper is constructed for every parallel group (tp, ep, mc2, dp, pp, ...),
-because the same ``NPUCommunicator`` backs all of them, but only groups with at
-most 8 ranks take the int8 path. EP/MC2 groups are ``DP x PCP x TP`` sized, so
-they can be larger than any valid TP degree; those groups keep the plain bf16
-path and never fail at start-up. The tensor-parallel degree itself is validated
-when the config is parsed (``QuantizedAllReduceConfig._validate_preconditions``),
-so TP > 8 is still rejected up front.
+The wrapper uses the same routing rules on A2 and A5. It is constructed
+for every parallel group, and groups with at most 8 ranks can take the int8
+path. Larger EP/MC2 groups keep bf16. Eligible bf16 tensors are selected by
+shape and payload size, without inspecting the forward phase or graph mode.
 
 Configuration
 -------------
 Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
-    --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 16777216}}'
+    --additional-config '{"quantized_all_reduce_config": {"enable": true, "quant_dtype": "int8"}}'
 
   enable     bool, default false.
   min_numel  Payload threshold in elements: a collective is quantized only when
              its payload reaches min_numel elements, i.e. min_numel * 2 bytes of
              bf16 data. The default 16,777,216 is 32 MiB, i.e. 8192 tokens at
              hidden_size 2048 or 3277 tokens at hidden_size 5120. Concurrency
-             matters only through batching (32 concurrent 1k-token requests form
-             one 16k-token step and qualify); decode steps never qualify.
+             matters only through the collective payload. Mixed batches and
+             decode take the int8 path if they meet the same size/shape gates.
 
-  Each collective carries a fixed ~0.5 ms cost (absmax, tiny fp32 amax
-  all-reduce, quantize, dequantize), so the int8 path only pays off above
-  ~20-24 MiB: 16 MiB +13%, 32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37%
-  (vs a plain bf16 all-reduce on 4x910B3). Do not lower min_numel further; if
-  max_num_batched_tokens * hidden_size * 2 is below the threshold the feature
-  can never trigger, so leave it disabled.
+  The optimized A2 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
+  32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37% versus BF16 on
+  4x910B3. A5 TP=2/4 measurements also support a conservative 32 MiB gate.
+  Do not lower min_numel without target-hardware and model validation.
 
   The setting is read when the TP communicator is created (server start-up) and
   is active when every TP worker logs
-  "Quantized all-reduce enabled (min_numel=..., max_q=...)".
+  "INT8 quantized all-reduce enabled (group=..., min_numel=..., max_q=...)".
+  To diagnose actual calls, add the following to the same --additional-config:
+  "runtime_config": {"ascend_log": {"debug":
+  ["distributed.device_communicators.quantized_all_reduce"]}}
+  Look for QAR-HIT and QAR-SKIP. These Python logs may also appear during
+  warmup or graph capture and do not count graph replays. Disable debug logging
+  for performance measurements.
 """
+
+import logging
 
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
-from vllm.logger import logger
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.logger import init_logger_ascend
 
-# Validated on A2 (910B, measured end to end). A3 (910C) runs the kernels, but
-# its bf16 HCCS bandwidth is about 2.6x that of A2, so the fixed per-collective
-# cost of the int8 path (amax sync + quantize + dequantize) exceeds the transfer
-# time it saves at every payload size; A3 is therefore rejected instead of
-# silently regressing throughput.
-_VALID_DEVICE_TYPES = (AscendDeviceType.A2,)
+logger = init_logger_ascend(__name__)
+
+# A2 is validated end to end; A5 TP=2/4 has standalone numerical and
+# performance evidence. A3 remains disabled due to its measured regression.
+_VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A5)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
@@ -81,10 +83,12 @@ _MAX_VALID_WORLD_SIZE = 8
 class QuantizedAllReduce:
     """Wrapper adding int8 quantized all-reduce around a base all_reduce."""
 
-    def __init__(self, group: "dist.ProcessGroup", min_numel: int) -> None:
+    def __init__(self, group: "dist.ProcessGroup", min_numel: int, group_name: str = "") -> None:
         self.group = group
+        self.group_name = group_name
         self.world_size = dist.get_world_size(group)
         device_type = get_ascend_device_type()
+        self.device_type = device_type
         # Fail fast on unvalidated families: a silent bf16 fallback would hide
         # a misconfiguration, and 310P lacks bf16 npu_quantize support anyway.
         if device_type not in _VALID_DEVICE_TYPES:
@@ -94,8 +98,8 @@ class QuantizedAllReduce:
                 f"but the current device family is {device_type.name}. "
                 "Disable it or use a supported device."
             )
-        # This communicator is also built for non-TP groups (ep/mc2/dp/...),
-        # whose sizes are not a tensor-parallel degree; those groups keep bf16.
+        # Match A2 routing on every family, including non-TP groups. Oversized
+        # EP/MC2 groups fall back without failing communicator construction.
         self.supported = self.world_size <= _MAX_VALID_WORLD_SIZE
         # Integer-safe bound: scale = amax / max_q keeps every rank within
         # +/-max_q, so the TP-way sum is <= 127 and int8 cannot wrap.
@@ -105,26 +109,68 @@ class QuantizedAllReduce:
         # 32 MiB by default, the measured break-even rounded up. See docstring.
         self.min_numel = min_numel
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def _skip_reason(self, input_: torch.Tensor) -> str | None:
         if not self.supported:
-            # Oversized groups (ep/mc2 = DP x PCP x TP) are out of scope: keep
-            # the plain bf16 path rather than failing at start-up.
+            return "unsupported_group"
+        if input_.dtype != torch.bfloat16:
+            return "dtype"
+        if input_.ndim < 2 or input_.shape[-1] < 64:
+            return "degenerate_shape"
+        if input_.numel() < self.min_numel:
+            return "below_threshold"
+        return None
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        reason = self._skip_reason(input_)
+        if reason == "unsupported_group":
+            # Unsupported, oversized groups stay on the plain BF16 path.
             logger.warning_once(
-                "quantized all-reduce disabled for this %d-rank group "
-                "(supported groups have at most %d ranks); its collectives stay bf16.",
+                "quantized all-reduce disabled for unsupported group %s "
+                "(world_size=%d, device=%s); its collectives stay bf16.",
+                self.group_name,
                 self.world_size,
-                _MAX_VALID_WORLD_SIZE,
+                self.device_type.name,
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[QAR-SKIP] reason=unsupported_group group=%s world_size=%d shape=%s dtype=%s "
+                    "numel=%d min_numel=%d",
+                    self.group_name,
+                    self.world_size,
+                    tuple(input_.shape),
+                    input_.dtype,
+                    input_.numel(),
+                    self.min_numel,
+                )
             dist.all_reduce(input_, group=self.group)
             return input_
-        if (
-            input_.dtype != torch.bfloat16
-            or input_.ndim < 2  # 1-D would degrade per-channel scales to per-element ones
-            or input_.shape[-1] < 64  # degenerate channel dim (e.g. spec-decode topk rows)
-            or input_.numel() < self.min_numel
-        ):
+        if reason is not None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[QAR-SKIP] reason=%s group=%s world_size=%d shape=%s dtype=%s numel=%d min_numel=%d",
+                    reason,
+                    self.group_name,
+                    self.world_size,
+                    tuple(input_.shape),
+                    input_.dtype,
+                    input_.numel(),
+                    self.min_numel,
+                )
             dist.all_reduce(input_, group=self.group)
             return input_
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[QAR-HIT] group=%s world_size=%d shape=%s dtype=%s numel=%d payload_bytes=%d min_numel=%d max_q=%d",
+                self.group_name,
+                self.world_size,
+                tuple(input_.shape),
+                input_.dtype,
+                input_.numel(),
+                input_.numel() * input_.element_size(),
+                self.min_numel,
+                self.max_q,
+            )
 
         # [*, C] view: the last dim carries the channels that share a scale.
         flat = input_.reshape(-1, input_.shape[-1])

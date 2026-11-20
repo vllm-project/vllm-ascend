@@ -74,7 +74,7 @@ docker images | grep vllm-ascend
 
 ### 3. What models does vllm-ascend support?
 
-Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
+Find more details [<u>supported models</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -83,11 +83,11 @@ There are many channels that you can communicate with our community developers /
 - Submit a GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-ascend/issues?page=1).
 - Join our [<u>weekly meeting</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z) and share your ideas.
 - Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your questions.
-- Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
+- Join our Ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
 
 ### 5. What features does vllm-ascend V1 support?
 
-Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
+Find more details [<u>supported features</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
@@ -217,23 +217,23 @@ There are several factors that affect output determinism:
 
 ### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models?
 
-Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
+Some multi-modal models requires the `librosa` package to be installed. You need to install the `qwen-omni-utils` package to ensure all dependencies are met. For Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
 
 ### 17. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
-```text
+```output
 capture_begin:../torch_npu/csrc/core/npu/NPUGraph.cpp:230 NPU function error: c10_npu::acl::AclmdlRICaptureBegin(capture_stream_, capture_mode), error code is 207008
 [Error]: Stream resources are insufficient.
 [PID: ...] Insufficient_Stream_Resources(EL0009): The stream resources are insufficient.
 ```
 
-When vLLM Ascend recognizes this capture-time stream-resource signature in the error text, it re-raises the error with targeted guidance for ACL graph sizing and mitigation.
+When vllm-ascend recognizes this capture-time stream-resource signature in the error text, it re-raises the error with targeted guidance for ACL graph sizing and mitigation.
 
 Recommended mitigation strategies:
 
 1. Upgrade to a newer HDK/CANN stack if one is available for your environment. Recent releases improve ACL graph capacity, so older workarounds may no longer be necessary.
-2. Manually reduce the configured graph sizes, for example: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}', or lower `max_cudagraph_capture_size`.
+2. Manually reduce the configured graph sizes, for example: '{"cudagraph_capture_sizes":[size1, size2, size3, …]}', or lower `max_cudagraph_capture_size`.
 3. If your workload is mostly uniform decode, try ACLGraph's `FULL` or `FULL_DECODE_ONLY` mode instead of the `PIECEWISE`.
 4. If you use `PIECEWISE` or `FULL_AND_PIECEWISE` and still hit this failure after upgrading, set `cudagraph_capture_sizes` manually according to your real workload and reduce the configured coverage.
 5. If you are debugging a startup failure, temporarily disable graph mode (`cudagraph_mode="NONE"` / `enforce_eager=True`) to confirm the issue is capture-related.
@@ -245,7 +245,7 @@ ACL graph capture can still fail when the runtime resources required by the sele
 
 TorchNPU will be overridden when installing vllm-ascend. If you need to install a specific version of TorchNPU, you can manually install the specified version of TorchNPU after vllm-ascend is installed.
 
-### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
+### 19. On certain systems (e.g., Kylin OS), docker pull may fail with an invalid tar header error
 
 On certain operating systems, such as Kylin OS, you may encounter an `invalid tar header` error during the `docker pull` process:
 
@@ -276,7 +276,7 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 When using `--shm-size`, you may need to add the `--privileged=true` flag to your `docker run` command to grant the container necessary permissions. Please be aware that using `--privileged=true` grants the container extensive privileges on the host system, which can be a security risk. Only use this option if you understand the implications and trust the container's source.
 
-### 21. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+### 21. How to set SOC_VERSION when building from source on a CPU-only machine?
 
 When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
 
@@ -301,7 +301,7 @@ export SOC_VERSION="<value starting with ascend950>"
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
 
-- vLLM usually logs stats on your server. You might see metrics like `NPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
+- vLLM usually logs stats on your server. You might see metrics like `NPU KV cache usage: 99.0%`. When reaching 100%, it triggers preemption.
 - When launching a vLLM server, you will see logs like `NPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
 
 Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.
@@ -318,4 +318,4 @@ Single-node deployment is recommended when the model fits within the memory of a
 
 ### 25. What is the difference between FIA and PA operators for attention?
 
-FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+FIA (Fused Infer Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

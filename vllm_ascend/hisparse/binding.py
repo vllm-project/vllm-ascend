@@ -74,15 +74,14 @@ def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
         raise ValueError("HiSparse indexer C4 is not supported by this adapter.")
     if spec.cache_sparse_li_c8:
         if not (
-            spec.dtype == torch.float8_e4m3fn
-            and spec.scale_dtype == torch.float32
+            (spec.dtype, spec.scale_dtype) in ((torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32))
             and spec.scale_dim == 1
             and spec.num_kv_heads == 1
             and spec.head_size == 128
             and spec.block_size == 128
             and spec.sfa_dcp_replicated_indexer_size == 1
         ):
-            raise ValueError("HiSparse indexer C8 requires E4M3FN K128 with one FP32 scale per token, block128.")
+            raise ValueError("HiSparse indexer C8 requires INT8/FP16 or E4M3FN/FP32 K128, block128.")
     elif spec.scale_dim:
         raise ValueError("HiSparse indexer scales require an explicit supported quantization format.")
 
@@ -93,35 +92,39 @@ def _quantized_indexer_views(cache: torch.Tensor, spec: AscendSFAIndexerCacheSpe
     stride = cache.stride(0)
     width = spec.head_size
     key_bytes = block * heads * width
-    scale_bytes = block * heads * torch.float32.itemsize
+    scale_size = spec.scale_dtype.itemsize
+    scale_bytes = block * heads * scale_size
     offset = cache.storage_offset()
     # Core's view covers all bytes reserved for each token. The Indexer
     # kernels use a page with contiguous K followed by contiguous scales.
     if (
-        cache.dtype != torch.float8_e4m3fn
+        cache.dtype != spec.dtype
         or (heads, block, row_bytes) != (1, spec.block_size, spec.state_content_size_bytes)
         or cache.stride()[2:] != (row_bytes, 1)
         or pages <= 0
         or stride < key_bytes + scale_bytes
         or stride % width
-        or (offset + key_bytes) % torch.float32.itemsize
-        or stride % torch.float32.itemsize
+        or (offset + key_bytes) % scale_size
+        or stride % scale_size
         or offset + (pages - 1) * stride + key_bytes + scale_bytes > cache.untyped_storage().nbytes()
     ):
-        raise ValueError("Invalid HiSparse FP8 indexer K/scale page geometry.")
+        raise ValueError("Invalid HiSparse C8 indexer K/scale page geometry.")
     key = torch.as_strided(cache, (pages, block, heads, width), (stride, width, width, 1))
     # Reinterpret only a zero-length contiguous alias before constructing the
     # scale view; dtype conversion of a strided tensor would impose unrelated
     # constraints on its last axis. Offsets below are absolute storage offsets.
-    raw = torch.as_strided(cache, (0,), (1,), storage_offset=0).view(torch.float32)
+    raw = torch.as_strided(cache, (0,), (1,), storage_offset=0).view(spec.scale_dtype)
     scale = torch.as_strided(
-        raw, (pages, block, heads, 1), (stride // 4, 1, 1, 1), storage_offset=(offset + key_bytes) // 4
+        raw,
+        (pages, block, heads, 1),
+        (stride // scale_size, 1, 1, 1),
+        storage_offset=(offset + key_bytes) // scale_size,
     )
     return key, scale
 
 
 def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
-    """Write byte-preserving K and FP32 scales using this layer's page stride.
+    """Write byte-preserving K and scales using this layer's page stride.
 
     Derive aliases from the current cache tuple, so profiling-cache replacement
     and teardown cannot leave a second set of persistent cache references.
@@ -131,15 +134,20 @@ def write_hisparse_indexer_c8(key, scale, values, scales, slots) -> None:
     block, width = key.shape[1], key.shape[-1]
     count = slots.numel()
     if values.numel() != count * width or scales.numel() != count:
-        raise ValueError("HiSparse FP8 indexer writes require matching token/slot counts.")
-    if values.dtype != key.dtype or scales.dtype != torch.float32:
-        raise ValueError("HiSparse FP8 indexer writes require E4M3FN data and FP32 scales.")
+        raise ValueError("HiSparse C8 indexer writes require matching token/slot counts.")
+    if (
+        values.dtype != key.dtype
+        or (key.dtype, scale.dtype) not in ((torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32))
+        or scales.dtype not in (scale.dtype, torch.float32)
+    ):
+        raise ValueError("HiSparse C8 indexer writes require matching K and scale dtypes.")
+    scale_bits = torch.int16 if scale.dtype == torch.float16 else torch.int32
     store_indexer_key_scale(
         values.contiguous().view(torch.int8).reshape(-1, width),
-        scales.view(torch.int32).reshape(-1),
+        scales.to(scale.dtype).contiguous().view(scale_bits).reshape(-1),
         slots.reshape(-1),
         key.view(torch.int8),
-        scale.view(torch.int32),
+        scale.view(scale_bits),
         block_size=block,
         key_block_stride=key.stride(0),
         scale_block_stride=scale.stride(0),

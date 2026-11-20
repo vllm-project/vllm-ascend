@@ -78,7 +78,7 @@ jobs:
         run: |
           printf '%s' "${CHANGED_DOCS}" > /tmp/changed-docs.json
           python .github/workflows/scripts/check_md_links.py \
-            --files-from /tmp/changed-docs.json --timeout 300
+            --files-from /tmp/changed-docs.json --timeout 1200
 
       - name: Publish summary
         if: ${{ always() }}
