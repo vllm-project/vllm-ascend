@@ -80,15 +80,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
     @staticmethod
     def _make_profile_result(free_memory_after: int, non_kv_cache_memory: int):
-        """Return a mock profile_result compatible with memory_profiling output.
-
-        The worker code recomputes non_kv_cache_memory as:
-            non_torch_increase + torch_peak_increase + weights_memory
-        We set non_torch_increase=0, before_profile.torch_peak=0 (so
-        torch_peak_increase = peak - 0 = 0 since memory_stats is mocked to
-        return peak=0), and weights_memory=non_kv_cache_memory, ensuring the
-        recomputed value equals the requested non_kv_cache_memory.
-        """
+        """Return the mock profiler total for memory used since the instance baseline."""
         profile_result = MagicMock()
         profile_result.after_profile.free_memory = free_memory_after
         profile_result.non_kv_cache_memory = non_kv_cache_memory

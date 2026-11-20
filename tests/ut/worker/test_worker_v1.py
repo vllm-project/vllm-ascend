@@ -1333,7 +1333,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
     @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_determine_available_memory_normal_case(
+    def test_determine_available_memory_includes_persistent_runner_allocations(
         self,
         mock_logger,
         mock_torch_mem_get_info,
@@ -1343,7 +1343,7 @@ class TestNPUWorker(TestBase):
         mock_memory_profiling,
         mock_get_ascend_config,
     ):
-        """Test determine_available_memory normal case (no non-torch memory allocation)"""
+        """Core counts runner allocations made between weight loading and profiling."""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Mock memory_profiling context manager
@@ -1352,9 +1352,10 @@ class TestNPUWorker(TestBase):
         mock_profile_result.torch_peak_increase = 2000
         mock_profile_result.weights_memory = 500
         mock_profile_result.before_profile = MagicMock()
-        mock_profile_result.before_profile.torch_peak = 0
+        mock_profile_result.before_profile.torch_peak = 1300
         mock_profile_result.after_profile = MagicMock()
-        mock_profile_result.after_profile.free_memory = 6500
+        mock_profile_result.after_profile.free_memory = 5700
+        mock_profile_result.non_kv_cache_memory = 4300
 
         mock_context = MagicMock()
         mock_context.__enter__ = MagicMock(return_value=mock_profile_result)
@@ -1385,16 +1386,14 @@ class TestNPUWorker(TestBase):
             )
 
             # Mock torch.npu.memory_stats for profile_torch_peak
-            # profile_torch_peak = memory_stats()["allocated_bytes.all.peak"] = 2000
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 2000}
+            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 3300}
 
             result = worker.determine_available_memory()
 
             worker.model_runner.profile_run.assert_called_once()
 
-            # non_kv_cache_memory = non_torch_increase(1000) + torch_peak_increase(2000-0) + weights_memory(500) = 3500
-            # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
-            expected_result = int(10000 * 0.8 - 3500)
+            # Core includes 800 bytes of runner memory outside weight loading.
+            expected_result = 8000 - 4300
             self.assertEqual(result, expected_result)
             worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
@@ -1461,6 +1460,7 @@ class TestNPUWorker(TestBase):
         mock_profile_result.before_profile.torch_peak = 0
         mock_profile_result.after_profile = MagicMock()
         mock_profile_result.after_profile.free_memory = 4000
+        mock_profile_result.non_kv_cache_memory = 6000
 
         mock_context = MagicMock()
         mock_context.__enter__ = MagicMock(return_value=mock_profile_result)
@@ -1570,6 +1570,7 @@ class TestNPUWorker(TestBase):
         mock_profile_result.before_profile.torch_peak = 0
         mock_profile_result.after_profile = MagicMock()
         mock_profile_result.after_profile.free_memory = 2000
+        mock_profile_result.non_kv_cache_memory = 10500
 
         mock_context = MagicMock()
         mock_context.__enter__ = MagicMock(return_value=mock_profile_result)
@@ -2023,20 +2024,17 @@ class TestNPUWorker(TestBase):
             mock_kernel_warmup.assert_called_once_with(worker)
 
     def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
-        """The persisted budget must include the measured NPU graph memory."""
+        """The persisted budget must include Core's total and the measured graph memory."""
         from vllm_ascend.worker.worker import NPUWorker
 
         requested_memory = 10 << 30
         model_memory = 2 << 30
         peak_activation_memory = 1 << 30
         non_torch_memory = 512 << 20
+        profiled_non_kv_memory = 4 << 30
         npugraph_memory = 256 << 20
         redundancy_buffer = 150 << 20
-        expected_kv_cache_memory = (
-            requested_memory
-            - (model_memory + peak_activation_memory + non_torch_memory + npugraph_memory)
-            - redundancy_buffer
-        )
+        expected_kv_cache_memory = requested_memory - (profiled_non_kv_memory + npugraph_memory) - redundancy_buffer
 
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
@@ -2067,6 +2065,7 @@ class TestNPUWorker(TestBase):
             worker.available_kv_cache_memory_bytes = requested_memory - model_memory
             worker.peak_activation_memory = peak_activation_memory
             worker.non_torch_memory = non_torch_memory
+            worker._profiled_non_kv_memory = profiled_non_kv_memory
 
             worker.compile_or_warm_up_model()
 
