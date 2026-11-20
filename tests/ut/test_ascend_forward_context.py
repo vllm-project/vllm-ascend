@@ -725,7 +725,8 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
         (8, 1, 16384, 500, 2, "mtp", 16384),
         (3, 8, 513, 16, 1, "mtp", 111),
         (1, 16, 16384, 512, 4, "mtp", 3968),
-        (1, 8, 16384, 500, 2, "dflash", 16384),
+        (1, 8, 16384, 64, 4, "dspark", 2400),
+        (1, 8, 16384, 64, 4, "dflash", 2400),
     ],
 )
 @pytest.mark.parametrize("prefill_mc2", [True, False])

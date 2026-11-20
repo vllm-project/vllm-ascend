@@ -5,8 +5,37 @@
 import copy
 from dataclasses import replace as dataclass_replace
 
+import torch
 from vllm.config import VllmConfig, replace
+from vllm.distributed import get_pcp_group
 from vllm.logger import logger
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+
+
+def prepare_replicated_draft_profile_inputs(
+    input_batch: InputBatch,
+    last_hidden_states: torch.Tensor,
+    aux_hidden_states: list[torch.Tensor] | None,
+    draft_input_buffers: InputBuffers,
+) -> tuple[InputBatch, torch.Tensor, list[torch.Tensor] | None]:
+    """Restore a PCP-local target dummy batch for replicated draft profiling."""
+    # The replicated draft's config has PCP=1 even when the target is sharded.
+    pcp_group = get_pcp_group()
+    if pcp_group.world_size == 1:
+        return input_batch, last_hidden_states, aux_hidden_states
+
+    num_tokens = min(draft_input_buffers.max_num_tokens, input_batch.num_tokens * pcp_group.world_size)
+
+    def gather(states: torch.Tensor) -> torch.Tensor:
+        # Keep only the compact context alive through the draft forward.
+        return pcp_group.all_gather(states.contiguous(), dim=0)[:num_tokens].clone()
+
+    last_hidden_states = gather(last_hidden_states)
+    if aux_hidden_states is not None:
+        aux_hidden_states = [gather(states) for states in aux_hidden_states]
+    # The draft forward reads the mask in these buffers. Profile rows must route to experts.
+    input_batch = InputBatch.make_dummy(input_batch.num_reqs, num_tokens, draft_input_buffers, is_padding=False)
+    return input_batch, last_hidden_states, aux_hidden_states
 
 
 def build_dspark_draft_config(
