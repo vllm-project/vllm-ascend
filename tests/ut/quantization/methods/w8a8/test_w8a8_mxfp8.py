@@ -13,8 +13,8 @@ from tests.ut.quantization.conftest_quantization import (
 )
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DSDynamicAscendV1LinearMethod,
     AscendW8A8MXFP8DSDynamicLinearMethod,
-    AscendW8A8MXFP8DSV41FlashLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
@@ -40,7 +40,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         mx_profile.start()
         self.addCleanup(mx_profile.stop)
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
-        self.flash_scheme = AscendW8A8MXFP8DSV41FlashLinearMethod()
+        self.flash_scheme = AscendW8A8MXFP8DSDynamicAscendV1LinearMethod()
         nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
         self.addCleanup(nz_config.stop)
         nz_config.start()

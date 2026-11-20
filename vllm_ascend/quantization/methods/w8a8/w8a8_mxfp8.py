@@ -909,9 +909,9 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             layer.weight_scale.data = layer.weight_scale.data.contiguous()
 
 
-@register_scheme("W8A8_MXFP8", "ds_linear_mxfp8")
-class AscendW8A8MXFP8DSV41FlashLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
-    """MXFP8 linear method for ModelSlim DeepSeek V4.1 Flash checkpoints.
+@register_scheme("W8A8_MXFP8", "ds_linear")
+class AscendW8A8MXFP8DSDynamicAscendV1LinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """MXFP8 linear method for ModelSlim DeepSeek V4 and V4.1 checkpoints.
 
     The checkpoint tensors match the shared MXFP8 layout. ``wo_a`` is additionally
     stored as grouped ND ``[n_local_groups, hidden, o_lora_rank]`` for DSA.
@@ -938,7 +938,9 @@ class AscendW8A8MXFP8DSV41FlashLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
 
         n_local_groups = layer.weight.data.shape[0] // layer.o_lora_rank
-        layer.weight.data = layer.weight.data.reshape(n_local_groups, layer.o_lora_rank, -1).transpose(1, 2).contiguous()
+        layer.weight.data = (
+            layer.weight.data.reshape(n_local_groups, layer.o_lora_rank, -1).transpose(1, 2).contiguous()
+        )
         layer.weight_scale.data = (
             reshaped_scale.reshape(n_local_groups, layer.o_lora_rank, -1, 2).transpose(1, 2).contiguous()
         )

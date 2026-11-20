@@ -78,6 +78,19 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
 )
 
 
+def _is_deepseek_v4_family(hf_config: Any) -> bool:
+    """Whether this config is DeepSeek V4 or V4.1, including a nested text config."""
+    if is_deepseek_v41(hf_config):
+        return True
+    text_config = getattr(hf_config, "text_config", None)
+    model_types = {
+        getattr(hf_config, "model_type", None),
+        getattr(type(hf_config), "model_type", None),
+        getattr(text_config, "model_type", None) if text_config is not None else None,
+    }
+    return "deepseek_v4" in model_types
+
+
 def _map_modelslim_moe_weight_name(weight_name: str) -> str:
     """Rewrite a ModelSlim MoE scale-bias name to the upstream scale path."""
     prefix, separator, param_name = weight_name.rpartition(".")
@@ -859,9 +872,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
-            layer_type = "linear"
-            if quant_type == "W8A8_MXFP8" and is_deepseek_v41(vllm_config.model_config.hf_config):
-                layer_type = "ds_linear_mxfp8"
+            layer_type = "ds_linear" if _is_deepseek_v4_family(vllm_config.model_config.hf_config) else "linear"
             scheme = create_scheme_for_layer(quant_type, prefix, layer_type)
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
