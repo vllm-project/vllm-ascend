@@ -5,31 +5,15 @@ from types import SimpleNamespace
 import pytest
 from vllm.config.model import ModelConfig
 
-from tests.ut.patch.platform.release_scheduler_fixture import release_cached_request_abi
 from vllm_ascend.patch.platform.patch_pp_mtp import (
     _apply_patch,
     _is_pd_prefill_node,
     _patch_engine_core,
     _patch_model_config_validation,
     _patch_model_runner_output,
-    _patch_scheduler_make_cached_request_data,
-    _patch_scheduler_update_after_schedule,
-    _patch_scheduler_update_from_output,
     _use_pp_ipc_runtime_patch,
     _use_pp_mtp_runtime_patch,
 )
-
-
-@pytest.fixture(autouse=True)
-def _release_ipc_payload_abi_on_main(monkeypatch, request):
-    if vllm_version_is("0.33.0") or not request.node.originalname.startswith("test_pp_ipc_cached_request_data_"):
-        return
-    from vllm.v1.core.sched import scheduler as native_module
-
-    legacy_scheduler, _ = release_cached_request_abi()
-    monkeypatch.setattr(request.module, "Scheduler", legacy_scheduler)
-    monkeypatch.setattr(native_module, "Scheduler", legacy_scheduler)
-    _patch_scheduler_make_cached_request_data()
 
 
 @pytest.mark.parametrize(
@@ -133,7 +117,4 @@ def test_pp_mtp_helpers_and_patch_reentry():
     _apply_patch()
     _patch_model_runner_output()
     _patch_engine_core()
-    _patch_scheduler_update_after_schedule()
-    _patch_scheduler_make_cached_request_data()
-    _patch_scheduler_update_from_output()
     _patch_model_config_validation()
