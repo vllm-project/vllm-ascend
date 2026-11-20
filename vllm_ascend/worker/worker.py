@@ -83,6 +83,7 @@ from vllm.v1.worker.startup_plan import (
 from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
 
+import vllm_ascend.device_allocator.sleep_mode_backend  # noqa: F401  (registers camem)
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
@@ -126,7 +127,6 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.config.profiler import ProfilerConfig
-    from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -286,12 +286,6 @@ class NPUWorker(GPUWorker):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
-
-    # Quarantine newly visible GPUWorker interfaces until each NPU contract is
-    # validated.
-    @property
-    def sleep_mode_backend(self) -> "SleepModeBackend":
-        raise NotImplementedError("GPUWorker.sleep_mode_backend is not validated on Ascend.")
 
     def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
         raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
@@ -461,9 +455,8 @@ class NPUWorker(GPUWorker):
             self.sleep_wakeup_manager.sleep()
         self.synchronize_device()
 
-        allocator = CaMemAllocator.get_instance()
         global_te.unregister_buffer()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        self.sleep_mode_backend.suspend(level)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -485,8 +478,7 @@ class NPUWorker(GPUWorker):
                 "or enable additional_config.rl_config (enabled: true) which disables NZ "
                 "automatically."
             )
-        allocator = CaMemAllocator.get_instance()
-        allocator.wake_up(tags=tags)
+        self.sleep_mode_backend.resume(tags)
         if tags is None or "kv_cache" in tags:
             global_te.reregister_buffer()
 
