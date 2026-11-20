@@ -30,7 +30,7 @@
 | FengLin Zhao | [@lcfenglinwan](https://github.com/lcfenglinwan) | 2026/11 |
 | JianPing He | [@winson-00178005](https://github.com/winson-00178005) | 2026/11 |
 | XinYue Zhang | [@zhangxinyuehfad](https://github.com/zhangxinyuehfad) | 2026/11 |
-| AuroraEmiya | [@AuroraEmiya](https://github.com/AuroraEmiya) | 2026/11 |
+| ShyRa1n | [@ShyRa1n](https://github.com/ShyRa1n) | 2026/11 |
 
 ## Emeritus Committers
 
@@ -338,7 +338,7 @@ Updated on 2026-11-18:
 | 442 | [@li1how](https://github.com/li1how) | 2026/06/10 | [9914ffa](https://github.com/vllm-project/vllm-ascend/commit/9914ffa27058165634dd9f46d37dc75debe8ce10) |
 | 441 | [@goodgoodname](https://github.com/goodgoodname) | 2026/06/10 | [ee88e35](https://github.com/vllm-project/vllm-ascend/commit/ee88e356a0703e74cd6499b470f740b319d7dcb5) |
 | 440 | [@baolongsun](https://github.com/baolongsun) | 2026/06/10 | [fcf5a1d](https://github.com/vllm-project/vllm-ascend/commit/fcf5a1d549896070d9baf2e58240503a4ca24fd3) |
-| 439 | [@AuroraEmiya](https://github.com/AuroraEmiya) | 2026/06/10 | [55d5bd1](https://github.com/vllm-project/vllm-ascend/commit/55d5bd15974e98a7f813bf3e2a480039461f721b) |
+| 439 | [@ShyRa1n](https://github.com/ShyRa1n) | 2026/06/10 | [55d5bd1](https://github.com/vllm-project/vllm-ascend/commit/55d5bd15974e98a7f813bf3e2a480039461f721b) |
 | 438 | [@SOMEONEUNSEEN](https://github.com/SOMEONEUNSEEN) | 2026/06/09 | [77ff286](https://github.com/vllm-project/vllm-ascend/commit/77ff28652b329796450f5448c7ab51b054697535) |
 | 437 | [@zouzy5137](https://github.com/zouzy5137) | 2026/06/08 | [80cd596](https://github.com/vllm-project/vllm-ascend/commit/80cd5964286f2a394e3e6b3d1f7581ce901c812a) |
 | 436 | [@nofushanquan](https://github.com/nofushanquan) | 2026/06/08 | [2b4a9da](https://github.com/vllm-project/vllm-ascend/commit/2b4a9daa66e78e156d72b2c7eb36f82ccef3735a) |

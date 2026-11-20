@@ -22,6 +22,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_attention.py: 30
+  tests/e2e/pull_request/one_card/test_hisparse_int8.py: 30
+  tests/e2e/pull_request/one_card/test_hisparse_int8_prolog.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_integration.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py: 30
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300

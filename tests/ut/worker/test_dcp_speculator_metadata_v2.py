@@ -16,9 +16,10 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadata, AscendSFADCPMetadataBuilder
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -48,9 +49,11 @@ def _dcp_local_cpu(common):
 class FakeDecodeMetadata:
     """Minimal stand-in mirroring ``AscendMLADCPDecodeMetadata``."""
 
-    def __init__(self, actual_seq_lengths_q):
+    def __init__(self, actual_seq_lengths_q, seq_lens, block_table):
         self.actual_seq_lengths_q = actual_seq_lengths_q
-        self.seq_lens_list = None
+        self.seq_lens = seq_lens.clone()
+        self.seq_lens_list = self.seq_lens.tolist()
+        self.block_table = block_table.clone()
 
     def update_dcp_seq_lens_cpu(
         self,
@@ -87,6 +90,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
         spec.model_state = object()
     spec.attn_architecture = architecture
+    spec.attn_backends = {"draft.layer": AscendMLABackend if architecture == "MLA" else AscendAttentionBackend}
     if kind == "dspark":
         spec.use_flashmla = False
     spec.use_dcp = use_dcp
@@ -139,7 +143,6 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
 
         def build(self, common_prefix_len, common_attn_metadata):
             common = common_attn_metadata
-            decode = FakeDecodeMetadata(common.query_start_loc_cpu[1:].tolist())
             # Keep the layer metadata's CPU view independent of the batch-level
             # one, matching the real builder (see the "without_aliasing" case in
             # test_mla_dcp_metadata_v2.py). vLLM main also dropped the deprecated
@@ -148,7 +151,20 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
             seq_lens_cpu = getattr(common, "seq_lens_cpu", None)
             if seq_lens_cpu is None:
                 seq_lens_cpu = common.seq_lens
-            return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
+            # Populate the same per-request fields as the real MLA/GQA
+            # builders: FULL-graph post-processing aligns all of them.
+            decode = FakeDecodeMetadata(
+                common.query_start_loc_cpu[1:].tolist(), seq_lens_cpu, common.block_table_tensor
+            )
+            return SimpleNamespace(
+                common=common,
+                decode=decode,
+                actual_seq_lengths_q=common.query_start_loc_cpu[1:].tolist(),
+                seq_lens_list=seq_lens_cpu.tolist(),
+                seq_lens=seq_lens_cpu.clone(),
+                seq_lens_cpu=seq_lens_cpu.clone(),
+                block_tables=common.block_table_tensor.clone(),
+            )
 
     class RecordingAttnGroup:
         # Both supported vLLM lanes (#56723) call the group's build_metadata.
@@ -399,6 +415,16 @@ def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch,
         assert common.is_prefilling.tolist() == [False] * padded
     else:
         assert common.is_prefilling.tolist() == [True, False]
+    if mode == "FULL" and architecture in ("GQA", "MLA"):
+        layer = result["draft.layer"]
+        metadata = layer.decode if architecture == "MLA" else layer
+        assert metadata.actual_seq_lengths_q == [(i + 1) * width for i in range(padded)]
+        assert metadata.seq_lens_list == expected
+        torch.testing.assert_close(metadata.seq_lens, torch.tensor(expected, dtype=torch.int32))
+        table = metadata.block_table if architecture == "MLA" else metadata.block_tables
+        assert table.shape[0] == padded
+        if architecture == "GQA":
+            torch.testing.assert_close(metadata.seq_lens_cpu, metadata.seq_lens)
     expected_attn_state = AscendAttentionState.ChunkedPrefill if architecture in ("GQA", "MLA") else None
     assert common.attn_state is expected_attn_state
     torch.testing.assert_close(common.positions, spec.input_buffers.positions)

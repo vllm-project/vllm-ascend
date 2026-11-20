@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from importlib import import_module
+from inspect import signature
 from typing import Any
 
 import torch
@@ -30,6 +31,11 @@ _GBSA_SOFTMAX_PRECISION = 0
 _GBSA_FP8_SOFTMAX_PRECISION = 1
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
+
+# CANN restricts ``topk`` to this range.
+_INDEX_SCORE_TOPK_MAX = 128
+# The operator produces incorrect results when topk is not a multiple of 8.
+_INDEX_SCORE_TOPK_WRITE_ALIGNMENT = 8
 
 if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
     from vllm_ascend.ops.triton.msa.msa_m3_index_topk import (
@@ -450,6 +456,82 @@ def _minimax_m3_index_score(
 
 
 @torch.no_grad()
+def _minimax_m3_index_score_topk(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor | None,
+    *,
+    topk: int,
+    init_blocks: int = 0,
+    local_blocks: int = 0,
+) -> torch.Tensor:
+    """Run the CANN MsaIndexScore TopK fusion and return its block indices.
+
+    Returns ``[num_index_heads, total_q, topk]`` int32 logical block IDs, already
+    ordered by the operator.
+    """
+    from cann_ops_transformer.ops import msa_index_score
+
+    index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
+        idx_q = _to_fp8_e4m3(idx_q)
+    return msa_index_score(
+        idx_q,
+        index_kv_cache,
+        start_loc,
+        return_choice=1,  # 1: only ``sparse_indices``; 0: the plain score
+        topk=topk,
+        block_table=block_table,
+        atten_mask=causal_mask,
+        actual_seq_qlen=cu_seqlens_q,
+        actual_seq_klen=seq_lens,
+        layout_key="BBND",  # paged key: [num_blocks, block_size, heads, dim]
+        # 3 requires ``atten_mask`` and 0 forbids it, so both follow the same call.
+        sparse_mode=3 if causal_mask is not None else 0,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+    )
+
+
+@lru_cache
+def _index_score_has_return_choice() -> bool:
+    """Whether the installed CANN package exposes the fused TopK output.
+
+    ``return_choice`` was added with the TopK fusion, so its presence is what
+    separates a new package from an older one. Inspect the wrapper signature
+    rather than the op name: a package without the keyword would reject the call
+    with ``TypeError`` instead of reaching the kernel.
+    """
+    try:
+        from cann_ops_transformer.ops import msa_index_score
+
+        return "return_choice" in signature(msa_index_score).parameters
+    except Exception:  # noqa: BLE001 -- optional toolchain, any failure -> no fusion
+        return False
+
+
+def _can_use_index_score_topk_fusion(topk: int) -> bool:
+    """Whether the fused TopK can serve this ``topk`` on this device.
+
+    ``topk`` must be aligned to the kernel's bulk write-back. The kernel collapses
+    the row only for that alignment and otherwise stores slot by slot, which with
+    more than one query token returns uninitialised memory for every row but the
+    last. Measured on Ascend950DT: ``topk`` in {4, 12, 17} at ``q_len`` in
+    {2, 4, 8} produced values like ``1050427392`` and ``-8388609``; ``topk`` in
+    {8, 16, 24, 32} was exact for every shape measured.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION):
+        return False
+    if not 0 < topk <= _INDEX_SCORE_TOPK_MAX or topk % _INDEX_SCORE_TOPK_WRITE_ALIGNMENT != 0:
+        return False
+    return _index_score_has_return_choice()
+
+
+@torch.no_grad()
 def minimax_m3_index_prefill(
     idx_q: torch.Tensor,
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
@@ -466,7 +548,25 @@ def minimax_m3_index_prefill(
     init_blocks: int,
     local_blocks: int,
 ) -> torch.Tensor:
-    """Compute AscendC prefill scores and finalize their block TopK."""
+    """Compute AscendC prefill scores and finalize their block TopK.
+
+    The CANN operator fuses the TopK into its score pass when the hardware and
+    toolchain support ``return_choice``; otherwise the scores feed the separate
+    TopK and sort helpers.
+    """
+    if _can_use_index_score_topk_fusion(topk):
+        return _minimax_m3_index_score_topk(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            causal_mask,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+        )
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,
@@ -513,7 +613,27 @@ def minimax_m3_index_decode(
     decode_query_len: int,
     sort_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute AscendC decode scores and fuse their TopK helpers."""
+    """Compute AscendC decode scores and fuse their TopK helpers.
+
+    ``sort_indices`` serves the GBSA consumer, which requires ascending block
+    IDs. The fused output is already globally ascending, so the fused results go
+    straight through and the separate sort helper is only used on the score path.
+
+    """
+    if sort_indices and _can_use_index_score_topk_fusion(topk):
+        indices = _minimax_m3_index_score_topk(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            causal_mask,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+        )
+        return indices, _select_num_idx_from_topk(indices)
     score = _minimax_m3_index_score(
         idx_q,
         index_kv_cache,

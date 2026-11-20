@@ -37,6 +37,8 @@ class AscendDecoderReplayLayers:
         self.num_actual_rows = 0
         self.num_padded_rows: int | None = None
         self.sequence_parallel = False
+        self.smla_plan_ratios: tuple[int, ...] | None = None
+        self.first_swa_plan_ratios: tuple[int, ...] | None = None
 
     def __call__(self, *states: torch.Tensor | None) -> tuple[torch.Tensor, ...]:
         if self.rows is None:
@@ -216,6 +218,14 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             first_swa_prefix=first_swa_prefix,
         )
         replay.sequence_parallel = model.use_sequence_parallel
+        ratios = getattr(model.config, "compress_ratios", None)
+        if ratios is not None and parallel.prefill_context_parallel_size == 1:
+            # The cut layer has its own replay floor. Its original full
+            # batch cache writes use the target metadata before compaction.
+            first_regular_layer = replay_start + int(first_swa_prefix is not None)
+            replay.smla_plan_ratios = tuple(dict.fromkeys(ratios[first_regular_layer : model.end_layer]))
+            if first_swa_prefix is not None:
+                replay.first_swa_plan_ratios = (ratios[replay_start],)
         return replay
     logger.warning_once("Ascend decoder bounded replay is disabled: %s.", reason)
     return None
