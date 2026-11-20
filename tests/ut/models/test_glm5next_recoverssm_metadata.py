@@ -168,6 +168,30 @@ def test_graph_staging_reuses_addresses_and_clears_prior_rows():
         ]
 
 
+def test_stage_spec_rejects_num_spec_decodes_above_batch_size():
+    builder = AscendKDARecoverSSMMetadataBuilder.__new__(AscendKDARecoverSSMMetadataBuilder)
+    builder.use_full_cuda_graph = True
+    builder.decode_cudagraph_max_bs = 4
+    builder.spec_state_indices_tensor = torch.full((4, 1), 99, dtype=torch.int32)
+    builder.spec_query_start_loc = torch.full((5,), 99, dtype=torch.int32)
+    builder.num_accepted_tokens = torch.full((4,), 99, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_spec_decodes=4,
+        num_spec_decode_tokens=2,
+        num_prefills=0,
+        num_decodes=0,
+        spec_state_indices_tensor=torch.tensor([[1], [2]], dtype=torch.int32),
+        spec_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+
+    with pytest.raises(ValueError, match=r"num_spec_decodes=4.*batch_size=2"):
+        builder._stage_spec(metadata, batch_size=2)
+
+    assert bool((builder.spec_state_indices_tensor == 99).all())
+    assert bool((builder.spec_query_start_loc == 99).all())
+    assert bool((builder.num_accepted_tokens == 99).all())
+
+
 @pytest.mark.parametrize(
     "batch,count,state_capacity,capture_capacity",
     [
