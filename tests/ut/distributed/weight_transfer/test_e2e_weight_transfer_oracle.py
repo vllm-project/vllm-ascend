@@ -213,14 +213,19 @@ def random_weight_case(tmp_path):
     return WeightUpdateModelCase(id="target", model=str(tmp_path), hf_overrides={})
 
 
-def test_draft_checkpoint_matches_payload_and_applies_overrides(random_weight_case, tmp_path):
+@pytest.mark.parametrize("use_modelscope", [False, True])
+def test_draft_checkpoint_matches_payload_and_applies_overrides(random_weight_case, tmp_path, use_modelscope):
     case = random_weight_case
     draft_case = replace(case, id="draft", hf_overrides={"num_hidden_layers": 1, "layer_types": ["full_attention"]})
     device = torch.device("cpu")
     source = FixedRandomWeightSource(case, device, draft_case=draft_case)
     destination = tmp_path / "checkpoint"
     original_config = (Path(case.model) / "config.json").read_bytes()
-    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
+    download = "modelscope.model_file_download" if use_modelscope else "huggingface_hub.hf_hub_download"
+    with (
+        patch("vllm.envs.VLLM_USE_MODELSCOPE", use_modelscope),
+        patch(download, return_value=str(Path(case.model) / "config.json")),
+    ):
         source.write_checkpoint(destination)
 
     assert source.draft_source is not None
