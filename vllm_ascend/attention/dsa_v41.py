@@ -1773,11 +1773,10 @@ class DeepseekV41CacheBackend(AttentionBackend):
         cls,
         spec: AttentionSpec,
         num_blocks: int,
-        layout: Any,
         kernel_block_size: int | None = None,
     ) -> KVCacheRuntimeShapesAndDtypes:
         """Expose NHD data/scale pages, including packed A5 storage widths."""
-        return AscendDSABackend.get_runtime_shapes_and_dtypes(spec, num_blocks, layout, kernel_block_size)
+        return AscendDSABackend.get_runtime_shapes_and_dtypes(spec, num_blocks, kernel_block_size)
 
     @staticmethod
     def format_runtime_views(

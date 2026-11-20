@@ -1113,7 +1113,6 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_runtime_shapes_and_dtypes(
         spec: MambaSpec,
         num_blocks: int,
-        _layout: Any,
         kernel_block_size: int | None = None,
     ) -> "KVCacheRuntimeShapesAndDtypes":
         # The leading state dimension indexes manager blocks.

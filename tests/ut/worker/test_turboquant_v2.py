@@ -16,7 +16,7 @@ from vllm_ascend.worker.v2 import attn_utils
 def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
     from vllm_ascend.worker.v2.attn_utils import create_cache_component_views
 
-    cache_shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, num_blocks, None)
+    cache_shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, num_blocks)
     return create_cache_component_views(
         raw,
         cache_shapes,
@@ -302,7 +302,7 @@ def test_dsa_runtime_shapes_and_dtypes_from_storage_spec(monkeypatch, scale_dtyp
         "get_kv_cache_shape",
         Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
     )
-    shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, 3, "HND", 128)
+    shapes, dtypes = AscendDSAC4Backend.get_runtime_shapes_and_dtypes(spec, 3, kernel_block_size=128)
     assert shapes == ((3, 32, 1, 128), (3, 32, 1, 1))
     assert dtypes == (torch.int8, scale_dtype)
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)

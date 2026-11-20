@@ -1459,7 +1459,6 @@ def create_kv_cache_runtime_views(
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
-    layout: Any = None,
 ) -> dict[str, Any]:
     """Delegate component views to backends using the descriptor block strides."""
     placements = {
@@ -1484,7 +1483,6 @@ def create_kv_cache_runtime_views(
             cache_shapes, dtypes = group.backend.get_runtime_shapes_and_dtypes(
                 spec,
                 num_blocks,
-                layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
 
@@ -1509,7 +1507,6 @@ def create_kv_cache_runtime_views(
 def unified_allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
-    layout: Any,
     kernel_block_sizes: list[int],
 ) -> dict[str, Any]:
     """Materialize the shared pool described by upstream byte placements.
@@ -1537,7 +1534,6 @@ def unified_allocate_kv_cache(
         _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
         kernel_block_sizes,
         shared_layers,
-        layout,
     )
 
 
@@ -1561,7 +1557,7 @@ def allocate_kv_cache_main(
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
     if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
-        return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
+        return unified_allocate_kv_cache(kv_cache_config, device, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {
         layer_name: target_layer

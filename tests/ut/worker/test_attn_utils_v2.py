@@ -1472,7 +1472,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         allocate=None,
     ) -> dict[str, Any]:
         assert allocate is None
-        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _layout, _kernel_block_sizes)
+        return attn_utils.unified_allocate_kv_cache(_kv_cache_config, _device, _kernel_block_sizes)
 
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
