@@ -21,7 +21,7 @@ import copy
 import gc
 import logging
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
 from threading import RLock
 from types import NoneType
@@ -76,8 +76,6 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
-
-from vllm.v1.worker.gpu_worker import Worker as VllmWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -134,9 +132,6 @@ if TYPE_CHECKING:
     from vllm.distributed.parallel_state import Handle
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-
-
-
 
 
 # Both supported versions resolve grouping through the platform's builder.
@@ -267,15 +262,6 @@ class NPUWorker(GPUWorker):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
-
-        # Weight transfer engine is created in `load_model` once the model
-        # is available, since the engine needs a reference to the model.
-        self.weight_transfer_engine = None
-        self._weight_update_active = False
-        self._weight_update_is_draft = False
-        self._incomplete_weight_updates: set[bool] = set()
-        self._kv_cache_reclaimable = False
-        self._weight_update_kv_cache_loan = ExitStack()
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -437,12 +423,6 @@ class NPUWorker(GPUWorker):
 
     def shutdown_weight_transfer_engine(self) -> None:
         raise NotImplementedError("GPUWorker.shutdown_weight_transfer_engine is not validated on Ascend.")
-
-    def start_draft_weight_update(self) -> None:
-        raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
-
-    def _start_weight_update(self, is_draft: bool = False) -> None:
-        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")

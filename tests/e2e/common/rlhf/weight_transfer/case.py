@@ -17,10 +17,10 @@ from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_checkpoint_name,
     deepseek_v4_dspark_parameters,
     deepseek_v4_mtp_parameters,
-    qwen3_draft_parameters,
     expand_fused_expert_params,
     expand_minimax_m3_params,
     minimax_m3_checkpoint_name,
+    qwen3_draft_parameters,
 )
 
 if TYPE_CHECKING:
