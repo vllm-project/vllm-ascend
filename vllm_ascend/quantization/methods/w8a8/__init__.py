@@ -19,8 +19,8 @@
 from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import (
-    AscendW8A8MXFP8DSDynamicAscendV1LinearMethod,
     AscendW8A8MXFP8DSDynamicLinearMethod,
+    AscendW8A8MXFP8DSRequantizedLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from .w8a8_pdmix import AscendW8A8PDMixLinearMethod
@@ -35,8 +35,8 @@ __all__ = [
     "AscendW8A8FP8DynamicFusedMoEMethod",
     "AscendW8A8FP8DynamicLinearMethod",
     "AscendW8A8LinearMethod",
-    "AscendW8A8MXFP8DSDynamicAscendV1LinearMethod",
     "AscendW8A8MXFP8DSDynamicLinearMethod",
+    "AscendW8A8MXFP8DSRequantizedLinearMethod",
     "AscendW8A8MXFP8DynamicLinearMethod",
     "AscendW8A8PDMixLinearMethod",
     "resolve_block_scales",

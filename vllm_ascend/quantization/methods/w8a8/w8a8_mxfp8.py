@@ -910,7 +910,7 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
 
 
 @register_scheme("W8A8_MXFP8", "ds_linear")
-class AscendW8A8MXFP8DSDynamicAscendV1LinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
+class AscendW8A8MXFP8DSRequantizedLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """MXFP8 linear method for ModelSlim DeepSeek V4 and V4.1 checkpoints.
 
     The checkpoint tensors match the shared MXFP8 layout. ``wo_a`` is additionally
