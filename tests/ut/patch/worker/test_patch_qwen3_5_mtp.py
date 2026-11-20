@@ -24,7 +24,8 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkp
         # This packed-weight test uses the non-checkpoint cache mode.
         layer.vllm_config = SimpleNamespace(
             model_config=layer.model_config,
-            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+            cache_config=SimpleNamespace(mamba_cache_mode="none", use_replayssm=False),
+            speculative_config=None,
         )
         layer.conv1d = torch.nn.Module()
         layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))

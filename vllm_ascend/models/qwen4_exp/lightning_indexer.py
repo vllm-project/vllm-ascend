@@ -7,15 +7,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
-from vllm_ascend.ops.triton.qwen4_exp.lightning_v2_prepare import prepare_qsa_lightning_v2_inputs
+from vllm_ascend.ops.triton.qwen4_exp.lightning_prepare import prepare_qsa_lightning_inputs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
+_COMPRESS_RATIO = 4
+_TOKEN_TOPK = 2048
 
 
 class QSAIndexerMetadataProtocol(Protocol):
@@ -28,6 +28,7 @@ class QSAIndexerMetadataProtocol(Protocol):
     logical_positions: torch.Tensor
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+    write_metadata: QSAIndexerMetadataProtocol
 
 
 def qsa_select_paged_tokens_lightning_v2(
@@ -80,11 +81,10 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    weights, cu_query, compressed_lengths, residual_lengths = prepare_qsa_lightning_v2_inputs(
-        query, lengths, attn_metadata.query_start_loc, compress_ratio
-    )
+    compressed_lengths = lengths.floor_divide(compress_ratio)
+    residual_lengths = lengths.remainder(compress_ratio)
     common = dict(
-        cu_seqlens_q=cu_query,
+        cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
         seqused_k=compressed_lengths,
         cmp_residual_k=residual_lengths,
         layout_q="TND",
@@ -93,19 +93,11 @@ def qsa_select_paged_tokens_lightning_v2(
         cmp_ratio=compress_ratio,
     )
     block_topk = token_topk // compress_ratio
-    # MRV2 prepares one schedule outside the layer loop. A caller that trims
-    # the query further must regenerate it for the new boundary instead.
-    metadata = getattr(attn_metadata, "qsa_lightning_v2_metadata", None)
-    if metadata is None or rows != attn_metadata.num_actual_tokens:
-        metadata = torch.ops.cann_ops_transformer.lightning_indexer_metadata(
-            query.shape[1],
-            1,
-            _HEAD_DIM,
-            block_topk,
-            batch_size=requests,
-            **common,
-        )
-    groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
+    packed_width = block_topk + compress_ratio - 1
+    query, weights, visible_groups, query_cu_seqlens, row_block_table = prepare_qsa_lightning_inputs(
+        query, query_positions, sequence_lengths, token_to_req, block_table
+    )
+    groups, _ = torch.ops.npu.npu_lightning_indexer.default(
         query,
         compressed_key_cache,
         weights,

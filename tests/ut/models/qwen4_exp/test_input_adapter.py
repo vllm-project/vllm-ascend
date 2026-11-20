@@ -50,6 +50,8 @@ def _load_adapter(monkeypatch, *, load_wrapper: bool = False):
 
 
 class AscendQwen4ExpQSAAttention:
+    _qsa_prepared_cos_sin: torch.Tensor
+
     def __init__(self):
         self.layer_name = "model.layers.0.self_attn"
         # The adapter attaches this fixed-address buffer before model replay.

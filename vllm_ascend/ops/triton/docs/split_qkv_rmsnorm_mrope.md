@@ -65,9 +65,14 @@ QSA model calls through it. Omitting positions preserves the legacy semantics.
 New QSA-mode tests compare against legacy gathered inputs and pre-offset
 weights with `rtol=0, atol=0`. They include 0/1/32/129 tokens, 1/3 position axes,
 BF16/FP32 weights, Q heads 2/12, KV heads 1, head size 256, partial width 64,
-and graph replay. These cases target direct-position mode and do not validate
-every shared caller.
+and graph replay. The shared legacy test provides independent reference coverage
+and must also run; the new test alone does not validate every shared caller.
 
 ```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_direct_rope.py
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_split_qkv_rmsnorm_mrope.py
+pytest -sv tests/ut/models/qwen4_exp/test_qsa_upstream_abi.py
 ```
+
+See [validation and specialization](qsa_preparation_validation.md) for evidence
+status and remaining model/TP coverage.

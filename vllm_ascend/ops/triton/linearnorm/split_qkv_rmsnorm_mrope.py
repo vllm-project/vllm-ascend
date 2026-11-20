@@ -76,10 +76,10 @@ def split_qkv_rmsnorm_mrope_kernel(
     IS_PARTIAL_ROPE: tl.constexpr,
     gate_size: tl.constexpr,
     positions_ptr=None,
-    POSITION_STRIDE_AXIS: tl.constexpr = 0,
-    POSITION_STRIDE_TOKEN: tl.constexpr = 0,
-    CACHE_STRIDE: tl.constexpr = 0,
-    CACHE_ROWS: tl.constexpr = 0,
+    position_stride_axis: tl.constexpr = 0,
+    position_stride_token: tl.constexpr = 0,
+    cache_stride: tl.constexpr = 0,
+    cache_rows: tl.constexpr = 0,
     GATHER_CACHE: tl.constexpr = False,
 ):
     block_idx = tl.program_id(0)
@@ -152,13 +152,13 @@ def split_qkv_rmsnorm_mrope_kernel(
             )
 
         if GATHER_CACHE:
-            position_row = positions_ptr + (block_offset + index) * POSITION_STRIDE_TOKEN
-            t_pos = tl.minimum(tl.maximum(tl.load(position_row), 0), CACHE_ROWS - 1)
-            h_pos = tl.minimum(tl.maximum(tl.load(position_row + POSITION_STRIDE_AXIS), 0), CACHE_ROWS - 1)
-            w_pos = tl.minimum(tl.maximum(tl.load(position_row + 2 * POSITION_STRIDE_AXIS), 0), CACHE_ROWS - 1)
-            t_cos_offset = cos_sin_ptr + t_pos.to(tl.int64) * CACHE_STRIDE
-            h_cos_offset = cos_sin_ptr + h_pos.to(tl.int64) * CACHE_STRIDE
-            w_cos_offset = cos_sin_ptr + w_pos.to(tl.int64) * CACHE_STRIDE
+            position_row = positions_ptr + (block_offset + index) * position_stride_token
+            t_pos = tl.minimum(tl.maximum(tl.load(position_row), 0), cache_rows - 1)
+            h_pos = tl.minimum(tl.maximum(tl.load(position_row + position_stride_axis), 0), cache_rows - 1)
+            w_pos = tl.minimum(tl.maximum(tl.load(position_row + 2 * position_stride_axis), 0), cache_rows - 1)
+            t_cos_offset = cos_sin_ptr + t_pos.to(tl.int64) * cache_stride
+            h_cos_offset = cos_sin_ptr + h_pos.to(tl.int64) * cache_stride
+            w_cos_offset = cos_sin_ptr + w_pos.to(tl.int64) * cache_stride
         else:
             t_cos_offset = cos_sin_ptr + (block_offset + index) * rope_dim
             h_cos_offset = t_cos_offset + num_tokens * rope_dim
@@ -423,10 +423,10 @@ def triton_split_qkv_rmsnorm_mrope(
         IS_PARTIAL_ROPE,
         gate_size,
         positions_ptr=positions,
-        POSITION_STRIDE_AXIS=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
-        POSITION_STRIDE_TOKEN=positions.stride(-1) if positions is not None else 0,
-        CACHE_STRIDE=cos_sin.stride(0),
-        CACHE_ROWS=cos_sin.shape[0],
+        position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
+        position_stride_token=positions.stride(-1) if positions is not None else 0,
+        cache_stride=cos_sin.stride(0),
+        cache_rows=cos_sin.shape[0],
         GATHER_CACHE=positions is not None,
     )
 

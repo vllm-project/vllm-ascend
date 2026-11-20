@@ -1,0 +1,14 @@
+pr: 21771
+entries:
+  - category: feature
+    text: >-
+      Qwen3.8-Flash-Next QSA now uses request-batched LightningIndexerV2 through
+      the upstream cann_ops_transformer Torch interface. Install the matching
+      Torch extension and CANN transformer operators in the serving environment.
+    model: Qwen3.8-Flash-Next
+  - category: bugfix
+    text: >-
+      Forward the explicit MTP layer count from the matching vLLM draft-config
+      API so Qwen3.8-Flash-Next MTP initialization and ModelSlim layer remapping
+      use the same layer count.
+    model: Qwen3.8-Flash-Next

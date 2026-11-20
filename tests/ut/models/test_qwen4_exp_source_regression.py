@@ -25,6 +25,44 @@ def test_qwen4_exp_reuses_upstream_vllm_model_ownership() -> None:
         assert not (model_root / platform_neutral_dir).exists()
 
 
+def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
+    model = _source("vllm_ascend/models/qwen4_exp/model.py")
+    mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
+    model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
+    ple = _source("vllm_ascend/models/qwen4_exp/ple.py")
+    assert "class AscendQwen4ExpDecoderLayer" not in model
+    assert model.count("def forward(") == 1
+    assert "for layer_idx" not in model
+    assert "output = super().forward(" in model
+    assert 'sp_all_gather(output["hidden_states"])' in model
+    assert '"hidden_states": sp_shard(hidden_states)' in model
+    assert "intermediate_tensors.tensors" in model
+    assert "output.tensors" in model
+    assert "pp_intermediate_tensors_are_full_tokens = True" in model
+    assert "upstream_model.sp_all_gather = sp_all_gather" in model
+    assert "upstream_model.sp_reduce_scatter = sp_reduce_scatter" in model
+    assert "upstream_model.sp_shard = sp_shard" in model
+    assert "upstream_ple.sp_all_gather = sp_all_gather" in model
+    assert "upstream_ple.sp_shard = sp_shard" in model
+    assert "upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention" in model
+    assert "class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock)" in model
+    assert "upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock" in model
+    assert "inputs_embeds: torch.Tensor | None = None" in model
+    assert "inputs_embeds=inputs_embeds" in model
+    assert "and hidden_states.shape[0] == positions.shape[-1]" in mtp
+    assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
+    assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
+    assert not (ROOT / "vllm_ascend/patch/platform/patch_qwen4_exp_pp.py").exists()
+    assert "class AscendQwen4ExpModelState" in model_state
+    assert "ple_layer_ids = config.ple_layer_ids" in model_state
+    assert "config.ple_layer_ids = []" in model_state
+    assert "config.ple_layer_ids = ple_layer_ids" in model_state
+    assert "if intermediate_tensors is None:" in mtp
+    assert "def _get_npu_view_from_cpu_tensor(" in ple
+    assert "torch.ops._C_ascend.get_npu_view_from_cpu_tensor(" in ple
+    assert ("upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor") in ple
+
+
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
     registry = _source("vllm_ascend/models/__init__.py")
     for architecture, wrapper in (
@@ -70,7 +108,7 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
     # Position clamping may be fused into RoPE; its numerical boundary cases
-    # are covered by the per-operator *_mrope.py NPU tests, not launch counts.
+    # are covered by test_qsa_direct_rope.py on NPU, not by counting launches.
 
 
 def test_qsa_metadata_ignores_full_graph_dummy_request_boundaries() -> None:
