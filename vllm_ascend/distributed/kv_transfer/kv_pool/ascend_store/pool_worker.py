@@ -1282,12 +1282,6 @@ class BaseKVPoolWorker(ABC):
                 break
         return hits
 
-    def take_kv_events(self) -> tuple[list[BlockStored], list[BlockStored]]:
-        """Return ``(replicated, sharded)`` CPU KV events from the sending thread."""
-        if self.enable_kv_events and self.kv_send_thread is not None:
-            return self.kv_send_thread.take_kv_events()
-        return [], []
-
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
             # collect store kv events form sending thread

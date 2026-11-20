@@ -81,48 +81,25 @@ def create_kv_pool_worker(
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
-    def __init__(self, num_workers: int, worker_rank: int | None = None) -> None:
+    def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
-        self.worker_rank = worker_rank
-        # Events emitted by every TP worker for the same logical block.
-        self._replicated_events: list[KVCacheEvent] = []
-        # Events emitted by exactly one TP worker (tp_replicas > 1).
-        self._sharded_events: list[KVCacheEvent] = []
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        self._replicated_events.extend(events)
         self._aggregator.add_events(events)
 
-    def add_sharded_events(self, events: list[KVCacheEvent]) -> None:
-        self._sharded_events.extend(events)
-
     def aggregate(self) -> "AscendStoreKVEvents":
-        """Deduplicate one worker batch.
-
-        Replicated events are not intersected here. Ranks finish the async put
-        on different steps, so the scheduler collects them until every TP rank
-        has reported the same block.
-        """
-        self._replicated_events = list(dict.fromkeys(self._replicated_events))
-        self._sharded_events = list(dict.fromkeys(self._sharded_events))
+        """Retain the unique union, including blocks saved by only one writer."""
+        events = list(dict.fromkeys(self._aggregator.get_all_events()))
+        self._aggregator.clear_events()
+        self._aggregator.add_events(events)
         self._aggregator.reset_workers()
         return self
 
     def increment_workers(self, count: int = 1) -> None:
         self._aggregator.increment_workers(count)
 
-    def get_replicated_events(self) -> list[KVCacheEvent]:
-        return list(self._replicated_events)
-
-    def get_sharded_events(self) -> list[KVCacheEvent]:
-        return list(self._sharded_events)
-
     def get_all_events(self) -> list[KVCacheEvent]:
-        replicated = list(dict.fromkeys(self._replicated_events))
-        if not self._sharded_events:
-            return replicated
-        seen = set(replicated)
-        return replicated + [event for event in self._sharded_events if event not in seen]
+        return self._aggregator.get_all_events()
 
     def get_number_of_workers(self) -> int:
         return self._aggregator.get_number_of_workers()
@@ -130,8 +107,6 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
     def clear_events(self) -> None:
         self._aggregator.clear_events()
         self._aggregator.reset_workers()
-        self._replicated_events.clear()
-        self._sharded_events.clear()
 
     def __repr__(self) -> str:
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
@@ -189,14 +164,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
         self._kv_cache_events: AscendStoreKVEvents | None = None
-        # Replicated CPU events wait here until every local TP rank has
-        # reported the same block. Absence is not a vote: a rank that has not
-        # finished the async put simply has not checked in yet.
-        self._pending_replicated: dict[KVCacheEvent, set[int]] = {}
-        self._ready_sharded: list[KVCacheEvent] = []
-        tp_size = getattr(vllm_config.parallel_config, "tensor_parallel_size", 1)
-        self._replicated_quorum = tp_size if isinstance(tp_size, int) and tp_size > 0 else 1
-
         self._current_step_has_real_forward = False
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind this connector's layerwise loads.
@@ -333,29 +300,19 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not kv_cache_events or not isinstance(kv_cache_events, AscendStoreKVEvents):
             return
 
-        worker_rank = kv_cache_events.worker_rank
-        if not isinstance(worker_rank, int):
-            worker_rank = 0
-        for event in kv_cache_events.get_replicated_events():
-            self._pending_replicated.setdefault(event, set()).add(worker_rank)
-        self._ready_sharded.extend(kv_cache_events.get_sharded_events())
-        return
+        if self._kv_cache_events is None:
+            self._kv_cache_events = kv_cache_events
+        else:
+            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
+            self._kv_cache_events.increment_workers(kv_cache_events.get_number_of_workers())
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        """
-        Take the KV cache events from the connector.
-
-        Yields:
-            New KV cache events since the last call.
-        """
-        ready = [event for event, ranks in self._pending_replicated.items() if len(ranks) >= self._replicated_quorum]
-        for event in ready:
-            self._pending_replicated.pop(event, None)
-        sharded = list(dict.fromkeys(self._ready_sharded))
-        self._ready_sharded.clear()
-        seen = set(ready)
-        yield from ready
-        yield from (event for event in sharded if event not in seen)
+        """Take the unique events collected since the previous call."""
+        if self._kv_cache_events is not None:
+            self._kv_cache_events.aggregate()
+            yield from self._kv_cache_events.get_all_events()
+            self._kv_cache_events.clear_events()
+            self._kv_cache_events = None
 
     ############################################################
     # Worker Side Methods
@@ -512,24 +469,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
-        """
-        Get the KV connector kv cache events collected during the last interval.
-        """
+        """Collect CPU KV events through the worker's existing event channel."""
         assert self.connector_worker is not None
-        replicated, sharded = self.connector_worker.take_kv_events()
-        if not replicated and not sharded:
+        events = self.connector_worker.get_kv_events()
+        if not events:
             return None
-
-        worker_rank = getattr(self.connector_worker, "tp_rank", None)
-        ascend_store_kv_events = AscendStoreKVEvents(
-            num_workers=1,
-            worker_rank=worker_rank if isinstance(worker_rank, int) else None,
-        )
-        if replicated:
-            ascend_store_kv_events.add_events(replicated)
-        if sharded:
-            ascend_store_kv_events.add_sharded_events(sharded)
-        return ascend_store_kv_events
+        result = AscendStoreKVEvents(num_workers=1)
+        result.add_events(events)
+        return result
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         assert self.connector_scheduler is not None
@@ -559,8 +506,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.load_specs.clear()
         self._kv_cache_events = None
-        self._pending_replicated.clear()
-        self._ready_sharded.clear()
         return self.connector_scheduler.reset_store()
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
