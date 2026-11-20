@@ -306,6 +306,21 @@ def configure_dspark_metadata(spec, provider):
     spec._prepare_draft_dcp_metadata_inputs = lambda *args: (None, torch.zeros(2, dtype=torch.bool))
 
 
+@pytest.mark.parametrize("provider", ["a5", "fia"])
+def test_non_a3_graph_refresh_uses_uniform_entry(provider):
+    class Parent:
+        def _build_uniform_attn_metadata(self, **kwargs):
+            return kwargs
+
+    spec = dspark_metadata_class(Parent)()
+    configure_dspark_metadata(spec, provider)
+    lengths = torch.tensor([23, 11])
+    (args,) = spec.build_draft_attn_metadatas(2, lengths)
+    assert args["seq_lens_cpu_upper_bound"] is lengths
+    assert args["num_query_per_req"] == args["step"] == 3
+    assert args["batch_desc"].cg_mode == "full"
+
+
 def test_dspark_full_graph_refreshes_only_two_schedules_per_round(runtime, monkeypatch):
     """Regression: target + propose + replay previously submitted six schedules."""
     a3 = sys.modules["vllm_ascend.attention.a3_mla_sink"]

@@ -2984,12 +2984,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if getattr(self, "use_a3_mla_sink", False):
             query = (preprocessed.ql_nope, preprocessed.q_pe)
+            output_kwargs = {"output_mask": flash.output_mask, "return_softmax_lse": False}
         else:
+            output_kwargs = {}
             query = flash.query
             query[..., : self.kv_lora_rank].copy_(preprocessed.ql_nope)
             query[..., self.kv_lora_rank :].copy_(preprocessed.q_pe)
         record_attention_compute_start()
-        output_kwargs = {"output_mask": flash.output_mask} if getattr(flash, "output_mask", None) is not None else {}
         latent, _ = flash.adapter.attention(
             query,
             fused_cache,

@@ -334,15 +334,25 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             )
-            attn_metadata = self._build_attn_metadata(
-                num_reqs=num_reqs,
-                batch_desc=batch_desc,
-                query_start_loc_np=self.arange_np[: num_reqs + 1] * self.num_query_per_req,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-                refresh_for_graph=True,
-            )
+            if getattr(self, "use_a3_mla_sink", False):
+                attn_metadata = self._build_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=self.arange_np[: num_reqs + 1] * self.num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                    refresh_for_graph=True,
+                )
+            else:
+                attn_metadata = self._build_uniform_attn_metadata(
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    num_query_per_req=self.num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
 
         return [attn_metadata]
 

@@ -80,6 +80,29 @@ def test_a5_preserves_baseline_pd_layout(monkeypatch, connector, expected):
     assert supports_component_major_mla_pd(config) is expected
 
 
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.parametrize("outside_scope", ["model", "runner", "draft", "pcp", "pp"])
+def test_other_a3_deployments_keep_baseline_pd_policy(role, outside_scope):
+    config = selection_impl().vllm_config
+    if outside_scope == "model":
+        config.model_config.hf_config.model_type = "other"
+    elif outside_scope == "runner":
+        config.use_v2_model_runner = False
+    elif outside_scope == "draft":
+        config.speculative_config = None
+    elif outside_scope == "pcp":
+        config.parallel_config.prefill_context_parallel_size = 2
+    else:
+        config.parallel_config.pipeline_parallel_size = 2
+    child = {"kv_connector": "MooncakeConnectorV2", "kv_connector_extra_config": {"use_layerwise": True}}
+    config.kv_transfer_config = SimpleNamespace(kv_role=role, **child)
+    assert supports_component_major_mla_pd(config)
+    config.kv_transfer_config = SimpleNamespace(
+        kv_role=role, kv_connector="MultiConnector", kv_connector_extra_config={"connectors": [child]}
+    )
+    assert not supports_component_major_mla_pd(config)
+
+
 def common(lengths=(15, 7), prefixes=(0, 2, 3), capacity=8):
     return SimpleNamespace(
         num_actual_tokens=prefixes[-1],
@@ -110,7 +133,7 @@ def selection_impl():
             ),
             cache_config=SimpleNamespace(block_size=128),
             kv_transfer_config=None,
-            parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+            parallel_config=SimpleNamespace(pipeline_parallel_size=1, prefill_context_parallel_size=1),
         ),
     )
 
@@ -354,6 +377,7 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
     current_ptr = first.current.schedule.data_ptr() if first.current else None
     current_mask_ptr = first.current.output_mask.data_ptr() if first.current else None
     split = causal and dcp_size > 1
+    assert len(calls) == 1 + int(split)
     assert first.cache_lens.tolist() == (
         [7, 3, 0, 0, 0] if split else [8, 4, 0, 0, 0] if dcp_size > 1 else [15, 7, 0, 0, 0]
     )
@@ -361,6 +385,7 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
     assert calls[0][2] is first.cache_lens  # Keep the builder's length buffer.
     inputs.seq_lens.copy_(torch.tensor([1, 0], dtype=torch.int32))
     second = builder.build(inputs, 2, 3, False)
+    assert len(calls) == 2 * (1 + int(split))
     assert second is first and second.schedule.data_ptr() == schedule_ptr
     assert second.output_mask.data_ptr() == mask_ptr
     expected_live = [False, False] if split else [not causal, True]
@@ -393,6 +418,12 @@ def test_a3_builder_normalizes_once_and_reuses_schedule_storage(monkeypatch, cau
         assert with_empty_request.current.slots.tolist() == [0, 1, 2] + [-1] * 5
         assert with_empty_request.current.output_mask.tolist() == [False] * 3 + [True] * 5
 
+    for _ in range(2):
+        calls.clear()
+        mixed = builder.build(inputs, 2, 3, True)
+        assert mixed is not first and mixed.schedule is not None
+        assert len(calls) == 1 + int(split)
+
 
 @pytest.mark.parametrize("path", ["ordinary", "history", "current"])
 def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
@@ -402,7 +433,9 @@ def test_a3_callers_forward_the_matching_output_mask(monkeypatch, path):
         assert q.data_ptr() == q_pe.data_ptr()
         assert kwargs["qv"].data_ptr() == q_nope.data_ptr()
         # Finite invalid-row sentinels must be masked by the eventual consumer.
-        return torch.ones(2, 8, 512, dtype=q.dtype), torch.zeros(8, 2), None, None
+        output = torch.ones(2, 8, 512, dtype=q.dtype)
+        assert kwargs["return_softmax_lse"] is (path != "ordinary")
+        return (output, torch.zeros(8, 2), None, None) if kwargs["return_softmax_lse"] else output
 
     adapter = sink.A3MLAAdapter(sink.A3MLAConfig(8, 0.125), provider, None)
     cache = adapter.allocate_cache(1, device="cpu")
@@ -751,7 +784,7 @@ def test_sfa_build_consumes_device_lengths_without_exact_cpu_mirror(monkeypatch,
     if host_mirror is None:
         assert actual.seq_lens_cpu is None
         # Other model/hardware paths retain the pre-existing fallback.
-        instance.allow_a3_device_lengths = False
+        del instance.allow_a3_device_lengths
         monkeypatch.setattr(torch.Tensor, "to", original_to)
         fallback = build(instance, inputs)
         assert fallback.seq_lens_cpu.tolist() == [15, 7]

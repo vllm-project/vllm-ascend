@@ -184,7 +184,17 @@ def supports_component_major_mla_pd(vllm_config: VllmConfig) -> bool:
         return False
 
     connector = getattr(kv_transfer_config, "kv_connector", None)
-    if get_ascend_device_type() != AscendDeviceType.A3:
+    # Both transfer endpoints select the layout from the deployment config,
+    # before either endpoint has a draft attention implementation.
+    if not (
+        getattr(vllm_config, "use_v2_model_runner", False)
+        and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+        and vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.method == "dspark"
+        and vllm_config.parallel_config.pipeline_parallel_size == 1
+        and vllm_config.parallel_config.prefill_context_parallel_size == 1
+        and get_ascend_device_type() == AscendDeviceType.A3
+    ):
         return connector in {"MooncakeConnectorV2", "MooncakePullConnector"}
     extra = getattr(kv_transfer_config, "kv_connector_extra_config", {})
     if connector == "MultiConnector":

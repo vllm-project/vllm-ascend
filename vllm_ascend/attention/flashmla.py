@@ -299,7 +299,7 @@ class FlashMLACurrent:
 
     adapter: FlashMLAImpl | A3MLAAdapter
     query: torch.Tensor | None
-    schedule: torch.Tensor
+    schedule: torch.Tensor | None
     cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     block_table: torch.Tensor
     slots: torch.Tensor
@@ -311,7 +311,7 @@ class FlashMLACurrent:
 class FlashMLADecode:
     adapter: FlashMLAImpl | A3MLAAdapter
     query: torch.Tensor | None
-    schedule: torch.Tensor
+    schedule: torch.Tensor | None
     cu: torch.Tensor
     used_q: torch.Tensor
     cache_lens: torch.Tensor
@@ -361,17 +361,22 @@ class FlashMLAMetadataBuilder:
 
     def _allocate_schedule(self, adapter, tokens, columns, lengths, cu, used):
         if isinstance(adapter, A3MLAAdapter):
-            adapter = adapter.for_capacity(columns, tokens)
-            # Let the installed provider allocate its opaque schedule once for this capacity.
-            schedule = adapter.build_metadata(lengths, cu, used)
+            return adapter.for_capacity(columns, tokens), None
+        schedule_meta = adapter.build_metadata(
+            torch.empty_like(lengths, device="meta"),
+            torch.empty_like(cu, device="meta"),
+            torch.empty_like(used, device="meta"),
+        )
+        return adapter, torch.empty_like(schedule_meta, device=self.device)
+
+    @staticmethod
+    def _refresh_schedule(batch, lengths, cu, used):
+        schedule = batch.adapter.build_metadata(lengths, cu, used)
+        if batch.schedule is None:
+            # The first real A3 schedule provides the buffer retained by graph capture.
+            batch.schedule = schedule
         else:
-            schedule_meta = adapter.build_metadata(
-                torch.empty_like(lengths, device="meta"),
-                torch.empty_like(cu, device="meta"),
-                torch.empty_like(used, device="meta"),
-            )
-            schedule = torch.empty_like(schedule_meta, device=self.device)
-        return adapter, schedule
+            batch.schedule.copy_(schedule)
 
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
@@ -446,18 +451,11 @@ class FlashMLAMetadataBuilder:
         rows = num_decodes + 1 if has_prefill else max(num_decodes, min(tokens, self.max_num_reqs)) + 1
         columns = common.block_table_tensor.shape[1]
         key = tokens, rows, columns, common.causal
-        if has_prefill:
-            if retain_for_graph:
-                raise ValueError("FlashMLA graph buffers require a decode-only batch")
+        if has_prefill and retain_for_graph:
+            raise ValueError("FlashMLA graph buffers require a decode-only batch")
+        flash = None if has_prefill else self.buffers.get(key)
+        if flash is None:
             flash = self._allocate(tokens, rows, columns, common.causal)
-        else:
-            cached_flash = self.buffers.get(key)
-            if cached_flash is None:
-                flash = self._allocate(tokens, rows, columns, common.causal)
-                if retain_for_graph:
-                    self.buffers[key] = flash
-            else:
-                flash = cached_flash
 
         def refresh():
             # The extra zero-used request owns physical graph/SP padding.
@@ -511,7 +509,7 @@ class FlashMLAMetadataBuilder:
                 cos, sin = get_cos_and_sin_mla(flash.positions)
                 flash.cos.copy_(cos)
                 flash.sin.copy_(sin)
-            flash.schedule.copy_(flash.adapter.build_metadata(flash.cache_lens, flash.cu, flash.used_q))
+            self._refresh_schedule(flash, flash.cache_lens, flash.cu, flash.used_q)
             if flash.output_mask is not None:
                 if current is None:
                     flash.output_mask.copy_(flash.adapter.build_output_mask(flash.cache_lens, flash.cu, tokens))
@@ -527,9 +525,11 @@ class FlashMLAMetadataBuilder:
                 current.block_table.masked_fill_(columns >= page_counts[:, None], 0)
                 current.slots.copy_(page_starts[requests] * FLASHMLA_BLOCK_SIZE + indices - flash.cu[requests])
                 current.slots.masked_fill_(padding, -1)
-                current.schedule.copy_(current.adapter.build_metadata(flash.used_q, flash.cu, flash.used_q))
+                self._refresh_schedule(current, flash.used_q, flash.cu, flash.used_q)
 
         # Refresh on the caller's stream before return; captured buffer caching
         # preserves the addresses used by graph replay.
         refresh()
+        if retain_for_graph:
+            self.buffers[key] = flash
         return flash

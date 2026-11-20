@@ -190,7 +190,6 @@ class DCPImplMixin:
                 self.tp_group.unique_name,
                 pcp_group.unique_name,
                 defer_combine=defer_combine,
-                **({"output_mask": output_mask} if output_mask is not None else {}),
             )
         return torch.ops.vllm.dcp_a2a_fused(
             attn_output,

@@ -192,6 +192,7 @@ class A3MLAAdapter:
         seqused_q=None,
         attn_mask=None,
         normalize_output=True,
+        return_softmax_lse=True,
     ):
         del attn_mask  # Mask semantics are explicit in cfg.mask_mode, never inferred from a tensor.
         # The batch builder validated these length buffers when preparing metadata.
@@ -239,21 +240,25 @@ class A3MLAAdapter:
             causal=cfg.mask_mode == 3,
             scheduler_metadata=metadata,
             num_splits=1,
-            return_softmax_lse=True,
+            return_softmax_lse=return_softmax_lse,
         )
-        if not isinstance(result, (tuple, list)) or len(result) != 4:
-            raise ValueError("A3 MLA must return (out, lse, out_accum, lse_accum)")
-        output, lse, _, _ = result
+        if return_softmax_lse:
+            if not isinstance(result, (tuple, list)) or len(result) != 4:
+                raise ValueError("A3 MLA must return (out, lse, out_accum, lse_accum)")
+            output, lse, _, _ = result
+            if lse.shape != (cfg.num_heads, tokens) or lse.dtype != torch.float32 or lse.device != device:
+                raise ValueError("A3 provider LSE must be FP32 [H,T] on the Query device")
+        else:
+            output, lse = result, None
         expected_output = (tokens, cfg.num_heads, LATENT_DIM)
         if output.shape != expected_output or output.dtype != cfg.dtype or output.device != device:
             raise ValueError("A3 provider output must be TND and match Query dtype/device")
-        if lse.shape != (cfg.num_heads, tokens) or lse.dtype != torch.float32 or lse.device != device:
-            raise ValueError("A3 provider LSE must be FP32 [H,T] on the Query device")
         if normalize_output and tokens:
             # The provider's empty/all-masked rows may carry +inf LSE.
             # Ordinary MLA needs normalized rows before V-up. DCP defers this
             # to its existing pack/combine kernels using the same output mask.
             output.masked_fill_(output_mask[:, None, None], 0)
-            lse.masked_fill_(output_mask[None, :], -torch.inf)
+            if lse is not None:
+                lse.masked_fill_(output_mask[None, :], -torch.inf)
         # Existing MLA V-up and DCP adaptation consume NTD output and NT LSE.
         return output.transpose(0, 1), lse

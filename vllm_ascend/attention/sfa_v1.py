@@ -422,8 +422,6 @@ class AscendSFAMetadata:
     understand this class
     """
 
-    allow_a3_device_lengths = False
-
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -664,7 +662,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope or self.allow_a3_device_lengths:
+        elif self.nope or getattr(self, "allow_a3_device_lengths", False):
             # These consumers use device lengths and scheduler upper bounds;
             # do not recreate an exact CPU mirror when it is absent.
             seq_lens_cpu = None
