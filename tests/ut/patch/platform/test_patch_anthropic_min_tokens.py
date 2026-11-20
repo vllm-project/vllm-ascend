@@ -16,6 +16,7 @@ def patch_module():
     # Load just this patch: CPU tests need no unrelated platform/device patches.
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/platform/patch_anthropic_min_tokens.py"
     spec = importlib.util.spec_from_file_location("patch_anthropic_min_tokens", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

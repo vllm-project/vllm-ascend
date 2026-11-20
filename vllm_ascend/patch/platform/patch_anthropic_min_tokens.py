@@ -34,7 +34,6 @@ def apply_patch() -> None:
 
     original = AnthropicServingMessages.__dict__["_build_base_request"].__func__
 
-    @classmethod
     @wraps(original)
     def build_base_request(cls, anthropic_request, openai_messages):
         request = original(cls, anthropic_request, openai_messages)
@@ -42,7 +41,7 @@ def apply_patch() -> None:
             request.min_tokens = anthropic_request.min_tokens  # type: ignore[attr-defined]
         return request
 
-    AnthropicServingMessages._build_base_request = build_base_request  # type: ignore[method-assign]
+    setattr(AnthropicServingMessages, "_build_base_request", classmethod(build_base_request))  # noqa: B010
 
 
 apply_patch()
