@@ -17,13 +17,36 @@
 # This file is a part of the vllm-ascend project.
 #
 import copy
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 from vllm.config import CompilationMode, VllmConfig
+
+from vllm_ascend.ascend_forward_context import bind_draft_moe_comm_context
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
+
+
+def _wrap_speculator_draft_model_context(speculator, vllm_config: VllmConfig):
+    """Ensure ``speculator.model`` isolates draft MoE comm across eager, PIECEWISE, and capture."""
+    load_model = getattr(speculator, "load_model", None)
+    if not callable(load_model):
+        return speculator
+
+    @wraps(load_model)
+    def wrapped_load_model(*args, **kwargs):
+        result = load_model(*args, **kwargs)
+        draft_model = getattr(speculator, "model", None)
+        if isinstance(draft_model, nn.Module):
+            draft_cfg = getattr(speculator, "draft_vllm_config", getattr(speculator, "vllm_config", vllm_config))
+            bind_draft_moe_comm_context(draft_model, draft_cfg)
+        return result
+
+    speculator.load_model = wrapped_load_model
+    return speculator
 
 
 def init_speculator(
@@ -66,49 +89,49 @@ def init_speculator(
             AscendDSparkSpeculator,
         )
 
-        return AscendDSparkSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendDSparkSpeculator(vllm_config, device), vllm_config)
     if speculative_config.use_dflash():
         if "LiLiCorrDraftModel" in speculative_config.draft_model_config.architectures:
             from vllm_ascend.worker.v2.spec_decode.lilicorr.speculator import (
                 AscendLiLiCorrSpeculator,
             )
 
-            return AscendLiLiCorrSpeculator(vllm_config, device)
+            return _wrap_speculator_draft_model_context(AscendLiLiCorrSpeculator(vllm_config, device), vllm_config)
         if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
             from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
                 AscendDFlash2Speculator,
             )
 
-            return AscendDFlash2Speculator(vllm_config, device)
+            return _wrap_speculator_draft_model_context(AscendDFlash2Speculator(vllm_config, device), vllm_config)
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
             AscendDFlashSpeculator,
         )
 
-        return AscendDFlashSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendDFlashSpeculator(vllm_config, device), vllm_config)
     if speculative_config.use_gemma4_mtp():
         from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
             AscendGemma4Speculator,
         )
 
-        return AscendGemma4Speculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendGemma4Speculator(vllm_config, device), vllm_config)
     if speculative_config.use_multi_module_mtp():
         from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
 
-        return AscendMultiModuleMTPSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendMultiModuleMTPSpeculator(vllm_config, device), vllm_config)
     if speculative_config.method == "mtp":
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
 
-        return AscendMTPSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendMTPSpeculator(vllm_config, device), vllm_config)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
-        return AscendEagleSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendEagleSpeculator(vllm_config, device), vllm_config)
     if speculative_config.uses_draft_model():
         from vllm_ascend.worker.v2.spec_decode.standalone_ar.speculator import (
             AscendStandaloneARSpeculator,
         )
 
-        return AscendStandaloneARSpeculator(vllm_config, device)
+        return _wrap_speculator_draft_model_context(AscendStandaloneARSpeculator(vllm_config, device), vllm_config)
     raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

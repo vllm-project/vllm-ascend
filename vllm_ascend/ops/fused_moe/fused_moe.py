@@ -128,6 +128,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
+        # Initialize the runner-owned output scaling factor once at construction.
+        # With apply_routed_scale_to_output=False (default), FusedMoEFactory
+        # passes routed_scaling_factor to the router and routed_experts while
+        # setting the runner's routed_scaling_factor to 1.0; pinning it here
+        # prevents FusedMC2CommImpl from falling back to routed_experts and
+        # scaling topk_weights a second time.
+        self.routed_experts.ascend_megamoe_fold_scale = float(self.routed_scaling_factor)
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -348,6 +355,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             and getattr(shared_experts, "megamoe_shared_weights_ready", False)
             and not getattr(shared_experts, "_megamoe_shared_fusion_disabled", False)
             and _EXTRA_CTX.moe_comm_type is MoECommType.FUSED_MC2
+            and bool(_EXTRA_CTX.use_mega_moe)
         )
 
     @property
