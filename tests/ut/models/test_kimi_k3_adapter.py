@@ -13,6 +13,7 @@ from vllm.config import CUDAGraphMode
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.models import quarot_utils
 from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
@@ -37,6 +38,68 @@ def test_kimi_kda_marks_only_mixed_qkv_for_gmm_layout(uses_mixed_projection):
         attention = kimi_k3.AscendKimiK3DeltaAttention(None, None)
 
     assert getattr(attention.in_proj_qkvgfab, "_single_group_gmm_nz", False) is uses_mixed_projection
+
+
+@pytest.mark.parametrize("use_latent_moe", [False, True])
+def test_kimi_moe_constructs_routed_gmm_projections(monkeypatch, use_latent_moe):
+    def init_linear(layer, input_size, output_size, **kwargs):
+        nn.Module.__init__(layer)
+        layer.input_size = input_size
+        layer.output_size = output_size
+        layer.quant_config = kwargs.get("quant_config")
+
+    config = SimpleNamespace(
+        hidden_size=128,
+        moe_intermediate_size=256,
+        num_experts=4,
+        num_experts_per_token=2,
+        routed_expert_hidden_size=64 if use_latent_moe else None,
+        latent_moe_use_norm=False,
+        routed_scaling_factor=1.0,
+        num_shared_experts=None,
+        hidden_act="silu",
+        moe_renormalize=True,
+        use_grouped_topk=False,
+        num_expert_group=1,
+        topk_group=1,
+        moe_router_activation_func="sigmoid",
+    )
+    parallel = SimpleNamespace(enable_eplb=False)
+    quant_config = SimpleNamespace(get_name=lambda: "ascend")
+    experts = nn.Module()
+    experts.moe_config = SimpleNamespace(num_logical_experts=4, num_experts=4, num_local_experts=4)
+    factory = MagicMock(return_value=experts)
+    output_transform = MagicMock(return_value=nn.Module())
+    monkeypatch.setattr(kimi_k3.ReplicatedLinear, "__init__", init_linear)
+    monkeypatch.setattr(
+        kimi_k3, "GateLinear", lambda input_size, output_size, **kwargs: nn.Linear(input_size, output_size)
+    )
+    monkeypatch.setattr(kimi_k3, "FusedMoEFactory", factory)
+    monkeypatch.setattr(kimi_k3, "AscendKimiRoutedOutputTransform", output_transform)
+
+    moe = kimi_k3.AscendKimiMoE(
+        config=config,
+        vllm_config=SimpleNamespace(parallel_config=parallel),
+        quant_config=quant_config,
+    )
+
+    if use_latent_moe:
+        down, up = moe.routed_expert_down_proj, moe.routed_expert_up_proj
+        for projection in (down, up):
+            assert isinstance(projection, kimi_k3.AscendKimiK3RoutedLinear)
+            assert projection._single_group_gmm_nz is True
+            assert projection.quant_config is quant_config
+        assert (down.input_size, down.output_size) == (128, 64)
+        assert (up.input_size, up.output_size) == (64, 128)
+        output_transform.assert_called_once_with(None, up)
+        assert factory.call_args.kwargs["routed_input_transform"] is down
+        assert factory.call_args.kwargs["routed_output_transform"] is output_transform.return_value
+    else:
+        assert moe.routed_expert_down_proj is None
+        assert moe.routed_expert_up_proj is None
+        assert factory.call_args.kwargs["routed_input_transform"] is None
+        assert factory.call_args.kwargs["routed_output_transform"] is None
+        output_transform.assert_not_called()
 
 
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
@@ -418,6 +481,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model.config = SimpleNamespace(
         is_moe=False,
         is_linear_attn=True,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         num_hidden_layers=1,
@@ -738,7 +802,9 @@ def test_projector_applies_optional_modelslim_rotation():
         torch.testing.assert_close(projector(image_features), image_features)
 
 
-def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lmhead_tp", [False, True])
+def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch, lmhead_tp):
+    monkeypatch.setattr(quarot_utils, "lmhead_tp_enable", lambda: lmhead_tp)
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
     model._owns_embed_tokens = False
@@ -777,13 +843,16 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
 
     torch.testing.assert_close(model.model.context_proj.weight, projection)
 
-    def vocab_layer(vocab_size, hidden_size, params_dtype):
+    prefixes = []
+
+    def vocab_layer(vocab_size, hidden_size, params_dtype, *, prefix):
+        prefixes.append(prefix)
         layer = nn.Linear(hidden_size, vocab_size, bias=False, dtype=params_dtype)
         layer.quant_method = SimpleNamespace(process_weights_after_loading=lambda layer: None)
         return layer
 
-    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.VocabParallelEmbedding", vocab_layer)
-    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.ParallelLMHead", vocab_layer)
+    monkeypatch.setattr("vllm_ascend.models.quarot_utils.VocabParallelEmbedding", vocab_layer)
+    monkeypatch.setattr("vllm_ascend.models.quarot_utils.ParallelLMHead", vocab_layer)
     config = SimpleNamespace(
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=3, hidden_size=2)),
         quant_config=SimpleNamespace(
@@ -791,6 +860,7 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
         ),
     )
     model.post_process(config)
+    assert prefixes == ["", "lm_head" if lmhead_tp else ""]
 
     torch.testing.assert_close(
         model.model.context_proj.weight,

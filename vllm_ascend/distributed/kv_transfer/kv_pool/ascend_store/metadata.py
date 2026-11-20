@@ -796,21 +796,35 @@ class LoadSpec:
 
     token_len: int = 0
 
-    # Exact request-scoped snapshot identity, separate from the logical length
-    # which can roll back after speculative-token rejection.
-    layerwise_snapshot_end_token: int | None = None
-    layerwise_snapshot_block_index: int | None = None
     # Distinguish the preceding step of this request from external prefix hits.
     layerwise_previous_step: bool = False
-    # First block stored under request-scoped keys, including unhashed full blocks.
-    layerwise_snapshot_start_block: int | None = None
+
+    @property
+    def pool_hit_tokens(self) -> int:
+        """External pool coverage in tokens.
+
+        Prefers the raw store-skip hit when the store reported one, else the
+        cached hit length. Load-range planning and save-range clamping share
+        this resolution; policies that must ignore the raw hit (eagle drafts,
+        hybrid groups that are not all cacheable) keep guards at call sites.
+        """
+        return self.kvpool_store_skip_tokens if self.kvpool_store_skip_tokens is not None else self.kvpool_cached_tokens
+
+    def clamp_save_start(self, start_block: int, block_size: int) -> int:
+        """Clamp ``start_block`` up past blocks the pool hit already covers.
+
+        No-op unless the hit is loadable (``can_load``): an unloadable hit
+        never trims the save range.
+        """
+        if not self.can_load:
+            return start_block
+        return max(start_block, self.pool_hit_tokens // block_size)
 
 
 @dataclass(init=False)
 class RequestTracker:
     # Request id
     req_id: str
-
     token_len: int
 
     # The block ids that has been allocated so far, grouped by KV cache group.
@@ -836,11 +850,6 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    # Identity of the latest request-scoped layerwise partial snapshot.
-    last_layerwise_snapshot_end_token: int | None = None
-    last_layerwise_snapshot_block_index: int | None = None
-    last_layerwise_snapshot_start_block: int | None = None
-
     # Number of speculative scratch blocks for each Mamba cache group.
     num_speculative_blocks_by_group: dict[int, int] | None = None
 
@@ -862,9 +871,6 @@ class RequestTracker:
         last_block_gva: int | None = None,
         num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
-        last_layerwise_snapshot_end_token: int | None = None,
-        last_layerwise_snapshot_block_index: int | None = None,
-        last_layerwise_snapshot_start_block: int | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -882,9 +888,6 @@ class RequestTracker:
         self.gva_block_offset = gva_block_offset
         self.last_block_gva = last_block_gva
         self.block_sizes = block_sizes
-        self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
-        self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
-        self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1187,16 +1190,6 @@ class ReqMeta:
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
             )
-            if should_save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = target_token_len
-                tracker.last_layerwise_snapshot_start_block = min(full_block_count, available_full_block_count)
-                tracker.last_layerwise_snapshot_block_index = (
-                    full_block_count if target_token_len % cache_transfer_granularity != 0 else full_block_count - 1
-                )
-            elif save_partial_block:
-                tracker.last_layerwise_snapshot_end_token = None
-                tracker.last_layerwise_snapshot_block_index = None
-                tracker.last_layerwise_snapshot_start_block = None
 
         token_ids = None
         if tracker.token_ids and not skip_save:

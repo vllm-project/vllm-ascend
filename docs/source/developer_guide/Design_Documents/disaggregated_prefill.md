@@ -64,11 +64,31 @@ This transfer path still requires end-to-end validation on Ascend hardware, incl
 
 #### Mooncake V2 Layerwise Push Connector
 
-Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
-`kv_producer` and `kv_consumer`, respectively. Use
+Set `kv_connector` to `MooncakeConnectorV2` and
+`kv_connector_extra_config.use_layerwise` to `true` on both P and D, with
+`kv_role` set to `kv_producer` and `kv_consumer`, respectively. For example, on P:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {"use_layerwise": true}
+}
+```
+
+`use_layerwise` defaults to `false`, which keeps the pull-based behavior.
+Explicit `MooncakePushConnector` and `MooncakePullConnector` names remain
+supported and always select their respective modes. When using `MultiConnector`,
+set `use_layerwise` in the Mooncake child's `kv_connector_extra_config`.
+
+Use
 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
 as the proxy. This experimental path supports PCP/TP routing and PP layer
-lookup; workers currently require DCP=1 and do not support KVPP.
+lookup. KVPP can be enabled on P for supported MLA/SFA models with DCP=1 on P.
+Each target layer's persistent owner supplies the layer to every D worker that
+holds it. With DCP on D, the Push transfer selects the destination's token
+stripes for sequence-sharded caches. Replicated draft caches use the usual
+replica selection.
 
 The proxy sends the request to D first. After allocating blocks, D's scheduler
 submits an immutable destination snapshot to a 32-worker HTTP thread pool,
@@ -168,7 +188,7 @@ settings consistent with the deployment and reserve enough host memory on D
 for staging.
 
 For startup scripts and a proxy example, see
-[D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
+[D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe).
 
 ### 3. Interface Design
 

@@ -11,9 +11,12 @@ import pytest
 import torch
 from vllm import envs
 from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config.attention import AttentionConfig
+from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.offloader.base import NoopOffloader
+from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
+from vllm.model_executor.offloader.base import create_offloader as create_vllm_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -29,16 +32,18 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
-def _make_runner(need_timing: bool = True):
+def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
+        scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
@@ -48,6 +53,7 @@ def _make_runner(need_timing: bool = True):
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
+    runner.max_num_reqs = 16
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
@@ -74,6 +80,7 @@ def _make_runner(need_timing: bool = True):
     runner.use_fia = False
     runner.sync_spec_pp_cpu_counts = False
     runner.speculative_config = None
+    runner.speculator = None
     # vLLM main suppresses EPLB even for `skip_eplb` dummy runs, so the
     # attribute must exist on every runner built here.
     runner.eplb = SimpleNamespace(suppress=nullcontext, step=Mock())  # type: ignore[assignment]
@@ -384,70 +391,6 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     assert gathered.has_prefill is True
     assert gathered.decode_graph_eligible is prefill_runs_as_decode
     assert uniform == expected_uniform
-
-
-def test_execute_model_records_profiling_time():
-    runner = _make_runner()
-    scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch(
-            "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
-            side_effect=[10.0, 10.125],
-        ),
-    ):
-        output = runner.execute_model(scheduler_output)
-
-    assert output is None
-    assert runner._cpp_execution_time_ms == pytest.approx(125.0)
-    assert mock_synchronize.call_count == 2
-    expected_kwargs: dict[str, object] = {
-        "intermediate_tensors": None,
-        "dummy_run": False,
-        "skip_attn_for_dummy_run": False,
-        "is_profile": False,
-        "context_len": 0,
-        "valid_dummy_state_slots": False,
-        "randomize_inputs": False,
-    }
-    mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
-
-
-def test_execute_model_disables_profiling_timer_and_clears_stale_time():
-    runner = _make_runner()
-    runner._cpp_execution_time_ms = 123.0
-    scheduler_output = SimpleNamespace(disable_profiling_timing=True, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch("vllm_ascend.core.profiling_chunk_predictor.time.perf_counter") as mock_perf_counter,
-    ):
-        runner.execute_model(scheduler_output)
-
-    profiling_config = runner.ascend_config.scheduler_config.profiling_chunk_config
-    assert not profiling_config.need_timing
-    assert runner._cpp_execution_time_ms is None
-    mock_synchronize.assert_not_called()
-    mock_perf_counter.assert_not_called()
 
 
 def test_execute_model_skips_dp_coordination_when_safe():
@@ -876,7 +819,7 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.use_aux_hidden_state_outputs = False
     runner.encoder_cache = None
     runner.num_speculative_steps = int(with_draft)
-    runner.speculative_config = SimpleNamespace() if with_draft else None
+    runner.speculative_config = SimpleNamespace(prefill_context_kv_only=False) if with_draft else None
     runner.is_first_pp_rank = True
     runner._draft_workspace_lane = object()
     model = SimpleNamespace()
@@ -1083,6 +1026,38 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     prepare_ring.assert_called_once_with(runner, dummy.num_reqs)
 
 
+@pytest.mark.parametrize("promised,padded,expected", [(6, 16, 6), (6, 1, 6), (None, 16, 1)])
+def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, promised, padded, expected):
+    from vllm_ascend.worker.v2.model_states import default
+
+    state = default.AscendModelState.__new__(default.AscendModelState)
+    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    state.model_config = SimpleNamespace(max_model_len=2048)
+    state.kvpp_runtime = None
+    state.decoder_replay = None
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_reqs_after_padding=1,
+        num_tokens=1,
+        num_tokens_after_padding=padded,
+        query_start_loc_np=np.array([0, 1], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1]),
+        num_scheduled_tokens=torch.tensor([1]),
+        max_query_len=promised,
+        is_prefilling_np=np.array([False]),
+        seq_lens=torch.tensor([1]),
+        seq_lens_np=np.array([1]),
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(padded, dtype=torch.int64),
+        attn_state=None,
+    )
+    build = Mock(return_value={})
+    monkeypatch.setattr(default, "build_attn_metadata", build)
+    monkeypatch.setattr(default, "get_ascend_config", lambda: SimpleNamespace(xlite_graph_config=None))
+    state.prepare_attn(batch, CUDAGraphMode.FULL, (), torch.empty(0), [], None, for_capture=True)
+    assert build.call_args.kwargs["max_query_len"] == expected
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
@@ -1120,6 +1095,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
         num_scheduled_tokens=torch.tensor([1, 1]),
+        max_query_len=None,
         is_prefilling_np=np.array([True, False, False, False]),
         seq_lens=torch.tensor([1, 5]),
         seq_lens_np=np.array([1, 5]),
@@ -1179,6 +1155,75 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 
 
 @pytest.mark.parametrize(
+    ("enforce_eager", "offload_backend", "use_ascend_offloader"),
+    [
+        pytest.param(True, "prefetch", True, id="eager-prefetch"),
+        pytest.param(False, "prefetch", False, id="graph-prefetch"),
+        pytest.param(True, "auto", False, id="eager-auto"),
+    ],
+)
+def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=1),
+        speculative_config=None,
+        offload_config=OffloadConfig(
+            offload_backend=offload_backend,
+            prefetch=PrefetchOffloadConfig(offload_group_size=2, offload_num_in_group=1),
+        ),
+    )
+    ascend_config = SimpleNamespace(
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
+        dump_config_path=None,
+    )
+    copy_stream = object()
+    parent_offloader = None
+
+    @contextmanager
+    def cuda_wrapper():
+        # Model the CUDA-to-NPU stream mapping only for the duration of the wrapper.
+        with patch.object(torch.cuda, "Stream", return_value=copy_stream):
+            yield
+
+    def parent_init(self, config, device):
+        nonlocal parent_offloader
+        _parent_init(self, config, device, full_graph=not enforce_eager)
+        parent_offloader = create_vllm_offloader(config.offload_config)
+        set_offloader(parent_offloader)
+
+    previous_offloader = get_offloader()
+    try:
+        with (
+            patch.object(torch.cuda, "Stream"),
+            patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
+            patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", side_effect=cuda_wrapper),
+            patch.object(GPUModelRunner, "__init__", parent_init),
+            patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
+            patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController"),
+            patch("vllm_ascend.worker.v2.model_runner.AscendRequestState"),
+            patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
+            patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+            patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
+            patch("vllm_ascend.worker.v2.model_runner.RuntimeGuardProcessor.bind"),
+            patch(
+                "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
+                return_value=False,
+            ),
+            patch("torch.npu.Event"),
+            patch("torch.npu.Stream"),
+            patch("torch.empty"),
+        ):
+            NPUModelRunner(vllm_config, torch.device("cpu"))
+            offloader = get_offloader()
+            if use_ascend_offloader:
+                assert isinstance(offloader, AscendPrefetchOffloader)
+                assert offloader.copy_stream is copy_stream
+            else:
+                assert offloader is parent_offloader
+    finally:
+        set_offloader(previous_offloader)
+
+
+@pytest.mark.parametrize(
     ("use_pp", "backend_name", "env_buffer_size"),
     [
         pytest.param(False, None, None, id="pp1"),
@@ -1195,7 +1240,8 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         monkeypatch.setenv("HCCL_BUFFSIZE", env_buffer_size)
 
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1)
+        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1),
+        offload_config=OffloadConfig(),
     )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
 
@@ -1292,7 +1338,10 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 
 @pytest.mark.parametrize("method", ["mtp", "ngram", "ngram_gpu"])
 def test_init_spec_pp_full_graph_and_speculator(method):
-    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2))
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2),
+        offload_config=OffloadConfig(),
+    )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
@@ -1376,6 +1425,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.input_buffers = object()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1384,7 +1434,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -1419,7 +1470,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         ) as create_kvpp,
     ):
         runner.initialize_kv_cache(kv_cache_config)
-        seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
+        query_kwargs: dict[str, Any] = (
+            {"decode_query_len": 1} if vllm_version_is("0.33.0") else {"decode_query_lens": {1: 8}}
+        )
+        seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, **query_kwargs)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
     assert runner.model_state.device_metadata == (
@@ -1443,6 +1497,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1451,7 +1506,8 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(architecture="OtherModel")
+    runner.model_config = SimpleNamespace(architecture="OtherModel", hf_config=SimpleNamespace())
+    runner.vllm_config.model_config = runner.model_config
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()
@@ -2090,6 +2146,52 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     assert runner.kv_block_zeroer is delegate
 
 
+@pytest.mark.parametrize("failure", [None, "parent", "unsynchronized", "synchronized"])
+def test_vmm_shutdown_orders_and_retains_failures(failure):
+    from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import EngramSharedReleaseError
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    events = []
+    first = SimpleNamespace(local_vmm=True, close_host_offload=Mock(side_effect=lambda: events.append("first")))
+    error = EngramSharedReleaseError("sync") if failure == "synchronized" else RuntimeError("peer")
+    last = SimpleNamespace(local_vmm=True, close_host_offload=Mock())
+
+    def close_last():
+        events.append("last")
+        if failure in ("unsynchronized", "synchronized"):
+            raise error
+
+    last.close_host_offload.side_effect = close_last
+    runner.model = SimpleNamespace(modules=lambda: [first, last])
+    runner._shared_engram_shutdown_pending = [first]
+
+    def parent(_runner):
+        events.append("parent")
+        if failure == "parent":
+            raise RuntimeError("parent")
+
+    with patch.object(GPUModelRunner, "shutdown", parent):
+        if failure:
+            with pytest.raises(RuntimeError):
+                runner.shutdown()
+        else:
+            runner.shutdown()
+    assert events[0] == "parent"
+    assert events[1:] == ([] if failure == "parent" else ["last"] if failure == "unsynchronized" else ["last", "first"])
+    if failure in ("unsynchronized", "synchronized"):
+        assert runner._shared_engram_shutdown_pending == ([first, last] if failure == "unsynchronized" else [last])
+        last.close_host_offload.side_effect = lambda: events.append("retry")
+        runner.model = None
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert runner._shared_engram_shutdown_pending == []
+        assert first.close_host_offload.call_count == 1
+    elif failure == "parent":
+        assert runner._shared_engram_shutdown_pending == [first, last]
+    else:
+        assert runner._shared_engram_shutdown_pending == []
+
+
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     embedding = MagicMock()
@@ -2631,3 +2733,54 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
             assert runner._lmhead_pad_size is None
 
     assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
+
+
+def test_shutdown_releases_uva_owner_without_shared_pool_client():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = torch.nn.Module()
+    calls = []
+    embedding.close_host_offload = lambda: calls.append("release")
+    runner.model = embedding
+    with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
+        runner.shutdown()
+    assert calls == ["parent", "release"]
+
+
+@pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])
+def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
+    from vllm_ascend.model_executor.warmup import nz_warmup
+    from vllm_ascend.models.host_offload import register_host_offload_owner
+
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = MagicMock()
+    first, second = MagicMock(), MagicMock()
+    if cleanup_fails:
+        first.close_host_offload.side_effect = [RuntimeError("unregister failed"), None]
+    load_error = ValueError("later layer or checkpoint failed")
+
+    def fail_load(*args, **kwargs):
+        register_host_offload_owner(first)
+        register_host_offload_owner(second)
+        if published_model:
+            runner.model = MagicMock()
+            runner.model.modules.return_value = [first, second]
+        raise load_error
+
+    with (
+        patch.object(nz_warmup, "start_nz_warm_thread"),
+        patch.object(nz_warmup, "join_nz_warm_thread") as join,
+        patch("vllm_ascend.worker.v2.model_runner.get_pd_dspark_aux_layer_ids"),
+        patch.object(GPUModelRunner, "load_model", side_effect=fail_load),
+        pytest.raises(ValueError) as caught,
+    ):
+        runner.load_model()
+    assert caught.value is load_error
+    join.assert_called_once()
+    first.close_host_offload.assert_called_once()
+    second.close_host_offload.assert_called_once()
+    assert runner._shared_engram_shutdown_pending == ([first] if cleanup_fails else [])
+    if cleanup_fails:
+        with patch.object(GPUModelRunner, "shutdown"):
+            runner.shutdown()
+        assert first.close_host_offload.call_count == 2
+        assert runner._shared_engram_shutdown_pending == []

@@ -14,12 +14,14 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
 def _spec(lengths, *, architecture="MLA", use_dcp=False):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = architecture
+    spec.attn_backends = {"draft.0": AscendMLABackend}
     spec.use_flashmla = False
     spec.use_dcp = use_dcp
     spec.input_buffers = SimpleNamespace(seq_lens=torch.tensor(lengths, dtype=torch.int32), positions=object())
@@ -86,7 +88,12 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     spec._group_causal = False
     spec.vllm_config = SimpleNamespace(parallel_config=object())
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
-    decode = SimpleNamespace(actual_seq_lengths_q=[8])
+    decode = SimpleNamespace(
+        actual_seq_lengths_q=[8],
+        seq_lens_list=[22666, 0, 0, 0, 0],
+        seq_lens=torch.tensor([22666, 0, 0, 0, 0], dtype=torch.int32),
+        block_table=torch.zeros(5, 1, dtype=torch.int32),
+    )
     metadata = {"draft.0": SimpleNamespace(decode=decode)}
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", MagicMock(return_value=metadata))
     monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)

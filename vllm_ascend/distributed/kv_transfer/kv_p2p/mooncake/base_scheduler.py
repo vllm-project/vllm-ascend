@@ -19,6 +19,7 @@ from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -452,7 +453,12 @@ class MooncakeBaseConnectorScheduler:
         has_state_group = any(
             isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
         )
-        return uses_compressed_cache or has_state_group
+        has_sliding_window_group = any(
+            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
+        )
+        # D replays the final prompt token. P must retain SWA pages for that
+        # same position rather than retire them for the next token's window.
+        return uses_compressed_cache or has_state_group or has_sliding_window_group
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
@@ -528,8 +534,15 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
+        truncate_hashes = getattr(request, "truncate_block_hashes", None)
+        if callable(truncate_hashes):
+            # The engine resolves hash geometry before creating the connector.
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            truncate_hashes(hash_block_size, self.vllm_config.num_hash_lookahead_tokens)
+        else:
+            # Older vLLM versions do not provide incremental hash truncation.
+            request.block_hashes.clear()
         request.update_block_hashes()
         params["_p_side_truncated"] = True
 

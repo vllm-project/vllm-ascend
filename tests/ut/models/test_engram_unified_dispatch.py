@@ -64,7 +64,10 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
         )
     )
     model = types.SimpleNamespace(
-        engram_layout=types.SimpleNamespace(primes=[[[1]]]), engram_dp_shared_memory=True, engram_weight_root="model"
+        has_engram=True,
+        engram_layout=types.SimpleNamespace(primes=[[[1]]]),
+        engram_dp_shared_memory=True,
+        engram_weight_root="model",
     )
     vc = types.SimpleNamespace(
         load_config=types.SimpleNamespace(load_format="auto", safetensors_load_strategy="lazy"),

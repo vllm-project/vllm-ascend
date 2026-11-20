@@ -6,7 +6,10 @@ from copy import copy
 
 from vllm.distributed import divide, get_pcp_group, get_tp_group
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda import _KimiGDNMergedColumnParallelLinear
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def get_kda_parallel_size(parallel_config) -> int:
@@ -54,10 +57,25 @@ class KDAColumnParallelLinear(ColumnParallelLinear):
 
 
 class KDAMergedColumnParallelLinear(MergedColumnParallelLinear, KDAColumnParallelLinear):
-    def __init__(self, input_size: int, output_sizes: list[int], **kwargs) -> None:
+    def __init__(self, input_size: int, output_sizes: list[int], *, padding_size: int = 0, **kwargs) -> None:
+        # #66784 moves padding ownership from the Kimi wrapper to the merged
+        # layer. Consume it here rather than forwarding it to ColumnParallelLinear.
+        if not vllm_version_is("0.33.0"):
+            self.padding_size = padding_size
         self.output_sizes = output_sizes.copy()
+        self.shard_ids = tuple(range(len(output_sizes)))
+        if padding_size and not vllm_version_is("0.33.0"):
+            parallel_size = get_tp_group().world_size * get_pcp_group().world_size
+            self.output_sizes.append(padding_size * parallel_size)
         # Keep the merged checkpoint loaders, but allocate with explicit ranks.
         KDAColumnParallelLinear.__init__(self, input_size, sum(self.output_sizes), **kwargs)
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
+        if not vllm_version_is("0.33.0"):
+            for name in self.padding_fill_params():
+                param = getattr(self, name)
+                self._zero_output_padding(param)
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
 
 class KDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, KDAMergedColumnParallelLinear):
