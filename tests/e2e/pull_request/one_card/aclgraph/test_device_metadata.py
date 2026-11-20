@@ -80,7 +80,7 @@ def test_metadata_order_and_buffer_reuse(full_graph, consumer_order):
 
 
 @pytest.mark.parametrize("query_len", [1, 8])
-@pytest.mark.parametrize("quant_mode", [1])
+@pytest.mark.parametrize("quant_mode", [1, 5])
 @pytest.mark.parametrize("full_graph", [False, True])
 @torch.inference_mode()
 def test_qli_metadata_rebuild_matches_inline_selection(quant_mode, full_graph, query_len):
@@ -91,16 +91,33 @@ def test_qli_metadata_rebuild_matches_inline_selection(quant_mode, full_graph, q
     metadata_op, select_op = A5DeviceAdaptor._load_cann_quant_lightning_indexer_ops()
     config = QLIMetadataConfig(32, 128, quant_mode)
     buffers = QLIMetadataBuffers(config, 2)
-    dtype = torch.float8_e4m3fn
-    scale_dtype = torch.float32
     torch.manual_seed(7)
     num_layers = 4
     num_tokens = 2 * query_len
-    query = [torch.randn(num_tokens, 32, 128, device="npu").mul_(4).to(dtype) for _ in range(num_layers)]
-    key = torch.randn(64, 128, 1, 128, device="npu").mul_(4).to(dtype)
-    weights = [torch.rand(num_tokens, 32, dtype=scale_dtype, device="npu") for _ in range(num_layers)]
-    query_scale = torch.ones(num_tokens, 32, dtype=scale_dtype, device="npu")
-    key_scale = torch.ones(64, 128, 1, dtype=scale_dtype, device="npu")
+    if quant_mode == 5:
+        query, query_scale = [], []
+        for _ in range(num_layers):
+            packed, scale = torch_npu.npu_dynamic_mx_quant(
+                torch.randn(num_tokens * 32, 128, dtype=torch.bfloat16, device="npu"),
+                dst_type=torch_npu.float4_e2m1fn_x2,
+            )
+            query.append(packed.view(num_tokens, 32, 64))
+            query_scale.append(scale.view(torch.float8_e8m0fnu).view(num_tokens, 32, 2, 2))
+        key, key_scale = torch_npu.npu_dynamic_mx_quant(
+            torch.randn(64 * 128, 128, dtype=torch.bfloat16, device="npu"),
+            dst_type=torch_npu.float4_e2m1fn_x2,
+        )
+        key = key.view(64, 128, 1, 64)
+        key_scale = key_scale.view(torch.float8_e8m0fnu).view(64, 128, 1, 2, 2)
+    else:
+        query = [
+            torch.randn(num_tokens, 32, 128, device="npu").mul_(4).to(torch.float8_e4m3fn) for _ in range(num_layers)
+        ]
+        key = torch.randn(64, 128, 1, 128, device="npu").mul_(4).to(torch.float8_e4m3fn)
+        query_scale = [torch.ones(num_tokens, 32, dtype=torch.float32, device="npu") for _ in range(num_layers)]
+        key_scale = torch.ones(64, 128, 1, dtype=torch.float32, device="npu")
+    # Both FP8 C8 and MXFP4 C4 require FP32 weights, independent of scale dtype.
+    weights = [torch.rand(num_tokens, 32, dtype=torch.float32, device="npu") for _ in range(num_layers)]
     block_table = torch.arange(64, dtype=torch.int32, device="npu").view(2, 32)
     queries = torch.tensor([0, query_len, 2 * query_len], dtype=torch.int32, device="npu")
     lengths = torch.tensor([128, 256], dtype=torch.int32, device="npu")
@@ -112,7 +129,7 @@ def test_qli_metadata_rebuild_matches_inline_selection(quant_mode, full_graph, q
             query=query[layer],
             key=key,
             weights=weights[layer],
-            query_dequant_scale=query_scale,
+            query_dequant_scale=query_scale[layer],
             key_dequant_scale=key_scale,
             topk=config.topk,
             quant_mode=quant_mode,

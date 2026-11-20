@@ -15,8 +15,9 @@ def _metadata_op(**kwargs):
     return torch.stack((kwargs["cu_seqlens_q"][-1], kwargs["seqused_k"].sum().to(torch.int32)))
 
 
-def test_layers_share_one_producer_per_build():
-    config = QLIMetadataConfig(32, 128, 1)
+@pytest.mark.parametrize("quant_mode", [1, 5])
+def test_layers_share_one_producer_per_build(quant_mode):
+    config = QLIMetadataConfig(32, 128, quant_mode)
     buffers = QLIMetadataBuffers(config, 4)
     queries, lengths = torch.tensor([0, 3, 5]), torch.tensor([32, 128])
     op = Mock(side_effect=_metadata_op)
@@ -28,7 +29,7 @@ def test_layers_share_one_producer_per_build():
     torch.testing.assert_close(prepared.query_start_loc, queries.to(torch.int32))
     torch.testing.assert_close(prepared.seq_lens, lengths.to(torch.int32))
     torch.testing.assert_close(prepared.metadata, torch.tensor([5, 160], dtype=torch.int32))
-    assert op.call_args.kwargs["quant_mode"] == 1
+    assert op.call_args.kwargs["quant_mode"] == quant_mode
 
 
 def test_rebuild_refreshes_existing_graph_references_with_new_lengths():
@@ -101,3 +102,14 @@ def test_output_layout_change_does_not_replace_captured_storage():
             "target", torch.tensor([0, 1]), torch.tensor([32]), lambda **kw: torch.zeros(3, dtype=torch.int32)
         )
     torch.testing.assert_close(captured.metadata, torch.tensor([1, 32], dtype=torch.int32))
+
+
+def test_c4_and_c8_groups_have_independent_metadata():
+    queries, lengths = torch.tensor([0, 1]), torch.tensor([32])
+    groups = [QLIMetadataBuffers(QLIMetadataConfig(32, 128, mode), 2) for mode in (1, 5)]
+    c8, c4 = [group.build("same_slot_mapping", queries, lengths, _metadata_op) for group in groups]
+    groups[1].build("same_slot_mapping", queries, lengths + 1, _metadata_op)
+    torch.testing.assert_close(c8.metadata, torch.tensor([1, 32], dtype=torch.int32))
+    with pytest.raises(ValueError, match="configuration"):
+        get_qli_metadata(c8, c4.config, queries[1:], lengths, Mock())
+    torch.testing.assert_close(c4.metadata, torch.tensor([1, 33], dtype=torch.int32))

@@ -700,9 +700,10 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
             assert owner.cache_spec == spec
 
 
-def test_builder_prepares_qli_after_lengths_and_refreshes_each_step(monkeypatch):
+@pytest.mark.parametrize("quant_mode", [1, 5])
+def test_builder_prepares_qli_after_lengths_and_refreshes_each_step(monkeypatch, quant_mode):
     builder = _make_builder()
-    config = QLIMetadataConfig(32, 128, 1)
+    config = QLIMetadataConfig(32, 128, quant_mode)
     builder._qli_metadata_buffers = QLIMetadataBuffers(config, 4)
     op = Mock(side_effect=lambda **kw: kw["seqused_k"].clone())
     monkeypatch.setattr(indexer_module.DeviceOperator, "get_indexer_metadata_op", lambda: op)
@@ -710,7 +711,7 @@ def test_builder_prepares_qli_after_lengths_and_refreshes_each_step(monkeypatch)
     common = _make_common_metadata()
     first = builder.build(0, common)
     assert first.qli_inputs is not None
-    assert first.qli_inputs.config.quant_mode == 1
+    assert first.qli_inputs.config.quant_mode == quant_mode
     torch.testing.assert_close(first.qli_inputs.query_start_loc, common.query_start_loc.to(torch.int32))
     common.seq_lens.add_(1)
     second = builder.build(0, common)
