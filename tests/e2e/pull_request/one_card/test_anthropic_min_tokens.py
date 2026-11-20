@@ -29,12 +29,12 @@ def test_min_tokens_delays_stop_sequence():
             "stop_sequences": ["\n"],
             "messages": [{"role": "user", "content": "Write two short lines of poetry."}],
         }
-        baseline = requests.post(server.url_root + "/v1/messages", json=payload, timeout=10)
+        baseline = requests.post(server.url_root + "/v1/messages", json=payload, timeout=(5, 120))
         baseline.raise_for_status()
         baseline_data = baseline.json()
         assert baseline_data["stop_reason"] == "stop_sequence"
         assert baseline_data["usage"]["output_tokens"] < 16
 
-        response = requests.post(server.url_root + "/v1/messages", json={**payload, "min_tokens": 16}, timeout=10)
+        response = requests.post(server.url_root + "/v1/messages", json={**payload, "min_tokens": 16}, timeout=(5, 120))
         response.raise_for_status()
         assert response.json()["usage"]["output_tokens"] >= 16

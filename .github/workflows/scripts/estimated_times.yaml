@@ -10,7 +10,7 @@
 
 estimated_times:
   # Initial scheduling estimate: one small-model startup and two API requests.
-  tests/e2e/pull_request/one_card/test_anthropic_min_tokens.py: 240
+  tests/e2e/pull_request/one_card/test_anthropic_min_tokens.py: 480
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
