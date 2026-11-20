@@ -1,0 +1,8 @@
+pr: 22587
+entries:
+  - category: performance
+    text: >-
+      GLM-5.3-Flash prefill with FP8 KV and indexer caches on A5 TP8 now
+      uses all eight ranks for full page-aligned chunks. In a single-request
+      128K prompt benchmark, median time to first token decreased from
+      9.47 to 8.84 seconds.
