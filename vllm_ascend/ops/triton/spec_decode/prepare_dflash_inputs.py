@@ -51,7 +51,7 @@ def _dflash_local_slot(
     block_table_stride,
     req_idx,
     valid,
-    block_size: tl.constexpr,
+    block_size,
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -112,7 +112,7 @@ def _prepare_dflash_inputs_kernel(
     block_table_stride,
     # Scalars
     parallel_drafting_token_id,
-    block_size: tl.constexpr,
+    block_size,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
