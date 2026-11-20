@@ -62,7 +62,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -89,7 +88,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -122,7 +120,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -160,7 +157,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -204,7 +200,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \
@@ -234,7 +229,6 @@ Select an image based on your host operating system and start it on every node. 
             --name vllm-ascend \
             --shm-size=1g \
             --net=host \
-            --privileged=true \
             --device /dev/davinci0 \
             --device /dev/davinci1 \
             --device /dev/davinci2 \

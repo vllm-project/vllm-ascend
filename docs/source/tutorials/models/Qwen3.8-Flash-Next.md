@@ -249,7 +249,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
@@ -293,7 +292,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=128g \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
@@ -339,7 +337,6 @@ Verify that all host device and file paths exist before running Docker.
       --name $NAME \
       -e MEMCACHE_CONFIG_DIR \
       --net=host \
-      --privileged=true \
       --shm-size=500g \
       --device /dev/davinci_manager \
       --device "${SSD_DEVICE_PATH}:${SSD_DEVICE_PATH}" \

@@ -79,7 +79,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
 
         docker run --rm \
-        --privileged \
         --name vllm-ascend \
         --shm-size=10g \
         --device=/dev/davinci0:/dev/davinci0 \
@@ -110,7 +109,6 @@ It is **recommended to use the latest release candidate (rc) version or the late
         export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler
 
         docker run --rm \
-        --privileged \
         --name vllm-ascend \
         --shm-size=10g \
         --device=/dev/davinci0:/dev/davinci0 \

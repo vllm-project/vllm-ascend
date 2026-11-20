@@ -64,7 +64,7 @@ The image tags below are fixed to the release that matches this guide. If your v
     mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
@@ -96,7 +96,7 @@ The image tags below are fixed to the release that matches this guide. If your v
     mkdir -p "$WORK_DIR"
 
     docker run -it --name "$CONTAINER_NAME" \
-        --network host --privileged --shm-size=100g \
+        --network host --shm-size=100g \
         --device /dev/davinci_manager \
         --device /dev/devmm_svm \
         --device /dev/hisi_hdc \
@@ -131,7 +131,7 @@ The image tags below are fixed to the release that matches this guide. If your v
     export WORK_DIR="<DEPLOYMENT_DIRECTORY>"
 
     docker run -it --name "$CONTAINER_NAME" \
-        --network host --ipc host --privileged --shm-size=100g \
+        --network host --ipc host --shm-size=100g \
         --device /dev/davinci_manager --device /dev/hisi_hdc \
         --device /dev/ummu --device /dev/uburma \
         --device /dev/davinci0 --device /dev/davinci1 \
