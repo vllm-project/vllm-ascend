@@ -1314,6 +1314,8 @@ def chunk_kda_fwd(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     prebuilt_meta=None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
@@ -1364,6 +1366,8 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
         chunk_offsets=chunk_offsets_chunk64,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(
@@ -1394,6 +1398,8 @@ def chunk_kda(
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     prebuilt_meta=None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
     if scale is None:
@@ -1414,6 +1420,8 @@ def chunk_kda(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         prebuilt_meta=prebuilt_meta,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     return o, final_state
 
