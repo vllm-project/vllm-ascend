@@ -1,0 +1,9 @@
+pr: 22609
+entries:
+  - category: feature
+    text: >-
+      DeepSeek V4.1 PD Decode on A3 can use pinned host memory for independent
+      BF16 input embeddings to free device memory for KV cache. Enable
+      input_embedding_host_vmm in --additional-config with Model Runner V2.
+    model: DeepSeek V4.1
+    hardware: [A3]
