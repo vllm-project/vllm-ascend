@@ -1,0 +1,4 @@
+pr: 22641
+entries:
+  - category: bugfix
+    text: Fixed a tokenizer load error when enabling `VLLM_USE_FASTOKENS=1` on Ascend with newer vLLM builds. Ascend packages now install fastokens 0.3.5.
