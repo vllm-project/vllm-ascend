@@ -21,7 +21,6 @@ from dataclasses import dataclass, fields
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 
@@ -64,6 +63,7 @@ class AscendInputBuffers(InputBuffers):
         # Logical query token count, scoped to _dummy_run before graph padding.
         # None keeps the default layout for other dummy/capture paths.
         self.dummy_num_tokens: int | None = None
+        self.dummy_num_reqs: int | None = None
 
 
 @dataclass
@@ -95,7 +95,7 @@ class AscendInputBatch(InputBatch):
         # TODO: Remove this workaround once upstream dummy-batch preparation
         # preserves logical query lengths separately from graph padding.
         num_tokens_after_padding = num_tokens
-        if input_buffers.dummy_num_tokens is not None:
+        if input_buffers.dummy_num_tokens is not None and input_buffers.dummy_num_reqs == num_reqs:
             # PIECEWISE pads model inputs without adding scheduled queries.
             num_tokens = input_buffers.dummy_num_tokens
             assert num_tokens <= num_tokens_after_padding

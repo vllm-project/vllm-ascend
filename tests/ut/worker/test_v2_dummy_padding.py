@@ -11,12 +11,13 @@ from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import set_dummy_context
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_uniform_decode_token_count
-
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+from vllm_ascend.utils import MRV2PaddingPlan
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 @pytest.fixture
@@ -42,6 +43,9 @@ def runner(buffers):
     runner.adaptive_verification = None
     runner.max_num_reqs = 16
     runner.max_num_tokens = 64
+    runner.logical_max_num_reqs = 16
+    runner.logical_max_num_tokens = 64
+    runner.input_padding_plan = MRV2PaddingPlan()
     runner.speculator = None
     runner.eplb = Mock()
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
@@ -80,6 +84,58 @@ def _make_graph_manager(buffers, mode, uniform, capture_size):
     return manager
 
 
+def test_gather_batch_req_state_aligns_eager_token_rows(runner):
+    runner.input_padding_plan = MRV2PaddingPlan(token_alignment=8)
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req0": 3, "req1": 2},
+        total_num_scheduled_tokens=5,
+    )
+    logical_state = SimpleNamespace(num_tokens=5)
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(logical_state, None)),
+        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
+    ):
+        physical_state, uniform_token_count = runner.gather_batch_req_state(scheduler_output, dummy_run=False)
+
+    assert uniform_token_count is None
+    assert physical_state.base is logical_state
+    assert physical_state.logical_num_tokens == 5
+    assert physical_state.num_tokens == 8
+
+
+def test_gather_batch_req_state_aligns_uniform_requests(runner):
+    runner.input_padding_plan = MRV2PaddingPlan(token_alignment=8)
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req0": 2, "req1": 2, "req2": 2},
+        total_num_scheduled_tokens=6,
+    )
+    logical_state = SimpleNamespace(num_tokens=6)
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(logical_state, 2)),
+        patch("vllm_ascend.worker.v2.model_runner.expert_offload.prepare_batch"),
+    ):
+        physical_state, uniform_token_count = runner.gather_batch_req_state(scheduler_output, dummy_run=False)
+
+    assert uniform_token_count == 2
+    assert len(scheduler_output.num_scheduled_tokens) == 3
+    assert physical_state.logical_num_tokens == 6
+    assert physical_state.num_tokens == 8
+    assert physical_state.num_tokens // uniform_token_count == 4
+
+
+def test_prepare_padding_mask_marks_only_physical_tail(buffers, runner):
+    buffers.is_padding.fill_(False)
+    buffers.is_padding[:8].fill_(True)
+
+    mask = runner.prepare_padding_mask(num_tokens=5, num_tokens_after_padding=8)
+
+    assert mask.data_ptr() == buffers.is_padding.data_ptr()
+    torch.testing.assert_close(mask, torch.tensor([False] * 5 + [True] * 3))
+    assert not buffers.is_padding[8:].any()
+
+
 @pytest.mark.parametrize("num_reqs,valid_tokens,padded_tokens", [(1, 2, 16), (3, 6, 8), (3, 7, 16), (2, 4, 4)])
 def test_piecewise_dummy_keeps_queries_and_pads_only_inputs(buffers, num_reqs, valid_tokens, padded_tokens):
     buffers.input_ids.fill_(99)
@@ -87,6 +143,7 @@ def test_piecewise_dummy_keeps_queries_and_pads_only_inputs(buffers, num_reqs, v
     buffers.is_padding.fill_(False)
     with (
         patch.object(buffers, "dummy_num_tokens", valid_tokens),
+        patch.object(buffers, "dummy_num_reqs", num_reqs),
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin") as update_rotary,
     ):
         batch = AscendInputBatch.make_dummy(num_reqs, padded_tokens, buffers)
@@ -111,6 +168,7 @@ def test_piecewise_dummy_keeps_queries_and_pads_only_inputs(buffers, num_reqs, v
     assert not buffers.is_padding[padded_tokens:].any()
     update_rotary.assert_called_once_with(batch.positions)
     assert buffers.dummy_num_tokens is None
+    assert buffers.dummy_num_reqs is None
 
 
 def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
@@ -180,6 +238,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
     assert buffers.dummy_num_tokens is None
+    assert buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize(
@@ -191,8 +250,8 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
         ({"is_profile": True}, CUDAGraphMode.PIECEWISE, None, False, 1),
         ({}, CUDAGraphMode.PIECEWISE, object(), False, None),
         ({}, CUDAGraphMode.PIECEWISE, None, True, 1),
-        ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, None),
-        ({}, CUDAGraphMode.NONE, None, False, None),
+        ({}, CUDAGraphMode.FULL_AND_PIECEWISE, None, False, 1),
+        ({}, CUDAGraphMode.NONE, None, False, 1),
     ],
 )
 def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, pcp, is_hybrid, expected):
@@ -200,9 +259,12 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     runner.pcp_manager = pcp
     runner.model_config.is_hybrid = is_hybrid
     buffers.dummy_num_tokens = 7
+    buffers.dummy_num_reqs = 5
 
     def execute_dummy(*args, **kwargs):
         assert buffers.dummy_num_tokens == expected
+        expected_num_reqs = None if expected is None else 1
+        assert buffers.dummy_num_reqs == expected_num_reqs
         raise RuntimeError("test")
 
     with (
@@ -211,28 +273,48 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     ):
         runner._dummy_run(1, **kwargs)
     assert buffers.dummy_num_tokens == 7
+    assert buffers.dummy_num_reqs == 5
 
 
-@pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
+@pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, 6)])
 def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mode, expected):
     buffers.dummy_num_tokens = 7
+    buffers.dummy_num_reqs = 5
 
     def execute_dummy(num_tokens, **kwargs):
         if num_tokens == 2:
             assert buffers.dummy_num_tokens == 2
+            assert buffers.dummy_num_reqs == 2
             with (
                 patch.object(runner.compilation_config, "cudagraph_mode", inner_mode),
                 pytest.raises(RuntimeError, match="inner dummy"),
             ):
                 runner._dummy_run(6)
             assert buffers.dummy_num_tokens == 2
+            assert buffers.dummy_num_reqs == 2
             return None, None
         assert buffers.dummy_num_tokens == expected
+        assert buffers.dummy_num_reqs == expected
         raise RuntimeError("inner dummy")
 
     with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
         runner._dummy_run(2)
     assert buffers.dummy_num_tokens == 7
+    assert buffers.dummy_num_reqs == 5
+
+
+def test_idle_dummy_preserves_zero_logical_batch(buffers, runner):
+    def execute_dummy(num_tokens, **kwargs):
+        assert num_tokens == 0
+        assert buffers.dummy_num_tokens == 0
+        assert buffers.dummy_num_reqs == 0
+        return None, None
+
+    with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
+        runner._dummy_run(0)
+
+    assert buffers.dummy_num_tokens is None
+    assert buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize("num_tokens,uniform_decode", [(1, False), (1, True), (6, True), (16, False)])
@@ -243,6 +325,8 @@ def test_profile_dummy_keeps_eager_layout(buffers, runner, num_tokens, uniform_d
         assert kwargs["is_profile"]
         query_tokens = max(num_tokens, runner.decode_query_len) if uniform_decode else num_tokens
         num_reqs = query_tokens // runner.decode_query_len if uniform_decode else min(query_tokens, runner.max_num_reqs)
+        assert buffers.dummy_num_tokens == query_tokens
+        assert buffers.dummy_num_reqs == num_reqs
         desc, sync = dispatch_cg_and_sync_dp(
             target,
             num_reqs,
@@ -267,6 +351,7 @@ def test_profile_dummy_keeps_eager_layout(buffers, runner, num_tokens, uniform_d
     ):
         runner._dummy_run(num_tokens, uniform_decode=uniform_decode, is_profile=True)
     assert buffers.dummy_num_tokens is None
+    assert buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize("num_tokens,expected_mode", [(16, CUDAGraphMode.PIECEWISE), (32, CUDAGraphMode.NONE)])
@@ -277,6 +362,7 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
     def execute_dummy(num_tokens, **kwargs):
         assert buffers.dummy_num_tokens == num_tokens
         num_reqs = min(num_tokens, runner.max_num_reqs)
+        assert buffers.dummy_num_reqs == num_reqs
         desc, _ = dispatch_cg_and_sync_dp(target, num_reqs, num_tokens, None, 1, 0)
         assert desc.cg_mode == expected_mode
         batch = AscendInputBatch.make_dummy(num_reqs, desc.num_tokens, buffers, desc.max_query_len)
@@ -300,6 +386,7 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
     ):
         runner._dummy_run(num_tokens, context_len=context_len)
     assert buffers.dummy_num_tokens is None
+    assert buffers.dummy_num_reqs is None
 
 
 def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
@@ -331,7 +418,11 @@ def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
 def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     buffers, mode, is_dummy, expected_input_tokens, state_type
 ):
-    with patch.object(buffers, "dummy_num_tokens", 2), patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+    with (
+        patch.object(buffers, "dummy_num_tokens", 2),
+        patch.object(buffers, "dummy_num_reqs", 1),
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+    ):
         batch = AscendInputBatch.make_dummy(1, 16, buffers)
     batch.is_dummy = is_dummy
     state = state_type.__new__(state_type)

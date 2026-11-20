@@ -32,13 +32,6 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm_ascend.ascend_config import (
-    KVPPConfig,
-    StairConfig,
-    get_ascend_config,
-    init_ascend_config,
-    is_draft_config_context,
-)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     DeviceAdaptorFamily,
@@ -49,15 +42,23 @@ from vllm_ascend.device.hardware_profile import (
 )
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
+from vllm_ascend.ascend_config import (
+    KVPPConfig,
+    StairConfig,
+    get_ascend_config,
+    init_ascend_config,
+    is_draft_config_context,
+)
+
 # isort: off
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    align_num_tokens_to_tp,
     dsv4_skips_indexer_topk,
-    get_tp_token_alignment,
+    get_mrv2_decode_query_lens,
+    get_mrv2_padding_plan,
     get_dsv4_compress_ratio,
     bootstrap_custom_op_env,
     check_kv_extra_config,
@@ -1466,6 +1467,7 @@ def _setup_compile_backend(
     if additional_config is None:
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
+    aligned_gears = additional_config.get("_mrv2_padding_graph_gears", {})
 
     reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
     if reduced_cg_cap is not None:
@@ -1494,15 +1496,15 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
-    # Models pad eager token rows inside sequence_parallel_chunk(). Graph
-    # gears remain initialization-time contracts and must already describe a
-    # TP-divisible physical layout.
-    tp_alignment = get_tp_token_alignment(
+    # Graph capture and MRV2 runtime preprocessing share one physical-layout
+    # policy.  Normalize capture gears up front so replay never depends on a
+    # model-internal padding branch.
+    padding_plan = get_mrv2_padding_plan(
         vllm_config,
         enable_shared_expert_dp,
         sequence_parallel=enable_sp(vllm_config),
     )
-    requires_tp_aligned_capture_sizes = tp_alignment > 1
+    requires_tp_aligned_capture_sizes = padding_plan.token_alignment > 1
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1515,36 +1517,61 @@ def _setup_compile_backend(
         prefill_sizes = None
         if not vllm_version_is("0.33.0"):
             prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
-        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
-        sp_aclgraph_sizes = [size for size in original_sizes if align_num_tokens_to_tp(size, tp_alignment) == size]
+            prefill_sizes = aligned_gears.get("prefill", prefill_sizes)
+        original_sizes = (
+            prefill_sizes
+            if prefill_sizes is not None
+            else aligned_gears.get("legacy", compilation_config.cudagraph_capture_sizes)
+        )
+        sp_aclgraph_sizes = sorted({padding_plan.align_tokens(size) for size in original_sizes})
         if not sp_aclgraph_sizes:
-            raise AssertionError(
-                f"cudagraph_capture_sizes {original_sizes} does not contain"
-                f"values that are multiples of tp_size "
-                f"{tp_alignment}"
-            )
+            raise AssertionError("cudagraph capture sizes must contain at least one positive gear")
 
         if prefill_sizes is not None:
             compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
             compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
-            target_query_lens = vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
-            decode_sizes = compilation_config.decode_cudagraph_capture_request_sizes or []
-            request_alignment = math.lcm(
-                1, *(tp_alignment // math.gcd(tp_alignment, query_len) for query_len in target_query_lens)
+            target_query_lens = get_mrv2_decode_query_lens(vllm_config)
+            decode_sizes = aligned_gears.get("decode", compilation_config.decode_cudagraph_capture_request_sizes or [])
+            request_alignment = padding_plan.common_request_alignment(target_query_lens)
+            aligned_decode_sizes = sorted(
+                {(size + request_alignment - 1) // request_alignment * request_alignment for size in decode_sizes}
             )
-            aligned_decode_sizes = [
-                size for size in decode_sizes if align_num_tokens_to_tp(size, request_alignment) == size
-            ]
             compilation_config.decode_cudagraph_capture_request_sizes = aligned_decode_sizes
             compilation_config.max_decode_cudagraph_capture_requests = max(aligned_decode_sizes, default=0)
+            additional_config["_mrv2_padding_graph_gears"] = {
+                "prefill": sp_aclgraph_sizes,
+                "decode": aligned_decode_sizes,
+            }
             # Re-record the token union from the resolved split grids. Keeping
             # a legacy-only list (e.g. [4] with one decode request) makes the
-            # engine handshake's config re-entry reject the derived sizes.
-            vllm_config._split_cudagraph_capture_sizes(False, target_query_lens)
-            compilation_config.post_init_cudagraph_sizes()
-        elif len(sp_aclgraph_sizes) != len(original_sizes):
-            # Match max_cudagraph_capture_size with the valid max size to avoid
-            # initialization error of vllm server.
+            # engine handshake's config re-entry reject the derived sizes. The
+            # scheduler limits remain logical; only this split call sees the
+            # physical maxima required by the aligned capture gears.
+            scheduler_config = vllm_config.scheduler_config
+            logical_max_tokens = scheduler_config.max_num_batched_tokens
+            logical_max_reqs = scheduler_config.max_num_seqs
+            decode_token_sizes = [
+                num_reqs * query_len for num_reqs in aligned_decode_sizes for query_len in target_query_lens
+            ]
+            scheduler_config.max_num_batched_tokens = max(
+                logical_max_tokens,
+                sp_aclgraph_sizes[-1],
+                max(decode_token_sizes, default=0),
+            )
+            scheduler_config.max_num_seqs = max(
+                logical_max_reqs,
+                max(aligned_decode_sizes, default=0),
+            )
+            try:
+                vllm_config._split_cudagraph_capture_sizes(False, target_query_lens)
+                compilation_config.post_init_cudagraph_sizes()
+            finally:
+                scheduler_config.max_num_batched_tokens = logical_max_tokens
+                scheduler_config.max_num_seqs = logical_max_reqs
+        else:
+            # v0.33 rebuilds this legacy list from the logical scheduler limit
+            # on config re-entry. Always restore the physical gears saved above.
+            additional_config["_mrv2_padding_graph_gears"] = {"legacy": sp_aclgraph_sizes}
             compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
             compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
             update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)

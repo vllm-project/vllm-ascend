@@ -24,6 +24,7 @@ import json
 import math
 import os
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,13 +33,11 @@ import numpy as np
 import regex as re
 import torch
 import torch_npu  # noqa: F401
+import vllm_ascend.envs as envs_ascend
 from packaging.version import InvalidVersion, Version
 from safetensors.torch import load_file
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -46,6 +45,8 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
+
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -895,7 +896,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if _ASCEND_CUSTOMOP_IS_REIGISTERED:
         return
     from vllm.model_executor.custom_op import CustomOp
-
     from vllm_ascend.ops.activation import (
         AscendQuickGELU,
         AscendSiluAndMul,
@@ -1124,25 +1124,74 @@ def enable_sp(vllm_config=None) -> bool:
     return enable_dense_sp(vllm_config)
 
 
-def get_tp_token_alignment(
+@dataclass(frozen=True)
+class MRV2PaddingPlan:
+    """Physical MRV2 batch-layout constraints for one engine configuration.
+
+    ``token_alignment`` is only the true token-row divisibility constraint
+    shared by SP, HC-SP and shared-expert DP. Fine-grained TP has a different
+    layout contract, so it is recorded separately instead of being folded into
+    the token multiple. PCP keeps its request/context partitioning in the PCP
+    manager and consumes this plan only for the resulting local token width.
+    """
+
+    token_alignment: int = 1
+    requires_uniform_token_rows: bool = False
+
+    def align_tokens(self, num_tokens: int) -> int:
+        return align_num_tokens_to_tp(num_tokens, self.token_alignment)
+
+    def request_alignment(self, query_len: int) -> int:
+        """Return the request multiple whose token rows satisfy alignment."""
+        if query_len < 1:
+            raise ValueError(f"query_len must be positive, got {query_len}")
+        return self.token_alignment // math.gcd(self.token_alignment, query_len)
+
+    def common_request_alignment(self, query_lens: tuple[int, ...] | list[int]) -> int:
+        return math.lcm(1, *(self.request_alignment(query_len) for query_len in query_lens))
+
+    def align_requests(self, num_reqs: int, query_len: int) -> int:
+        return align_num_tokens_to_tp(num_reqs, self.request_alignment(query_len))
+
+    def align_batch_tokens(self, num_tokens: int, num_reqs: int, uniform_query_len: int | None) -> int:
+        """Align one worker-local batch without mixing token/request axes."""
+        if uniform_query_len and num_tokens == num_reqs * uniform_query_len:
+            return self.align_requests(num_reqs, uniform_query_len) * uniform_query_len
+        return self.align_tokens(num_tokens)
+
+
+def get_mrv2_padding_plan(
     vllm_config: VllmConfig,
     enable_shared_expert_dp: bool | None = None,
     sequence_parallel: bool | None = None,
-) -> int:
-    """Return the token-row alignment required by Ascend TP collectives."""
+    finegrained_tp_config: Any | None = None,
+) -> MRV2PaddingPlan:
+    """Compose MRV2 physical-layout constraints from enabled features."""
     parallel_config = vllm_config.parallel_config
     tp_size = parallel_config.tensor_parallel_size
-    if tp_size <= 1:
-        return 1
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
     if enable_shared_expert_dp is None:
-        additional_config = vllm_config.additional_config or {}
         enable_shared_expert_dp = bool(additional_config.get("enable_shared_expert_dp", False))
     if sequence_parallel is None:
         sequence_parallel = enable_sp(vllm_config)
     needs_alignment = (
         enable_shared_expert_dp or sequence_parallel or getattr(parallel_config, "enable_hc_sp", False) is True
     )
-    return tp_size if needs_alignment else 1
+
+    finegrained_config = finegrained_tp_config or additional_config.get("finegrained_tp_config") or {}
+    get_finegrained_size = (
+        finegrained_config.get
+        if isinstance(finegrained_config, dict)
+        else lambda name, default=1: getattr(finegrained_config, name, default)
+    )
+    requires_uniform_token_rows = getattr(parallel_config, "data_parallel_size", 1) > 1 and (
+        get_finegrained_size("oproj_tensor_parallel_size", 1) > 1
+        or get_finegrained_size("mlp_tensor_parallel_size", 1) > 1
+    )
+    return MRV2PaddingPlan(
+        token_alignment=tp_size if tp_size > 1 and needs_alignment else 1,
+        requires_uniform_token_rows=requires_uniform_token_rows,
+    )
 
 
 def align_num_tokens_to_tp(num_tokens: int, alignment: int) -> int:
@@ -1150,6 +1199,62 @@ def align_num_tokens_to_tp(num_tokens: int, alignment: int) -> int:
     if alignment < 1:
         raise ValueError(f"alignment must be positive, got {alignment}")
     return (num_tokens + alignment - 1) // alignment * alignment
+
+
+def get_mrv2_decode_query_lens(vllm_config: VllmConfig) -> tuple[int, ...]:
+    """Return decode query lengths across the supported vLLM config ABIs."""
+    uniform_query_len = vllm_config.uniform_decode_query_len
+    resolve_query_lens = getattr(vllm_config, "get_decode_cudagraph_query_lens", None)
+    if not callable(resolve_query_lens):
+        # vLLM v0.33 has one uniform decode width and no tier resolver.
+        return (uniform_query_len,)
+    return tuple(resolve_query_lens(uniform_query_len))
+
+
+def get_mrv2_physical_batch_capacity(
+    vllm_config: VllmConfig,
+    padding_plan: MRV2PaddingPlan | None = None,
+) -> tuple[int, int]:
+    """Return runner-local physical token/request buffer capacities.
+
+    Scheduler limits remain logical.  This only accounts for padding rows and
+    requests that an already-normalized graph gear may materialize in runner
+    buffers.
+    """
+    plan = padding_plan or get_mrv2_padding_plan(vllm_config)
+    scheduler_config = vllm_config.scheduler_config
+    max_tokens = plan.align_tokens(scheduler_config.max_num_batched_tokens)
+    max_reqs = scheduler_config.max_num_seqs
+    compilation_config = vllm_config.compilation_config
+
+    # Eager uniform decode also pads by complete requests.  Its physical token
+    # extent can exceed a plain token-axis round-up when query_len and TP are
+    # not divisors of one another (for example, TP=8 and query_len=6).
+    query_lens = get_mrv2_decode_query_lens(vllm_config)
+    for query_len in query_lens:
+        logical_reqs = min(
+            scheduler_config.max_num_seqs,
+            scheduler_config.max_num_batched_tokens // query_len,
+        )
+        if logical_reqs:
+            physical_reqs = plan.align_requests(logical_reqs, query_len)
+            max_tokens = max(max_tokens, physical_reqs * query_len)
+
+    token_sizes: list[int] = []
+    for name in ("cudagraph_capture_sizes", "prefill_cudagraph_capture_token_sizes"):
+        sizes = getattr(compilation_config, name, None)
+        if sizes:
+            token_sizes.extend(sizes)
+    if token_sizes:
+        max_tokens = max(max_tokens, max(token_sizes))
+
+    decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None) or []
+    if decode_sizes:
+        max_reqs = max(max_reqs, max(decode_sizes))
+        decode_token_sizes = [max(decode_sizes) * query_len for query_len in query_lens]
+        if decode_token_sizes:
+            max_tokens = max(max_tokens, max(decode_token_sizes))
+    return max_tokens, max_reqs
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -2043,7 +2148,6 @@ def use_updatable_graph(
         return True
 
     from vllm.distributed import get_dcp_group
-
     from vllm_ascend.attention.mla_v1 import AscendMLABackend
 
     # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA

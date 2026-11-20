@@ -1,10 +1,13 @@
 import importlib
+import math
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from tests.ut.base import TestBase
+from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -12,12 +15,10 @@ from vllm.platforms import PlatformEnum
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
-
-from tests.ut.base import TestBase
-from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
-from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
@@ -182,9 +183,8 @@ def test_v4_index_cache_recomputes_first_local_c4(stage_start, pattern):
     ],
 )
 def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, all2all_backend, expected):
-    from vllm.config.parallel import ParallelConfig
-
     import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+    from vllm.config.parallel import ParallelConfig
 
     config = ParallelConfig(
         data_parallel_size=dp_size,
@@ -260,9 +260,8 @@ def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
 
 @pytest.mark.parametrize("dcp_size", [2, 16])
 def test_parallel_config_preserves_upstream_pcp_dcp_sizes(dcp_size):
-    from vllm.config.parallel import ParallelConfig
-
     import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+    from vllm.config.parallel import ParallelConfig
 
     config = ParallelConfig(
         tensor_parallel_size=8,
@@ -1095,7 +1094,7 @@ class TestNPUPlatform(TestBase):
                     config._set_cudagraph_sizes()
                     self.assertIn(max_num_seqs, config.compilation_config.cudagraph_capture_sizes)
 
-    def test_setup_compile_backend_keeps_split_decode_grid_after_tp_alignment(self):
+    def test_setup_compile_backend_aligns_split_decode_grid_for_tp_layout(self):
         cases = ((1, 1, [4]), (4, 2, [16, 32]), (4, 1, [1, 2, 4, 8]))
         for max_num_seqs, query_len, sizes in cases:
             for mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
@@ -1137,7 +1136,13 @@ class TestNPUPlatform(TestBase):
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
                         if not vllm_version_is("0.33.0"):
-                            expected_decode_sizes = [size for size in decode_sizes if size * query_len % 4 == 0]
+                            request_alignment = 4 // math.gcd(4, query_len)
+                            expected_decode_sizes = sorted(
+                                {
+                                    (size + request_alignment - 1) // request_alignment * request_alignment
+                                    for size in decode_sizes
+                                }
+                            )
                             self.assertEqual(
                                 config.compilation_config.decode_cudagraph_capture_request_sizes,
                                 expected_decode_sizes,
@@ -1146,9 +1151,9 @@ class TestNPUPlatform(TestBase):
                             self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
                             if max_num_seqs == 1:
                                 self.assertEqual(prefill_sizes, [4])
-                                self.assertEqual(expected_decode_sizes, [])
+                                self.assertEqual(expected_decode_sizes, [4])
                                 if mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                                    self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [])
+                                    self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [4])
                         else:
                             self.assertTrue(
                                 all(size % 4 == 0 for size in config.compilation_config.cudagraph_capture_sizes)
@@ -1334,8 +1339,8 @@ class TestNPUPlatform(TestBase):
                 compilation_config = vllm_config.compilation_config
                 compilation_config.mode = CompilationMode.VLLM_COMPILE
                 compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-                compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
-                compilation_config.max_cudagraph_capture_size = 8
+                compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8, 9]
+                compilation_config.max_cudagraph_capture_size = 9
                 compilation_config.splitting_ops = []
                 vllm_config.additional_config = {
                     "ascend_compilation_config": {
@@ -1347,7 +1352,10 @@ class TestNPUPlatform(TestBase):
                 vllm_config.parallel_config.tensor_parallel_size = 8
                 vllm_config._set_cudagraph_sizes = MagicMock()
                 vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[8])
-                logical_capacity = vllm_config.scheduler_config.max_num_batched_tokens
+                logical_capacity = (
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config.scheduler_config.max_num_seqs,
+                )
 
                 with patch("vllm_ascend.platform.enable_sp", return_value=upstream_sp):
                     _setup_compile_backend(
@@ -1358,12 +1366,18 @@ class TestNPUPlatform(TestBase):
 
                 if should_align:
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
-                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
-                    self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
+                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [8, 16])
+                    self.assertEqual(compilation_config.max_cudagraph_capture_size, 16)
                 else:
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
-                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
-                self.assertEqual(vllm_config.scheduler_config.max_num_batched_tokens, logical_capacity)
+                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8, 9])
+                self.assertEqual(
+                    (
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        vllm_config.scheduler_config.max_num_seqs,
+                    ),
+                    logical_capacity,
+                )
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
@@ -2439,12 +2453,13 @@ class TestNPUPlatform(TestBase):
 
     def test_refresh_block_size_then_the_hook_keeps_the_physical_size(self):
         """The whole chain: default 16 settles to 32, the parent derives 4096, 32 survives."""
-        from vllm_ascend import utils as vllm_ascend_utils
         from vllm_ascend.attention.dsa_v1 import (
             AscendDSAC4Backend,
             AscendDSAC128Backend,
             AscendDSASWABackend,
         )
+
+        from vllm_ascend import utils as vllm_ascend_utils
 
         backends = [AscendDSASWABackend, AscendDSAC4Backend, AscendDSAC128Backend]
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -2483,9 +2498,8 @@ class TestNPUPlatform(TestBase):
         platform._validate_parallel_config(vllm_config)
 
         # Exercise Pydantic construction, not just the patched Python method.
-        from vllm.config.parallel import ParallelConfig
-
         import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+        from vllm.config.parallel import ParallelConfig
 
         parallel = ParallelConfig(
             tensor_parallel_size=1,

@@ -23,12 +23,12 @@ from unittest import mock
 import pytest
 import torch
 import torch_npu
-
 from tests.ut.base import TestBase
-from vllm_ascend import ascend_forward_context, utils
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+from vllm_ascend import ascend_forward_context, utils
 
 
 def test_use_updatable_graph_does_not_require_current_vllm_config():
@@ -266,6 +266,152 @@ class TestUtils(TestBase):
         # replayed graph drops padding for non-aligned token counts.
         mock_pad.assert_called_once_with(aligned, (0, 0, 0, 0))
         self.assertEqual(padded.shape, (8, 3))
+
+    def test_mrv2_padding_plan_identity(self):
+        plan = utils.MRV2PaddingPlan()
+
+        self.assertEqual(plan.align_tokens(5), 5)
+        self.assertEqual(plan.align_requests(3, query_len=2), 3)
+        self.assertEqual(plan.align_batch_tokens(5, num_reqs=2, uniform_query_len=None), 5)
+        self.assertFalse(plan.requires_uniform_token_rows)
+
+    def test_mrv2_padding_plan_composes_tp_token_alignment(self):
+        for sequence_parallel, enable_hc_sp, shared_expert_dp in (
+            (True, False, False),
+            (False, True, False),
+            (False, False, True),
+        ):
+            with self.subTest(
+                sequence_parallel=sequence_parallel,
+                enable_hc_sp=enable_hc_sp,
+                shared_expert_dp=shared_expert_dp,
+            ):
+                config = SimpleNamespace(
+                    parallel_config=SimpleNamespace(
+                        tensor_parallel_size=4,
+                        data_parallel_size=1,
+                        enable_hc_sp=enable_hc_sp,
+                        prefill_context_parallel_size=1,
+                    ),
+                    additional_config={},
+                )
+
+                plan = utils.get_mrv2_padding_plan(
+                    config,
+                    enable_shared_expert_dp=shared_expert_dp,
+                    sequence_parallel=sequence_parallel,
+                )
+
+                self.assertEqual(plan.token_alignment, 4)
+                self.assertEqual(plan.align_tokens(5), 8)
+
+    def test_mrv2_padding_plan_aligns_uniform_requests(self):
+        plan = utils.MRV2PaddingPlan(token_alignment=8)
+
+        self.assertEqual(plan.request_alignment(query_len=1), 8)
+        self.assertEqual(plan.request_alignment(query_len=2), 4)
+        self.assertEqual(plan.request_alignment(query_len=4), 2)
+        self.assertEqual(plan.common_request_alignment((2, 4)), 4)
+        self.assertEqual(plan.align_requests(3, query_len=2), 4)
+        self.assertEqual(plan.align_batch_tokens(6, num_reqs=3, uniform_query_len=2), 8)
+
+    def test_mrv2_padding_plan_keeps_pcp_separate_from_tp_alignment(self):
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=8,
+                data_parallel_size=1,
+                enable_hc_sp=False,
+                prefill_context_parallel_size=2,
+            ),
+            additional_config={},
+        )
+
+        plan = utils.get_mrv2_padding_plan(
+            config,
+            enable_shared_expert_dp=False,
+            sequence_parallel=False,
+        )
+
+        self.assertEqual(plan.token_alignment, 1)
+
+    def test_mrv2_padding_plan_finegrained_tp_only_requires_uniform_rows(self):
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=8,
+                data_parallel_size=2,
+                enable_hc_sp=False,
+                prefill_context_parallel_size=1,
+            ),
+            additional_config={},
+        )
+        finegrained_tp_config = SimpleNamespace(
+            oproj_tensor_parallel_size=2,
+            mlp_tensor_parallel_size=1,
+        )
+
+        plan = utils.get_mrv2_padding_plan(
+            config,
+            enable_shared_expert_dp=False,
+            sequence_parallel=False,
+            finegrained_tp_config=finegrained_tp_config,
+        )
+
+        self.assertEqual(plan.token_alignment, 1)
+        self.assertTrue(plan.requires_uniform_token_rows)
+
+    def test_mrv2_decode_query_lens_uses_main_resolver(self):
+        resolver = mock.Mock(return_value={3: 8, 5: 16})
+        config = SimpleNamespace(
+            uniform_decode_query_len=4,
+            get_decode_cudagraph_query_lens=resolver,
+        )
+
+        self.assertEqual(utils.get_mrv2_decode_query_lens(config), (3, 5))
+        resolver.assert_called_once_with(4)
+
+    def test_mrv2_decode_query_lens_supports_v033_config(self):
+        config = SimpleNamespace(uniform_decode_query_len=4)
+
+        self.assertEqual(utils.get_mrv2_decode_query_lens(config), (4,))
+
+    def test_mrv2_physical_capacity_does_not_mutate_scheduler_limits(self):
+        scheduler_config = SimpleNamespace(max_num_batched_tokens=5, max_num_seqs=3)
+        config = SimpleNamespace(
+            scheduler_config=scheduler_config,
+            compilation_config=SimpleNamespace(
+                cudagraph_capture_sizes=[8],
+                prefill_cudagraph_capture_token_sizes=[8],
+                decode_cudagraph_capture_request_sizes=[4],
+            ),
+            uniform_decode_query_len=2,
+            get_decode_cudagraph_query_lens=lambda _query_len: [2],
+        )
+
+        capacity = utils.get_mrv2_physical_batch_capacity(
+            config,
+            utils.MRV2PaddingPlan(token_alignment=4),
+        )
+
+        self.assertEqual(capacity, (8, 4))
+        self.assertEqual(scheduler_config.max_num_batched_tokens, 5)
+        self.assertEqual(scheduler_config.max_num_seqs, 3)
+
+        scheduler_config.max_num_batched_tokens = 10
+        scheduler_config.max_num_seqs = 1
+        config.compilation_config.cudagraph_capture_sizes = []
+        config.compilation_config.prefill_cudagraph_capture_token_sizes = []
+        config.compilation_config.decode_cudagraph_capture_request_sizes = []
+        config.uniform_decode_query_len = 6
+        config.get_decode_cudagraph_query_lens = lambda _query_len: [6]
+
+        capacity = utils.get_mrv2_physical_batch_capacity(
+            config,
+            utils.MRV2PaddingPlan(token_alignment=8),
+        )
+
+        self.assertEqual(capacity, (24, 1))
+        self.assertEqual(scheduler_config.max_num_batched_tokens, 10)
+        self.assertEqual(scheduler_config.max_num_seqs, 1)
 
     def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
         ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)

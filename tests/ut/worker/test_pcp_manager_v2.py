@@ -32,16 +32,10 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.models.deepseek_v41.engram import model_state as engram_state
-from vllm_ascend.platform import _setup_worker_and_scheduler
-from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import aclgraph as aclgraph_module
@@ -49,6 +43,13 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import AutoR
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
 )
+
+from vllm_ascend.platform import _setup_worker_and_scheduler
+from vllm_ascend.utils import MRV2PaddingPlan
+from vllm_ascend.worker.v2 import states as states_module
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -554,6 +555,10 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 class _ReplicatedPCPManager(AscendPCPManager):
     """Exercise replicated layouts explicitly, independently of speculation."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.padding_plan = MRV2PaddingPlan()
 
     @property
     def is_decode_sharded(self):

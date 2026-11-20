@@ -7,11 +7,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
@@ -84,7 +82,7 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
         if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
             hidden_states = intermediate_tensors["hidden_states"]
             intermediate_tensors = IntermediateTensors(
-                {**intermediate_tensors.tensors, "hidden_states": sequence_parallel_chunk(hidden_states)}
+                {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
             )
 
         output = super().forward(
