@@ -28,7 +28,7 @@ query tokens per sequence (one target plus five draft tokens).
 
 Capture candidates are [6,12,30,48,132,192], maximum192.
 The32-sequence budget and six capture tiers are retained from the previous
-configuration while removing D50; they are not retuned for this smaller load.
+configuration while removing D50; they are not adjusted for this smaller load.
 The sizing average of five sequences at concurrency80 does not guarantee
 uniform routing. Intermediate loads can pad to the next capture size.
 Verify actual runner capture sizes, padding, per-rank running/waiting and
