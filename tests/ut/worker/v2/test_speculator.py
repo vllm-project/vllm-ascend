@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.utils import hash_config_cached
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
@@ -21,7 +22,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
-from vllm_ascend.utils import get_config_hash
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
@@ -831,9 +831,9 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
             "draft": SimpleNamespace(model=SimpleNamespace(moe_layers=[SimpleNamespace(eplb_state=layer_state)]))
         },
     )
-    state.model_states[get_config_hash(speculator.speculative_config.draft_model_config, cached=True)] = (
-        state.model_states["draft"]
-    )
+    state.model_states[hash_config_cached(speculator.speculative_config.draft_model_config)] = state.model_states[
+        "draft"
+    ]
     speculator.set_eplb_state(state)
     mask = layer_state.allgather_source_is_padding
     speculator.set_eplb_state(state)
