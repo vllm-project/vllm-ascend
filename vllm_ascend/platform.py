@@ -1788,15 +1788,14 @@ def _disable_expandable_segments() -> None:
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
 
-def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str) -> bool:
+def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | None) -> bool:
     """Match supported target/draft pairs against the live loader tag."""
     # V2 keeps the target model_config while loading the draft. Match the live
     # loader tag so the target and other auxiliary models retain their backend.
     target = spec.target_model_config
     if spec.method == "dflash":
         return (
-            bool(spec.enforce_eager)
-            and model_tag == "dflash_head"
+            model_tag == "dflash_head"
             and target.hf_text_config.model_type == "glm_moe_dsa"
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
@@ -1881,7 +1880,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
 
 
 def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
-    """Select optional FA3 for compatible MiniMax or Step5 attention."""
+    """Select optional FA3 for compatible MiniMax, Step5 and local GLM DFlash2 drafts."""
     if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
         HardwareCapability.FLASH_ATTN_NPU_3
     ):
@@ -1897,7 +1896,14 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
         return False
     if config is None or config.model_config is None:
         return False
-    if not (_uses_minimax_fa3(config) or _uses_step5_fa3(config)):
+    from vllm.compilation import backends
+
+    local_glm_dflash = (
+        spec.method == "dflash"
+        and _is_supported_flash_attn_draft(spec, getattr(backends, "model_tag", None))
+        and not getattr(selector, "use_pcp", False)
+    )
+    if not (local_glm_dflash or _uses_minimax_fa3(config) or _uses_step5_fa3(config)):
         return False
     parallel = config.parallel_config
     return (
@@ -1917,11 +1923,16 @@ def _validate_flash_attn_npu_3(backend_key, selector) -> bool:
                 "use_rswa",
             )
         )
-        and parallel.pipeline_parallel_size == 1
-        and parallel.prefill_context_parallel_size == 1
-        and parallel.decode_context_parallel_size == 1
+        and (
+            local_glm_dflash
+            or (
+                parallel.pipeline_parallel_size == 1
+                and parallel.prefill_context_parallel_size == 1
+                and parallel.decode_context_parallel_size == 1
+            )
+        )
         and config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
-        and not getattr(config.quant_config, "enable_c8_quant", False)
+        and (local_glm_dflash or not getattr(config.quant_config, "enable_c8_quant", False))
         and not getattr(spec, "enable_adaptive_verification", False)
         and util.find_spec("flash_attn_npu_3") is not None
     )
