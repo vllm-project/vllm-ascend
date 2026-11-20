@@ -1,0 +1,4 @@
+pr: 22669
+entries:
+  - category: bugfix
+    text: QSA attention now retains all 512 selected complete groups when an incomplete trailing group is present, keeping GBSA and FIA attention selections consistent.
