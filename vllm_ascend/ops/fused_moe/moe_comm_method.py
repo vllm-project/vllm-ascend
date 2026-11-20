@@ -578,9 +578,7 @@ class FusedMC2CommImpl(MoECommMethod):
             # instead of the fine-grained quant_out_dtype, which can disagree
             # with the tensor dtype (e.g. W4A8 packed as int8 bytes).
             shared_tensors = weights.shared_w1
-            shared_first = (
-                shared_tensors[0] if isinstance(shared_tensors, (list, tuple)) else shared_tensors
-            )
+            shared_first = shared_tensors[0] if isinstance(shared_tensors, (list, tuple)) else shared_tensors
             shared_dtype = getattr(shared_first, "dtype", None)
             if shared_dtype == torch.int8:
                 # int8 descriptor family: always INT8, even when the routed
