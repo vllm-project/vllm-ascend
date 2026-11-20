@@ -184,6 +184,8 @@ DyntraLB balances decode requests across data-parallel ranks. It is supported on
 PD-disaggregated decode nodes (`kv_role="kv_consumer"`) with `data_parallel_size > 1`.
 `dyntra_lb_config.enabled` and `recompute_scheduler_enable` are independent sibling
 settings; enabling both selects the combined DyntraLB recompute scheduler.
+For deployment requirements, tuning, and diagnostics, see the
+[DyntraLB guide](../feature_guide/dyntra_lb.md).
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
