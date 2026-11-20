@@ -10,9 +10,9 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41StateMetadataBuilder
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num, compressor_from_projected
 from vllm_ascend.worker.v2.model_states import default

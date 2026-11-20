@@ -18,8 +18,11 @@ from collections.abc import Iterable
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
+
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+)
 
 
 class AscendKVBlockZeroer310(KVBlockZeroer):

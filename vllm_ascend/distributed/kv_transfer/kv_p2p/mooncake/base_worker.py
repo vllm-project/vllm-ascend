@@ -24,16 +24,19 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -391,7 +394,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         self.layer_name_to_spec_index: dict[str, int] = {}
 
         for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            group_spec = group.kv_cache_spec
+            group_spec = get_group_layout(group)
             group_spec_indices: list[int] = []
 
             for layer_name in group.layer_names:

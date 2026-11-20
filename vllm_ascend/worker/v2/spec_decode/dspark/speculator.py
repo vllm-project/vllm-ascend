@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_lay
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.core.kv_cache_compat import get_group_layout
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
     initialize_draft_context_chunk,
@@ -59,6 +60,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    context_kv_only = False
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -166,7 +168,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         if not group_ids or not layer_group_ids:
             raise ValueError("DSpark context initialization requires loaded draft attention layers")
         block_sizes = {
-            group_id: self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.block_size for group_id in group_ids
+            group_id: get_group_layout(self.kv_cache_config.kv_cache_groups[group_id]).block_size
+            for group_id in group_ids
         }
         return group_ids, layer_group_ids, block_sizes
 
@@ -223,6 +226,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         block_tables: Any,
         target_input_buffers: Any,
         target_attn_groups: Any,
+        kernel_block_sizes: list[int] | None = None,
     ) -> None:
         # Initialize the draft attention backend with its PCP=1 config.
         with set_current_vllm_config(self.attn_vllm_config):
@@ -232,6 +236,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 block_tables,
                 target_input_buffers,
                 target_attn_groups,
+                *((kernel_block_sizes,) if kernel_block_sizes is not None else ()),
             )
             self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
             # npu needs attn_backends to update full graph params in run_fullgraph.
@@ -261,8 +266,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     for group in groups
                     if issubclass(group.backend, AscendMLABackend)
                 ]
-                self.use_flashmla = bool(mla_groups) and all(
-                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+                self.use_flashmla = (
+                    (vllm_version_is("0.33.0") or not self.context_kv_only)
+                    and bool(mla_groups)
+                    and all(
+                        getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                        for group in mla_groups
+                    )
                 )
             elif issubclass(backend, AscendAttentionBackend):
                 self.attn_architecture = "GQA"

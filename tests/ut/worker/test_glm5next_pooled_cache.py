@@ -7,11 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
-)
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,

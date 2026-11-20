@@ -14,6 +14,7 @@ from vllm_ascend.attention.indexer import (
 )
 from vllm_ascend.attention.sfa_v1 import PreprocessType
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendSFAIndexerBackend(TestBase):
@@ -38,9 +39,13 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_indexer.k_cache = MagicMock()
         mock_indexer.k_cache.prefix = "model.layers.0.indexer"
         mock_indexer.k_cache.head_dim = 132
-        mock_indexer.k_cache.get_kv_cache_spec.return_value = MLAAttentionSpec(
-            block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8
-        )
+        spec = MLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=132, dtype=torch.uint8)
+        if vllm_version_is("0.33.0"):
+            mock_indexer.k_cache.get_kv_cache_spec.return_value = spec
+        else:
+            from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+            mock_indexer.k_cache.get_kv_cache_config.return_value = FullAttentionManager.layer_config(spec)
         return mock_indexer
 
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")

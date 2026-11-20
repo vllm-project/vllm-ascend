@@ -14,17 +14,21 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
@@ -158,15 +162,17 @@ class AscendStoreCoordinator:
         self.group_effective_specs: list[KVCacheSpec] = []
 
         for group_id, group in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(group.kv_cache_spec)
+            spec = _unwrap_spec(get_group_layout(group))
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
-            manager_cls = _get_manager_class(spec)
+            release = vllm_version_is("0.33.0")
+            manager_cls = _get_manager_class(spec) if release else group.manager_cls
 
             for existing_spec, group_ids, existing_cls in attention_groups:
-                if existing_spec == effective_spec:
+                same_policy = release or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                if existing_spec == effective_spec and same_policy:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
                     group_ids.append(group_id)
                     break
@@ -244,13 +250,18 @@ class AscendStoreCoordinator:
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
-            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            group = self.kv_cache_groups[group_id]
+            manager_cls = (
+                _get_manager_class(_unwrap_spec(get_group_layout(group)))
+                if vllm_version_is("0.33.0")
+                else group.manager_cls
+            )
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
-                kv_cache_spec=spec,
+                **self._manager_layout_args(group_id, spec),
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
@@ -336,6 +347,11 @@ class AscendStoreCoordinator:
         # when resolving each group's block-size view.
         return cast(BlockHashList, block_hashes)
 
+    def _manager_layout_args(self, group_id: int, spec: KVCacheSpec) -> dict[str, Any]:
+        if vllm_version_is("0.33.0"):
+            return {"kv_cache_spec": spec}
+        return {"block_size": spec.block_size, "manager_config": self.kv_cache_groups[group_id].manager_config}
+
     def _find_hit_blocks(
         self,
         block_hashes: Sequence[BlockHash],
@@ -354,7 +370,7 @@ class AscendStoreCoordinator:
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
-                kv_cache_spec=spec,
+                **self._manager_layout_args(group_ids[0], spec),
                 drop_eagle_block=0 in eagle_indices,
                 alignment_tokens=spec.block_size,
             )
@@ -392,7 +408,7 @@ class AscendStoreCoordinator:
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
-                    kv_cache_spec=spec,
+                    **self._manager_layout_args(group_ids[0], spec),
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )

@@ -7,17 +7,15 @@ import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core import kv_cache_planning as planning
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.kv_cache_interface import HiddenStateCacheSpec, KVCacheSpec, MambaSpec, MLAAttentionSpec
+
+from vllm_ascend.core.kv_cache_compat import (
     CircularBufferSpec,
     FullAttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheGroupSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
+    LegacyMambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
@@ -131,14 +129,14 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
-    gdn = MambaSpec(
+    gdn = LegacyMambaSpec(
         block_size=128,
         shapes=((64, 4), (128, 128)),
         dtypes=(torch.bfloat16, torch.bfloat16),
         mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
-    ple = MambaSpec(
+    ple = LegacyMambaSpec(
         block_size=128,
         shapes=((128, 5),),
         dtypes=(torch.bfloat16,),
@@ -737,6 +735,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
             get_mamba_chunk_size=lambda: 64,
         ),
         cache_config=cache,
+        speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -882,7 +881,17 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
     caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
     # Exercise the actual MRV2 factory, which rewrites the builder spec.
     group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+    builder_kwargs = {}
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        from tests.ut.kvpp_utils import make_layer_cache_configs
+        from vllm_ascend.core.kv_cache_compat import get_group_layer_layouts
+
+        builder_kwargs["kv_cache_group"] = KVCacheGroup.from_layers(
+            make_layer_cache_configs(get_group_layer_layouts(compressed_group))
+        )
+    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128, **builder_kwargs)
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
     layer = qsa.qsa_indexer.QSACompressedKeyCache(

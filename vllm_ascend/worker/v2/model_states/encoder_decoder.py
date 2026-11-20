@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.model_states.encoder_decoder import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -63,7 +64,7 @@ class AscendEncoderDecoderModelState(EncoderDecoderModelState):
         encoder_decoder_metadata = EncoderDecoderAttnMetadata(
             self._get_encoder_seq_lens(
                 input_batch.req_ids,
-                attn_groups,
+                attn_groups if vllm_version_is("0.33.0") else kv_cache_config.kv_cache_groups,
                 for_capture,
                 num_reqs,
             )

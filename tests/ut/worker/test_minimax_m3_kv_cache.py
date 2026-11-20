@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerBackend
 from vllm_ascend.worker.v2 import attn_utils

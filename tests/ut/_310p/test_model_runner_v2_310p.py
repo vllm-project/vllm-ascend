@@ -1435,6 +1435,8 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
             self.block_size = block_size
             self.head_size = head_size
 
+    from vllm_ascend.core import kv_cache_compat
+
     class FakeUniformTypeKVCacheSpecs:
         def __init__(self, specs):
             self.kv_cache_specs = dict(enumerate(specs))
@@ -1446,10 +1448,12 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
+    config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec, layer_names=list(range(len(specs))))]
+    )
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
+        patch.object(kv_cache_compat, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
     ):
         runner._adjust_kernel_block_sizes(config)
     assert runner.kernel_block_sizes == [expected_kernel_size]
@@ -1466,7 +1470,9 @@ def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
+    config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec(), layer_names=["layer"])]
+    )
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
         pytest.raises(NotImplementedError, match="divides every attention cache block size"),

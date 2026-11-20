@@ -6,9 +6,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -16,6 +14,10 @@ from vllm.v1.worker.utils import (
     select_common_block_size,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    EncoderOnlyAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -160,23 +162,29 @@ def prepare_ascend_kernel_block_sizes(
     """
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
-    # Upstream drops only encoder-only groups, so this index tracks its output.
+    # The release excludes encoder-only groups, whereas main preserves every
+    # group including empty PP projections.
+    release = vllm_version_is("0.33.0")
     index = 0
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = next(iter(spec.kv_cache_specs.values()))
-        if isinstance(spec, EncoderOnlyAttentionSpec):
-            continue
+        if release:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = next(iter(spec.kv_cache_specs.values()))
+            if isinstance(spec, EncoderOnlyAttentionSpec):
+                continue
+            manager_block_size = group.kv_cache_spec.block_size
+        else:
+            spec = next(iter(group.kv_cache_specs.values()), None)
+            manager_block_size = group.block_size
         if index >= len(kernel_block_sizes):
             break
-        manager_block_size = group.kv_cache_spec.block_size
         strides = _group_tensor_strides(kv_cache_config, group.layer_names)
         block_outermost_packed = any(0 < layer_stride < block_stride for layer_stride, block_stride in strides)
         aliases_layers = any(layer_stride == 0 and block_stride > 0 for layer_stride, block_stride in strides)
         if (
-            spec.has_layer_views
-            and isinstance(spec, AttentionSpec)
+            isinstance(spec, AttentionSpec)
+            and spec.has_layer_views
             and aliases_layers
             and not block_outermost_packed
             and kernel_block_sizes[index] == manager_block_size

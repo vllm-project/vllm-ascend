@@ -16,10 +16,10 @@
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 
 
 class TestAscendKVBlockZeroer310(TestBase):

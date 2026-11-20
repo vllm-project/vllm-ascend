@@ -24,11 +24,14 @@ from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_compat import (
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
@@ -442,7 +445,7 @@ class BaseKVPoolWorker(ABC):
 
         group_uses_align_state: list[bool] = []
         for group in self.kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
+            kv_cache_spec = get_group_layout(group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 specs = [kv_cache_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names]
             else:
@@ -459,7 +462,7 @@ class BaseKVPoolWorker(ABC):
         if not use_hybrid or kv_cache_config is None:
             return False
         for group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = group.kv_cache_spec
+            kv_cache_spec = get_group_layout(group)
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.kv_cache_specs.values()):
                     return True
@@ -683,7 +686,7 @@ class BaseKVPoolWorker(ABC):
         result = dict(kv_caches)
         copy_funcs = None
         for group in self.kv_cache_config.kv_cache_groups:
-            specs = group.kv_cache_spec
+            specs = get_group_layout(group)
             for name in group.layer_names:
                 spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
                 if not isinstance(spec, MambaSpec):

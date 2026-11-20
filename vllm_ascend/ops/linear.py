@@ -308,11 +308,12 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         )
         # vLLM #63752: custom allocation bypasses the stacked initializer.
         self.loaded_shard_ids: dict[str, set[str | int]] = {}
-        if not vllm_version_is("0.33.0"):
-            for name in self.padding_fill_params():
-                param = getattr(self, name)
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
                 self._zero_output_padding(param)
-                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel(), "fill_on_reload": True})
 
     def forward(
         self,

@@ -64,6 +64,7 @@ def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, mod
     parallel_config = SimpleNamespace(
         tensor_parallel_size=1,
         enable_expert_parallel=False,
+        enable_eplb=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
         # Both supported vLLM lanes read this during model/parallel validation.
@@ -91,6 +92,7 @@ def test_model_config_keeps_target_model_pp_validation(monkeypatch):
     parallel_config = SimpleNamespace(
         tensor_parallel_size=1,
         enable_expert_parallel=False,
+        enable_eplb=False,
         pipeline_parallel_size=2,
         decode_context_parallel_size=1,
         # Both supported vLLM lanes read this during model/parallel validation.

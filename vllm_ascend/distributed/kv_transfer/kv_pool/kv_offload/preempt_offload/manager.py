@@ -19,9 +19,16 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_utils import resolve_dcp_kv_block_size, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
+from vllm_ascend.core.kv_cache_compat import (
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
     MambaConvLoadMeta,
@@ -136,24 +143,24 @@ class PreemptOffloadScheduler:
     def _get_group_is_sliding_window(kv_cache_config: "KVCacheConfig") -> list[bool]:
         group_is_sliding_window: list[bool] = []
         for group in kv_cache_config.kv_cache_groups:
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            if isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
                 group_is_sliding_window.append(
-                    any(isinstance(spec, SlidingWindowSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
+                    any(isinstance(spec, SlidingWindowSpec) for spec in get_group_layout(group).kv_cache_specs.values())
                 )
             else:
-                group_is_sliding_window.append(isinstance(group.kv_cache_spec, SlidingWindowSpec))
+                group_is_sliding_window.append(isinstance(get_group_layout(group), SlidingWindowSpec))
         return group_is_sliding_window
 
     @staticmethod
     def _get_group_is_mamba(kv_cache_config: "KVCacheConfig") -> list[bool]:
         group_is_mamba: list[bool] = []
         for group in kv_cache_config.kv_cache_groups:
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            if isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
                 group_is_mamba.append(
-                    any(isinstance(spec, MambaSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
+                    any(isinstance(spec, MambaSpec) for spec in get_group_layout(group).kv_cache_specs.values())
                 )
             else:
-                group_is_mamba.append(isinstance(group.kv_cache_spec, MambaSpec))
+                group_is_mamba.append(isinstance(get_group_layout(group), MambaSpec))
         return group_is_mamba
 
     @staticmethod
@@ -167,9 +174,9 @@ class PreemptOffloadScheduler:
         group_has_mamba_conv: list[bool] = []
         for group in kv_cache_config.kv_cache_groups:
             specs = (
-                group.kv_cache_spec.kv_cache_specs.values()
-                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-                else (group.kv_cache_spec,)
+                get_group_layout(group).kv_cache_specs.values()
+                if isinstance(get_group_layout(group), UniformTypeKVCacheSpecs)
+                else (get_group_layout(group),)
             )
             group_has_mamba_conv.append(
                 any(isinstance(spec, MambaSpec) and spec.mamba_type in conv_backends for spec in specs)
@@ -319,8 +326,9 @@ class PreemptOffloadScheduler:
                         gpu_blocks.append(gpu_block)
                         effective_hashes.append(None)
             else:
-                group_block_size = resolve_dcp_kv_block_size(kv_cache_groups[g].kv_cache_spec, self.dcp_world_size)
-                is_circular = is_circular_kv_cache_spec(kv_cache_groups[g].kv_cache_spec)
+                group_layout = get_group_layout(kv_cache_groups[g])
+                group_block_size = resolve_dcp_kv_block_size(group_layout, self.dcp_world_size)
+                is_circular = is_circular_kv_cache_spec(group_layout)
                 # A ring owns one private block, independent of token position.
                 if is_circular and (len(group_gpu_ids) != 1 or group_gpu_ids[0] <= 0):
                     raise RuntimeError(f"Invalid circular cache blocks for {req_id}: {group_gpu_ids}")
@@ -469,6 +477,7 @@ class PreemptOffloadScheduler:
         cpu_block_ids: list[int] = []
         mamba_conv_loads: list[MambaConvLoadMeta] = []
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
+            group_layout = get_group_layout(self.cpu_kv_cache_config.kv_cache_groups[g])
             if self._group_is_mamba[g]:
                 accept_token_idx = self.num_spec_tokens - (state.num_computed_tokens - request.num_tokens + 1)
                 group_gpu_ids = block_ids_by_group[g]
@@ -493,7 +502,7 @@ class PreemptOffloadScheduler:
                 # separate accepted-token shift. If postprocess_mamba already
                 # crossed a cache boundary, only the residual in-block shift
                 # remains to be applied during resume.
-                mamba_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                mamba_block_size = group_layout.block_size
                 num_tokens_running_state = request.num_tokens - 1 - accept_token_idx
                 accepted_state_position = request.num_tokens - 1
                 aligned_accepted_state_position = (accepted_state_position // mamba_block_size) * mamba_block_size
@@ -515,7 +524,7 @@ class PreemptOffloadScheduler:
                         source_offset=conv_source_offset,
                     )
                 )
-            elif is_circular_kv_cache_spec(self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec):
+            elif is_circular_kv_cache_spec(group_layout):
                 # Reuse the ordinary block transfer, but always restore slot 0.
                 group_gpu_ids = block_ids_by_group[g]
                 if len(group_cpu_ids) != 1 or len(group_gpu_ids) != 1 or group_cpu_ids[0] <= 0 or group_gpu_ids[0] <= 0:
@@ -526,9 +535,7 @@ class PreemptOffloadScheduler:
                 cpu_block_ids.append(group_cpu_ids[0])
                 gpu_block_ids.append(group_gpu_ids[0])
             else:
-                group_block_size = resolve_dcp_kv_block_size(
-                    self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec, self.dcp_world_size
-                )
+                group_block_size = resolve_dcp_kv_block_size(group_layout, self.dcp_world_size)
                 start_block = load_start_tokens // group_block_size
                 end_block = min(
                     len(group_cpu_ids),

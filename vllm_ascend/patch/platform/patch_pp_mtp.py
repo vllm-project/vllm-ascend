@@ -341,7 +341,10 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
-    _patch_model_runner_output()
+    # The v0.33.0 backport extends the V1 output. Main uses the native V2
+    # protocol and its slotted ModelRunnerOutput cannot carry extra fields.
+    if vllm_version_is("0.33.0"):
+        _patch_model_runner_output()
     # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
     if vllm_version_is("0.33.0"):

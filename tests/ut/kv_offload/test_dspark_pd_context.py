@@ -9,8 +9,9 @@ from unittest.mock import Mock, patch
 import msgspec
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
@@ -29,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     build_draft_kv_metadata,
     build_draft_kv_read_batches,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _descriptor(request_id="request", generation="allocation-1", prompt_tokens=6):
@@ -98,31 +100,48 @@ def test_scheduler_conversion_retains_resident_draft_in_shared_block_group():
         speculative_config=SimpleNamespace(method="dspark"),
         kv_transfer_config=None,
     )
-    with (
-        pytest.MonkeyPatch.context() as monkeypatch,
-    ):
-        monkeypatch.setattr(
-            kv_cache_config_builder,
-            "_upstream_get_kv_cache_config_from_groups",
-            lambda *a, **k: config,
-        )
-        monkeypatch.setattr(kv_cache_config_builder, "is_deepseek_v41_cache", lambda *a, **k: False)
-        monkeypatch.setattr(kv_cache_config_builder, "_get_glm5_next_cache_layout", lambda *a, **k: None)
-        monkeypatch.setattr(kv_cache_config_builder, "_is_deepseek_v4_groups", lambda *a, **k: False)
-        physical = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
-            vllm_config, config.kv_cache_groups, 1
-        )
+    if vllm_version_is("0.33.0"):
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(
+                kv_cache_config_builder, "_upstream_get_kv_cache_config_from_groups", lambda *a, **k: config
+            )
+            monkeypatch.setattr(kv_cache_config_builder, "is_deepseek_v41_cache", lambda *a, **k: False)
+            monkeypatch.setattr(kv_cache_config_builder, "_get_glm5_next_cache_layout", lambda *a, **k: None)
+            monkeypatch.setattr(kv_cache_config_builder, "_is_deepseek_v4_groups", lambda *a, **k: False)
+            physical = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
+                vllm_config, config.kv_cache_groups, 1
+            )
+        assert physical.kv_cache_groups[0].kv_cache_spec is uniform
+    else:
+        from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        from tests.ut.kvpp_utils import make_layer_cache_configs
+        from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+        layers = make_layer_cache_configs(uniform.kv_cache_specs)
+        group = KVCacheGroup.from_layers(layers)
+        builder = AscendKVCacheConfigBuilder()
+        with patch.object(AscendKVCacheConfigBuilder, "_get_native_groups", return_value=[group]):
+            groups = builder.get_kv_cache_groups(vllm_config, layers)
+        with patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups", return_value=config):
+            physical = builder.get_kv_cache_config_from_groups(vllm_config, groups, 8)
+        assert physical.kv_cache_groups[0].kv_cache_specs == uniform.kv_cache_specs
     assert physical.dspark_context_group_ids == (0,)
     assert physical.dspark_draft_only_group_ids == ()
     scheduler_config = generate_scheduler_kv_cache_config([physical])
-    assert scheduler_config.kv_cache_groups[0].kv_cache_spec.store_on_host is True
+    scheduler_group = scheduler_config.kv_cache_groups[0]
+    if vllm_version_is("0.33.0"):
+        assert scheduler_group.kv_cache_spec.store_on_host is True
+    else:
+        assert scheduler_group.kv_cache_specs["target"].store_on_host is True
+        assert scheduler_group.kv_cache_specs["draft"].store_on_host is False
     assert scheduler_config.dspark_context_group_ids == (0,)
     assert scheduler_config.dspark_draft_only_group_ids == ()
     scheduler = _context_scheduler(draft_spec)
     scheduler.kv_cache_config = scheduler_config
     scheduler.main_group_idx = scheduler.indexer_group_idx = 0
     assert scheduler._find_dspark_context_groups() == (0,)
-    assert physical.kv_cache_groups[0].kv_cache_spec is uniform
     assert resident_mla_context_group_ids(physical.kv_cache_groups) == (0,)
 
 

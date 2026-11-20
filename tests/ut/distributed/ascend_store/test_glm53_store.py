@@ -16,12 +16,12 @@ import numpy as np
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec
 
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, start_patch
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
+from vllm_ascend.core.kv_cache_compat import UniformTypeKVCacheSpecs, register_all_kvcache_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window

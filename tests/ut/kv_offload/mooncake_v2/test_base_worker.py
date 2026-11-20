@@ -6,13 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MLAAttentionSpec
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,

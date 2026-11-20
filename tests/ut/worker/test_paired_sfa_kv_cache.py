@@ -9,17 +9,10 @@ import pytest
 import torch
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheLayout,
-    KVCacheTensor,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    compute_layout_strides,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayout, KVCacheTensor, MambaSpec, compute_layout_strides
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
 from vllm_ascend.worker.v2 import attn_utils

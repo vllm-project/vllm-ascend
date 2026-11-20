@@ -1,42 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import sys
 from collections.abc import Mapping
 from copy import copy
 from dataclasses import replace
 from math import lcm
 
-import vllm
-import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
-from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import (
-    HybridKVCacheCoordinator,
-    KVCacheCoordinator,
-    SpecGroup,
-)
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
-    BlockHashList,
-    KVCacheBlock,
-)
-from vllm.v1.core.single_type_kv_cache_manager import (
-    MambaManager,
-    get_manager_for_kv_cache_spec,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupRole,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+import vllm.v1.core.kv_cache_coordinator as upstream
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator as _native_factory
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
 
-_orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+if vllm_version_is("0.33.0"):
+    import vllm
+    import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+    from vllm.utils.math_utils import cdiv
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_coordinator import (
+        HybridKVCacheCoordinator,
+        KVCacheCoordinator,
+        SpecGroup,
+    )
+    from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+    from vllm.v1.core.kv_cache_utils import (
+        BlockHash,
+        BlockHashList,
+        KVCacheBlock,
+    )
+
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupRole,
+        KVCacheSpec,
+        MambaSpec,
+        UniformTypeKVCacheSpecs,
+    )
+
+    from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+
+    _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
@@ -597,12 +611,130 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
 
-vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+class _NativeHybridKVCacheCoordinator(upstream.HybridKVCacheCoordinator):
+    """Use native cache managers with Ascend's prefix lookup policy."""
 
-# `kv_cache_manager` imports `get_kv_cache_coordinator` with
-# `from ... import ...`, so if it was loaded before this patch runs
-# (for example through the recompute scheduler path), it keeps the
-# old function object. Update that cached binding as well.
-_kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
-if _kv_cache_manager is not None:
-    _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+    def __init__(
+        self,
+        kv_cache_config,
+        max_model_len,
+        max_in_flight_tokens,
+        use_eagle,
+        enable_caching,
+        enable_kv_cache_events,
+        dcp_world_size,
+        pcp_world_size,
+        scheduler_block_size,
+        hash_block_size,
+        metrics_collector=None,
+        num_hash_lookahead_tokens=0,
+        num_prefill_lookahead=0,
+        allow_partial_hash_hits=True,
+    ):
+        # Draft models have no Mamba layers. Preserve the full-attention-only
+        # fallback without reconstructing Core's manager instances or groups.
+        if use_eagle and not any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups):
+            kv_cache_config = copy(kv_cache_config)
+            kv_cache_config.kv_cache_groups = [
+                replace(group, is_eagle_group=issubclass(group.manager_cls, FullAttentionManager))
+                for group in kv_cache_config.kv_cache_groups
+            ]
+        self.skips_eagle_block_drop = _skips_eagle_block_drop(getattr(kv_cache_config, "kv_transfer_config", None))
+        super().__init__(
+            kv_cache_config,
+            max_model_len,
+            max_in_flight_tokens,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size,
+            pcp_world_size,
+            scheduler_block_size,
+            hash_block_size,
+            metrics_collector,
+            num_hash_lookahead_tokens,
+            num_prefill_lookahead,
+            allow_partial_hash_hits,
+        )
+        if self.skips_eagle_block_drop:
+            self.drop_eagle_group_ids = set()
+        for group_id, manager in enumerate(self.single_type_managers):
+            if isinstance(manager, MambaManager):
+                manager.drop_eagle_checkpoint_block = (
+                    use_eagle and not self.skips_eagle_block_drop and group_id in self.eagle_group_ids
+                )
+
+    def verify_and_split_kv_cache_groups(self) -> None:
+        # Hybrid connector lookups still honor draft group flags for DSpark.
+        # Keep the scheduler's use_eagle value for Core's cache-write accounting.
+        write_drop_group_ids = self.drop_eagle_group_ids
+        self.drop_eagle_group_ids = set() if self.skips_eagle_block_drop else self.eagle_group_ids
+        try:
+            super().verify_and_split_kv_cache_groups()
+        finally:
+            self.drop_eagle_group_ids = write_drop_group_ids
+
+    @property
+    def _cache_hit_alignment_tokens(self) -> int:
+        tail_alignment = lcm(
+            1,
+            *(
+                getattr(spec, "compress_ratio", 1)
+                for group in self.kv_cache_config.kv_cache_groups
+                if not group.prefix_cacheable
+                for spec in group.kv_cache_specs.values()
+            ),
+        )
+        return lcm(super()._cache_hit_alignment_tokens, tail_alignment)
+
+
+def _get_native_kv_cache_coordinator(
+    kv_cache_config,
+    max_model_len,
+    max_in_flight_tokens,
+    use_eagle,
+    enable_caching,
+    enable_kv_cache_events,
+    dcp_world_size,
+    pcp_world_size,
+    scheduler_block_size,
+    hash_block_size,
+    metrics_collector=None,
+    num_hash_lookahead_tokens=0,
+    num_prefill_lookahead=0,
+    allow_partial_hash_hits=True,
+):
+    # Bounded-replay SWA can allocate private pages without caching a prefix.
+    has_cacheable_groups = any(group.prefix_cacheable for group in kv_cache_config.kv_cache_groups)
+    return _native_factory(
+        kv_cache_config,
+        max_model_len,
+        max_in_flight_tokens,
+        use_eagle,
+        enable_caching and has_cacheable_groups,
+        enable_kv_cache_events,
+        dcp_world_size,
+        pcp_world_size,
+        scheduler_block_size,
+        hash_block_size,
+        metrics_collector,
+        num_hash_lookahead_tokens,
+        num_prefill_lookahead,
+        allow_partial_hash_hits,
+    )
+
+
+if vllm_version_is("0.33.0"):
+    vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator
+    # Preserve the cached factory binding when the manager was imported first.
+    _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
+    if _kv_cache_manager is not None:
+        _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+else:
+    AscendHybridKVCacheCoordinator = _NativeHybridKVCacheCoordinator  # type: ignore[misc, assignment]
+    get_kv_cache_coordinator = _get_native_kv_cache_coordinator  # type: ignore[assignment]
+    upstream.get_kv_cache_coordinator = _get_native_kv_cache_coordinator
+    _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
+    if _kv_cache_manager is not None:
+        _kv_cache_manager.get_kv_cache_coordinator = _get_native_kv_cache_coordinator  # type: ignore[attr-defined]
+    upstream.HybridKVCacheCoordinator = _NativeHybridKVCacheCoordinator

@@ -92,11 +92,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -126,6 +128,9 @@ from vllm_ascend.worker.v2.pp_transport import (
 from vllm_ascend.worker.v2.pp_transport import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 _FP8_E4M3_MAX = 448.0
 _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
@@ -359,6 +364,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AscendMiniMaxM3SparseBackend]:
         return self.attn_backend
+
+    if not vllm_version_is("0.33.0"):
+
+        def get_kv_cache_config(self, vllm_config: VllmConfig):
+            spec = self.get_kv_cache_spec(vllm_config)
+            if spec is None:
+                return None
+            return FullAttentionManager.layer_config(spec)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         return FullAttentionSpec(

@@ -48,16 +48,19 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layout,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -1815,8 +1818,8 @@ class MooncakeConnectorScheduler:
 
     def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
         specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
+        first_spec = specs[0] if specs else get_group_layout(group)
+        block_size = getattr(get_group_layout(group), "block_size", getattr(first_spec, "block_size", self.block_size))
         is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
         sliding_window = 0
         compress_ratio = 1
@@ -1834,12 +1837,12 @@ class MooncakeConnectorScheduler:
         )
 
     def _get_group_unique_specs(self, group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
+        if not isinstance(get_group_layout(group), UniformTypeKVCacheSpecs):
+            return [get_group_layout(group)]
 
         specs = []
         for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
+            layer_spec = get_group_layout(group).kv_cache_specs[layer_name]
             if layer_spec not in specs:
                 specs.append(layer_spec)
         return specs
@@ -2196,14 +2199,14 @@ class MooncakeConnectorWorker:
         self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
         _is_fullattn_group = []
         for g in self.kv_cache_config.kv_cache_groups:
-            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
+            if isinstance(get_group_layout(g), UniformTypeKVCacheSpecs):
                 is_fullattn_spec = []
                 for layer_name in g.layer_names:
-                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
+                    layer_spec = get_group_layout(g).kv_cache_specs[layer_name]
                     is_fullattn_spec.append(isinstance(layer_spec, FullAttentionSpec))
                 _is_fullattn_group.append(all(is_fullattn_spec))
             else:
-                _is_fullattn_group.append(isinstance(g.kv_cache_spec, FullAttentionSpec))
+                _is_fullattn_group.append(isinstance(get_group_layout(g), FullAttentionSpec))
         self.use_hybrid = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and not all(_is_fullattn_group)
@@ -2304,7 +2307,7 @@ class MooncakeConnectorWorker:
         if layer_names is None:
             layer_names = list(group_spec.layer_names)
         if kv_cache_spec is None:
-            kv_cache_spec = group_spec.kv_cache_spec
+            kv_cache_spec = get_group_layout(group_spec)
         spec = kv_cache_spec
         if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
             spec = {layer_name: kv_cache_spec.kv_cache_specs[layer_name] for layer_name in layer_names}
@@ -2351,7 +2354,7 @@ class MooncakeConnectorWorker:
         """Return the real per-layer specs retained by the KV cache config."""
         layer_specs: dict[str, Any] = {}
         for group in kv_cache_config.kv_cache_groups:
-            group_kv_spec = group.kv_cache_spec
+            group_kv_spec = get_group_layout(group)
             if isinstance(group_kv_spec, UniformTypeKVCacheSpecs):
                 for layer_name in group.layer_names:
                     layer_specs[layer_name] = group_kv_spec.kv_cache_specs[layer_name]

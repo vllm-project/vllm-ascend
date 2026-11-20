@@ -60,13 +60,16 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker._kvpp_cache_allocation_plan = None
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
+        worker.model_runner.get_kv_cache_layer_configs.return_value = {}
 
         mock_cache_config = MagicMock()
         mock_cache_config.kv_cache_memory_bytes = None
         mock_cache_config.gpu_memory_utilization = requested_memory / init_total_memory
         worker.cache_config = mock_cache_config
 
-        worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3"))
+        worker.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3"), supports_kv_cache_grouping=False
+        )
         worker.vllm_config.model_config = worker.model_config
 
         mock_snapshot = MagicMock()

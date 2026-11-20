@@ -25,20 +25,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
 from vllm.v1.outputs import KVConnectorOutput
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    LegacyMambaSpec,
+    LegacyMLAAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -185,9 +185,9 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
 ):
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
-    from vllm_ascend.core import kv_cache_config_builder
+    from vllm_ascend.utils import vllm_version_is
 
-    target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    target = LegacyMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
     # Ownership comes from is_draft, independently of the attention mask.
     target = replace(target, non_causal_multi_token_decode=non_causal)
     draft = replace(target, is_draft=True)
@@ -198,34 +198,22 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         speculative_config=SimpleNamespace(method="dspark"),
         kv_transfer_config=None,
     )
-    kv_config = SimpleNamespace(
-        num_blocks=4,
-        hisparse_host_num_blocks=0,
-        kv_cache_groups=[
-            KVCacheGroupSpec([], draft, is_eagle_group=True),
-            KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
-            KVCacheGroupSpec(["target-only"], target),
-            KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
-        ],
-    )
-    original_groups = copy.deepcopy(kv_config.kv_cache_groups)
-    with (
-        patch.object(kv_cache_config_builder, "is_deepseek_v41_cache", return_value=False),
-        patch.object(kv_cache_config_builder, "_get_glm5_next_cache_layout", return_value=None),
-        patch.object(kv_cache_config_builder, "_is_deepseek_v4_groups", return_value=False),
-        patch.object(kv_cache_config_builder, "_upstream_get_kv_cache_config_from_groups", return_value=kv_config),
-    ):
-        result = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(config, kv_config.kv_cache_groups, 0)
+    if vllm_version_is("0.33.0"):
+        result, original_groups = _plan_legacy_dspark_groups(config, layer_specs, mixed, target, draft, empty_pp_layers)
+    else:
+        result, original_groups = _plan_native_dspark_groups(config, layer_specs, target, draft, empty_pp_layers)
     assert result.dspark_draft_only_group_ids == (0, 3)
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0, 3)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    if vllm_version_is("0.33.0"):
+        assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    else:
+        assert scheduler_config.kv_cache_groups[1].kv_cache_specs == ({} if empty_pp_layers else layer_specs)
     assert result.kv_cache_groups == original_groups
 
-    # Feed the preserved ownership to its real consumer. A mixed group must
-    # retain target keys even if its representative is draft or this PP stage
-    # has no local layers; standalone draft groups have no target object.
+    # A mixed group must retain target keys even when this PP stage has no
+    # local layers. A standalone draft group has no target object.
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
     scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(
@@ -245,6 +233,58 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
             *draft_keys,
         ]
     assert scheduler.layerwise_keys.make_hit_check_keys.call_count == 2
+
+
+def _plan_legacy_dspark_groups(config, layer_specs, mixed, target, draft, empty_pp_layers):
+    from vllm_ascend.core import kv_cache_config_builder
+
+    kv_config = SimpleNamespace(
+        num_blocks=4,
+        hisparse_host_num_blocks=0,
+        kv_cache_groups=[
+            KVCacheGroupSpec([], draft, is_eagle_group=True),
+            KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
+            KVCacheGroupSpec(["target-only"], target),
+            KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
+        ],
+    )
+    original_groups = copy.deepcopy(kv_config.kv_cache_groups)
+    with (
+        patch.object(kv_cache_config_builder, "is_deepseek_v41_cache", return_value=False),
+        patch.object(kv_cache_config_builder, "_get_glm5_next_cache_layout", return_value=None),
+        patch.object(kv_cache_config_builder, "_is_deepseek_v4_groups", return_value=False),
+        patch.object(kv_cache_config_builder, "_upstream_get_kv_cache_config_from_groups", return_value=kv_config),
+    ):
+        result = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(config, kv_config.kv_cache_groups, 0)
+    return result, original_groups
+
+
+def _plan_native_dspark_groups(config, layer_specs, target, draft, empty_pp_layers):
+    from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder, _project_kv_cache_groups_to_worker
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
+
+    from tests.ut.kvpp_utils import make_layer_cache_configs
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+    layer_configs = make_layer_cache_configs(
+        {**layer_specs, "draft-only": draft, "target-only": target, "draft-hidden": draft}
+    )
+    groups = [
+        KVCacheGroup.from_layers({"draft-only": layer_configs["draft-only"]}, is_eagle_group=True),
+        KVCacheGroup.from_layers({name: layer_configs[name] for name in layer_specs}, is_eagle_group=True),
+        KVCacheGroup.from_layers({"target-only": layer_configs["target-only"]}),
+        KVCacheGroup.from_layers({"draft-hidden": layer_configs["draft-hidden"]}),
+    ]
+    builder = AscendKVCacheConfigBuilder()
+    with patch.object(AscendKVCacheConfigBuilder, "_get_native_groups", return_value=groups):
+        annotated = builder.get_kv_cache_groups(config, layer_configs)
+    worker_names = {"target-only"} if empty_pp_layers else {"target-only", *layer_specs}
+    projected = _project_kv_cache_groups_to_worker(annotated, {name: layer_configs[name] for name in worker_names})
+    before = copy.deepcopy(projected)
+    planned = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=projected)
+    with patch.object(DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups", return_value=planned):
+        result = builder.get_kv_cache_config_from_groups(config, projected, 4)
+    return result, before
 
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
@@ -285,7 +325,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
         groups.append(
             KVCacheGroupSpec(
                 ["layer.1"],
-                MambaSpec(
+                LegacyMambaSpec(
                     shapes=((4,),),
                     dtypes=(torch.float32,),
                     block_size=16,
@@ -405,7 +445,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         # Cover the UniformType wrapper path handled by _infer_mamba_groups.
         wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs(
             {
-                "layer.1": MambaSpec(
+                "layer.1": LegacyMambaSpec(
                     shapes=((4,),),
                     dtypes=(torch.float32,),
                     block_size=16,
@@ -422,7 +462,7 @@ class TestKVPoolScheduler(unittest.TestCase):
             KVCacheGroupSpec(["layer.1"], wrapped_mamba_spec),
             KVCacheGroupSpec(
                 ["layer.2"],
-                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+                LegacyMambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
             ),
         ]
         config = self._make_config(extra_config={"backend": "memcache"})

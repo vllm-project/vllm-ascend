@@ -5,21 +5,18 @@
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
+    MLAAttentionSpec,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm_ascend.core.kv_cache_compat import create_legacy_cache_groups as create_kv_cache_group_specs
 from vllm_ascend.utils import vllm_version_is
-
-# vLLM main moved this helper to kv_cache_planning after v0.32.0.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import create_kv_cache_group_specs
-else:
-    from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
-
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -62,6 +59,8 @@ def make_kimi_cache_groups(
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
+    *,
+    layer_configs=None,
 ) -> list[KVCacheGroupSpec] | None:
     """Build topology-independent Kimi K3 DSpark scheduler groups.
 
@@ -77,15 +76,25 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     relation. An unrecognized or incompatible signature falls back to vLLM's
     generic hybrid grouping.
     """
+
+    def is_full_attention(name, spec):
+        if vllm_version_is("0.33.0"):
+            return isinstance(spec, FullAttentionSpec)
+        if layer_configs is None:
+            return isinstance(spec, (FullAttentionSpec, MLAAttentionSpec))
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        return layer_configs[name].manager_cls is FullAttentionManager
+
     target_attention_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and is_full_attention(name, spec)
     }
     draft_attention_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and is_full_attention(name, spec)
     }
     mamba_specs = {
         name: spec

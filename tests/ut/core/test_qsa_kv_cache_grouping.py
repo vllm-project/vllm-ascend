@@ -3,13 +3,12 @@ from unittest.mock import Mock
 
 import torch
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from tests.ut.kvpp_utils import make_layer_cache_configs
 from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
+from vllm_ascend.utils import vllm_version_is
 
 
 def _ordinary_specs() -> dict[str, KVCacheSpec]:
@@ -34,6 +33,8 @@ def _ordinary_config() -> SimpleNamespace:
 
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
+    if not vllm_version_is("0.33.0"):
+        specs = make_layer_cache_configs(specs)
     vllm_config = _ordinary_config()
     expected = [Mock(spec=KVCacheGroupSpec)]
     upstream_grouping = Mock(return_value=expected)
@@ -79,6 +80,19 @@ def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
     )
 
     vllm_config = _ordinary_config()
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.kv_cache_interface import KVCacheGroup
+
+        native = KVCacheGroup.from_layers(make_layer_cache_configs({"model.layers.0.self_attn": ordinary}))
+        fallback = Mock(return_value=expected)
+        monkeypatch.setattr(DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups", fallback)
+        actual = kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+            vllm_config, [native], 7
+        )
+        assert actual is expected
+        fallback.assert_called_once_with(vllm_config, [native], 7)
+        assert actual.kv_transfer_config is None
+        return
     actual = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
         vllm_config,
         groups,

@@ -6,16 +6,17 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
-from vllm.v1.kv_cache_interface import (
+from vllm.v1.kv_cache_interface import MambaSpec
+
+from vllm_ascend.core.kv_cache_compat import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
-    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 
 
 def ring_spec():
@@ -30,8 +31,10 @@ def ring_spec():
 
 def test_ring_lifetime_reuse_and_external_tokens():
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=32)
+    spec = ring_spec()
+    layout = spec if vllm_version_is("0.33.0") else KVCacheGroupSpec(["ring"], spec)
     manager = CircularBufferManager(
-        ring_spec(),
+        layout,
         pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -83,14 +86,15 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
     full = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.float32)
     scratch = ring_spec()
     groups = [KVCacheGroupSpec(["kv"], full), KVCacheGroupSpec(["state"], scratch)]
-    coordinator = SimpleNamespace(
-        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
-        single_type_managers=[SimpleNamespace(), SimpleNamespace()],
-        eagle_group_ids=set(),
-        scheduler_block_size=128,
-        _get_effective_block_size=lambda spec: spec.block_size,
-    )
-    AscendHybridKVCacheCoordinator.verify_and_split_kv_cache_groups(coordinator)
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=groups)
+    coordinator.single_type_managers = (SimpleNamespace(), SimpleNamespace())
+    coordinator.eagle_group_ids = set()
+    coordinator.drop_eagle_group_ids = set()
+    coordinator.skips_eagle_block_drop = False
+    coordinator.dcp_world_size = 1
+    coordinator.scheduler_block_size = 128
+    coordinator.verify_and_split_kv_cache_groups()
     assert len(coordinator.attention_groups) == 1
     assert coordinator.attention_groups[0].group_ids == [0]
     host = SimpleNamespace(

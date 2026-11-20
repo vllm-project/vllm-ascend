@@ -6,7 +6,6 @@ from dataclasses import replace
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
@@ -15,6 +14,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_packet_size_bytes,
     mxfp_paged_cache_views,
 )
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 

@@ -3,15 +3,10 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheTensor,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-    compute_layout_strides,
-)
+from vllm.v1.kv_cache_interface import KVCacheTensor, MambaSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,

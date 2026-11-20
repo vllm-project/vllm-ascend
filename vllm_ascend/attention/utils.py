@@ -21,13 +21,15 @@ from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    CrossAttentionSpec,
+    FullAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE

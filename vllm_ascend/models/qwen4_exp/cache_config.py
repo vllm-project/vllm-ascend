@@ -19,18 +19,21 @@ try:
 except ImportError:
     from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+    get_group_layer_layouts,
+)
 from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
 )
@@ -102,12 +105,6 @@ class Qwen4KVCacheLayout:
             QSA_COMPRESSED: "r5",
             GDN: "r1",
         }[self.owner(layer_name).role]
-
-
-def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-        return group.kv_cache_spec.kv_cache_specs
-    return {name: group.kv_cache_spec for name in group.layer_names}
 
 
 def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
@@ -190,10 +187,8 @@ def build_qwen4_kv_cache_layout(
     owner_group_ids: dict[str, int] = {}
     unknown: list[tuple[str, KVCacheSpec]] = []
     for group_id, group in enumerate(kv_cache_groups):
-        member_specs = _group_member_specs(group)
-        for layer_name in group.layer_names:
+        for layer_name, spec in get_group_layer_layouts(group).items():
             owner_group_ids[layer_name] = group_id
-            spec = member_specs[layer_name]
             role = _classify_spec(layer_name, spec)
             if role is None:
                 unknown.append((layer_name, spec))
@@ -553,14 +548,14 @@ def _merge_mamba_state_groups(
     buckets: dict[tuple, list[tuple[int, str, MambaSpec]]] = {}
     for index, group in enumerate(groups):
         spec = group.kv_cache_spec
-        members = (
+        layer_specs = (
             spec.kv_cache_specs
             if isinstance(spec, UniformTypeKVCacheSpecs)
             else {name: spec for name in group.layer_names}
         )
-        if not all(isinstance(member, MambaSpec) for member in members.values()):
+        if not all(isinstance(member, MambaSpec) for member in layer_specs.values()):
             continue
-        for name, member in members.items():
+        for name, member in layer_specs.items():
             key = (member, group.is_eagle_group)
             buckets.setdefault(key, []).append((index, name, member))
     replacements: dict[int, list[KVCacheGroupSpec]] = {}
@@ -632,6 +627,8 @@ def get_qwen4_exp_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig | None:
     """Plan state slabs and block-packed K/V-or-SSM pages per ordinal slot.
 
@@ -653,7 +650,7 @@ def get_qwen4_exp_kv_cache_config(
     private_bytes_per_block = sum(_private_page_bytes(owner) for owner in private_owners)
     slab_bytes_per_block = probe.slot_backing_size
     bytes_per_block = probe.slot_count * slab_bytes_per_block + private_bytes_per_block
-    candidate = available_memory // bytes_per_block
+    candidate = available_memory // bytes_per_block if num_blocks is None else 0
     while candidate > 0:
         candidate_layout = build_qwen4_kv_cache_layout(
             kv_cache_groups,
@@ -666,7 +663,8 @@ def get_qwen4_exp_kv_cache_config(
         if required <= available_memory:
             break
         candidate -= 1
-    num_blocks = may_override_num_blocks(vllm_config, candidate)
+    if num_blocks is None:
+        num_blocks = may_override_num_blocks(vllm_config, candidate)
     layout = build_qwen4_kv_cache_layout(
         kv_cache_groups,
         num_blocks=num_blocks,

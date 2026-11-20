@@ -15,7 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
@@ -24,6 +24,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, LegacyMambaSpec
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
@@ -156,7 +157,7 @@ def _make_states(
 
 
 def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheConfig:
-    mamba_spec = MambaSpec(
+    mamba_spec = LegacyMambaSpec(
         block_size=cfg.block_size,
         shapes=((cfg.conv_width, cfg.conv_inner_dim), (cfg.temporal_state_dim,)),
         dtypes=(cfg.dtype, cfg.dtype),

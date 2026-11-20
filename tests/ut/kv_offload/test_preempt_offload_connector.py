@@ -11,17 +11,16 @@ import pytest
 import torch
 from vllm.config import ParallelConfig
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
+from vllm_ascend.core.kv_cache_compat import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.

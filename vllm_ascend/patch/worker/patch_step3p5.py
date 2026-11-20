@@ -34,6 +34,8 @@
 # shape constraints).
 #
 
+from copy import copy
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig
@@ -65,6 +67,14 @@ from vllm.model_executor.models.utils import (
 )
 
 from vllm_ascend.device.device_op import DeviceOperator
+
+
+def _get_ascend_rope_parameters(config, layer_idx, layer_type):
+    # Remote Step3.5 configs can expose only the legacy rope_scaling field.
+    if not getattr(config, "rope_parameters", None) and (rope_scaling := getattr(config, "rope_scaling", None)):
+        config = copy(config)
+        config.rope_parameters = rope_scaling
+    return _get_rope_parameters(config, layer_idx, layer_type)
 
 
 def _patched_attention_forward(
@@ -239,7 +249,7 @@ def _patched_decoder_layer_init(
         num_heads=_get_num_attention_heads(config, layer_idx, layer_type),
         max_position=config.max_position_embeddings,
         num_kv_heads=config.num_attention_groups,
-        rope_parameters=_get_rope_parameters(config, layer_idx, layer_type),
+        rope_parameters=_get_ascend_rope_parameters(config, layer_idx, layer_type),
         rms_norm_eps=config.rms_norm_eps,
         qkv_bias=getattr(config, "attention_bias", False),
         head_dim=getattr(config, "head_dim", None),

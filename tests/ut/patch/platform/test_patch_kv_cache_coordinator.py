@@ -38,18 +38,20 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.kv_cache_coordinator import SpecGroup
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import FullAttentionSpec, KVCacheGroupSpec
 from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.kv_cache_coordinator import SpecGroup
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
+    from vllm.v1.kv_cache_interface import KVCacheGroup, ManagerConfig, PrefixLookupGroup
 
 HASH_BLOCK_SIZE = 128
 
@@ -63,7 +65,7 @@ MAMBA_SPEC = MambaSpec(
     block_size=1536,
     shapes=((1,),),
     dtypes=(torch.float32,),
-    mamba_cache_mode="align",
+    **({"mamba_cache_mode": "align"} if vllm_version_is("0.33.0") else {}),
 )
 
 
@@ -96,10 +98,23 @@ def _fake_manager_factory(**kwargs):
 
 
 def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
-    groups = [
-        KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
-        KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
-    ]
+    if vllm_version_is("0.33.0"):
+        groups = [
+            KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
+            KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
+        ]
+    else:
+        groups = [
+            KVCacheGroup.from_layers({"fa-layer": FullAttentionManager.layer_config(FA_SPEC)}),
+            KVCacheGroup.from_layers(
+                {
+                    "mamba-layer": MambaManager.layer_config(
+                        replace(MAMBA_SPEC, block_size=HASH_BLOCK_SIZE), mamba_cache_mode="align"
+                    )
+                },
+                is_eagle_group=mamba_eagle,
+            ),
+        ]
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
@@ -116,9 +131,10 @@ def _make_coordinator(
     mamba_eagle: bool = False,
     retention_interval: int | None = None,
 ):
-    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
-    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
-    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    if vllm_version_is("0.33.0"):
+        monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+        monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
+        monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
@@ -133,6 +149,7 @@ def _make_coordinator(
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
         scheduler_block_size=HASH_BLOCK_SIZE,
+        **({} if vllm_version_is("0.33.0") else {"max_in_flight_tokens": 4096}),
     )
 
 
@@ -148,7 +165,11 @@ def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_int
 
 
 def test_eagle_fallback_flags_only_full_attention_group(monkeypatch):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True)
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=SimpleNamespace(is_kv_producer=False, is_kv_consumer=True),
+    )
     # Only the FA group is flagged; the mamba group stays out.
     assert coordinator.eagle_group_ids == {0}
     # Bit propagation after verify_and_split: FA manager eagle, mamba not.
@@ -254,6 +275,23 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+
+        from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+
+        sentinel_config = SimpleNamespace()
+        monkeypatch.setattr(
+            DefaultKVCacheConfigBuilder, "get_kv_cache_config_from_groups", lambda *args: sentinel_config
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+            kv_transfer_config=kv_transfer_config,
+        )
+        result = AscendKVCacheConfigBuilder().get_kv_cache_config_from_groups(vllm_config, [], 0)
+        assert result is sentinel_config
+        assert result.kv_transfer_config is kv_transfer_config
+        return
     from vllm_ascend.core import kv_cache_config_builder as builder_module
 
     sentinel_config = SimpleNamespace()
@@ -317,6 +355,7 @@ class _RecordingManager:
     records the ``drop_eagle_block`` flag the coordinator passed."""
 
     supports_fine_grained_hash_lookup = False
+    Params = type(None)
     calls: list[dict] = []
 
     @classmethod
@@ -326,11 +365,11 @@ class _RecordingManager:
         max_length,
         kv_cache_group_ids,
         block_pool,
-        kv_cache_spec,
         drop_eagle_block,
         alignment_tokens,
         dcp_world_size=1,
         pcp_world_size=1,
+        **kwargs,
     ):
         cls.calls.append(
             {"max_length": max_length, "drop_eagle_block": drop_eagle_block, "dcp_world_size": dcp_world_size}
@@ -358,10 +397,27 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator.block_pool = object()
     coordinator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
     # FA group is the EAGLE group; the mamba group never is.
-    coordinator.attention_groups = [
-        SpecGroup(FA_SPEC, [0], _RecordingFA, True),
-        SpecGroup(MAMBA_SPEC, [1], _RecordingMamba, False),
-    ]
+    if vllm_version_is("0.33.0"):
+        coordinator.attention_groups = [
+            SpecGroup(FA_SPEC, [0], _RecordingFA, True),
+            SpecGroup(MAMBA_SPEC, [1], _RecordingMamba, False),
+        ]
+    else:
+        coordinator.scheduler_block_size = HASH_BLOCK_SIZE
+        coordinator.num_reprefillable_tokens = 0
+        coordinator.kv_cache_config.kv_cache_groups = [
+            SimpleNamespace(prefix_cacheable=True, kv_cache_specs={}) for _ in range(2)
+        ]
+        coordinator.single_type_managers = [
+            SimpleNamespace(
+                block_size=spec.block_size, block_pool=coordinator.block_pool, dcp_world_size=1, pcp_world_size=1
+            )
+            for spec in (FA_SPEC, MAMBA_SPEC)
+        ]
+        coordinator.attention_groups = [
+            PrefixLookupGroup(ManagerConfig(_RecordingFA, None), FA_SPEC.block_size, [0], not (producer or standalone)),
+            PrefixLookupGroup(ManagerConfig(_RecordingMamba, None), MAMBA_SPEC.block_size, [1], False),
+        ]
     # Newer PD/partial-hit revisions cap the offered hit length at lookup
     # entry. That behavior is outside this regression's scope; install a
     # pass-through stub so the drop-gating logic runs with the original
@@ -381,7 +437,8 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
 
 def test_standard_lookup_drops_last_block_on_consumer():
     coordinator = _make_lookup_coordinator(producer=False)
-    coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
+    block_hashes = [] if vllm_version_is("0.33.0") else [bytes(32)] * (2048 // HASH_BLOCK_SIZE)
+    coordinator.find_longest_cache_hit(block_hashes=block_hashes, max_cache_hit_length=2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     # Mamba group is never eagle.
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
@@ -408,7 +465,8 @@ def test_standard_lookup_skips_drop_on_standalone():
 
 def test_per_group_lookup_drops_last_block_on_consumer():
     coordinator = _make_lookup_coordinator(producer=False)
-    _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
+    block_hashes = [] if vllm_version_is("0.33.0") else [bytes(32)] * (2048 // HASH_BLOCK_SIZE)
+    _, hit_lengths = coordinator.find_longest_cache_hit_per_group(block_hashes, 2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
     assert hit_lengths == (2048, 2048)
@@ -445,10 +503,18 @@ def test_per_group_lookup_preserves_replicated_draft_positions():
     coordinator = _make_lookup_coordinator(producer=True)
     coordinator.dcp_world_size = 2
     draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
-    coordinator.attention_groups = [
-        SpecGroup(FA_SPEC, [0], _RecordingFA, False),
-        SpecGroup(draft_spec, [1], _RecordingMamba, True),
-    ]
+    if vllm_version_is("0.33.0"):
+        coordinator.attention_groups = [
+            SpecGroup(FA_SPEC, [0], _RecordingFA, False),
+            SpecGroup(draft_spec, [1], _RecordingMamba, True),
+        ]
+    else:
+        target_manager, draft_manager = coordinator.single_type_managers
+        target_manager.dcp_world_size = coordinator.dcp_world_size
+        draft_manager.block_size = draft_spec.block_size
+        coordinator.attention_groups[1] = PrefixLookupGroup(
+            ManagerConfig(_RecordingMamba, None), draft_spec.block_size, [1], False
+        )
     coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
     assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1

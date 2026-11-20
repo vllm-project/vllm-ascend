@@ -6,14 +6,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import torch
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
-    KVCacheTensor,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheTensor, MambaSpec
 
+from vllm_ascend.core.kv_cache_compat import CircularBufferSpec, FullAttentionSpec, LegacyMambaSpec, SlidingWindowSpec
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendSFAIndexerCacheSpec,
@@ -55,7 +50,7 @@ def make_sliding_spec(block_size: int = 16) -> SlidingWindowSpec:
 
 
 def make_mamba_spec(block_size: int = 16) -> MambaSpec:
-    return MambaSpec(
+    return LegacyMambaSpec(
         block_size=block_size,
         shapes=((3, 16), (2, 4, 4)),
         dtypes=(torch.float16, torch.float16),

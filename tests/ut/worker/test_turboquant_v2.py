@@ -5,10 +5,11 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend, AscendDSAImpl
+from vllm_ascend.core.kv_cache_compat import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache
 from vllm_ascend.worker.v2 import attn_utils
