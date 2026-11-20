@@ -1080,3 +1080,131 @@ def test_union_overflow_preserves_state(capture, compact):
         torch.npu.synchronize()
         if graph is not None:
             graph.reset()
+
+
+@pytest.mark.parametrize(
+    "label,cols,hot,rows,topk,resident_pages,miss_mask",
+    [
+        # cols <= 512 keeps both page rows in UB: the union translates a tile per
+        # Gather, the miss count runs as vector compares and the emit happens in
+        # the same pass as the slot assignment.
+        ("vector_union", 480, 10240, 8, 512, 2, False),
+        ("vector_union_all_cold", 480, 10240, 8, 512, 0, False),
+        # cols > 512 no longer fits the scratch: per-token scalar translation.
+        ("scalar_union", 768, 10240, 8, 512, 0, False),
+        # hot below the union scratch (kPageBase + 2 * 512 words) also falls back.
+        ("small_hot", 480, 4096, 4, 512, 0, False),
+        # hot too small for the emit tiles: the separate Publish pass runs.
+        ("tiny_hot", 480, 512, 2, 128, 0, False),
+        # miss_mask needs the finished hash, so it always keeps the Publish pass.
+        ("miss_mask", 480, 10240, 8, 512, 0, True),
+        # The vector union needs whole 64-lane mask repeats: SFA top-k is a
+        # multiple of 128, so 128 keeps the vector path and 17 must fall back.
+        ("vector_topk128", 480, 10240, 8, 128, 0, False),
+        ("odd_topk_fallback", 480, 10240, 8, 17, 0, False),
+    ],
+)
+def test_resolve_union_tiles_and_fallbacks(label, cols, hot, rows, topk, resident_pages, miss_mask):
+    """Check the vector union against the oracle, and every scalar fallback.
+
+    The production geometry (block 128, a 480-page request row) is what the
+    vector union is tuned for; the other rows of the matrix disable one guard at
+    a time so the fallbacks stay bit-identical to the vector path.
+    """
+    block, width, requests_count = 128, 16, 2
+    rows_per_request = rows // requests_count
+    hot_blocks = hot // block
+
+    host = allocate_mapped_host(((cols + 1) * block, width), torch.float32)
+    mapping = host._hisparse_registration
+    host.copy_(torch.arange(host.numel(), dtype=torch.float32).view_as(host))
+    # Layer 0 is the sentinel layer; layer 1 is the Hot cache the kernel writes.
+    backing = torch.full((hot_blocks + 1, 2, block, width), -17.0, device="npu")
+    hot_cache = backing[:, 1]
+    workspace = ResolverWorkspace(rows, hot, rows * topk, torch.device("npu", torch.npu.current_device()))
+    ops = HiSparseNPUOps(mapping, workspace)
+
+    generator = torch.Generator().manual_seed(11)
+    source = torch.arange(1, cols + 1, dtype=torch.int32).repeat(requests_count, 1)
+    hot_table = torch.arange(1, hot_blocks + 1, dtype=torch.int32).repeat(requests_count, 1)
+    indices_cpu = torch.randint(-1, cols * block, (rows, topk), generator=generator, dtype=torch.int32)
+    requests_cpu = torch.arange(requests_count, dtype=torch.int32).repeat_interleave(rows_per_request)
+    states_cpu = torch.arange(requests_count, dtype=torch.int32)
+    # Sentinel 0 keeps a page cold; any positive page resolves to device memory.
+    resident_cpu = torch.zeros((requests_count, cols), dtype=torch.int32)
+    resident_cpu[:, :resident_pages] = 1 + torch.arange(resident_pages, dtype=torch.int32)
+    dgi_cpu = torch.full((requests_count, hot), -1, dtype=torch.int32)
+    lru_cpu = torch.stack([torch.randperm(hot, generator=generator) for _ in range(requests_count)]).to(torch.int16)
+
+    indices = indices_cpu.npu()
+    requests = requests_cpu.npu()
+    states = states_cpu.npu()
+    source_n = source.npu()
+    hot_table_n = hot_table.npu()
+    resident = resident_cpu.npu()
+    dgi = dgi_cpu.npu()
+    lru = lru_cpu.npu()
+    out, sh, sd = (torch.empty_like(indices) for _ in range(3))
+    counts = torch.empty(rows, dtype=torch.int32, device="npu")
+    sc = torch.empty_like(counts)
+    stats = torch.zeros(2, dtype=torch.int64, device="npu")
+    mask = torch.empty_like(indices, dtype=torch.uint8) if miss_mask else None
+
+    try:
+        ops.hisparse_resolve_residency(
+            host,
+            hot_cache,
+            hot_table_n,
+            indices,
+            out,
+            dgi,
+            lru,
+            states,
+            hot,
+            rows * topk,
+            stats,
+            None,
+            block,
+            requests,
+            source_n,
+            block,
+            counts,
+            sh,
+            sd,
+            sc,
+            resident,
+            block,
+            None,
+            miss_mask=mask,
+        )
+        torch.npu.synchronize()
+        want_out, want_counts, want_sh, want_sd, want_sc, want_dgi, want_lru, want_stats = (
+            _reference_hisparse_resolve_residency(
+                indices_cpu, requests_cpu, states_cpu, source, resident_cpu, hot_table, dgi_cpu, lru_cpu, block
+            )
+        )
+        for name, actual, wanted in (
+            ("indices", out, want_out),
+            ("counts", counts, want_counts),
+            ("swap_counts", sc, want_sc),
+            ("dgi", dgi, want_dgi),
+            ("lru", lru, want_lru),
+            ("stats", stats, want_stats),
+        ):
+            torch.testing.assert_close(actual.cpu(), wanted, msg=f"{label}: {name}")
+        # The copy-back pads its last store to a 32 B block, so only the prefix
+        # announced by swap_counts belongs to the contract.
+        sh_cpu, sd_cpu = sh.cpu(), sd.cpu()
+        for row, length in enumerate(want_sc.tolist()):
+            torch.testing.assert_close(
+                sh_cpu[row, :length], want_sh[row, :length], msg=f"{label}: swap_host row {row}"
+            )
+            torch.testing.assert_close(
+                sd_cpu[row, :length], want_sd[row, :length], msg=f"{label}: swap_device row {row}"
+            )
+    finally:
+        # The registration lives in the ACL runtime, not in the tensor, and PTA
+        # recycles pinned allocations: an undrained, unclosed mapping makes the
+        # next aclrtHostRegister of the same range fail.
+        torch.npu.synchronize()
+        mapping.close()
