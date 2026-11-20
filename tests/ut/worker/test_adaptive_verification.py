@@ -206,6 +206,7 @@ def _attn_group(backend, builder):
     return SimpleNamespace(
         backend=backend,
         get_metadata_builder=lambda _: builder,
+        metadata_builders=[builder],
         kv_cache_spec=Mock(),
         layer_names=[backend.__name__],
     )

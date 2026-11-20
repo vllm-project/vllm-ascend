@@ -118,6 +118,7 @@ def test_flash_attn_192_preserves_scale_and_output_buffer(monkeypatch, causal):
 def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
+    layer.layer_name = "attention"
     layer.attn_type = AttentionType.DECODER
     layer.attn_backend = backend
     layer.is_draft_layer = True
@@ -475,6 +476,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
 ):
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
+    layer.layer_name = "attention"
     layer.attn_type = AttentionType.DECODER
     layer.attn_backend = backend
     layer.is_draft_layer = is_draft

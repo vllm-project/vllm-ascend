@@ -181,7 +181,11 @@ def test_draft_decode_capture_respects_moe_comm_policy(
         decode_request_sizes=compatible_sizes,
         varlen_decode=False,
         lora_capture_cases=[0],
-        vllm_config=SimpleNamespace(uniform_decode_query_len=4, cache_config=SimpleNamespace(use_kda_recoverssm=False)),
+        vllm_config=SimpleNamespace(
+            uniform_decode_query_len=4,
+            model_config=SimpleNamespace(max_model_len=512),
+            cache_config=SimpleNamespace(use_kda_recoverssm=False),
+        ),
         _capture_descs={},
         _decode_descs={},
         _candidates={},

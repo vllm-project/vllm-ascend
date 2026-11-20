@@ -54,6 +54,10 @@ class _FakeAttentionBackend:
         # These layout tests use arbitrary block sizes without kernel alignment.
         return [MultipleOf(1)]
 
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(cls, spec, layer_names):
+        return cls.get_supported_kernel_block_sizes(spec)
+
 
 def _mock_vllm_config():
     # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.

@@ -735,6 +735,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
             get_mamba_chunk_size=lambda: 64,
         ),
         cache_config=cache,
+        speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=8),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )

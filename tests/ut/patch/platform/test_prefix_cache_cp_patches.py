@@ -184,7 +184,8 @@ def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, w
         assert not manager.enable_caching
         manager.allocate_new_blocks("request", 16, 16)
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks - group_count
-    coordinator.free("request")
+    request = SimpleNamespace(request_id="request")
+    coordinator.free(request.request_id if vllm_version_is("0.33.0") else request)
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks
     assert coordinator.find_longest_cache_hit([b"a" * 32], 16) == (tuple([] for _ in groups), 0, 0)
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
@@ -247,7 +248,7 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
         coordinator.cache_blocks(request, full.block_size)
         for manager in coordinator.single_type_managers:
             assert manager.req_to_blocks[request_id][0].block_hash is None
-        coordinator.free(request_id)
+        coordinator.free(request_id if vllm_version_is("0.33.0") else request)
         assert pool.get_num_free_blocks() == free_blocks
         hit_blocks, hit_tokens, uncached_tokens = coordinator.find_longest_cache_hit(hashes, full.block_size)
         assert hit_blocks == tuple([] for _ in groups)
@@ -409,7 +410,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         manager.allocate_new_blocks(request.request_id, 128, 128)
     coordinator.cache_blocks(request, 128)
     assert coordinator.single_type_managers[-1].req_to_blocks[request.request_id][0].block_hash is None
-    coordinator.free(request.request_id)
+    coordinator.free(request.request_id if vllm_version_is("0.33.0") else request)
     hit = coordinator.find_longest_cache_hit(hashes, 128)
     assert hit[1] == 128
     assert len(hit[0][0]) == 4

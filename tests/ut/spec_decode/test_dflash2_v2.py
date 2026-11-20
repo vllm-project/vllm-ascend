@@ -86,6 +86,7 @@ def test_v2_loader_selects_flash_attn_and_restores_target_context(monkeypatch, c
         enforce_eager=True,
         attention_backend=None,
         kv_cache_dtype="auto",
+        apply_draft_eplb_overrides=lambda config: config,
     )
     # Keep the real V2 loader's config cloning, causality and model-tag scopes.
     fields = {

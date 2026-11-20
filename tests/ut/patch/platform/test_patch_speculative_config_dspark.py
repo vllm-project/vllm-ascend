@@ -93,6 +93,9 @@ class _DraftModelConfig(SimpleNamespace):
     # Kimi/Qwen model classes; None would select the DeepSeek target-config path.
     speculator_config_class = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
 
+    if not vllm_version_is("0.33.0"):
+        verify_eplb_config = ModelConfig.verify_eplb_config
+
     @property
     def architectures(self):
         return self.model_arch_config.architectures

@@ -1806,6 +1806,7 @@ def test_v41_adaptive_real_initialization_gate(num_drafts, method):
                 backend=getattr(dsa_v41, f"DeepseekV41{role}Backend"),
                 layer_names=[role],
                 kv_cache_spec=object(),
+                metadata_builders=[getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder")],
                 get_metadata_builder=lambda index, role=role: getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder"),
             )
         ]
