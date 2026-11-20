@@ -50,6 +50,7 @@ def worker():
     w.num_kv_cache_groups, w.num_layers = 1, 2
     w.grouped_block_size, w.hash_block_size = [128], 128
     w.group_uses_align_state = [False]
+    w.swa_group_ids = set()
     w.cacheable_group_ids = {0}
     w.independent_layers = [0]
     w._is_layerwise_save_owner = lambda group: True
