@@ -78,6 +78,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
+    def _has_rotating_dsv4_cache(self) -> bool:
+        return (
+            self.layerwise_offload
+            and getattr(getattr(self, "kv_cache_config", None), "dsv4_cache_format", None) is not None
+        )
+
+    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        if self._has_rotating_dsv4_cache() and (entry := self._unfinished_requests.get(request_tracker.req_id)):
+            # Speculative verifier rows do not identify saveable input KV.
+            request_tracker.token_len = min(request_tracker.token_len, len(entry[0].all_token_ids))
+        return super()._build_req_meta(request_tracker, *args, **kwargs)
+
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
         if self.layerwise_offload:
@@ -125,8 +137,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             if self.use_eagle:
                 final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
                 token_len = min(token_len, final_block_start)
-                if token_len <= 0:
-                    return 0
+            elif self._has_rotating_dsv4_cache() and len(self.cacheable_group_ids) != len(self.original_block_size):
+                # Probe the checkpoint used to resume, before the block
+                # containing the prompt token that must be replayed.
+                token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
             )
@@ -159,23 +175,31 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         coordinator = self.cache_coordinator
         assert coordinator is not None
 
+        def query_groups(
+            queries: Sequence[tuple[int, Sequence[BlockHash | str], Sequence[bool] | None]],
+        ) -> list[list[BlockHash | str]]:
+            keys_by_block: list[list[str]] = []
+            hashes_by_group: list[list[BlockHash | str]] = []
+            for group_id, group_block_hashes, lookup_mask in queries:
+                allowed_hashes: list[BlockHash | str] = []
+                local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
+                for block_idx, block_hash in enumerate(group_block_hashes):
+                    if block_idx < local_blocks:
+                        continue
+                    if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
+                        continue
+                    keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+                    allowed_hashes.append(block_hash)
+                hashes_by_group.append(allowed_hashes)
+            hits = iter(self._query_layerwise_block_hits(keys_by_block))
+            return [[block_hash for block_hash in hashes if next(hits)] for hashes in hashes_by_group]
+
         def query_group_hits(
             group_id: int,
             group_block_hashes: Sequence[BlockHash | str],
             lookup_mask: Sequence[bool] | None,
-        ) -> list[BlockHash]:
-            keys_by_block: list[list[str]] = []
-            allowed_hashes: list[BlockHash] = []
-            local_blocks = num_computed_tokens // self.grouped_block_size[group_id]
-            for block_idx, block_hash in enumerate(group_block_hashes):
-                if block_idx < local_blocks:
-                    continue
-                if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
-                    continue
-                keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
-                allowed_hashes.append(block_hash)
-            block_hits = self._query_layerwise_block_hits(keys_by_block)
-            return [block_hash for block_hash, hit in zip(allowed_hashes, block_hits) if hit]
+        ) -> list[BlockHash | str]:
+            return query_groups([(group_id, group_block_hashes, lookup_mask)])[0]
 
         return coordinator.find_reachable_hit_tokens(
             request.block_hashes,
@@ -183,6 +207,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
             hbm_hit_tokens=num_computed_tokens,
+            batch_query=query_groups if self.use_layerwise_transfer else None,
         )
 
     def _query_contiguous_group_hits(

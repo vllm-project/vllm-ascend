@@ -7,8 +7,37 @@ import numpy as np
 import pytest
 from vllm.config import KVTransferConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 from vllm_ascend.models.deepseek_v4.cache_reuse import uses_dspark_push
 from vllm_ascend.models.deepseek_v4.cache_transfer import select_window_pages
+
+
+@pytest.mark.parametrize("rotating,expected", [(True, 4096), (False, 8192)])
+def test_dsv4_prefix_lookup_probes_resumable_boundary_without_speculation(rotating, expected):
+    scheduler = object.__new__(LayerwiseKVPoolScheduler)
+    scheduler.layerwise_offload = rotating
+    scheduler.kv_cache_config = SimpleNamespace(dsv4_cache_format="dsv4")
+    scheduler.use_eagle = False
+    scheduler.cache_transfer_granularity = 4096
+    scheduler.cacheable_group_ids = {0}
+    scheduler.original_block_size = [128, 32]
+    scheduler.cache_coordinator = object()
+    scheduler._get_or_create_request_tracker = Mock()
+    scheduler._lookup_layerwise_with_coordinator = Mock(return_value=expected)
+    request = SimpleNamespace(request_id="request", num_tokens=8192)
+    assert scheduler._get_layerwise_hit_tokens(request, 8192, 0) == expected
+    scheduler._lookup_layerwise_with_coordinator.assert_called_once_with(request, expected, 0)
+
+
+@pytest.mark.parametrize("rotating,expected", [(True, 65), (False, 66)])
+def test_dsv4_save_metadata_stops_before_verifier_only_rows(monkeypatch, rotating, expected):
+    scheduler = object.__new__(LayerwiseKVPoolScheduler)
+    scheduler.layerwise_offload = rotating
+    scheduler.kv_cache_config = SimpleNamespace(dsv4_cache_format="dsv4")
+    scheduler._unfinished_requests = {"request": (SimpleNamespace(all_token_ids=list(range(65))),)}
+    monkeypatch.setattr(BaseKVPoolScheduler, "_build_req_meta", lambda self, tracker: tracker.token_len)
+    assert scheduler._build_req_meta(SimpleNamespace(req_id="request", token_len=66)) == expected
 
 
 @pytest.mark.parametrize(

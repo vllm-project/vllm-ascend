@@ -301,6 +301,11 @@ class AscendStoreCoordinator:
         *,
         log_context: str = "reachable_lookup",
         hbm_hit_tokens: int = 0,
+        batch_query: Callable[
+            [Sequence[tuple[int, Sequence[BlockHash | str], Sequence[bool] | None]]],
+            Sequence[Iterable[BlockHash | str]],
+        ]
+        | None = None,
     ) -> int:
         """Reachability-aware external hit lookup shared by both transfer paths.
 
@@ -317,16 +322,28 @@ class AscendStoreCoordinator:
         owns. When ``hbm_hit_tokens`` is provided, the callback only returns
         external hits; locally computed complete blocks are marked lazily for
         the existing managers, including each group's terminal-hash selection.
+        A backend can optionally query all groups in one batch; results must
+        remain in query order. Reachability and local-HBM rules stay here.
         """
         aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
         lookup_masks = self.lookup_mask(aligned_len)
         exists: set[tuple[int, bytes]] = set()
         block_hashes_to_check = block_hashes[: token_len // self.hash_block_size]
 
+        queries = []
         for group_id in self.cacheable_group_ids:
             group_block_size = self.group_effective_block_sizes[group_id]
             group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
-            hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
+            queries.append((group_id, group_block_hashes, lookup_masks[group_id]))
+        group_hits: Iterable[Iterable[BlockHash | str]]
+        if batch_query is None:
+            group_hits = (query_group_hits(*query) for query in queries)
+        else:
+            batch_hits = batch_query(queries)
+            if len(batch_hits) != len(queries):
+                raise ValueError("Reachable lookup must return one hit result per cache group")
+            group_hits = batch_hits
+        for (group_id, _, _), hits in zip(queries, group_hits, strict=True):
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
 
         if not exists and hbm_hit_tokens <= 0:

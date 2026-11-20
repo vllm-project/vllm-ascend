@@ -217,9 +217,8 @@ def test_no_reuse_dependencies_keep_native_descriptors(independent, buffers):
     assert plan_layerwise_cache_reuse(plan, runtime) is None
 
 
-def allocate_test_views(monkeypatch, runtime, config, specs, cache_format):
-    from vllm_ascend.device.hardware import AscendDeviceType
-    from vllm_ascend.device.hardware_profile import get_hardware_profile
+def allocate_test_views(monkeypatch, runtime, config, specs):
+    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
     from vllm_ascend.worker.v2 import attn_utils
 
     allocations = []
@@ -229,16 +228,14 @@ def allocate_test_views(monkeypatch, runtime, config, specs, cache_format):
         return torch.zeros(size, dtype=torch.int8, device=device)
 
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: runtime)
-    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
-    hardware = AscendDeviceType.A3 if cache_format == "a3" else AscendDeviceType.A5
-    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(hardware))
-    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
-    caches = {}
-    for descriptor in config.kv_cache_tensors:
-        for name in descriptor.layers:
-            caches[name] = attn_utils._view_dsv4_cache(raw[name], specs[name], backend, config, descriptor.block_stride)
+    # DSV4 attention, SWA, state and indexer backends inherit the same runtime
+    # view method. Supply the layer registry and use the normal MRv2 entry.
+    layer = SimpleNamespace(get_attn_backend=lambda: AscendDSABackend)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: dict.fromkeys(specs, layer))
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    kernel_block_sizes = [group.kv_cache_spec.block_size for group in config.kv_cache_groups]
+    caches = attn_utils.allocate_kv_cache_main(config, torch.device("cpu"), None, kernel_block_sizes)
     return caches, allocations
 
 
@@ -248,7 +245,7 @@ def allocate_test_views(monkeypatch, runtime, config, specs, cache_format):
 def test_real_allocator_and_typed_views_keep_block_ownership(cache_format, mtp, model, monkeypatch):
     runtime, groups, specs = make_layout(model, cache_format=cache_format, independent=[0, 1, 4], mtp=mtp)
     config = make_worker_config(runtime, groups, num_blocks=16)
-    caches, allocations = allocate_test_views(monkeypatch, runtime, config, specs, cache_format)
+    caches, allocations = allocate_test_views(monkeypatch, runtime, config, specs)
     assert allocations == [config.kv_cache_tensors[0].size]
     assert len({components[0].untyped_storage().data_ptr() for components in caches.values()}) == 1
     transferred = transfer_cache_views(caches)
@@ -293,7 +290,7 @@ def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, c
     monkeypatch.setattr(base_worker, "global_te", Mock())
 
     def register(plan):
-        caches, _ = allocate_test_views(monkeypatch, runtime, plan, specs, cache_format)
+        caches, _ = allocate_test_views(monkeypatch, runtime, plan, specs)
         worker = object.__new__(MooncakePushConnectorWorker)
         worker.kv_cache_config = plan
         worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
@@ -314,11 +311,11 @@ def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, c
 
     name = "model.layers.2.self_attn.indexer.k_cache"
     src, dst = source[name], target[name]
+    assert len(src) == len(dst) == 2
     src[0][2].view(torch.uint8).fill_(0x37)
     src[1][2].view(torch.uint8).fill_(0x49)
-    dst[2].view(torch.uint8).fill_(0x55)
-    expected_page = src[2][2].view(torch.uint8)
-    assert {0x37, 0x49} == set(expected_page.unique().tolist())
+    for component in dst:
+        component.view(torch.uint8).fill_(0x55)
     producer._layer_indices = {name: local.layer_names.index(name)}
     rank_metadata = SimpleNamespace(
         layer_indices=range(len(remote.layer_names)),
@@ -341,9 +338,12 @@ def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, c
     )
 
     def write(session, sources, destinations, lengths):
+        expected = [
+            (source[2].data_ptr(), target[4].data_ptr(), source[2].nbytes)
+            for source, target in zip(src, dst, strict=True)
+        ]
+        assert list(zip(sources, destinations, lengths, strict=True)) == expected
         for address, destination, length in zip(sources, destinations, lengths, strict=True):
-            assert src[2][2].data_ptr() <= address <= src[2][2].data_ptr() + expected_page.nbytes - length
-            assert dst[2][4].data_ptr() <= destination <= dst[2][4].data_ptr() + expected_page.nbytes - length
             ctypes.memmove(destination, address, length)
         return 0
 
@@ -351,8 +351,9 @@ def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, c
     producer.engine.batch_transfer_sync_write.side_effect = write
     assert producer._execute_layer_transfer(batch) is None
     producer.engine.batch_transfer_sync_write.assert_called_once()
-    assert torch.equal(dst[2][4].view(torch.uint8), expected_page)
-    assert (dst[2].view(torch.uint8)[[3, 5]] == 0x55).all()
+    for source_component, target_component in zip(src, dst, strict=True):
+        assert torch.equal(target_component[4].view(torch.uint8), source_component[2].view(torch.uint8))
+        assert (target_component.view(torch.uint8)[[3, 5]] == 0x55).all()
 
     # Incompatible peer metadata must fail before a partial WRITE is submitted.
     remote_index = remote.layer_names.index(name)
