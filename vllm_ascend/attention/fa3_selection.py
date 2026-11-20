@@ -9,46 +9,50 @@ if TYPE_CHECKING:
     from vllm.config import SpeculativeConfig
 
 
-# Each draft loader maps to (target architectures, draft architectures).
-# A matching DFlash pair enables FA3 on both loaders. A matching DSpark pair enables it only on the draft.
-_FA3_ARCHITECTURE_PAIRS = {
+_QWEN_FA3_TARGETS = frozenset(
+    {
+        "Qwen3NextForCausalLM",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
+_MINIMAX_DSPARK_TARGETS = frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"})
+
+# The backbone lists eligible target architectures. Each draft loader lists (target architectures, draft architectures).
+_FA3_ARCHITECTURE_PAIRS: dict[str, frozenset[str] | tuple[frozenset[str], frozenset[str]]] = {
+    "backbone": _QWEN_FA3_TARGETS,
     "dspark_head": (
-        frozenset({"MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration"}),
+        _MINIMAX_DSPARK_TARGETS,
         frozenset({"DSparkMiniMaxDraftModel", "MiniMaxM31FlashA3DSparkModel"}),
     ),
-    "dflash_head": (
-        frozenset(
-            {
-                "Qwen3NextForCausalLM",
-                "Qwen3_5ForCausalLM",
-                "Qwen3_5MoeForCausalLM",
-                "Qwen3_5ForConditionalGeneration",
-                "Qwen3_5MoeForConditionalGeneration",
-            }
-        ),
-        frozenset({"DFlash2DraftModel"}),
-    ),
+    "dflash_head": (_QWEN_FA3_TARGETS, frozenset({"DFlash2DraftModel"})),
 }
 
 
 def supports_fa3_model(spec: SpeculativeConfig, model_tag: str) -> bool:
     """Match the FA3 target/draft architecture pair for the active loader."""
-    if model_tag != "backbone" and model_tag not in _FA3_ARCHITECTURE_PAIRS:
+    if model_tag not in _FA3_ARCHITECTURE_PAIRS:
         return False
 
-    target = spec.target_model_config
-    target_hf = getattr(target, "hf_config", None)
-    dspark_targets, _ = _FA3_ARCHITECTURE_PAIRS["dspark_head"]
-    is_dspark_target = not dspark_targets.isdisjoint(getattr(target_hf, "architectures", None) or ())
-    supported_method = "dspark" if is_dspark_target else "dflash"
-    if spec.method != supported_method:
+    draft_tag = f"{spec.method}_head"
+    draft_pair = _FA3_ARCHITECTURE_PAIRS.get(draft_tag)
+    if not isinstance(draft_pair, tuple):
         return False
-
-    draft_tag = f"{supported_method}_head"
-    supported_targets, supported_drafts = _FA3_ARCHITECTURE_PAIRS[draft_tag]
+    supported_targets, supported_drafts = draft_pair
+    if model_tag == "backbone":
+        supported_targets = supported_targets.intersection(_FA3_ARCHITECTURE_PAIRS[model_tag])
+    elif model_tag != draft_tag:
+        return False
     if supported_drafts.isdisjoint(spec.draft_model_config.architectures or ()):
         return False
 
-    if is_dspark_target:
-        return model_tag == draft_tag
-    return model_tag in ("backbone", draft_tag) and getattr(target, "architecture", None) in supported_targets
+    target = spec.target_model_config
+    target_architecture = getattr(target, "architecture", None)
+    target_hf = getattr(target, "hf_config", None)
+    # MiniMax is identified by HF architecture aliases. Qwen uses the architecture resolved by vLLM.
+    minimax_aliases = _MINIMAX_DSPARK_TARGETS.intersection(getattr(target_hf, "architectures", None) or ())
+    if minimax_aliases or target_architecture in _MINIMAX_DSPARK_TARGETS:
+        return not supported_targets.isdisjoint(minimax_aliases)
+    return target_architecture in supported_targets
