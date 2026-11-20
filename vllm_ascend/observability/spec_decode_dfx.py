@@ -319,11 +319,21 @@ def log_accept0_census(
     nothing to reject. When boundaries are given, both the numerator and
     the denominator are restricted to requests with ``cu[i+1] - cu[i] > 1``.
 
-    Correlate with the input NaN census of the same step: ``rows_with_nan``
-    rising together with ``accept0`` confirms the NaN -> forced-reject ->
-    garbage-token causality in production; NaN present but accept0 normal
-    means the row-level NaN did NOT reach the verdict (reduction NaN
-    semantics evidence).
+    Correlate with the input NaN census of the same step, with care about
+    what each record establishes. A reported NaN row means the verifier
+    loads that cell, so the row-level reductions poison that position's
+    acceptance test and the position is necessarily rejected. ``accept0``
+    means every draft position of the request was rejected this step --
+    but full rejection has other causes too (low-quality or disagreeing
+    drafts), and a step can reject the NaN position while still accepting
+    elsewhere. The pair of records is therefore strong evidence for the
+    NaN -> rejected-position chain and a precise pointer to the suspect
+    request, not a proof that the NaN alone caused the whole collapse:
+    confirm with the row-level coordinates (do the NaN rows and the
+    accept0 request overlap?) and, when needed, the draft quality of the
+    remaining positions. Conversely, NaN rows without ``accept0`` on the
+    same request mean the poisoned positions were rejected but other
+    positions still passed their acceptance tests.
     """
     if not _logger.isEnabledFor(logging.DEBUG):
         return
