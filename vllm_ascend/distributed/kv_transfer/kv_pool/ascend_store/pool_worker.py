@@ -1771,7 +1771,7 @@ class KVPoolWorker(BaseKVPoolWorker):
         missing_keys = [keys[i] for i in missing_indices]
         missing_addrs = [addrs[i] for i in missing_indices]
         missing_sizes = [sizes[i] for i in missing_indices]
-        if req_meta.current_event is not None:
+        if missing_keys and req_meta.current_event is not None:
             req_meta.current_event.synchronize()
         logger.debug(
             "KV pool worker tp_mismatch put req=%s keys=%d sample_keys=%s",
