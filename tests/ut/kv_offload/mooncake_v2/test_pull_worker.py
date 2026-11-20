@@ -2,7 +2,7 @@
 
 import queue
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -73,6 +73,9 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.request_queue = queue.Queue()
     for name, value in overrides.items():
         setattr(thread, name, value)
+    thread._process_next = (
+        thread._process_next_request if thread.pull_transfer_mode == "request" else thread._process_next_batch
+    )
     return thread
 
 
@@ -1264,11 +1267,12 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     thread.executor.submit.side_effect = submit
     requests = {"request-a": make_req_meta(), "request-b": make_req_meta()}
 
-    if submission_error:
-        with pytest.raises(RuntimeError, match="submit failed"):
-            thread._handle_requests("engine-p", "10.0.0.1", 6000, requests)
-    else:
-        assert thread._handle_requests("engine-p", "10.0.0.1", 6000, requests) == {"request-b"}
+    thread.add_requests("engine-p", requests)
+    thread._process_next()
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(
+        finished_recving=set(requests),
+        failed_recving=set(requests) if submission_error else {"request-b"},
+    )
     completed_result.assert_called_once_with()
 
 
@@ -1426,12 +1430,16 @@ def test_validate_remote_metadata_rejects_invalid_topology(
 
 @pytest.mark.parametrize("can_report", [True, False])
 @pytest.mark.parametrize("batch_error", [False, True])
+@pytest.mark.parametrize("mode", ["batch", "request"])
 def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
     can_report: bool,
     batch_error: bool,
 ) -> None:
-    thread = make_thread(device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report)
+    thread = make_thread(
+        pull_transfer_mode=mode, device=0, ready_event=threading.Event(), can_report_invalid_block_ids=can_report
+    )
     requests = {
         "request-a": make_req_meta(local=([10],)),
         "request-b": make_req_meta(local=([20],)),
@@ -1439,10 +1447,22 @@ def test_worker_run_marks_only_failed_requests_and_finishes_the_batch(
     request_queue = MagicMock()
     request_queue.get.side_effect = [("engine-p", requests), _StopWorkerLoop()]
     thread.request_queue = request_queue
-    thread._handle_requests = MagicMock(  # type: ignore[method-assign]
+    thread._get_remote_metadata = MagicMock(
         side_effect=RuntimeError("metadata unavailable") if batch_error else None,
-        return_value={"request-b"},
     )
+
+    def submit_group(_engine, _metadata, group, *_args):
+        futures = {}
+        for request_id in group:
+            future = Future()
+            if request_id == "request-b":
+                future.set_exception(RuntimeError("READ failed"))
+            else:
+                future.set_result(None)
+            futures[future] = (0, 0, 0, {request_id})
+        return futures, None
+
+    thread._submit_transfer_group = MagicMock(side_effect=submit_group)
     set_device = MagicMock()
     monkeypatch.setattr(torch.npu, "set_device", set_device)
 
@@ -2521,7 +2541,8 @@ def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_co
         "a": make_req_meta(local=([1, 2],), remote=([3, 4],)),
         "b": make_req_meta(local=([5, 6],), remote=([7, 8],)),
     }
-    result = thread._handle_requests("engine-p", "10.0.0.1", 6000, requests)
+    thread.add_requests("engine-p", requests)
+    thread._process_next()
 
     calls = thread.engine.batch_transfer_sync_read.call_args_list
     assert len(calls) == read_count
@@ -2530,8 +2551,7 @@ def test_pull_modes_preserve_addresses_and_select_read_granularity(mode, read_co
     assert [address for call in calls for address in call.args[1]] == [1128, 1640]
     assert [address for call in calls for address in call.args[2]] == [5384, 5896]
     assert [length for call in calls for length in call.args[3]] == [256, 256]
-    assert result == (set() if mode == "batch" else None)
-    assert thread.get_and_clear_finished_requests().finished_recving == (set() if mode == "batch" else {"a", "b"})
+    assert thread.get_and_clear_finished_requests() == KVConnectorTransferResults(finished_recving={"a", "b"})
     assert all(call.args[0] == thread._execute_tp_transfer_bucket for call in thread.executor.submit.call_args_list)
 
 
@@ -2576,3 +2596,107 @@ def test_request_completion_drains_reads(failure, monkeypatch):
     assert thread.finished_requests.get_nowait() == ("a", True)
     assert thread.invalid_block_ids == {10}
     assert thread.finished_requests.empty()
+
+
+@pytest.mark.parametrize("registration", ["before", "after", "completed"])
+def test_callback_registration_failure_drains_and_finishes_once(registration):
+    thread = make_thread()
+    futures = [Future() for _ in range(3)]
+    futures[0].set_result(None)
+    entered = threading.Event()
+    original = futures[1].add_done_callback
+    callbacks = []
+
+    def register(callback):
+        callbacks.append(callback)
+        if registration != "before":
+            original(callback)
+        if registration == "completed":
+            futures[1].set_result(None)
+        entered.set()
+        raise RuntimeError("callback registration failed")
+
+    futures[1].add_done_callback = register
+    tasks = {future: (0, 0, rank, {"a"}) for rank, future in enumerate(futures)}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        tracking = executor.submit(thread._track_request, "a", make_req_meta(local=([10],)), tasks, None)
+        try:
+            assert entered.wait(5)
+            assert thread.finished_requests.empty()
+            assert not thread.invalid_block_ids
+            if not futures[1].done():
+                futures[1].set_result(None)
+            assert thread.finished_requests.empty()  # The third READ still owns blocks.
+            futures[2].set_result(None)
+            tracking.result(timeout=5)
+            assert thread.finished_requests.get_nowait() == ("a", True)
+            callbacks[0](futures[1])  # A late/repeated callback must not publish twice.
+            assert thread.finished_requests.empty()
+            assert thread.invalid_block_ids == {10}
+        finally:
+            for future in futures:
+                if not future.done():
+                    future.set_result(None)
+
+
+@pytest.mark.parametrize("mode", ["request", "batch"])
+def test_pull_fallback_drains_before_finish_and_keeps_other_engines(mode, monkeypatch):
+    thread = make_thread(pull_transfer_mode=mode, device=0, ready_event=threading.Event())
+    pending, healthy = Future(), Future()
+    healthy.set_result(None)
+    thread._get_remote_metadata = MagicMock()
+    thread._submit_transfer_group = MagicMock(
+        side_effect=lambda engine, _metadata, _requests, *_args: (
+            {pending if engine == "bad" else healthy: (0, 0, 0, {engine})},
+            None,
+        )
+    )
+    entered = threading.Event()
+    if mode == "request":
+        track = thread._track_request
+
+        def fail_after_tracking(request_id, *args):
+            track(request_id, *args)
+            if request_id == "bad":
+                entered.set()
+                raise RuntimeError("unexpected handler failure after callbacks attached")
+
+        thread._track_request = fail_after_tracking
+    else:
+        original = pull_worker.as_completed
+
+        def fail_aggregation(futures):
+            if pending in futures:
+                entered.set()
+                raise RuntimeError("unexpected aggregation failure")
+            return original(futures)
+
+        monkeypatch.setattr(pull_worker, "as_completed", fail_aggregation)
+    thread.request_queue = MagicMock()
+    thread.request_queue.get.side_effect = [
+        (engine, {engine: make_req_meta(local=([block],))}) for engine, block in [("bad", 10), ("good", 20)]
+    ] + [_StopWorkerLoop()]
+    monkeypatch.setattr(torch.npu, "set_device", MagicMock())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        running = executor.submit(thread.run)
+        try:
+            assert entered.wait(5)
+            if mode == "request":
+                # No batch barrier: the other engine completes with the first READ pending.
+                with pytest.raises(_StopWorkerLoop):
+                    running.result(timeout=5)
+                assert thread.finished_requests.get_nowait() == ("good", False)
+            assert thread.finished_requests.empty()
+            assert not thread.invalid_block_ids
+            pending.set_result(None)
+            with pytest.raises(_StopWorkerLoop):
+                running.result(timeout=5)
+            results = thread.get_and_clear_finished_requests()
+            assert results.finished_recving == ({"bad"} if mode == "request" else {"bad", "good"})
+            assert results.failed_recving == (set() if mode == "request" else {"bad"})
+            assert thread.invalid_block_ids == (set() if mode == "request" else {10})
+            assert thread.finished_requests.empty()
+            assert thread.request_queue.task_done.call_count == 2
+        finally:
+            if not pending.done():
+                pending.set_result(None)
