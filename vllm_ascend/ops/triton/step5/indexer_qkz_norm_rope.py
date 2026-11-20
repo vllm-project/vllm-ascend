@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 import triton.language.extra.cann.extension as extension  # noqa: F401 (used in @triton.jit bodies)
 
@@ -535,36 +534,6 @@ def _fused_indexer_qkz_norm_rope_impl(
     return out_q, out_k, out_z
 
 
-def _fused_indexer_qkz_norm_rope_fake(
-    index_q: torch.Tensor,
-    index_k: torch.Tensor,
-    index_z: torch.Tensor,
-    q_norm_weight: torch.Tensor,
-    k_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    k_norm_bias: torch.Tensor,
-    *,
-    head_dim: int,
-    num_q_heads: int,
-    num_k_heads: int,
-    rotary_dim: int,
-    eps: float = 1e-6,
-    q_norm_weight_bias: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _allocate_indexer_outputs(
-        index_q, index_k, index_z, num_q_heads * head_dim, num_k_heads * head_dim
-    )
-
-
-direct_register_custom_op(
-    op_name="ascend_step5_fused_indexer_norm_rope",
-    op_func=_fused_indexer_qkz_norm_rope_impl,
-    mutates_args=[],
-    fake_impl=_fused_indexer_qkz_norm_rope_fake,
-)
-
-
 def fused_indexer_qkz_norm_rope(
     index_q: torch.Tensor,
     index_k: torch.Tensor,
@@ -597,7 +566,7 @@ def fused_indexer_qkz_norm_rope(
     quantization of index_q rides along with the norm+rope store (its only
     consumer, the fused indexer scoring, wants fp8).
     """
-    return torch.ops.vllm.ascend_step5_fused_indexer_norm_rope(
+    return _fused_indexer_qkz_norm_rope_impl(
         index_q,
         index_k,
         index_z,

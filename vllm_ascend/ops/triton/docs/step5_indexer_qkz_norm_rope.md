@@ -17,11 +17,10 @@
   `indexer_score_topk` via `indexer_region_score`) wants fp8, so the
   quantization rides along with the norm+RoPE store instead of a separate
   cast at the scoring entry (bf16 inputs of the non-fused fallback are
-  quantized there). The wrapper is registered as the custom op
-  `ascend_step5_fused_indexer_norm_rope`
-  (`vllm.triton_utils.direct_register_custom_op`), callable through
-  `torch.ops.vllm.ascend_step5_fused_indexer_norm_rope` and safe for
-  torch.compile.
+  quantized there). The wrapper is a plain Python call into the Triton
+  kernel; Step5 currently runs with `do_not_compile`. Once the outer
+  `step5_sparse_attention_forward` custom op from #22342 is in place, that
+  op provides the torch.compile boundary.
 - **Location**: `vllm_ascend/ops/triton/step5/indexer_qkz_norm_rope.py` —
   kernel `_indexer_qkz_norm_rope_kernel`, wrapper
   `fused_indexer_qkz_norm_rope`. Production caller:
@@ -121,8 +120,7 @@
   few, fixed in serving, and the alignment specialization feeds
   vectorization).
 - In-place behavior: none. Inputs are read-only (strided reads are
-  supported); outputs are freshly allocated. The op is registered with
-  `mutates_args=[]`.
+  supported); outputs are freshly allocated.
 
 ## Origin and Differences
 
@@ -141,9 +139,9 @@
     - RoPE angles are always read from one caller-provided `[cos | sin]` cache;
       per-layer `rope_theta` (`1e7` for the DSA indexer) is the caller's
       responsibility when building the cache.
-    - Exposed as a registered custom op
-      (`ascend_step5_fused_indexer_norm_rope`) so the fused call is
-      torch.compile-friendly and has a registered fake impl.
+    - Exposed as a plain Python wrapper around the Triton kernel. The
+      torch.compile boundary is provided by the outer
+      `step5_sparse_attention_forward` custom op once #22342 lands.
 
 ## Test Cases
 
