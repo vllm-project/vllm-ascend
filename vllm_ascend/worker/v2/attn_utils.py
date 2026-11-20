@@ -1787,7 +1787,7 @@ def _reshape_kv_cache_v2(
                         * kv_cache_spec.head_size
                         * get_dtype_size(kv_cache_spec.dtype)
                     )
-                    if expected_page_bytes != region.page_size_bytes:
+                    if expected_page_bytes > region.page_size_bytes:
                         raise ValueError(
                             f"{layer_name} Qwen4 hybrid page mismatch: "
                             f"view={expected_page_bytes}, "
@@ -1810,6 +1810,7 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.head_size,
                         ),
                         storage_offset=slot_offset + region.offset,
+                        block_stride=region.block_stride if owner.role == QSA_RAW else None,
                     ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
@@ -1826,12 +1827,13 @@ def _reshape_kv_cache_v2(
                     continue
                 if owner.role == GDN:
                     assert isinstance(kv_cache_spec, MambaSpec)
-                    region_names = ("r1", "r2")
-                    if len(region_names) != len(kv_cache_spec.shapes):
-                        raise RuntimeError(
-                            f"Invalid Qwen4 hybrid Mamba role/shape for {layer_name}: "
-                            f"role={owner.role}, shapes={kv_cache_spec.shapes}."
+                    region_names = tuple(
+                        f"r{state_index}"
+                        for state_index in range(
+                            1,
+                            len(kv_cache_spec.shapes) + 1,
                         )
+                    )
                     kv_caches[layer_name] = [
                         make_slab_view(
                             raw_slab,

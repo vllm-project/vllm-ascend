@@ -13,6 +13,7 @@ CONV_WIDTH = 4
 CONV_DIM = 64
 SSM_SHAPE = (4, 16, 16)
 MAX_COLS = 8
+NUM_REQUEST_SLOTS = 8
 
 
 def _build_states(num_blocks, device, conv_dim_first):
@@ -52,10 +53,12 @@ def _build_meta(convs, ssms, device, conv_dim_first):
     )
 
 
-def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first):
-    conv_before, ssm_before = [state.clone() for state in convs], [state.clone() for state in ssms]
-    conv_ref, ssm_ref = [state.clone() for state in convs], [state.clone() for state in ssms]
-    for req_idx in range(len(src_col)):
+def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first, request_slots):
+    conv_before, ssm_before = [state.cpu() for state in convs], [state.cpu() for state in ssms]
+    conv_ref, ssm_ref = [state.clone() for state in conv_before], [state.clone() for state in ssm_before]
+    for req_idx in request_slots:
+        if req_idx < 0:
+            continue
         src, dst, token_bias = int(src_col[req_idx]), int(dst_col[req_idx]), int(bias[req_idx])
         if src < 0 or src == dst:
             continue
@@ -75,27 +78,38 @@ def _reference(convs, ssms, block_table, src_col, dst_col, bias, conv_dim_first)
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("conv_dim_first", [False, True])
-@pytest.mark.parametrize("has_idx_mapping", [False, True])
+@pytest.mark.parametrize(
+    ("has_idx_mapping", "request_slots"),
+    [
+        pytest.param(False, (0, 1, 2, 3), id="v1-batch-order"),
+        pytest.param(True, (0, 1, 2, 3), id="identity"),
+        pytest.param(True, (2, 0, 3, 1), id="permuted"),
+        pytest.param(True, (3, 7), id="sparse-request-slots"),
+        pytest.param(True, (5, -1, 2, -1), id="filtered-padding"),
+    ],
+)
 @pytest.mark.parametrize("temporal_tiles", [1, 4])
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU required")
-def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_tiles):
+def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, request_slots, temporal_tiles):
     device = torch.device("npu:0")
     torch.manual_seed(0)
-    num_reqs = 4
-    num_blocks = num_reqs * MAX_COLS + 1
-    block_table = torch.arange(1, num_blocks, dtype=torch.int32, device=device).reshape(num_reqs, MAX_COLS)
-    src_col = torch.tensor([-1, 1, 1, 1], dtype=torch.int32, device=device)
-    dst_col = torch.tensor([0, 1, 0, 0], dtype=torch.int32, device=device)
-    bias = torch.tensor([0, 0, 1, 2], dtype=torch.int32, device=device)
+    num_reqs = len(request_slots)
+    num_blocks = NUM_REQUEST_SLOTS * MAX_COLS + 1
+    # State and block-table rows belong to persistent request slots, while
+    # the launch grid and idx_mapping describe only this step's active batch.
+    block_table = torch.arange(1, num_blocks, dtype=torch.int32, device=device).reshape(NUM_REQUEST_SLOTS, MAX_COLS)
+    src_col = torch.tensor([-1, 1, 1, 1, 1, 1, 1, 1], dtype=torch.int32, device=device)
+    dst_col = torch.tensor([0, 1, 0, 0, 0, 0, 0, 0], dtype=torch.int32, device=device)
+    bias = torch.tensor([0, 0, 1, 2, 3, 1, 2, 3], dtype=torch.int32, device=device)
     convs, ssms = _build_states(num_blocks, device, conv_dim_first)
     conv_ref, ssm_ref = _reference(
-        convs, ssms, block_table.cpu(), src_col.cpu(), dst_col.cpu(), bias.cpu(), conv_dim_first
+        convs, ssms, block_table.cpu(), src_col.cpu(), dst_col.cpu(), bias.cpu(), conv_dim_first, request_slots
     )
     base, block_stride, elem_size, inner_size, conv_width, group, row_count, row_stride = _build_meta(
         convs, ssms, device, conv_dim_first
     )
     block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.int64, device=device)
-    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    idx_mapping = torch.tensor(request_slots, dtype=torch.int32, device=device)
     grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
     precopy_mamba_align_fused_kernel[grid](
         dst_col,
@@ -120,5 +134,7 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_til
     )
     torch.accelerator.synchronize()
     for layer in range(NUM_LAYERS):
-        torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
-        torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+        # Compare every block, including inactive slots and the null block,
+        # so writing another request's state cannot pass this check.
+        torch.testing.assert_close(convs[layer].cpu(), conv_ref[layer], rtol=0, atol=0)
+        torch.testing.assert_close(ssms[layer].cpu(), ssm_ref[layer], rtol=0, atol=0)
