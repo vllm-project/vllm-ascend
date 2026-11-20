@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     ReqMeta,
+    can_publish_single_writer_kv_events,
     get_block_hashes,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
@@ -375,6 +376,17 @@ class BaseKVPoolWorker(ABC):
         )
 
     def _init_kv_events(self, vllm_config) -> None:
+        self.allow_single_writer_kv_events = can_publish_single_writer_kv_events(
+            tp_size=self.tp_size,
+            num_kv_heads=self.num_kv_head,
+            pp_size=self.pp_size,
+            pcp_size=self.pcp_size,
+            dcp_size=self.dcp_size,
+            use_layerwise=self.use_layerwise,
+            use_kvpp=self.use_kvpp,
+            use_hybrid=self.use_hybrid,
+            tp_mismatch=self.tp_mismatch,
+        )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
         if kv_event_config and kv_event_config.enable_kv_cache_events:
