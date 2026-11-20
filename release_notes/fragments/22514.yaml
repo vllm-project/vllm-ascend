@@ -1,4 +1,0 @@
-pr: 22514
-entries:
-  - category: bugfix
-    text: Fixed missing CPU KV-cache events for blockwise AscendStore saves by publishing the unique union of worker events, including blocks assigned to a single writer.
