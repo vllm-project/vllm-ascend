@@ -77,7 +77,6 @@ This mechanism is implemented in attention backends such as:
 
 - `vllm_ascend/attention/attention_v1.py`
 - `vllm_ascend/attention/mla_v1.py`
-- `vllm_ascend/attention/context_parallel/attention_cp.py`
 - `vllm_ascend/attention/context_parallel/mla_cp.py`
 
 The important design point is that Ascend full graph support depends on backend-provided `update_graph_params()` hooks. Without that hook, capture alone is not enough to replay the correct attention state.
@@ -115,5 +114,4 @@ Full graph mode is the more performance-oriented path when the attention backend
 - `vllm_ascend/compilation/acl_graph.py`, runtime ACL graph capture, replay, and capture-failure guidance.
 - `vllm_ascend/attention/attention_v1.py`, full graph attention parameter capture and update logic.
 - `vllm_ascend/attention/mla_v1.py`, MLA (Multi-Head Latent Attention) specific full graph parameter capture and update logic.
-- `vllm_ascend/attention/context_parallel/attention_cp.py`, context parallel attention update path.
 - `vllm_ascend/attention/context_parallel/mla_cp.py`, context parallel MLA update path.

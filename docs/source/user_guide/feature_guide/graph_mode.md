@@ -68,7 +68,7 @@ Online example:
 vllm serve Qwen/Qwen3-0.6B
 ```
 
-### Explicit `cudagraph_mode` configuration
+### Explicit cudagraph_mode configuration
 
 The generic `cudagraph_mode` options come from upstream vLLM. On Ascend, the final effective mode may still be adjusted according to platform and backend support, so the official vLLM CUDA Graphs document remains the canonical reference for mode semantics.
 
@@ -101,7 +101,6 @@ On Ascend, the current attention backend support levels are:
 | Attention backend | Declared support | Practical meaning |
 |---|---|---|
 | `attention_v1` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
-| `context_parallel/attention_cp` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
 | `mla_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `context_parallel/mla_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
 | `sfa_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
@@ -122,7 +121,7 @@ This is most likely to appear in `PIECEWISE` or `FULL_AND_PIECEWISE` configurati
 
 ## Using Npugraph_ex
 
-As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), Npugraph_ex is a compile-time FX graph optimization layer that works together with ACLGraph. It optimizes the model's FX graph before ACLGraph captures it at runtime. Its performance benefits mainly come from fusing multiple operators into single kernels (e.g., add + rms_norm → npu_add_rms_norm) to reduce kernel launch overhead.
+As introduced in the [Npugraph_ex RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), Npugraph_ex is a compile-time FX graph optimization layer that works together with ACLGraph. It optimizes the model's FX graph before ACLGraph captures it at runtime. Its performance benefits mainly come from fusing multiple operators into single kernels (e.g., add + rms_norm → npu_add_rms_norm) to reduce kernel launch overhead.
 
 !!! note "Atlas 300I DUO"
 
@@ -220,7 +219,7 @@ The recommended way to verify static kernel is in effect is through **Ascend Pro
 
 During the compilation phase, you will see a Python warning (visible by default):
 
-```text
+```output
 Starting static kernel compilation, the build directory is <path>
 ```
 
@@ -286,7 +285,7 @@ Super kernel optimization is enabled for ACL graph capture.
 
 This message confirms that the optimization step was invoked. To verify the resulting fusion coverage and performance benefit, collect an **Ascend Profiling** trace and inspect `kernel_details.csv`. Compare the kernel/task entries and latency with Super Kernel disabled; the profiler also reports the launch core count for generated Super Kernels in the `Block Dim` field.
 
-For more details about Npugraph_ex, see the [npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
+For more details about Npugraph_ex, see the [Npugraph_ex guide](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/overview.md).
 
 ## Using XliteGraph {: #using-xlitegraph }
 
