@@ -47,13 +47,30 @@ class DynamicMXQuantScaleAlg(IntEnum):
     CEIL = 1
 
 
+_CEIL_MX_SCALE_ARCHITECTURE_PREFIXES = (
+    "MiniMaxM3",
+    "Qwen3_5",
+)
+_CEIL_MX_SCALE_MODEL_TYPES = frozenset(
+    {
+        "minimax_m3",
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+)
+
+
 def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     """Select the MX scale algorithm used by DynamicMxQuantV3.
 
     ``scale_alg=0`` derives a shared exponent directly from the block's
-    maximum absolute value. ``scale_alg=1`` first maps that maximum to the
-    destination FP8 range, then rounds the E8M0 scale exponent up to avoid
-    quantization overflow. MiniMax M3 checkpoints require the latter.
+    maximum absolute value, which clamps values in ``[448 * 2^k, 512 * 2^k)``
+    to the FP8 E4M3 finite ceiling. ``scale_alg=1`` first maps that maximum to
+    the destination FP8 range, then rounds the E8M0 scale exponent up to avoid
+    quantization overflow during block-FP8-to-MXFP8 weight requantization and
+    dynamic activation quantization.
     """
     if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
         return DynamicMXQuantScaleAlg.MAX_EXPONENT
@@ -77,8 +94,11 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     model_type = getattr(hf_text_config, "model_type", None)
     if (
-        any(isinstance(architecture, str) and architecture.startswith("MiniMaxM3") for architecture in architectures)
-        or model_type == "minimax_m3"
+        any(
+            isinstance(architecture, str) and architecture.startswith(_CEIL_MX_SCALE_ARCHITECTURE_PREFIXES)
+            for architecture in architectures
+        )
+        or model_type in _CEIL_MX_SCALE_MODEL_TYPES
     ):
         return DynamicMXQuantScaleAlg.CEIL
     return DynamicMXQuantScaleAlg.MAX_EXPONENT
