@@ -1,0 +1,4 @@
+pr: 20784
+entries:
+  - category: bugfix
+    text: A5 Docker images can now decode AVIF input images with an AVIF-capable Pillow wheel.
