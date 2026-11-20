@@ -80,6 +80,8 @@ def select_deepseek_v4_vision_experts(
 class AscendFusedTopKRouter(AscendGroupedTopKRouter):
     """Router adapter that uses Ascend's existing expert-selection path."""
 
+    routing_mask_overlap_stream: torch.npu.Stream | None = None
+
     def __init__(
         self,
         top_k: int,
@@ -201,6 +203,11 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             text_bias = self.e_score_correction_bias
             if text_bias is not None and text_bias.dtype != router_logits.dtype:
                 text_bias = text_bias.to(router_logits.dtype)
+            mask_ready = None
+            overlap_stream = self.routing_mask_overlap_stream
+            if overlap_stream is not None and not _EXTRA_CTX.in_profile_run:
+                prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
+                mask_ready = prepare_finalize.start_routing_padding_mask_gather(overlap_stream)
             topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
                 x=router_logits,
                 k=self.top_k,
@@ -220,6 +227,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 image_sentinel_lo=self.image_sentinel_lo,
                 image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
             )
+            if mask_ready is not None:
+                torch.npu.current_stream().wait_event(mask_ready)
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:

@@ -21,6 +21,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_finalize_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
@@ -29,6 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -741,6 +743,95 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(
 
     with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
         router._compute_routing(hidden_states, router_logits, torch.int32)
+
+
+def test_hash_topk_overlaps_routing_mask_gather_once(monkeypatch):
+    context = SimpleNamespace(is_padding=torch.tensor([False, True]), additional_kwargs={})
+    monkeypatch.setattr(prepare_finalize_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_finalize_module, "dbo_current_ubatch_id", lambda: 0)
+    calls = []
+    main = SimpleNamespace(
+        record_event=lambda: calls.append("inputs ready") or "inputs ready",
+        wait_event=lambda event: calls.append(("main waits", event)),
+    )
+    auxiliary = SimpleNamespace(
+        record_event=lambda: calls.append("mask ready") or "mask ready",
+        wait_event=lambda event: calls.append(("auxiliary waits", event)),
+    )
+    current = main
+
+    @contextmanager
+    def stream(target):
+        nonlocal current
+        current = target
+        try:
+            yield
+        finally:
+            current = main
+
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(current_stream=lambda: current, stream=stream))
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, target: None)
+    prepare = PrepareAndFinalizeWithAllGather.__new__(PrepareAndFinalizeWithAllGather)
+    prepare.moe_config = SimpleNamespace(is_sequence_parallel=False, dp_size=2, pcp_size=1)
+
+    def gather(tensor):
+        if tensor.dtype == torch.int64:
+            assert current is main
+            calls.append("gather ids")
+            return torch.tensor([22, -1, 3, 4], dtype=torch.int64)
+        assert current is auxiliary
+        calls.append("gather mask")
+        return tensor.new_tensor([1, 0, 0, 1])
+
+    monkeypatch.setattr(prepare, "all_gather_input_ids", gather)
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            moe_comm_type=MoECommType.ALLGATHER,
+            moe_comm_method=SimpleNamespace(prepare_finalize=prepare),
+            in_profile_run=False,
+        ),
+    )
+    router_logits = torch.randn(4, 4)
+    weights = torch.randn(4, 2)
+    expert_ids = torch.zeros(4, 2, dtype=torch.int32)
+
+    def hash_op(**kwargs):
+        assert current is main
+        calls.append("main topk")
+        torch.testing.assert_close(kwargs["input_ids"], torch.tensor([22, 0, 3, 4]))
+        return weights, expert_ids, router_logits
+
+    monkeypatch.setattr(torch.ops._C_ascend, "moe_gating_top_k_hash", hash_op, raising=False)
+    router = AscendFusedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        scoring_func="sqrtsoftplus",
+        tid2eid=torch.zeros(32, 2, dtype=torch.int32),
+    )
+    router.routing_mask_overlap_stream = auxiliary
+    for _ in range(2):
+        actual_weights, actual_ids = router._compute_routing(
+            router_logits,
+            router_logits,
+            torch.int32,
+            input_ids=torch.tensor([-1, 22]),
+        )
+        assert actual_weights is weights
+        assert actual_ids is expert_ids
+        torch.testing.assert_close(prepare.get_routing_padding_mask(), torch.tensor([False, True, True, False]))
+    assert calls == [
+        "gather ids",
+        "inputs ready",
+        ("auxiliary waits", "inputs ready"),
+        "gather mask",
+        "mask ready",
+        "main topk",
+        ("main waits", "mask ready"),
+        "gather ids",
+        "main topk",
+    ]
 
 
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])

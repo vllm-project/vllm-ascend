@@ -43,6 +43,7 @@ from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
 # ForwardContext.additional_kwargs key for the per-forward MC2 mask cache.
 _MC2_RUNNER_PADDING_MASK_KEY = "ascend_mc2_runner_padding_mask"
+_ALLGATHER_ROUTING_PADDING_MASKS_KEY = "allgather_routing_padding_masks"
 
 
 class PrepareAndFinalize(ABC):
@@ -581,15 +582,41 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         # Match input-id row alignment with a supported collective dtype.
         return self.all_gather_input_ids(valid_mask.to(torch.int32)).to(torch.bool)
 
+    def start_routing_padding_mask_gather(self, mask_stream: torch.npu.Stream) -> torch.npu.Event | None:
+        context = get_forward_context()
+        masks = context.additional_kwargs.get(_ALLGATHER_ROUTING_PADDING_MASKS_KEY)
+        if masks is not None and dbo_current_ubatch_id() in masks:
+            return None
+
+        # The router has already queued every input collective, including hash IDs.
+        routed_stream = torch.npu.current_stream()
+        inputs_ready = routed_stream.record_event()
+        with torch.npu.stream(mask_stream):
+            mask_stream.wait_event(inputs_ready)
+            mask = self.get_routing_padding_mask()
+            mask_ready = mask_stream.record_event()
+        mask.record_stream(routed_stream)
+        return mask_ready
+
     def get_routing_padding_mask(self) -> torch.Tensor:
         context = get_forward_context()
-        masks = context.additional_kwargs.setdefault("allgather_routing_padding_masks", {})
+        masks = context.additional_kwargs.setdefault(_ALLGATHER_ROUTING_PADDING_MASKS_KEY, {})
         ubatch = dbo_current_ubatch_id()
         if ubatch not in masks:
             padding = context.is_padding
             assert padding is not None
-            # Collective padding uses zero, so gather validity before inverting.
-            masks[ubatch] = ~self.all_gather_valid_mask(~padding)
+            if self.moe_config.dp_size > 1 or self.moe_config.pcp_size > 1:
+                if self._use_ep_sequence_parallel():
+                    # Each EP rank contributes the same TP shard as its router logits.
+                    padding = torch.ops.vllm.ascend_sp_padding_mask_impl(padding)
+                # Collective padding uses zero, so gather validity before inverting.
+                padding = ~self.all_gather_valid_mask(~padding)
+            elif padding.shape[0] < self.num_tokens:
+                # TP AllGather restores the original row order, including any SP tail.
+                padding = nn.functional.pad(padding, (0, self.num_tokens - padding.shape[0]), value=True)
+            elif padding.shape[0] > self.num_tokens:
+                padding = padding[: self.num_tokens]
+            masks[ubatch] = padding
         return masks[ubatch]
 
     def finalize(

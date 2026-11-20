@@ -110,10 +110,10 @@ def test_sp_mask_tracks_padding_and_source_phase(tp_size):
     assert fallback.sum() == 4
 
 
-def test_tp_only_sp_routes_with_the_gathered_padding_mask(monkeypatch):
+def test_tp_only_sp_routes_with_the_full_padding_mask(monkeypatch):
     from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
 
-    local_padding = torch.tensor([False, True])
+    local_padding = torch.tensor([False, True, True, False])
     context = SimpleNamespace(is_padding=local_padding, additional_kwargs={})
     monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
@@ -122,14 +122,11 @@ def test_tp_only_sp_routes_with_the_gathered_padding_mask(monkeypatch):
     monkeypatch.setattr(routed_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     monkeypatch.setattr(routed_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
 
-    def gather_validity(local_validity):
-        torch.testing.assert_close(local_validity, torch.tensor([1, 0], dtype=torch.int32))
-        return torch.cat((local_validity, local_validity.new_tensor([0, 1])))
-
-    gather = MagicMock(side_effect=gather_validity)
+    gather = MagicMock()
     monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
     config = SimpleNamespace(num_experts=4, is_sequence_parallel=True, dp_size=1, pcp_size=1)
     prepare = PrepareAndFinalizeWithAllGather(config)
+    prepare.num_tokens = local_padding.numel()
     monkeypatch.setattr(
         routed_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_method=SimpleNamespace(prepare_finalize=prepare))
     )
@@ -148,8 +145,55 @@ def test_tp_only_sp_routes_with_the_gathered_padding_mask(monkeypatch):
         actual_weights, ids = routed._select_experts(logits, logits, enable_force_load_balance=False)
         assert actual_weights is weights
         torch.testing.assert_close(ids, torch.tensor([[0, 1], [2, 2], [2, 2], [0, 1]]))
-    gather.assert_called_once()
+    gather.assert_not_called()
+    assert prepare.get_routing_padding_mask() is local_padding
     assert context.is_padding is local_padding
+
+
+@pytest.mark.parametrize("dp,pcp", [(2, 1), (1, 2), (2, 2)])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_sp_mask_gather_contributes_own_tp_rows(monkeypatch, dp, pcp, rank):
+    from vllm_ascend.models.common.ops import sequence_parallel as sp_module
+    from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
+
+    full = torch.tensor([False, False, True])
+    context = SimpleNamespace(is_padding=full, additional_kwargs={})
+    monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_rank", lambda: rank)
+    monkeypatch.setattr(torch.ops.vllm, "ascend_sp_padding_mask_impl", sp_module._ascend_sp_padding_mask_impl)
+    monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
+    prepare = PrepareAndFinalizeWithAllGather(SimpleNamespace(is_sequence_parallel=True, dp_size=dp, pcp_size=pcp))
+    gather = MagicMock(return_value=torch.tensor([1, 1, 0, 0] * (dp * pcp), dtype=torch.int32))
+    monkeypatch.setattr(torch.ops.vllm, "maybe_all_gather_and_maybe_unpad", gather)
+    mask = prepare.get_routing_padding_mask()
+    assert mask.tolist() == [False, False, True, True] * (dp * pcp)
+    assert prepare.get_routing_padding_mask() is mask
+    gather.assert_called_once()
+    torch.testing.assert_close(gather.call_args.args[0], torch.full((2,), 1 - rank, dtype=torch.int32))
+    assert context.is_padding is full
+
+
+@pytest.mark.parametrize("rows,valid,gathered", [(8, 6, 8), (16, 15, 16), (13, 11, 16)])
+def test_tp_only_mask_matches_router_rows_without_collective(monkeypatch, rows, valid, gathered):
+    from vllm_ascend.ops.fused_moe import prepare_finalize as prepare_module
+
+    mask = torch.arange(rows) >= valid
+    context = SimpleNamespace(is_padding=mask, additional_kwargs={})
+    monkeypatch.setattr(prepare_module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(prepare_module, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(prepare_module, "get_dynamic_mx_quant_scale_alg", lambda: None)
+    prepare = PrepareAndFinalizeWithAllGather(SimpleNamespace(is_sequence_parallel=True, dp_size=1, pcp_size=1))
+    prepare.num_tokens = gathered
+    gather = MagicMock()
+    monkeypatch.setattr(prepare, "all_gather_valid_mask", gather)
+    result = prepare.get_routing_padding_mask()
+    torch.testing.assert_close(result, torch.arange(gathered) >= valid)
+    if rows == gathered:
+        assert result is mask
+    assert prepare.get_routing_padding_mask() is result
+    gather.assert_not_called()
 
 
 def test_dp_mask_uses_same_padded_rows_as_logits(monkeypatch):
