@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -252,9 +252,12 @@ class MooncakePullConnector(MooncakeBaseConnector):
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_worker = self._create_worker(vllm_config, kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def _create_worker(self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> MooncakePullConnectorWorker:
+        return MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
@@ -304,10 +307,22 @@ class MooncakeConnectorV2(MooncakeBaseConnector):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ) -> MooncakeBaseConnector:
-        assert vllm_config.kv_transfer_config is not None
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        connector_cls = MooncakePushConnector if extra_config.get("use_layerwise", False) else MooncakePullConnector
-        return connector_cls(vllm_config, role, kv_cache_config)
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        return cls._get_connector_cls(transfer)(vllm_config, role, kv_cache_config)
+
+    @staticmethod
+    def _get_connector_cls(transfer: KVTransferConfig) -> type[MooncakeBaseConnector]:
+        extra_config = transfer.kv_connector_extra_config or {}
+        if extra_config.get("use_layerwise", False):
+            return MooncakePushConnector
+
+        if extra_config.get("transfer_backend") != "memfabric":
+            return MooncakePullConnector
+
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+
+        return _HiSparseMooncakePullConnector
 
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.

@@ -171,6 +171,129 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     assert events == ["close", "close"]
 
 
+@pytest.fixture
+def shared_offload_sdk(monkeypatch):
+    import sys
+
+    from vllm.v1.hisparse import runtime
+
+    configs, messages, allocations, dva_queries = [], [], [], []
+    group = NS(rank_in_group=0, world_size=2, barrier=lambda: None)
+
+    def broadcast(value, src):
+        if group.rank_in_group == 0:
+            messages.append(value)
+            return value
+        return messages.pop(0)
+
+    def allocate(shape, **kwargs):
+        allocations.append(shape[0])
+        owner = torch.empty(shape[0] + 4096, dtype=kwargs["dtype"])
+        offset = -owner.data_ptr() % 4096
+        return owner[offset : offset + shape[0]]
+
+    def get_dva(ptr):
+        dva_queries.append(group.rank_in_group)
+        if group.rank_in_group != 0:
+            raise RuntimeError("host pointer outside local contribution")
+        return ptr
+
+    def initialize(config):
+        configs.append(config)
+        return 0
+
+    group.broadcast_object = broadcast
+    sdk = NS(
+        OffloadConfig=NS,
+        Scene=NS(SHARED="shared"),
+        initialize=initialize,
+        empty=allocate,
+        get_dva=get_dva,
+    )
+    monkeypatch.setitem(sys.modules, "memfabric_hybrid", NS(offload=sdk))
+    monkeypatch.setattr(runtime, "check_hisparse_host_memory", lambda size: None)
+    monkeypatch.setattr(torch, "npu", NS(current_device=lambda: group.rank_in_group), raising=False)
+    monkeypatch.setattr(host_pool, "_shared_owners", [])
+    return sdk, group, configs, allocations, dva_queries
+
+
+def test_single_rank_memfabric_offload_uses_shared_scene(shared_offload_sdk):
+    _, _, configs, allocations, dva_queries = shared_offload_sdk
+    region = host_pool.MemFabricSharedHostRegion([4096])
+
+    assert allocations == [1024**3]
+    (config,) = configs
+    assert config.scene == "shared"
+    assert (config.world_size, config.rank_id) == (1, 0)
+    assert config.alloc_size == config.reserve_size == allocations[0]
+    assert dva_queries == [0]
+    assert region.base_tensor.data_ptr() % 4096 == 0
+
+
+def test_shared_offload_contributes_once_and_exposes_real_zero_copy_views(shared_offload_sdk):
+    _, group, configs, allocations, dva_queries = shared_offload_sdk
+    leader = host_pool.MemFabricSharedHostRegion([32, 64], group=group)
+    group.rank_in_group = 1
+    follower = host_pool.MemFabricSharedHostRegion([32, 64], group=group)
+    assert allocations == [1024**3]
+    assert [config.alloc_size for config in configs] == [1024**3, 0]
+    assert all(not getattr(config, "flags", 0) for config in configs)
+    assert all(config.scene == "shared" for config in configs)
+    assert [config.rank_id for config in configs] == [0, 1]
+    assert all(config.world_size == 2 for config in configs)
+    assert configs[0].store_url == configs[1].store_url
+    assert leader.base_tensor.data_ptr() == follower.base_tensor.data_ptr()
+    assert dva_queries == [0]
+    first = leader.base_tensor[:32]
+    second = leader.base_tensor[32:96]
+    second.fill_(19)
+    torch.testing.assert_close(follower.base_tensor[32:96], second)
+    assert second.data_ptr() == first.data_ptr() + 32
+    leader.cleanup()
+    leader.cleanup()
+
+
+def test_shared_offload_resolves_distinct_device_mapping_per_rank(shared_offload_sdk):
+    sdk, group, _, allocations, _ = shared_offload_sdk
+    sdk.get_dva = lambda ptr: ptr + (group.rank_in_group + 1) * 4096
+    leader = host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    follower = host_pool.MemFabricSharedHostRegion([32], group=group)
+    assert allocations == [1024**3]
+    for region, offset in [(leader, 4096), (follower, 8192)]:
+        mapping = region.base_tensor._hisparse_registration
+        assert mapping.device_ptr == mapping.host_address + offset
+        assert mapping.address_of(region.base_tensor[:32]) == mapping.device_ptr
+
+
+def test_shared_offload_allocation_error_reaches_followers(shared_offload_sdk):
+    sdk, group, _, _, _ = shared_offload_sdk
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("allocation failed")
+
+    sdk.empty = fail
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+
+
+def test_shared_offload_mapping_error_reaches_followers(shared_offload_sdk):
+    sdk, group, _, _, _ = shared_offload_sdk
+
+    def fail(ptr):
+        raise RuntimeError("device mapping unavailable")
+
+    sdk.get_dva = fail
+    with pytest.raises(RuntimeError, match="device mapping unavailable"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+    group.rank_in_group = 1
+    with pytest.raises(RuntimeError, match="device mapping unavailable"):
+        host_pool.MemFabricSharedHostRegion([32], group=group)
+
+
 def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     from vllm.v1.hisparse import backend as core_backend
     from vllm.v1.hisparse import runtime
@@ -185,12 +308,15 @@ def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
     monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
     monkeypatch.setattr(core_backend, "get_hisparse_backend", lambda: backend)
     # Restore the process-wide binding when this test exits.
-    monkeypatch.setattr(runtime, "allocate_pinned_host_pool", runtime.allocate_pinned_host_pool)
+    monkeypatch.setattr(runtime.HiSparseHostPool, "allocate", runtime.HiSparseHostPool.allocate)
+    monkeypatch.setattr(runtime, "allocate_hisparse_host_pools", runtime.allocate_hisparse_host_pools)
     install()
-    installed = runtime.allocate_pinned_host_pool
+    installed = runtime.HiSparseHostPool.allocate
     install()
-    assert runtime.allocate_pinned_host_pool is installed
-    payload, registered = installed(1001)
+    assert runtime.HiSparseHostPool.allocate is installed
+    pool = runtime.HiSparseHostPool(None, NS(hisparse_shared_host_pool=False))
+    payload = pool.allocate(1001)
+    registered = pool.registered
     assert registered._test_registration is backend
     assert payload.numel() == 1001 and registered.data_ptr() % 4096 == 0
     payload.fill_(17)

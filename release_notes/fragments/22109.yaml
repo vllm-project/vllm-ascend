@@ -1,0 +1,4 @@
+pr: 22109
+entries:
+  - category: feature
+    text: Added experimental MooncakeConnectorV2 MemFabric URMA Pull for HiSparse P/D, importing main KV into the Offload Host Source and Indexer KV into each NPU. Supported local TP configurations share one physical Host pool.

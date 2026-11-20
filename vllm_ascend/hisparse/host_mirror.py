@@ -131,13 +131,14 @@ class _DirectMirrorSources:
 class HostMirrorConnector:
     """Join one worker's Host mirror at the existing Core draft finalizer."""
 
-    def __init__(self, connector, worker, output_copy_stream, sources, logger=None, rank=None):
+    def __init__(self, connector, worker, output_copy_stream, sources, logger=None, rank=None, *, pd_connector=None):
         self._connector = connector
         self._worker = worker
         self._output_copy_stream = output_copy_stream
         self._sources = sources
         self._logger = logger
         self._rank = rank
+        self._pd_connector = pd_connector
         self._logged_draft_defer = False
         self._logged_finalize = False
         self._overlap_draft = False
@@ -164,6 +165,7 @@ class HostMirrorConnector:
         self._eligible_forward = (
             self._allow_step
             and scheduler_output.has_sync_kv_loads
+            and (self._pd_connector is None or not scheduler_output.skip_drafts)
             and input_batch is not None
             and attn_metadata is not None
             and not input_batch.has_prefill
@@ -187,6 +189,7 @@ class HostMirrorConnector:
         pending_before = len(worker._pending_dma_descriptors)
         try:
             worker._finish_mirror_phase(worker._forward_ready_event)
+            worker._in_step = False
             if worker._dma_submitted:
                 self._pending_event = worker.host_write_event
                 worker._dma_submitted = False
@@ -199,6 +202,9 @@ class HostMirrorConnector:
             else:
                 worker.host_write_event.record(compute_stream)
             worker._release_completed_dma_descriptors()
+            # The supported MultiConnector calls HiSparse first and Mooncake second.
+            if self._pd_connector is not None:
+                self._pd_connector.finish_forward()
         except BaseException:
             # The mirror phase may fail after recording a submitted copy.
             if worker._dma_submitted:
@@ -242,31 +248,52 @@ class HostMirrorConnector:
 
 
 def overlap_target_host_mirror(runner):
-    """Use Core's private Host writer and live HMA binding, or keep its original fence."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+    """Enable overlap for standalone private Host or the shared HiSparse PD writer."""
     from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
     from vllm.logger import logger
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
+    from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.hisparse.connector import HiSparseConnector
     from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
+    from vllm_ascend.hisparse.worker import AscendHiSparseConnectorWorker
 
     connector = runner.kv_connector
-    if (
-        type(connector) not in (ActiveKVConnector, PCPHiSparseConnector)
-        or type(connector.kv_connector) is not HiSparseConnector
-    ):
+    if type(connector) not in (ActiveKVConnector, PCPHiSparseConnector):
         return connector
-    worker = connector.kv_connector.connector_worker
+    hisparse_connector = connector.kv_connector
+    pd_connector = None
+    if type(hisparse_connector) is AscendMultiConnector:
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import (
+            _HiSparseMooncakePullConnector,
+            _HiSparsePDWorker,
+        )
+
+        if len(hisparse_connector._connectors) != 2:
+            return connector
+        hisparse_connector, pd_connector = hisparse_connector._connectors
+        if (
+            type(pd_connector) is not _HiSparseMooncakePullConnector
+            or type(pd_connector.connector_worker) is not _HiSparsePDWorker
+            or not pd_connector.connector_worker.kv_transfer_config.is_kv_consumer
+        ):
+            return connector
+    if type(hisparse_connector) is not HiSparseConnector:
+        return connector
+    worker = hisparse_connector.connector_worker
     if (
-        type(worker) is not HiSparseConnectorWorker
+        type(worker) is not AscendHiSparseConnectorWorker
         or not worker._initialized
         or not isinstance(worker.backend, AscendHiSparseBackend)
-        or worker.shared_host_region is not None
         or not worker.is_host_writer
-        or worker.cache_handles[0].runtime.device.type != "npu"
     ):
+        return connector
+    shared = worker.shared_host_region is not None
+    if shared != (pd_connector is not None):
+        return connector
+    device = worker.cache_handles[0].runtime.device
+    if device.type != "npu":
         return connector
     sources = _DirectMirrorSources.bind(worker, runner.speculator)
     if sources is None:
@@ -276,12 +303,8 @@ def overlap_target_host_mirror(runner):
         stream_id=output.stream_id, device_index=output.device_index, device_type=output.device_type
     )
     compute_stream = torch.accelerator.current_stream()
-    if (
-        output_stream.device != compute_stream.device
-        or compute_stream.device != worker.cache_handles[0].runtime.device
-        or output_stream == compute_stream
-    ):
+    if output_stream.device != device or compute_stream.device != device or output_stream == compute_stream:
         return connector
     rank = get_tensor_model_parallel_rank()
     logger.info("HiSparse direct Target Host mirror overlap enabled: rank=%d", rank)
-    return HostMirrorConnector(connector, worker, output_stream, sources, logger, rank)
+    return HostMirrorConnector(connector, worker, output_stream, sources, logger, rank, pd_connector=pd_connector)

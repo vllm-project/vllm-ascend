@@ -4,16 +4,23 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from prometheus_client import Counter, Gauge, Histogram
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole, KVConnectorTransferResults
 
+from vllm_ascend.distributed.kv_transfer import register_connector
+from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p import hisparse_pd
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakeBaseConnector,
     MooncakeConnector,
+    MooncakeConnectorV2,
     MooncakePullConnector,
     MooncakePushConnector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
 
 def make_facade() -> MooncakeBaseConnector:
@@ -95,10 +102,13 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
 @pytest.mark.parametrize(
     "connector_cls, prefix", [(MooncakePullConnector, "MooncakePull"), (MooncakePushConnector, "MooncakePush")]
 )
-def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None:
+@pytest.mark.parametrize("extra", [{}, {"transfer_backend": "memfabric"}])
+def test_connector_selects_implementation_by_role(connector_cls, prefix, extra) -> None:
     config = MagicMock()
     config.kv_transfer_config.engine_id = "engine"
     config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_connector = connector_cls.__name__
+    config.kv_transfer_config.kv_connector_extra_config = extra
     kv_cache_config = MagicMock()
 
     def initialize_base(self, *_args, **_kwargs) -> None:
@@ -131,3 +141,108 @@ def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None
     worker_cls.assert_called_once_with(config, "engine", kv_cache_config)
     scheduler_connector.shutdown()
     scheduler_cls.return_value.shutdown.assert_called_once_with()
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_v2_memfabric_uses_private_pull_connector(monkeypatch, role):
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    connector_cls = KVConnectorFactory.get_connector_class_by_name("MooncakeConnectorV2")
+    config = MagicMock()
+    config.kv_transfer_config.kv_connector = "MooncakeConnectorV2"
+    config.kv_transfer_config.kv_connector_extra_config = {"transfer_backend": "memfabric"}
+    config.kv_transfer_config.is_kv_consumer = True
+    cache = MagicMock()
+    cache.hisparse_host_num_blocks = None
+
+    def initialize_base(self, *_args, **_kwargs):
+        self.engine_id = "engine"
+        self.kv_transfer_config = config.kv_transfer_config
+        self.connector_worker = self.connector_scheduler = None
+
+    with (
+        patch.object(MooncakeBaseConnector, "__init__", initialize_base),
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd._HiSparsePDWorker") as worker,
+        patch.object(connector_module, "MooncakePullConnectorScheduler") as scheduler,
+    ):
+        if role == KVConnectorRole.WORKER:
+            with pytest.raises(ValueError, match="requires HiSparse Host Source"):
+                connector_cls(config, role, cache)
+            worker.assert_not_called()
+            scheduler.assert_not_called()
+            config.kv_transfer_config.is_kv_consumer = False
+        connector = connector_cls(config, role, cache)
+    assert type(connector) is hisparse_pd._HiSparseMooncakePullConnector
+    assert hisparse_pd._HiSparseMooncakePullConnector.__name__ not in KVConnectorFactory._registry
+    if role == KVConnectorRole.WORKER:
+        assert connector.connector_worker is worker.return_value
+        worker.assert_called_once_with(config, "engine", cache)
+        scheduler.assert_not_called()
+    else:
+        assert connector.connector_scheduler is scheduler.return_value
+        scheduler.assert_called_once_with(config, "engine", cache)
+        worker.assert_not_called()
+
+
+def test_multi_connector_uses_public_stats_key_for_hisparse(monkeypatch):
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            engine_id="engine",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakePullConnector",
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {"transfer_backend": "memfabric"},
+                    },
+                    {
+                        "kv_connector": "MooncakeConnectorV2",
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {"transfer_backend": "memfabric"},
+                    },
+                    {
+                        "kv_connector": "MooncakeConnectorV2",
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {"use_layerwise": True},
+                    },
+                ]
+            },
+        ),
+    )
+    children = AscendMultiConnector._get_connector_classes_and_configs(config)  # type: ignore[arg-type]
+    assert [connector_cls for connector_cls, _ in children] == [
+        MooncakePullConnector,
+        MooncakeConnectorV2,
+        MooncakePushConnector,
+    ]
+
+    transfer_stats = MooncakeKVConnectorStats()
+    transfer_stats.record_transfer(0.012, 1024)
+    child = object.__new__(hisparse_pd._HiSparseMooncakePullConnector)
+    child.connector_worker = MagicMock()
+    child.connector_worker.get_kv_connector_stats.return_value = transfer_stats
+    multi = object.__new__(AscendMultiConnector)
+    multi._connectors = [child]
+    stats = multi.get_kv_connector_stats()
+    assert stats is not None
+    payload = stats.to_dict()
+    assert payload == {"MooncakeConnectorV2": transfer_stats.to_dict()}
+    restored = AscendMultiConnector.build_kv_connector_stats(payload)
+    assert restored is not None
+    assert restored.to_dict() == payload
+
+    recorder = MagicMock()
+    with (
+        patch.object(MooncakeBaseConnector, "build_prom_metrics", return_value=None),
+        patch.object(MooncakeConnectorV2, "build_prom_metrics", return_value=recorder),
+    ):
+        metrics = AscendMultiConnector.build_prom_metrics(
+            config,  # type: ignore[arg-type]
+            {Gauge: Gauge, Counter: Counter, Histogram: Histogram},
+            [],
+            {},
+        )
+    metrics.observe(payload)
+    recorder.observe.assert_called_once_with(transfer_stats.to_dict(), 0)
