@@ -131,7 +131,7 @@ on the same instances that previously exported the environment variable.
         "protocol": "ascend",
         "device_name": "",
         "master_server_address": "<master_ip>:50088",
-        "global_segment_size": "1GB",
+        "global_segment_size": "30GB",
         "preferred_segment": false,
         "prefer_alloc_in_same_node": true,
         "enable_ssd_offload": false,

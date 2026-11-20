@@ -41,6 +41,20 @@ With native KDA, enabling PCP shards the KDA attention heads and recurrent
 state across the product of tensor parallel size and prefill context parallel
 size. The KDA head count must be divisible by that product.
 
+### INT8 KPool indexer cache on A3
+
+Set `--attention-config.indexer_kv_dtype int8` to quantize the KPool indexer's
+queries and compressed keys to INT8. This option is independent of
+`--kv-cache-dtype`, which controls the main attention cache. The default `auto`
+and explicit `bf16` retain the BF16 indexer path.
+
+The INT8 path calls `torch.ops.cann_ops_transformer.pool_key_indexer` with
+per-vector FP16 scales and requires an ops-transformer build that supports INT8
+and requests with no completed pools. The 2026-10-31 A3 CANN 9.3.0
+ops-transformer build provides this interface. Keys and scales share managed
+cache pages so cache transport includes both. No separate indexer environment
+variable is required.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

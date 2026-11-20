@@ -94,6 +94,10 @@ from vllm_ascend.models.step5.sparse_attention import (
     AscendStep5DSAImpl,
     AscendStep5SparseSummaryCacheLayer,
 )
+from vllm_ascend.ops.triton.step5.fused_add_rms_norm import (
+    can_use_fused_add_rms_norm_cast,
+    fused_add_rms_norm_cast,
+)
 from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
     fused_qknorm_rope,
 )
@@ -1016,11 +1020,23 @@ class AscendStep5DecoderLayer(Step5DecoderLayer):
         padding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_moe:
-            ffn_output = self.moe(hidden_states, input_is_sequence_parallel=self.use_sequence_parallel)
-            if self.moe.experts.moe_config.is_sequence_parallel:
-                return ffn_output
-            return self._cast_for_residual(ffn_output)
+            # The next layer or the final residual add handles FP32 promotion.
+            return self.moe(hidden_states, input_is_sequence_parallel=self.use_sequence_parallel)
         return self.mlp(hidden_states)
+
+    def _add_rms_norm(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        norm: AscendStep5RMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if can_use_fused_add_rms_norm_cast(hidden_states, residual, norm.weight, self.fp32_residual_connection):
+            return fused_add_rms_norm_cast(
+                hidden_states, residual, norm.weight, norm.variance_epsilon, norm.zero_centered
+            )
+        if residual is not None:
+            hidden_states = self._add_for_residual(hidden_states, residual)
+        return self._cast_for_param_op(norm(hidden_states)), hidden_states
 
     def forward(
         self,
@@ -1029,11 +1045,7 @@ class AscendStep5DecoderLayer(Step5DecoderLayer):
         residual: torch.Tensor | None = None,
         padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is not None:
-            hidden_states = self._add_for_residual(hidden_states, residual)
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self._cast_for_param_op(hidden_states)
+        hidden_states, residual = self._add_rms_norm(hidden_states, residual, self.input_layernorm)
 
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
@@ -1044,10 +1056,7 @@ class AscendStep5DecoderLayer(Step5DecoderLayer):
         if self.use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
 
-        hidden_states = self._add_for_residual(hidden_states, residual)
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self._cast_for_param_op(hidden_states)
+        hidden_states, residual = self._add_rms_norm(hidden_states, residual, self.post_attention_layernorm)
 
         ffn_output = self._forward_ffn(hidden_states, padding=padding)
         return ffn_output, residual
