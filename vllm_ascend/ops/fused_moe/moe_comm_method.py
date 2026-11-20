@@ -551,10 +551,10 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
-        # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
-        # so no Dispatch/Combine traffic is involved. The caller skips the
-        # separate shared-expert forward when this payload is present.
+        # Shared experts fused into the MegaMoe operator (A5 MXFP and A3 INT8):
+        # their GMM1 + activation + GMM2 runs inside the kernel on the local
+        # tokens, so no Dispatch/Combine traffic is involved. The caller skips
+        # the separate shared-expert forward when this payload is present.
         shared_kwargs: dict = {}
         # Live payload installed by AscendMoERunner; its fields are filled in
         # when the shared linears finish loading.

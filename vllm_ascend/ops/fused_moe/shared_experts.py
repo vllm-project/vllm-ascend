@@ -190,21 +190,21 @@ class AscendSharedExperts:
         if not get_ascend_config().megamoe_shared_expert_fusion:
             return
         hardware_profile = get_current_hardware_profile()
-        supports_mxfp_fusion = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP)
-        supports_int_fusion = hardware_profile.supports(
-            HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT
-        )
-        if not supports_mxfp_fusion and not supports_int_fusion:
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
             return
+        # The payload family follows the machine's routed MegaMoe contract rather
+        # than a separate capability: A5 keeps the MXFP layouts, A3 (arch22) the
+        # INT8 A8W8 one.
+        supports_mxfp_fusion = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_MXFP)
         if supports_mxfp_fusion:
             self._megamoe_shared_fusion_platform = "A5/MXFP"
         else:
-            # A2/A3 (arch22) INT8 shared fusion, re-enabled for enable_fused_mc2=3.
-            # The arch22 kernel consumes shared_l1/l2 when the INT8 payload uses
-            # the routed (in, out) FRACTAL_NZ layout: a per-expert list of 2-D
-            # int8 weights plus a 1-D per-output-channel uint64 scale, matching
-            # the routed-expert INT8 descriptor contract.
-            self._megamoe_shared_fusion_platform = "A2/A3/INT8"
+            # A3 (arch22) INT8 shared fusion, enabled by enable_fused_mc2=3. The
+            # arch22 kernel consumes shared_l1/l2 when the INT8 payload uses the
+            # routed (in, out) FRACTAL_NZ layout: a per-expert list of 2-D int8
+            # weights plus a 1-D per-output-channel uint64 scale, matching the
+            # routed-expert INT8 descriptor contract.
+            self._megamoe_shared_fusion_platform = "A3/INT8"
         # Checks the ROUTED experts' quant type: the shared fusion stacks on
         # top of the routed MegaMoe path, which must support the scenario
         # first. The operator's A5 scenarios are A8W8-FP / A8W4-FP / A4W4-FP
