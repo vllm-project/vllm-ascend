@@ -1942,3 +1942,21 @@
 #       Merged upstream: https://github.com/vllm-project/vllm/pull/63165
 #    Future Plan:
 #       Remove once the supported vLLM version includes upstream PR #63165.
+#
+# ** File: platform/patch_service_profiling_dir.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.engine.arg_utils.EngineArgs.from_cli_args`
+#    Why:
+#       Deployments with fixed serve scripts cannot append
+#       `--profiler-config`, so Ascend torch-profiler traces are unavailable
+#       without editing those scripts.
+#    How:
+#       Wrap `EngineArgs.from_cli_args` once and fill an unset `ProfilerConfig`
+#       from `VLLM_ASCEND_PROFILER_DIR`. An explicit profiler config always
+#       wins, and the patch is inert when the env var is empty.
+#    Related PR (if no, explain why):
+#       No upstream PR; vLLM already supports `--profiler-config`, and this only
+#       exposes it through an environment variable for constrained launchers.
+#    Future Plan:
+#       Remove this patch once the affected launch scripts can pass
+#       `--profiler-config` directly.

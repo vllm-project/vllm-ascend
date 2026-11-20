@@ -1564,7 +1564,88 @@ class TestUpstreamConfigCompatibility(TestBase):
                 with self.subTest(field="hidden_size", value=3584), patch.object(text_config, "hidden_size", 3584):
                     self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
 
-    def test_megamoe_model_config_constraints(self):
+    @staticmethod
+    def _a2_megamoe_vllm_config():
+        text_config = SimpleNamespace(
+            hidden_size=5120,
+            moe_intermediate_size=2304,
+            num_experts_per_tok=6,
+        )
+        parallel_config = SimpleNamespace(
+            enable_expert_parallel=True,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            prefill_context_parallel_size=8,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            use_ubatching=False,
+            expert_placement_strategy="linear",
+            enable_eplb=False,
+        )
+        return SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=["DeepseekV41ForCausalLM"],
+                hf_text_config=text_config,
+                get_num_experts=lambda: 384,
+                enforce_eager=True,
+                dtype="torch.bfloat16",
+            ),
+            parallel_config=parallel_config,
+            kv_transfer_config=SimpleNamespace(kv_role="kv_producer"),
+            use_v2_model_runner=True,
+            lora_config=None,
+        )
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_a2_megamoe_accepts_validated_dsv41_prefill_shapes(self, _mock_profile):
+        vllm_config = self._a2_megamoe_vllm_config()
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = 4
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_a2_megamoe_rejects_out_of_envelope_configs(self, _mock_profile):
+        vllm_config = self._a2_megamoe_vllm_config()
+        cases = (
+            (vllm_config.model_config, "architectures", ["DeepseekV3ForCausalLM"]),
+            (vllm_config, "kv_transfer_config", SimpleNamespace(kv_role="kv_consumer")),
+            (vllm_config, "use_v2_model_runner", False),
+            (vllm_config, "lora_config", object()),
+        )
+        for target, field, value in cases:
+            with self.subTest(field=field), patch.object(target, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+
+        for field, value in (
+            ("data_parallel_size", 2),
+            ("prefill_context_parallel_size", 4),
+            ("tensor_parallel_size", 2),
+            ("enable_expert_parallel", False),
+            ("use_ubatching", True),
+            ("expert_placement_strategy", "block"),
+            ("enable_eplb", True),
+        ):
+            with self.subTest(field=field), patch.object(vllm_config.parallel_config, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+
+        with patch.object(vllm_config.model_config, "dtype", "torch.float16"):
+            self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+        with patch.object(vllm_config.model_config.hf_text_config, "hidden_size", 4096):
+            self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vllm_config))
+
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_megamoe_model_config_constraints(self, _mock_profile):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1603,7 +1684,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         )
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
-    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_kimi_k3_megamoe_uses_routed_expert_dimensions(self, _mock_profile):
         kimi_k3 = SimpleNamespace(
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
@@ -1836,7 +1921,13 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.parallel_config.world_size = 8
         vc.additional_config = {"enable_fused_mc2": 2}
 
-        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+        with (
+            patch(
+                "vllm_ascend.ascend_config.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec),
+        ):
             config = init_ascend_config(vc)
 
         self.assertEqual(config.enable_fused_mc2, 1)

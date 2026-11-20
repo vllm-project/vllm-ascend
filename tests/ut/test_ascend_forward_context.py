@@ -314,6 +314,43 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+def test_select_moe_comm_method_a2_prefers_megamoe_when_enabled(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "is_draft_model", lambda _: False)
+
+    assert afc.select_moe_comm_method(128, _make_vllm_config(world_size=8)) == MoECommType.FUSED_MC2
+
+
+def test_use_cann_megamoe_a2_excludes_draft_model(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A2,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8)
+    monkeypatch.setattr(afc, "is_draft_model", lambda config: config is vllm_config)
+
+    assert afc.use_cann_megamoe(vllm_config) is False
+
+
+def test_is_draft_model_detects_dspark_architecture():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["DeepseekV41DSparkModel"], runner_type=None),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=8),
+    )
+
+    assert afc.is_draft_model(vllm_config) is True
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
