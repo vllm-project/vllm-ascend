@@ -354,46 +354,26 @@ presets:
       HCCL_BUFFSIZE: '1024'
       HCCL_NPU_SOCKET_PORT_RANGE: auto
 
-  a3_pd_prefill:
-    label: PD / Prefill worker (A3)
-    source:
-      label: Qwen3.8-Flash-Next deployment tutorial
-      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
-      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
-    runbook: >-
-      Run Prefill on devices 0–7 and select the same workload point for the
-      A3 Decode worker on devices 8–15 of this host. Start the proxy
-      for that workload after both roles respond at `/v1/models`.
+  a3_single_host_pd:
+    label: Single-host PD (A3)
     hardware: ascend_910c
     strategy: single_node_tp
     variants:
       - ascend_w4a8
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: >-
+        https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
     select:
       frontend: python
       features:
         tool_calling: false
         reasoning: false
         spec_decoding: true
-    tp: 2
-    args:
-      - '--port'
-      - '25568'
-      - '--served-model-name'
-      - qwen38-flash-next-a3-pd
-      - '--max-num-seqs'
-      - '32'
-      - '--max-num-batched-tokens'
-      - '8192'
-      - '--gpu-memory-utilization'
-      - '0.90'
-      - '--mamba-ssm-cache-dtype'
-      - bfloat16
-      - '--enforce-eager'
-      - '--additional-config'
-      - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
-    json_args:
-      '--speculative-config':
-        enforce_eager: true
+    runbook: >-
+      Run Prefill on devices 0–7 and Decode on devices 8–15 in the same container. Start the proxy for the
+      selected workload after both roles are ready.
     env:
       VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
       VLLM_HOST_IP: $LOCAL_SERVICE_IP
@@ -403,25 +383,88 @@ presets:
       HCCL_SOCKET_IFNAME: $SERVICE_NIC
       no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
       NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
-      HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
-      HCCL_BUFFSIZE: '8192'
+    args:
+      - '--served-model-name'
+      - qwen38-flash-next-a3-pd
+      - '--max-num-seqs'
+      - '32'
+      - '--gpu-memory-utilization'
+      - '0.90'
     points:
-      basic:
-        label: Basic PD
-        remove_args: ['--compilation-config']
+      basic_prefill:
+        label: Basic PD / Prefill
         default: true
+        tp: 2
         args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
           - '--pipeline-parallel-size'
           - '4'
           - '--max-model-len'
           - '262144'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
-      pooling:
-        label: MemCache three-tier pooling
-        remove_args: ['--compilation-config']
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        remove_args:
+          - '--compilation-config'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '8192'
+      basic_decode:
+        label: Basic PD / Decode
+        tp: 2
         args:
+          - '--port'
+          - '25569'
+          - '--data-parallel-size'
+          - '4'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--max-model-len'
+          - '262144'
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+      pooling_prefill:
+        label: MemCache three-tier pooling / Prefill
+        tp: 2
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
           - '--pipeline-parallel-size'
           - '2'
           - '--data-parallel-size'
@@ -431,35 +474,129 @@ presets:
           - '--engram-config'
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}'
+          - >-
+            {"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_p","use_layerwise":false}}]}}
+        remove_args:
+          - '--compilation-config'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '8192'
           PYTHONHASHSEED: '0'
           MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local.conf
           ACL_OP_INIT_MODE: '1'
           ASCEND_ENABLE_USE_FABRIC_MEM: '1'
-      long_context:
-        label: Long context (1M)
-        remove_args: ['--compilation-config']
+      pooling_decode:
+        label: MemCache three-tier pooling / Decode
+        tp: 2
         args:
+          - '--port'
+          - '25569'
+          - '--data-parallel-size'
+          - '4'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--max-model-len'
+          - '262144'
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+          PYTHONHASHSEED: '0'
+          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local.conf
+          ACL_OP_INIT_MODE: '1'
+          ASCEND_ENABLE_USE_FABRIC_MEM: '1'
+      long_context_prefill:
+        label: Long context (1M) / Prefill
+        tp: 2
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--enforce-eager'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
           - '--pipeline-parallel-size'
           - '4'
           - '--max-model-len'
           - '1010000'
           - '--hf-overrides'
-          - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
-        env:
-          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
-      image_10k:
-        label: Image and text (10K)
-        tp: 4
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
         remove_args:
-          - '--enable-prefix-caching'
-          - '--mamba-cache-mode'
-          - '--mamba-ssm-cache-dtype'
-          - '--enforce-eager'
+          - '--compilation-config'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '8192'
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+      long_context_decode:
+        label: Long context (1M) / Decode
+        tp: 2
         args:
+          - '--port'
+          - '25569'
+          - '--data-parallel-size'
+          - '4'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
+          - '--max-model-len'
+          - '1010000'
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+      image_10k_prefill:
+        label: Image and text (10K) / Prefill
+        tp: 4
+        args:
+          - '--port'
+          - '25568'
+          - '--max-num-batched-tokens'
+          - '8192'
           - '--mm-encoder-tp-mode'
           - data
           - '--pipeline-parallel-size'
@@ -472,110 +609,41 @@ presets:
           - '--compilation-config'
           - '{"cudagraph_mode":"NONE"}'
           - '--additional-config'
-          - '{"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+          - >-
+            {"enable_shared_expert_dp":false,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}'
-        env:
-          VLLM_SERVER_DEV_MODE: '1'
-          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
-          VLLM_ASCEND_PLE_BACKEND: torch
-          HCCL_BUFFSIZE: '4096'
-          VLLM_PP_LAYER_PARTITION: 24,24
-  a3_pd_decode:
-    label: PD / Decode worker (A3)
-    source:
-      label: Qwen3.8-Flash-Next deployment tutorial
-      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
-      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
-    runbook: >-
-      Run Decode on devices 8–15 and select the same workload point for the
-      A3 Prefill worker on devices 0–7 of this host. Start the proxy
-      for that workload after both roles respond at `/v1/models`.
-    hardware: ascend_910c
-    strategy: single_node_tp
-    variants:
-      - ascend_w4a8
-    select:
-      frontend: python
-      features:
-        tool_calling: false
-        reasoning: false
-        spec_decoding: true
-    tp: 2
-    args:
-      - '--port'
-      - '25569'
-      - '--served-model-name'
-      - qwen38-flash-next-a3-pd
-      - '--data-parallel-size'
-      - '4'
-      - '--max-num-seqs'
-      - '32'
-      - '--max-num-batched-tokens'
-      - '8192'
-      - '--gpu-memory-utilization'
-      - '0.90'
-      - '--mamba-ssm-cache-dtype'
-      - bfloat16
-      - '--engram-config'
-      - '{"cpu_offload":true,"dp_shared_memory":true}'
-      - '--additional-config'
-      - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
-    json_args:
-      '--speculative-config':
-        enforce_eager: false
-    env:
-      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
-      VLLM_HOST_IP: $LOCAL_SERVICE_IP
-      HCCL_IF_IP: $LOCAL_SERVICE_IP
-      GLOO_SOCKET_IFNAME: $SERVICE_NIC
-      TP_SOCKET_IFNAME: $SERVICE_NIC
-      HCCL_SOCKET_IFNAME: $SERVICE_NIC
-      no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      ASCEND_RT_VISIBLE_DEVICES: 8,9,10,11,12,13,14,15
-      HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
-      HCCL_BUFFSIZE: '512'
-    points:
-      basic:
-        label: Basic PD
-        default: true
-        args:
-          - '--max-model-len'
-          - '262144'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
-      pooling:
-        label: MemCache three-tier pooling
-        args:
-          - '--max-model-len'
-          - '262144'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"qwen38_pool_d","use_layerwise":false}}]}}'
-        env:
-          PYTHONHASHSEED: '0'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local.conf
-          ACL_OP_INIT_MODE: '1'
-          ASCEND_ENABLE_USE_FABRIC_MEM: '1'
-      long_context:
-        label: Long context (1M)
-        args:
-          - '--max-model-len'
-          - '1010000'
-          - '--hf-overrides'
-          - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
-        env:
-          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
-      image_10k:
-        label: Image and text (10K)
-        description: This command runs one Decode rank. Run the four-rank loop in the A3 image-and-text 10K launch scripts above the command to set the device pair, API port and Mooncake configuration for each rank.
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"34600","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2,"pp_layer_partition":"24,24"},"decode":{"dp_size":4,"tp_size":2}}}
         remove_args:
           - '--enable-prefix-caching'
           - '--mamba-cache-mode'
           - '--mamba-ssm-cache-dtype'
+          - '--enforce-eager'
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          HCCL_BUFFSIZE: '4096'
+          VLLM_SERVER_DEV_MODE: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          VLLM_PP_LAYER_PARTITION: 24,24
+      image_10k_decode:
+        label: Image and text (10K) / Decode
+        description: >-
+          This command runs one Decode rank. Run the four-rank loop in the A3 image-and-text 10K launch scripts
+          above the command to set the device pair, API port and Mooncake configuration for each rank.
+        tp: 2
         args:
+          - '--data-parallel-size'
+          - '4'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
           - '--port'
           - $DECODE_HTTP_PORT
           - '--data-parallel-size-local'
@@ -593,46 +661,49 @@ presets:
           - '--no-enable-prefix-caching'
           - '--kv-transfer-config'
           - $DECODE_KV_CONFIG
+        remove_args:
+          - '--enable-prefix-caching'
+          - '--mamba-cache-mode'
+          - '--mamba-ssm-cache-dtype'
         json_args:
           '--speculative-config':
-            enforce_eager: null
+            enforce_eager: ~
         env:
+          ASCEND_RT_VISIBLE_DEVICES: $DECODE_DEVICES
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          HCCL_BUFFSIZE: '512'
           VLLM_SERVER_DEV_MODE: '1'
           VLLM_ENGINE_READY_TIMEOUT_S: '2400'
           VLLM_ASCEND_PLE_BACKEND: torch
-          ASCEND_RT_VISIBLE_DEVICES: $DECODE_DEVICES
-  a5_pd_prefill:
-    label: PD / Prefill worker (950DT)
-    source:
-      label: Qwen3.8-Flash-Next deployment tutorial
-      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
-      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
-    runbook: >-
-      Run Prefill on devices 0–3 and select the same workload point for the
-      950DT Decode worker on devices 4–7 of this host. Start the proxy
-      for that workload after both roles respond at `/v1/models`.
+
+  a5_single_host_pd:
+    label: Single-host PD (950DT)
     hardware: ascend_950dt
     strategy: single_node_tp
     variants:
       - ascend_a5_w4a8_mxfp
+    source:
+      label: Qwen3.8-Flash-Next deployment tutorial
+      href: >-
+        https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
+      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
     select:
       frontend: python
       features:
         tool_calling: false
         reasoning: false
         spec_decoding: true
-    args:
-      - '--compilation-config'
-      - '{"cudagraph_mode":"NONE"}'
-    env:
-      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
-      HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+    runbook: >-
+      Run Prefill on devices 0–3 and Decode on devices 4–7 in the same container. Start the proxy for the
+      selected workload after both roles are ready.
     points:
-      basic:
-        label: Basic PD
+      basic_prefill:
+        label: Basic PD / Prefill
         default: true
         tp: 2
         args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
           - '--api-server-count'
           - '1'
           - '--port'
@@ -656,13 +727,17 @@ presets:
           - '--mamba-ssm-cache-dtype'
           - bfloat16
           - '--additional-config'
-          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
+          - >-
+            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":30000,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
         json_args:
           '--speculative-config':
-            enforce_eager: null
+            enforce_eager: ~
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
           VLLM_HOST_IP: $LOCAL_SERVICE_IP
           HCCL_IF_IP: $LOCAL_SERVICE_IP
           GLOO_SOCKET_IFNAME: $SERVICE_NIC
@@ -682,156 +757,12 @@ presets:
           TASK_QUEUE_ENABLE: '1'
           HCCL_BUFFSIZE: '8192'
           HCCL_OP_EXPANSION_MODE: AIV
-          ASCEND_BUFFER_POOL: '0:0'
+          ASCEND_BUFFER_POOL: 0:0
           HCCL_IF_BASE_PORT: '62000'
           no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
           NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      pooling:
-        label: MemCache three-tier pooling
-        tp: 2
-        args:
-          - '--enable-auto-tool-choice'
-          - '--reasoning-parser'
-          - qwen3
-          - '--port'
-          - '8247'
-          - '--served-model-name'
-          - qwen38-megamoe-sp-pd
-          - '--data-parallel-size'
-          - '2'
-          - '--max-model-len'
-          - '262144'
-          - '--max-num-seqs'
-          - '64'
-          - '--gpu-memory-utilization'
-          - '0.9'
-          - '--mamba-cache-mode'
-          - align
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--engram-config'
-          - '{"cpu_offload":true,"dp_shared_memory":true}'
-          - '--additional-config'
-          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}'
-          - '--tool-call-parser'
-          - qwen3_coder
-          - '--data-parallel-address'
-          - $LOCAL_SERVICE_IP
-          - '--data-parallel-rpc-port'
-          - '29770'
-        json_args:
-          '--speculative-config':
-            enforce_eager: null
-        env:
-          ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
-          VLLM_HOST_IP: $LOCAL_SERVICE_IP
-          HCCL_IF_IP: $LOCAL_SERVICE_IP
-          GLOO_SOCKET_IFNAME: $SERVICE_NIC
-          TP_SOCKET_IFNAME: $SERVICE_NIC
-          HCCL_SOCKET_IFNAME: $SERVICE_NIC
-          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-          PYTHONHASHSEED: '0'
-          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-          HCCL_BUFFSIZE: '512'
-          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf
-      long_context:
-        label: Long context (1M)
-        tp: 4
-        args:
-          - '--port'
-          - '8247'
-          - '--served-model-name'
-          - qwen38-megamoe-sp-pd
-          - '--pipeline-parallel-size'
-          - '1'
-          - '--max-model-len'
-          - '1010000'
-          - '--max-num-seqs'
-          - '16'
-          - '--gpu-memory-utilization'
-          - '0.9'
-          - '--mamba-cache-mode'
-          - align
-          - '--mamba-ssm-cache-dtype'
-          - bfloat16
-          - '--additional-config'
-          - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
-          - '--hf-overrides'
-          - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
-        json_args:
-          '--speculative-config':
-            enforce_eager: true
-        env:
-          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
-          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
-          VLLM_ASCEND_PLE_BACKEND: torch
-          HCCL_BUFFSIZE: '512'
-      image_10k:
-        label: Image and text (10K)
-        tp: 2
-        args:
-          - '--port'
-          - '8247'
-          - '--served-model-name'
-          - qwen38-megamoe-sp-pd
-          - '--pipeline-parallel-size'
-          - '2'
-          - '--max-model-len'
-          - '143360'
-          - '--max-num-seqs'
-          - '64'
-          - '--max-num-batched-tokens'
-          - '8192'
-          - '--gpu-memory-utilization'
-          - '0.9'
-          - '--additional-config'
-          - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
-          - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
-        json_args:
-          '--speculative-config':
-            enforce_eager: true
-        env:
-          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-          VLLM_ASCEND_PLE_BACKEND: torch
-          VLLM_PP_LAYER_PARTITION: 25,23
-          HCCL_BUFFSIZE: '512'
-  a5_pd_decode:
-    label: PD / Decode worker (950DT)
-    source:
-      label: Qwen3.8-Flash-Next deployment tutorial
-      href: https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md
-      revision: a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee
-    runbook: >-
-      Run Decode on devices 4–7 and select the same workload point for the
-      950DT Prefill worker on devices 0–3 of this host. Start the proxy
-      for that workload after both roles respond at `/v1/models`.
-    hardware: ascend_950dt
-    strategy: single_node_tp
-    variants:
-      - ascend_a5_w4a8_mxfp
-    select:
-      frontend: python
-      features:
-        tool_calling: false
-        reasoning: false
-        spec_decoding: true
-    json_args:
-      '--speculative-config':
-        enforce_eager: false
-    env:
-      ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
-      VLLM_ENGINE_READY_TIMEOUT_S: '4800'
-      HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
-    points:
-      basic:
-        label: Basic PD
-        default: true
+      basic_decode:
+        label: Basic PD / Decode
         tp: 2
         args:
           - '--api-server-count'
@@ -857,10 +788,18 @@ presets:
           - '--mamba-ssm-cache-dtype'
           - bfloat16
           - '--additional-config'
-          - '{"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"scheduler_config":{"recompute_scheduler_enable":true}}'
+          - >-
+            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"scheduler_config":{"recompute_scheduler_enable":true}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":30100,"kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
           VLLM_HOST_IP: $LOCAL_SERVICE_IP
           HCCL_IF_IP: $LOCAL_SERVICE_IP
           GLOO_SOCKET_IFNAME: $SERVICE_NIC
@@ -879,12 +818,69 @@ presets:
           TASK_QUEUE_ENABLE: '1'
           HCCL_BUFFSIZE: '8192'
           HCCL_OP_EXPANSION_MODE: AIV
-          ASCEND_BUFFER_POOL: '0:0'
+          ASCEND_BUFFER_POOL: 0:0
           HCCL_IF_BASE_PORT: '63000'
           no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
           NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
-      pooling:
-        label: MemCache three-tier pooling
+      pooling_prefill:
+        label: MemCache three-tier pooling / Prefill
+        tp: 2
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--enable-auto-tool-choice'
+          - '--reasoning-parser'
+          - qwen3
+          - '--port'
+          - '8247'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--data-parallel-size'
+          - '2'
+          - '--max-model-len'
+          - '262144'
+          - '--max-num-seqs'
+          - '64'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--additional-config'
+          - >-
+            {"enable_cpu_binding":true,"enable_shared_expert_dp":true,"enable_fused_mc2":0,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"0","use_layerwise":false}}]}}
+          - '--tool-call-parser'
+          - qwen3_coder
+          - '--data-parallel-address'
+          - $LOCAL_SERVICE_IP
+          - '--data-parallel-rpc-port'
+          - '29770'
+        json_args:
+          '--speculative-config':
+            enforce_eager: ~
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+          VLLM_HOST_IP: $LOCAL_SERVICE_IP
+          HCCL_IF_IP: $LOCAL_SERVICE_IP
+          GLOO_SOCKET_IFNAME: $SERVICE_NIC
+          TP_SOCKET_IFNAME: $SERVICE_NIC
+          HCCL_SOCKET_IFNAME: $SERVICE_NIC
+          NO_PROXY: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+          no_proxy: localhost,127.0.0.1,$LOCAL_SERVICE_IP
+          PYTHONHASHSEED: '0'
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_BUFFSIZE: '512'
+          MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local-p.conf
+      pooling_decode:
+        label: MemCache three-tier pooling / Decode
         tp: 2
         args:
           - '--enable-auto-tool-choice'
@@ -909,16 +905,24 @@ presets:
           - '--engram-config'
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--additional-config'
-          - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}'
+          - >-
+            {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":2,"tp_size":2},"decode":{"dp_size":2,"tp_size":2}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"memcache","lookup_rpc_port":"1","use_layerwise":false}}]}}
           - '--tool-call-parser'
           - qwen3_coder
           - '--data-parallel-address'
           - $LOCAL_SERVICE_IP
           - '--data-parallel-rpc-port'
           - '29780'
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
           ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
           VLLM_HOST_IP: $LOCAL_SERVICE_IP
           HCCL_IF_IP: $LOCAL_SERVICE_IP
@@ -930,8 +934,49 @@ presets:
           PYTHONHASHSEED: '0'
           HCCL_BUFFSIZE: '512'
           MMC_LOCAL_CONFIG_PATH: ${MEMCACHE_CONFIG_DIR}/mmc-local-d.conf
-      long_context:
-        label: Long context (1M)
+      long_context_prefill:
+        label: Long context (1M) / Prefill
+        tp: 4
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--port'
+          - '8247'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--pipeline-parallel-size'
+          - '1'
+          - '--max-model-len'
+          - '1010000'
+          - '--max-num-seqs'
+          - '16'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--mamba-cache-mode'
+          - align
+          - '--mamba-ssm-cache-dtype'
+          - bfloat16
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--hf-overrides'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
+          VLLM_ENGINE_READY_TIMEOUT_S: '2400'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          HCCL_BUFFSIZE: '512'
+      long_context_decode:
+        label: Long context (1M) / Decode
         tp: 4
         args:
           - '--port'
@@ -949,17 +994,62 @@ presets:
           - '--mamba-ssm-cache-dtype'
           - bfloat16
           - '--additional-config'
-          - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+          - >-
+            {"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}
           - '--hf-overrides'
-          - '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
+          - >-
+            {"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
           VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
           VLLM_ASCEND_PLE_BACKEND: torch
           HCCL_BUFFSIZE: '512'
-      image_10k:
-        label: Image and text (10K)
+      image_10k_prefill:
+        label: Image and text (10K) / Prefill
+        tp: 2
+        args:
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--port'
+          - '8247'
+          - '--served-model-name'
+          - qwen38-megamoe-sp-pd
+          - '--pipeline-parallel-size'
+          - '2'
+          - '--max-model-len'
+          - '143360'
+          - '--max-num-seqs'
+          - '64'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--additional-config'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}
+          - '--kv-transfer-config'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32470,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: true
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          VLLM_ASCEND_PLE_BACKEND: torch
+          VLLM_PP_LAYER_PARTITION: 25,23
+          HCCL_BUFFSIZE: '512'
+      image_10k_decode:
+        label: Image and text (10K) / Decode
         tp: 2
         args:
           - '--port'
@@ -979,10 +1069,18 @@ presets:
           - '--engram-config'
           - '{"cpu_offload":true,"dp_shared_memory":true}'
           - '--additional-config'
-          - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}'
+          - >-
+            {"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}
           - '--kv-transfer-config'
-          - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}'
+          - >-
+            {"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32480,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":2,"pp_layer_partition":"25,23"},"decode":{"dp_size":2,"tp_size":2}}}
+        json_args:
+          '--speculative-config':
+            enforce_eager: false
         env:
+          ASCEND_RT_VISIBLE_DEVICES: 4,5,6,7
+          VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
           VLLM_ASCEND_PLE_BACKEND: torch
           HCCL_BUFFSIZE: '512'
 
@@ -993,7 +1091,7 @@ notes:
       variants: [ascend_w4a8]
       strategies: [single_node_tp]
     body: |
-      Use these scripts only for the **Image and text (10K)** point of the A3 Prefill and Decode worker presets. Run Prefill, Decode and the proxy in separate terminals inside the prepared A3 container.
+      Use these scripts only for the **Image and text (10K) / Prefill** and **Image and text (10K) / Decode** points of the A3 single-host PD preset. Run Prefill, Decode and the proxy in separate terminals inside the prepared A3 container.
 
       **Environment for Prefill and Decode** — run this block in both worker terminals.
 
@@ -1140,8 +1238,7 @@ hardware_notes:
   ascend_910c:
     title: Single-host deployment on A3
     body: >-
-      Select W4A8 and a PD worker preset, then choose the image-and-text, pooling or
-      long-context Point. The table below opens each worker command directly (128g shm).
+      Select W4A8 (Ascend A2/A3) and Single-host PD (A3) to open the paired workload commands (128g shm).
     link:
       label: Single-host PD configurations
       href: '#single-host-pd-configurations'
@@ -1149,8 +1246,7 @@ hardware_notes:
   ascend_950dt:
     title: Single-host deployment on 950DT
     body: >-
-      Select W4A8-MXFP and a PD worker preset, then choose the image-and-text, pooling or
-      long-context Point. The table below opens each worker command directly (500g shm).
+      Select W4A8-MXFP and Single-host PD (950DT) to open the paired workload commands (500g shm).
     link:
       label: Single-host PD configurations
       href: '#single-host-pd-configurations'
@@ -1319,19 +1415,19 @@ guide_sections:
 
     A3 uses devices 0–7 for Prefill and 8–15 for Decode with 128g of container shared memory.
     950DT uses devices 0–3 for Prefill and 4–7 for Decode with 500g of container shared memory.
-    Open a topology in the table to select the hardware, quantized checkpoint, worker and workload.
-    To select them manually, choose **Tensor Parallel**, the **Prefill** or **Decode** worker preset,
-    and the same **Point** for both roles. The command panel shows one role at a time.
+    Choose **Tensor Parallel** and the **Single-host PD** preset for your hardware.
+    Under **Point**, select Prefill and then Decode for the same workload. Run the commands
+    in separate terminals on that host. The table links directly to each pair.
     For the A3 image-and-text point, expand **A3 image-and-text 10K launch scripts** above the command
     to launch all four Decode ranks, start the proxy and send the image request.
     For pooling, complete the storage setup in Sections 4.3 and 5.5 before starting the workers.
 
-    | Procedure | A3 Prefill | A3 Decode | 950DT Prefill | 950DT Decode |
-    | --- | --- | --- | --- | --- |
-    | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=basic) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=basic) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=basic) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=basic) |
-    | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP4 PP2 DP1 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=image_10k) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=image_10k) | [TP2 PP2 DP1 (EP2)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=image_10k) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=image_10k) |
-    | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=long_context) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=long_context) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=long_context) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=long_context) |
-    | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | [TP2 PP2 DP2 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_prefill&point=pooling) | [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_pd_decode&point=pooling) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_prefill&point=pooling) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_pd_decode&point=pooling) |
+    | Procedure | A3 (Prefill / Decode) | 950DT (Prefill / Decode) |
+    | --- | --- | --- |
+    | [Basic PD](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#52-basic-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=basic_decode) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=basic_decode) |
+    | [Image-and-text 10K](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#53-image-and-text-10k-pd-separation-deployment) | [TP4 PP2 DP1 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=image_10k_decode) | [TP2 PP2 DP1 (EP2)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=image_10k_decode) |
+    | [Long context](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#54-long-context-pd-separation-deployment) | [TP2 PP4 DP1 (EP2)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=long_context_decode) | [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_prefill) / [TP4 DP1 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=long_context_decode) |
+    | [MemCache three-tier pooling](https://github.com/vllm-project/vllm-ascend/blob/a41e2ff8ba274328f9ef2ff27d15653df1d2e8ee/docs/source/tutorials/models/Qwen3.8-Flash-Next.md#55-pd-separation-with-memcache-three-tier-kv-cache-pool) | [TP2 PP2 DP2 (EP4)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=pooling_prefill) / [TP2 DP4 (EP8)](?hardware=ascend_910c&variant=ascend_w4a8&strategy=single_node_tp&preset=a3_single_host_pd&point=pooling_decode) | [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=pooling_prefill) / [TP2 DP2 (EP4)](?hardware=ascend_950dt&variant=ascend_a5_w4a8_mxfp&strategy=single_node_tp&preset=a5_single_host_pd&point=pooling_decode) |
 
     The 950DT Basic PD presets use the tutorial's `VLLM_VERSION=0.32.0` override with the
     `v0.32.0rc1-a5` image. If you switch images, unset this override so vLLM Ascend
