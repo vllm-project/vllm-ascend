@@ -23,6 +23,7 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
+import torch_npu
 from npugraph_ex._acl_concrete_graph.static_kernel import _set_static_kernel_blacklist
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.compile_fx import graph_returns_tuple, make_graph_return_tuple
@@ -35,7 +36,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY
+from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -161,7 +162,24 @@ def _configure_backend(
 
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
-            options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            # PIECEWISE graphs capture and replay exactly at the cudagraph capture
+            # sizes, so compile those shapes; other routes use decode batch sizes.
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_mode.requires_piecewise_compilation():
+                # Pieces are captured and replayed exactly at the cudagraph
+                # capture sizes. Newer vllm resolves the prefill token grid
+                # and the decode request grid separately, so prefer them and
+                # cover both; fall back to the legacy unified sizes.
+                prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
+                decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None)
+                if prefill_sizes is None and decode_sizes is None:
+                    sym_range = list(compilation_config.cudagraph_capture_sizes or [])
+                else:
+                    sym_range = list(prefill_sizes or [])
+                    sym_range.extend(size for size in decode_sizes or [] if size not in sym_range)
+                options["_vllm_aclnn_static_kernel_sym_range"] = sym_range
+            else:
+                options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
             if ascend_compilation_config.enable_super_kernel:
                 options["super_kernel_optimize"] = True
                 options["super_kernel_optimize_options"] = {
@@ -272,13 +290,9 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
-    # TODO(wxs): add passes related to compilation in compute_hash
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> dict[str, Any]:
         self.vllm_config = vllm_config
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        from hashlib import sha256
-
-        import torch_npu
 
         factors = {
             "torch_npu_version": torch_npu.__version__,
@@ -287,7 +301,15 @@ class AscendCompiler(CompilerInterface):
             "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
-        return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
+        return factors
+
+    if vllm_version_is("0.33.0"):
+
+        def compute_hash(self, vllm_config: VllmConfig) -> str:
+            # Main rejects subclasses defining compute_hash (#65652).
+            from hashlib import sha256
+
+            return sha256(str(self.compile_factors(vllm_config)).encode(), usedforsecurity=False).hexdigest()[:10]
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
         """Initialize cache settings and runtime state before compiling or loading a graph."""

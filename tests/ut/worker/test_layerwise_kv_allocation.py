@@ -5,9 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import KVTransferConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import LayerwiseCachePlanner
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -48,44 +50,39 @@ def test_layerwise_plan_shares_each_physical_slot(reuse, indexer_c8):
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
     )
-    connector = (
-        SimpleNamespace(
-            kv_connector="AscendStoreConnector",
-            kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 2},
-        )
-        if reuse
-        else None
+    extra_config = {"layerwise_num_shared_buffers": 2} if reuse else {}
+    transfer = KVTransferConfig(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={"backend": "memcache", "use_layerwise": True, **extra_config},
     )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        kv_transfer_config=connector,
-        model_config=SimpleNamespace(get_num_layers=lambda _: 4, hf_config=SimpleNamespace()),
-        parallel_config=None,
-    )
+    runtime = SimpleNamespace(model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 4))
+    layout = LayerwiseCachePlanner(
+        config, runtime, extra_config, spec_reuse_rules={AscendMLAAttentionSpec: True}
+    ).build()
     original_tensors = list(config.kv_cache_tensors)
-
-    apply_layerwise_kv_cache_plan(config, vllm_config)
-
+    assert layout.has_layer_reuse is reuse
     if not reuse:
+        assert not layout.kv_cache_tensors
         assert config.kv_cache_tensors == original_tensors
         return
 
-    # Every descriptor owns one physical slot, so its layers alias that slot
-    # through a zero layer stride instead of occupying contiguous regions.
-    descriptors = config.kv_cache_tensors
-    assert descriptors != original_tensors
-    for descriptor in descriptors:
-        assert descriptor.layer_stride == 0
-        assert descriptor.offset == 0
-        assert descriptor.block_stride > 0
-        assert descriptor.size == config.num_blocks * descriptor.block_stride
-        assert descriptor.layers
+    worker_config = apply_layerwise_kv_cache_plan(config, transfer, layout)
+    assert config.kv_cache_tensors == original_tensors
+    descriptors = worker_config.kv_cache_tensors
+    assert len({descriptor.offset for descriptor in descriptors}) == len(descriptors)
+    expected_bytes = num_blocks * (4 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes)
+    assert {descriptor.size for descriptor in descriptors} == {expected_bytes}
+    assert all(
+        descriptor.layer_stride == 0 and descriptor.offset + num_blocks * descriptor.block_stride <= expected_bytes
+        for descriptor in descriptors
+    )
     covered = [name for descriptor in descriptors for name in descriptor.layers]
     assert sorted(covered) == sorted(main_names + indexer_names)
     assert len(covered) == len(set(covered))
 
-    # A slot never mixes main caches with indexer caches: their page layouts
-    # differ, and only the indexer is allowed to keep a per-layer dtype.
+    assert layout.reused_cache_names == frozenset((main_names[1], main_names[3]))
+    assert layout.draft_entry_names == frozenset((main_names[-1],))
     main_slots = [d for d in descriptors if set(d.layers) <= set(main_names)]
     indexer_slots = [d for d in descriptors if set(d.layers) <= set(indexer_names)]
     assert len(main_slots) + len(indexer_slots) == len(descriptors)

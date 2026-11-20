@@ -11,7 +11,7 @@ Take the DeepSeek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to de
 ### Physical Layer Requirements
 
 - The physical machines must be located on the same LAN, with network connectivity.
-- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For Atlas 850/850E/950 SuperPod (950PR/950DT), see [Atlas 850/850E/950 SuperPod Communication Configuration](#atlas-850850e950-superpod-communication-configuration).
+- All NPUs must be interconnected. On A2/A3, intra-node connectivity is via HCCS, and inter-node connectivity is via RDMA. For 950PR&950DT Products, see [950PR&950DT Products Communication Configuration](#950pr950dt-products-communication-configuration).
 
 ### Verification Process
 
@@ -120,9 +120,9 @@ Execute the following commands on each node in sequence. The results must all be
         for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
         ```
 
-### Atlas 850/850E/950 SuperPod Communication Configuration
+### 950PR&950DT Products Communication Configuration {: #950pr950dt-products-communication-configuration}
 
-For Atlas 850/850E/950 SuperPod (950PR/950DT), PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
+For 950PR&950DT Products, PD disaggregation uses the super plane (based on UB port and UBC protocol) by default. No additional network configuration is required for this default path.
 
 Automatic UB configuration requires HIXL 9.1.0 or later. Upgrade HIXL before using the configuration below. Set the following environment variable in both the prefiller and decoder serving environments to generate the communication configuration automatically:
 
@@ -148,7 +148,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 === "RoCE"
 
-    Host RoCE parameter-plane configuration for Atlas 850/850E/950 SuperPod (950PR/950DT) currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
+    Host RoCE parameter-plane configuration for 950PR&950DT Products currently requires manual endpoint files and checking the mapping between physical NPUs and host RoCE IP addresses. Prepare the endpoint configuration files under `/etc/hixlep` and set `ascend_local_comm_res_path` in `kv_connector_extra_config` on both sides. The directory is configurable; `/etc/hixlep` is only an example. For example, with `DP=4` and `TP=1` on each side:
 
     ```json
     {
@@ -203,7 +203,7 @@ For UBG or UBoE network protocols, keep the automatic configuration setting abov
 
 ## Run with Docker
 
-Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For Atlas 850/850E/950 SuperPod (950PR/950DT), use the complete container command below.
+Start a Docker container on each node. The following example maps the 16 device nodes used by the A3 deployment above. For 950PR&950DT Products, use the complete container command below.
 
 ```bash
 # Update the vllm-ascend image
@@ -246,7 +246,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-### Atlas 850/850E/950 SuperPod (950PR/950DT) Container Requirements
+### 950PR&950DT Products Container Requirements {: #950pr950dt-products-container-requirements}
 
 For an eight-device 950PR/950DT host, use the following command. Choose an image compatible with the host driver; for openEuler, use the `{{ vllm_ascend_version }}-a5-openeuler` tag.
 
@@ -966,9 +966,9 @@ python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank
 python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
-## D2RH Deployment on Atlas 850E (UBoE)
+## D2RH Deployment on Atlas 850E SuperPoD (Air-Cooled) (UBoE) {: #d2rh-deployment-on-atlas-850e-superpod-air-cooled-uboe}
 
-**Validation scope:** D2RH has only been validated with the Atlas 850E
+**Validation scope:** D2RH has only been validated with the Atlas 850E SuperPoD (Air-Cooled)
 UBoE configuration shown below, using DeepSeek-V4-Flash. Other hardware,
 network types, and deployment configurations have not been validated.
 
@@ -1159,7 +1159,7 @@ vllm serve /path/to/DeepSeek-V4-Flash-0731-w4a4c8 \
 The scripts enable prefix caching on both sides, keep the hybrid KV cache
 manager enabled, and set
 `ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'`.
-They use FP8 indexer cache on Atlas 850E, not the INT8 indexer setting from the
+They use FP8 indexer cache on Atlas 850E SuperPoD (Air-Cooled), not the INT8 indexer setting from the
 A2/A3 examples; see the [W4A4C8 FAQ](../models/DeepSeek-V4-Flash.md#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 P uses eager execution and D uses `FULL_DECODE_ONLY` graphs.
 

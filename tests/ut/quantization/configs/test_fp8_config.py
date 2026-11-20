@@ -200,30 +200,6 @@ class TestAscendFp8Config(TestBase):
 
         self.assertEqual(method, "block-fp8")
 
-    def test_suffix_fallback_is_skipped_when_is_layer_skipped_has_no_match_mode(self):
-        def old_is_layer_skipped(prefix, ignored_layers, packed_modules_mapping):
-            return prefix in ignored_layers
-
-        flat_entry = "model.layers.3.self_attn.indexer.wq_b"
-        real_runtime_prefix = "language_model.model.layers.3.self_attn.indexer.wq_b"
-        config = self.build_config(ignored_layers=[flat_entry])
-
-        with (
-            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
-            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
-            patch(
-                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
-                return_value=MagicMock(),
-            ),
-            patch(
-                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
-                return_value="block-fp8",
-            ),
-        ):
-            method = config.get_quant_method(MagicMock(spec=LinearBase), real_runtime_prefix)
-
-        self.assertEqual(method, "block-fp8")
-
     def test_ignored_moe_falls_back_to_unquantized(self):
         config = self.build_config(ignored_layers=["model.layers.0.mlp.experts"])
         moe_layer = MagicMock(spec=RoutedExperts)
@@ -304,24 +280,6 @@ class TestAscendFp8Config(TestBase):
     def test_unrelated_layer_returns_none(self):
         config = self.build_config()
         self.assertIsNone(config.get_quant_method(torch.nn.Linear(8, 8), "some.prefix"))
-
-    def test_get_quant_method_when_is_layer_skipped_has_no_match_mode(self):
-        # vLLM 0.27.1's is_layer_skipped has no match_mode keyword.
-        def old_is_layer_skipped(prefix, ignored_layers, packed_modules_mapping):
-            return False
-
-        config = self.build_config()
-        with (
-            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
-            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
-            patch("vllm_ascend.quantization.configs.fp8_config.get_scheme_class", return_value=MagicMock()),
-            patch(
-                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
-                return_value="block-fp8",
-            ),
-        ):
-            method = config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.mlp.gate_proj")
-        self.assertEqual(method, "block-fp8")
 
 
 if __name__ == "__main__":

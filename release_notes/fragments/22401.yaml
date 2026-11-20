@@ -1,0 +1,5 @@
+pr: 22401
+entries:
+  - category: performance
+    text: Fused the Step 5 Preview head-wise attention gate (sigmoid + broadcast multiply) into one Ascend Triton kernel, fused the sparse-indexer QK norm+RoPE and Z passthrough into one kernel, and packed the sliding-window qkv and gate projections into a single GEMM when KV heads are partitioned across TP ranks, removing eager kernels, materializing copies and one GEMM launch per gated layer per step.
+    model: step-5-preview

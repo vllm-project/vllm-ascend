@@ -137,9 +137,63 @@ class TestAscendCompressedTensorsQuanType(TestBase):
             with self.subTest(attribute=attribute), self.assertRaises(NotImplementedError):
                 self.config._detect_quant_type(weight, self._make_mx_quant(8, True), "mxfp4-pack-quantized")
 
-    def test_mxfp4_weight_only_does_not_implicitly_select_dynamic_w4a8(self):
-        with self.assertRaises(NotImplementedError):
-            self.config._detect_quant_type(self._make_mx_quant(), None, "mxfp4-pack-quantized")
+    def test_native_mxfp4_selects_w4a8(self):
+        result = self.config._detect_quant_type(self._make_mx_quant(), None, "mxfp4-pack-quantized")
+        self.assertEqual(result, "W4A8_MXFP")
+        self.assertEqual(self.config.quant_description["group_size"], 32)
+
+    def test_native_mxfp4_uses_global_format(self):
+        self.config.quant_format = "mxfp4-pack-quantized"
+        result = self.config._detect_quant_type(self._make_mx_quant(), None, None)
+        self.assertEqual(result, "W4A8_MXFP")
+
+    def test_native_mxfp4_from_checkpoint_config(self):
+        config = {
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "ignore": ["lm_head"],
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "input_activations": None,
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "dynamic": False,
+                        "symmetric": True,
+                    },
+                }
+            },
+        }
+        parsed = AscendCompressedTensorsConfig.from_config(config)
+        scheme = parsed.target_scheme_map["Linear"]
+        self.assertIsNone(scheme["input_activations"])
+        with patch("vllm_ascend.quantization.methods.get_scheme_class") as get_scheme_class:
+            result = parsed._create_scheme_for_layer_type(scheme["weights"], None, scheme["format"], "moe")
+        get_scheme_class.assert_called_once_with("W4A8_MXFP", "moe")
+        self.assertIs(result, get_scheme_class.return_value.return_value)
+        self.assertEqual(parsed.quant_description["group_size"], 32)
+
+    def test_native_mxfp4_rejects_incompatible_formats(self):
+        for quant_format in ("int-quantized", "pack-quantized", "mxfp8-quantized"):
+            with self.subTest(format=quant_format), self.assertRaises(NotImplementedError):
+                self.config._detect_quant_type(self._make_mx_quant(), None, quant_format)
+
+    def test_native_mxfp4_rejects_invalid_weight_geometry(self):
+        for attribute, value in (
+            ("num_bits", 8),
+            ("group_size", 16),
+            ("group_size", 64),
+            ("strategy", "channel"),
+            ("dynamic", True),
+            ("symmetric", False),
+        ):
+            weight = self._make_mx_quant()
+            setattr(weight, attribute, value)
+            with self.subTest(attribute=attribute, value=value), self.assertRaises(NotImplementedError):
+                self.config._detect_quant_type(weight, None, "mxfp4-pack-quantized")
 
     def test_detect_mxfp8_dynamic(self):
         weight = self._make_mx_quant(num_bits=8, dynamic=False)

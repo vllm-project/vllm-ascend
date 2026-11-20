@@ -19,6 +19,7 @@ from vllm_ascend.ops.triton.hisparse import (
     gather_resident_rows_kernel,
     gather_rows_kernel,
     invalidate_kernel,
+    invalidate_written_slots_batched,
     invalidate_written_slots_sorted,
     pack_attention_rows_kernel,
     pack_written_slot_keys,
@@ -27,6 +28,9 @@ from vllm_ascend.ops.triton.hisparse import (
 
 _SORT_MIN_DIRECT_TILES = 64 * 1024
 _SORT_BUFFER_LIMIT_BYTES = 768 * 1024
+# Bound sequential writes per tile on the arch22 decode path.
+_BATCH_INVALIDATE_MAX_WRITES = 64
+_BATCH_INVALIDATE_TILE = 2048
 
 
 def _load_resolver():
@@ -140,22 +144,23 @@ class HiSparseNPUOps:
         request_state_indices,
         region_stride,
         max_union_rows,
-        miss_mask,
         stats,
         attention_indices,
         attention_block_stride,
         request_ids,
         source_block_table,
         source_block_size,
-        resolved_global_indices,
         valid_counts,
         swap_host_physical_rows,
         swap_device_physical_rows,
         swap_counts,
         resident_block_table,
         resident_block_size,
-        resident_null_block=0,
         num_valid_rows=None,
+        *,
+        miss_mask=None,
+        resolved_global_indices=None,
+        resident_null_block=0,
     ) -> None:
         """Resolve logical selections and prepare resident/hot-cache refill plans.
 
@@ -198,7 +203,6 @@ class HiSparseNPUOps:
             raise ValueError("HiSparse host row IDs must fit int32")
         for name, tensor in (
             ("hot_indices", hot_indices),
-            ("resolved_global_indices", resolved_global_indices),
             ("swap_host_physical_rows", swap_host_physical_rows),
             ("swap_device_physical_rows", swap_device_physical_rows),
         ):
@@ -232,8 +236,6 @@ class HiSparseNPUOps:
             )
             if attention_indices.stride(1) != 1 or attention_block_stride < hot_cache.size(1):
                 raise ValueError("HiSparse attention indices require dense columns and a valid block stride")
-        if miss_mask is not None:
-            _check_tensor(miss_mask, "miss_mask", device, (torch.uint8, torch.bool, torch.int32), shape=(rows, topk))
         if valid_counts is not None:
             _check_tensor(valid_counts, "valid_counts", device, (torch.int32,), contiguous=False)
             if tuple(valid_counts.shape) not in ((rows,), (rows, 1)):
@@ -256,9 +258,7 @@ class HiSparseNPUOps:
         Callers must destroy graphs before releasing or rebinding those owners.
         """
         rows, topk = arguments["global_indices"].shape
-        resolved = arguments["resolved_global_indices"]
-        if resolved is None:
-            resolved = workspace.first_refs[: rows * topk].view(rows, topk)
+        resolved = workspace.first_refs[: rows * topk].view(rows, topk)
         workspace.native.hisparse_resolve_residency(
             arguments["global_indices"],
             arguments["hot_block_table"],
@@ -277,13 +277,13 @@ class HiSparseNPUOps:
             arguments["swap_host_physical_rows"],
             arguments["swap_device_physical_rows"],
             arguments["swap_counts"],
-            arguments["miss_mask"],
+            None,
             arguments["stats"],
             arguments["host_cache"].shape[0],
             arguments["hot_cache"].shape[1],
             arguments["source_block_size"],
             arguments["resident_block_size"],
-            arguments["resident_null_block"],
+            0,
             arguments["attention_block_stride"] if self.attention_block_stride is None else self.attention_block_stride,
             arguments["max_union_rows"],
             self.attention_capacity,
@@ -389,6 +389,20 @@ class HiSparseNPUOps:
             return
         if region_stride == 0 or num_state_rows == 0 or groups == 0:
             return
+        if not is_950() and num_tokens <= _BATCH_INVALIDATE_MAX_WRITES:
+            invalidate_written_slots_batched[(triton.cdiv(region_stride, _BATCH_INVALIDATE_TILE), groups)](
+                group_table,
+                request_state_indices,
+                req_id_per_token,
+                written_slots,
+                num_tokens,
+                REQUESTS=request_state_indices.numel(),
+                STATE_ROWS=num_state_rows,
+                REGION=region_stride,
+                BLOCK=_BATCH_INVALIDATE_TILE,
+                multibuffer=False,
+            )
+            return
         tile = 256
         hot_tiles = triton.cdiv(region_stride, tile)
         table_tiles = groups * hot_tiles
@@ -399,11 +413,7 @@ class HiSparseNPUOps:
         direct_tiles = num_tokens * table_tiles
         search_probes = num_state_rows * table_tiles * search_steps
         sort_buffer_bytes = 3 * num_tokens * torch.int64.itemsize
-        if (
-            direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES
-            and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES
-            and is_950()
-        ):
+        if direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES:
             keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
             sorted_keys = torch.empty_like(keys)
             order = torch.empty_like(keys)
@@ -426,6 +436,7 @@ class HiSparseNPUOps:
                 HOT=region_stride,
                 TILE=tile,
                 STEPS=search_steps,
+                UNROLL_SEARCH=is_950(),
                 multibuffer=False,
             )
             return

@@ -34,6 +34,8 @@ def init_speculator(
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
     """
+    # TODO: Align init_speculator dispatch with upstream vLLM by mapping the
+    # resolved speculator class to its Ascend implementation.
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.enforce_eager:
@@ -89,16 +91,16 @@ def init_speculator(
         )
 
         return AscendGemma4Speculator(vllm_config, device)
-    if speculative_config.method == "mtp" and not speculative_config.use_step3p5_mtp():
+    if speculative_config.use_multi_module_mtp():
+        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
+
+        return AscendMultiModuleMTPSpeculator(vllm_config, device)
+    if speculative_config.method == "mtp":
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
 
         return AscendMTPSpeculator(vllm_config, device)
-    if speculative_config.use_multi_module_mtp():
-        from vllm_ascend.worker.v2.spec_decode.multi_module_mtp.speculator import AscendMultiModuleMTPSpeculator
-
-        return AscendMultiModuleMTPSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
