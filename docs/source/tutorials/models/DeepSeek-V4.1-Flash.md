@@ -2836,7 +2836,31 @@ keep `--gpu-memory-utilization` at `0.9`: each 64GB device already reports
 about 61.4 GiB of HBM in use at that setting, so higher values leave no
 headroom for the KV cache.
 
-### 9.1 Tool-Assisted Tuning with msmodeling
+### 9.1 Fused MLA Prologue on Atlas A3
+
+Enable this path for eligible pure decode batches of DeepSeek-V4.1-Flash on Atlas A3. Use a
+build with A3 custom operators, tensor parallel size 1, 2, or 4, and a compatible checkpoint.
+The attention weights must provide BF16 ND `wq_a` and `wkv` projections and a
+`W8A8_DYNAMIC` `wq_b` projection with BF16 per-channel scales. For a ModelSlim
+checkpoint, use `--quantization ascend`.
+
+Add these options to the A3 colocated or decode-server command. Merge the two JSON
+settings into your existing `--additional-config` value and remove the
+`--compilation-config` option for graph capture.
+
+```bash
+--enforce-eager \
+--dtype bfloat16 --kv-cache-dtype auto --block-size 128 \
+--prefill-context-parallel-size 1 --decode-context-parallel-size 1 \
+--additional-config '{"weight_nz_mode":1,"ascend_fusion_config":{"fuse_sparse_mla_prologue":true}}'
+```
+
+The switch defaults to `false`. With the switch enabled, A2 and A5, prefill and mixed
+batches, and batches that fail the kernel's shape or cache checks use the existing
+attention path. To verify activation, look for `dsv41_mla_prolog` in the NPU
+profiler during pure decode.
+
+### 9.2 Tool-Assisted Tuning with msmodeling
 
 The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark
 parameters together, combining measured results with knowledge-base experience

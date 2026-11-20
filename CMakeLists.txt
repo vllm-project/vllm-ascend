@@ -66,6 +66,30 @@ else()
     )
 endif()
 
+# Build the A3-only host-direct kernel in its own ASC project so the ASC
+# toolchain does not affect the ascendc_library precompile projects.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  include(ExternalProject)
+  set(DSV41_MLA_PROLOG_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/dsv41_mla_prolog_direct)
+  set(DSV41_MLA_PROLOG_LIBRARY ${DSV41_MLA_PROLOG_BUILD_DIR}/libvllm_ascend_mla_prolog_direct.so)
+  ExternalProject_Add(dsv41_mla_prolog_direct_ep
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/csrc/direct_kernels/dsv41_mla_prolog
+    BINARY_DIR ${DSV41_MLA_PROLOG_BUILD_DIR}
+    CMAKE_ARGS
+      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DASCEND_HOME_PATH=${ASCEND_HOME_PATH}
+    BUILD_BYPRODUCTS ${DSV41_MLA_PROLOG_LIBRARY}
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS TRUE
+  )
+  add_library(vllm_ascend_mla_prolog_direct SHARED IMPORTED)
+  set_target_properties(vllm_ascend_mla_prolog_direct PROPERTIES
+    IMPORTED_LOCATION ${DSV41_MLA_PROLOG_LIBRARY})
+  add_dependencies(vllm_ascend_mla_prolog_direct dsv41_mla_prolog_direct_ep)
+  install(FILES ${DSV41_MLA_PROLOG_LIBRARY} DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+endif()
+
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 if(SOC_VERSION MATCHES "ascend310p.*")
@@ -103,7 +127,8 @@ set(
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
-  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_DSV41_MLA_PROLOG)
+  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX vllm_ascend_mla_prolog_direct)
 endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)

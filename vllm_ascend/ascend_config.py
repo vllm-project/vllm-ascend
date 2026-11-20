@@ -179,7 +179,7 @@ class AscendCompilationConfig:
 
 @config
 class AscendFusionConfig:
-    """Configuration for controlling whether to use a fused operator gmmswigluquant.
+    """Configuration for opt-in and default fused operators.
 
     Migrated to ``@config`` (pydantic dataclass): bool field gets lax coercion
     (``"false"``→False) and unknown keys are forbidden (``extra="forbid"``),
@@ -187,6 +187,7 @@ class AscendFusionConfig:
     """
 
     fusion_ops_gmmswigluquant: bool = True
+    fuse_sparse_mla_prologue: bool = False
 
 
 @config(config=ConfigDict(frozen=True))

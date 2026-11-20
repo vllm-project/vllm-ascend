@@ -49,6 +49,9 @@
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
+#ifdef VLLM_ASCEND_ENABLE_DSV41_MLA_PROLOG
+#include "attention/dsv41_mla_prolog/dsv41_mla_prolog_torch_adpt.h"
+#endif
 #include "attention/indexer_region_score/indexer_region_score_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
@@ -3089,6 +3092,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
+
+#ifdef VLLM_ASCEND_ENABLE_DSV41_MLA_PROLOG
+    ops.def(
+        "dsv41_mla_prolog(Tensor x, Tensor wq_a, Tensor gamma_q_a, "
+        "Tensor wq_b, Tensor wq_b_scale, Tensor wkv, Tensor gamma_kv, "
+        "Tensor rope_cos, Tensor rope_sin, Tensor slot_mapping, "
+        "Tensor(a!) kv_cache, float epsilon) -> (Tensor, Tensor)");
+    ops.impl("dsv41_mla_prolog", torch::kPrivateUse1,
+             &vllm_ascend::dsv41_mla_prolog_npu);
+#endif
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(

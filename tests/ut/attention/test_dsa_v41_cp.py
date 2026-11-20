@@ -837,7 +837,11 @@ def runtime(builders, monkeypatch):
             ),
         )
         projector.cv_wq_a, projector.cv_wq_b, projector.cv_wkv = map(CVLinearWrapper, (attn.wq_a, attn.wq_b, attn.wkv))
-        monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))
+        config = SimpleNamespace(
+            multistream_dsv4_dsa_overlap=overlap,
+            ascend_fusion_config=SimpleNamespace(fuse_sparse_mla_prologue=False),
+        )
+        monkeypatch.setattr(dsa_v41, "get_ascend_config", lambda: config)
         monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
