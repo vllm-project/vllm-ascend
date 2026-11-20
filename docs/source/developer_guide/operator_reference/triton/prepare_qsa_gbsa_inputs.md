@@ -2,7 +2,7 @@
 
 Prepare sparse attention indices and per-query block tables for GBSA.
 
-[Implementation of `prepare_qsa_gbsa_inputs`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/qwen4_exp/gbsa.py) · [Production caller in gbsa.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/qwen4_exp/gbsa.py)
+[Implementation of `prepare_qsa_gbsa_inputs`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/qwen4_exp/gbsa.py) · [Caller `qsa_gbsa_attention` in gbsa.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/qwen4_exp/gbsa.py)
 
 ## Calling convention
 
@@ -16,4 +16,4 @@ It returns five tensors in order: int32 sparse indices `[kv_heads, rows, output_
 
 ## Validation
 
-[Integration and semantic tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_qsa.py)
+[`test_qsa_gbsa_preparation_ragged_noncontiguous_table`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qwen4_exp_qsa.py) checks ragged inputs and a strided block table.

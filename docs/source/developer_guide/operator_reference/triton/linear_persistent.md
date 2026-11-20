@@ -50,3 +50,5 @@ The test guards the 1:1 wrapper against an fp32 CPU golden across fp16/bf16/fp32
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py -k linear_persistent
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_batch_invariant_ops.py).

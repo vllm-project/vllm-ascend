@@ -112,3 +112,5 @@ wrap-around (`capacity = 16`, positions beyond capacity), skipped rows
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_summary_update.py -k decode
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_summary_update.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_summary_update.py).

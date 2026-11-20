@@ -81,3 +81,5 @@ The arithmetic accuracy criterion is relative L2 error below 0.5% against a PyTo
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lora_linear.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lora_linear.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lora_linear.py).

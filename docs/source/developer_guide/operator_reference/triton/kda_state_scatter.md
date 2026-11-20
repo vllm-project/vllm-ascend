@@ -2,7 +2,7 @@
 
 Write packed final KDA states back to selected cache pages.
 
-[Implementation of `_kda_state_scatter`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py) · [Production caller in kda_state_copy_plan.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py)
+[Implementation of `_kda_state_scatter`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py) · [Caller `KDAStateCopyPlan.scatter` in kda_state_copy_plan.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py)
 
 ## Calling convention
 
@@ -14,4 +14,4 @@ Supply packed states and one int32 or int64 index per row. Invalid destinations 
 
 ## Validation
 
-[Integration and semantic tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py)
+[`test_scatter_graph_replay_int64_extremes`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py) checks scatter during graph replay with extreme int64 indices.

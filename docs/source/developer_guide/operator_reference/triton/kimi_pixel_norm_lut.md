@@ -81,7 +81,7 @@ normal lazy compilation behavior.
 ## Validation
 
 The nightly E2E case is
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixel_norm.py`.
+[`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixel_norm.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixel_norm.py).
 It checks both output dtypes, all pixel values against the CPU reference, empty
 inputs, both dispatch boundaries, large inputs, invalid metadata, dtype/device
 lifecycle, changing graph inputs and a shared dynamic Torch compile graph.
@@ -95,7 +95,7 @@ pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixe
 ```
 
 CPU unit tests are in
-`tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py`. They check
+[`tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py). They check
 scoped and deduplicated registration, deferred final-dtype key expansion and
 table restoration, metadata-only compilation of all three BLOCK variants, and
 runtime launch coverage at both element-count dispatch boundaries. Compiler and

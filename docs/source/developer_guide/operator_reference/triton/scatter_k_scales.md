@@ -135,3 +135,5 @@ block_ids, segment_ids, fragment_ids = (index.cpu() for index in indices)
 actual = cache.cpu()[block_ids, :, segment_ids, :, fragment_ids, :]
 torch.testing.assert_close(actual, values.cpu(), rtol=0, atol=0)
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_mxfp_k_scale_scatter.py), [`tests/ut/attention/test_mxfp_k_scale_scatter.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/attention/test_mxfp_k_scale_scatter.py).

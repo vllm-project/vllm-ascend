@@ -51,3 +51,5 @@ The test compares `swiglustep_forward_triton` with an independent PyTorch baseli
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglustep.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglustep.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglustep.py).

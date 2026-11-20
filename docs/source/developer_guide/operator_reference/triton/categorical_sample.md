@@ -72,3 +72,5 @@ The single-operator tests use the long-vocabulary inference shape `vocab_size=15
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_categorical_sample.py).

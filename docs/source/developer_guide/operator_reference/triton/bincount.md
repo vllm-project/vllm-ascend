@@ -541,3 +541,5 @@ to that realization, not every possible vocabulary-owner algorithm. An earlier
 sort/scan partial-packing trial hit a vector-core runtime exception and was
 excluded from the timing table. None of these trials is promoted into this PR;
 the approved operator and its model evidence remain unchanged.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bincount.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_bincount.py).

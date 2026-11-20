@@ -169,10 +169,10 @@ claim precompilation for unrelated GQA owners or direct public-operator calls
 using token scatter, `return_lse=True`, arbitrary external tensor views or
 unregistered dtypes. Those calls retain their existing runtime behavior.
 
-`tests/ut/model_executor/warmup/test_kernel_warmup.py` contains finite-domain
+[`tests/ut/model_executor/warmup/test_kernel_warmup.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/model_executor/warmup/test_kernel_warmup.py) contains finite-domain
 versus exhaustive-token coverage, owner/draft registration and deduplication,
 compile-only behavior and alignment checks. The existing
-`test_dcp_pre_post.py` single-NPU suite also adds a cold in-memory JIT / registry
+[`test_dcp_pre_post.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py) single-NPU suite also adds a cold in-memory JIT / registry
 warmup / forbidden-recompile regression over new token counts and layouts,
 followed by changed-input replay of retained graphs. These tests were added
 without execution for this change; NPU compilation, graph replay,
@@ -232,3 +232,5 @@ The distributed tests cover T1/2/13/48/191/192, multiple head counts, head-major
 torchrun --standalone --nproc-per-node=8 -m pytest --noconftest -sv \
   tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_dcp.py -k exchange
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py), [`tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_dcp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_dcp.py), [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py).

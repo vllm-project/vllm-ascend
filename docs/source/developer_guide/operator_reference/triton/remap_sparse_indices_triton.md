@@ -57,3 +57,5 @@ The tests cover top-k2048, DCP8/16 with interleave768/1536, non-power-of-two DCP
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k remap
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k remap
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py), [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py).

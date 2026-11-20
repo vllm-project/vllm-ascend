@@ -80,7 +80,7 @@ Tests cover heads 1/4; Q=1/4/8; TopK=1/3/16/31/32/64; block/context
 boundaries; contiguous and strided inputs/outputs/counts; inactive guard slots;
 input immutability; and changed inputs between graph replays. IDs and counts
 must match exactly. Public guard/dispatch/empty-batch tests also live in
-`tests/ut/models/minimax_m3/test_msa_m3.py`.
+[`tests/ut/models/minimax_m3/test_msa_m3.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/models/minimax_m3/test_msa_m3.py).
 
 A5 single-machine model validation must hold TP/DP/PP, KV dtype, model/draft,
 input files, seeds, operator libraries and generation parameters fixed between
@@ -90,3 +90,5 @@ need attribution. This does not validate multi-node communication or throughput.
 Record the tested source hashes and runtime with each result. Reused model
 accuracy scores must identify their source and actual backend; single-operator
 exactness and trace coverage are reported separately.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_topk.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_topk.py).

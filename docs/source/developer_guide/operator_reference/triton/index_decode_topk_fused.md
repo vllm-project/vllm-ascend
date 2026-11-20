@@ -93,7 +93,7 @@ within that model contract. Existing helper boundary fixtures are supplementary;
 they do not establish support for other models or arbitrary TopK configurations.
 
 Accuracy and interface cases are in
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py`.
+[`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_msa_m3_index_postprocess.py).
 
 | Category | Cases |
 | --- | --- |

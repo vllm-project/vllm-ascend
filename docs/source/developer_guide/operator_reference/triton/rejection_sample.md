@@ -84,7 +84,7 @@ Tests are split by responsibility to avoid duplicating the same combinations. Th
 
 | Input equivalence class / requirement | Test and assertion |
 | --- | --- |
-| Config lookup per call, explicit True/False, None | `test_entropy_verify.py`: worker config and override tests |
+| Config lookup per call, explicit True/False, None | [`test_entropy_verify.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/worker/v2/test_entropy_verify.py): worker config and override tests |
 | Disabled, alpha zero, synthetic bypass | CPU allocation/launch tests; `test_synthetic_entropy_is_a_noop` on NPU |
 | Invalid threshold/alpha, conflicting block flag | CPU fail-before-launch tests, including FP64 rejection and block/synthetic conflict in `test_entropy_verify.py` |
 | FP16/BF16/FP32, one-hot/full draft, vocabulary tail | `test_entropy_verify_matches_fp32_oracle`: exact prefix counts and accepted IDs |
@@ -95,7 +95,7 @@ Tests are split by responsibility to avoid duplicating the same combinations. Th
 | Placeholder, bonus-only, greedy/probabilistic | `test_entropy_verify_placeholder_and_bonus_only` and recovery tests |
 | Offsets, position, mapping, seed; chunking/reordered requests | `test_entropy_verify_chunking_and_request_mapping`; resample deterministic and ragged tests |
 | Narrow draft vocabulary | Existing standard/block vocabulary test, entropy-specific contract test |
-| Recovery probabilities, dtype, residual independence | `test_resample.py`: distribution and `test_entropy_verify_uses_unscaled_recovery` tests |
+| Recovery probabilities, dtype, residual independence | [`test_resample.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py): distribution and `test_entropy_verify_uses_unscaled_recovery` tests |
 | External tensor data, dtype, shape, stride, offset, address; output aliasing | `test_verification_preserves_external_inputs`: seven mode/layout classes |
 | Empty batch and invalid low-level recovery inputs | `test_resample.py`; not a promise of full-wrapper support for malformed input |
 
@@ -140,3 +140,5 @@ sampled, counts = rejection_sample(
 ```
 
 For serving, retain the model's supported proposer configuration, select `rejection_sample_method="standard"`, and add `--additional-config '{"rejection_sampler_config":{"enable_entropy_verify":true,"posterior_threshold":0.95,"posterior_alpha":0.4}}'`. Omit it to retain the default disabled behavior. Tuning changes both acceptance and model quality; benchmark the intended workload before selecting a setting.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample_v2.py).

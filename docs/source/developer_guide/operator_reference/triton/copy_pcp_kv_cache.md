@@ -74,3 +74,5 @@ The NPU tests compare copied rows against an independent PyTorch reference for C
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pcp_kv_cache.py
 pytest -q tests/ut/ops/test_pcp_kv_cache.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pcp_kv_cache.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pcp_kv_cache.py), [`tests/ut/ops/test_pcp_kv_cache.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/ops/test_pcp_kv_cache.py).

@@ -98,3 +98,5 @@ store_indexer_key_scale(
     scale_block_stride=scale.stride(0),
 )
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_hisparse.py), [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py).

@@ -21,6 +21,7 @@ Find an operator by its callable name. Each entry links to the wrapper, a call o
 | [`copy_pcp_kv_cache`](copy_pcp_kv_cache.md) | Gather selected paged KV cache rows into contiguous storage. |
 | [`copy_qsa_fia_output`](copy_qsa_fia_output.md) | Write selected FIA result rows and clear empty rows. |
 | [`dcp_a2a_fused`](dcp_a2a_fused.md) | Exchange partial attention results across context-parallel ranks. |
+| [`fused_add_rms_norm_cast`](fused_add_rms_norm_cast.md) | Fuse optional FP32 residual addition, RMS normalization and BF16 output conversion. |
 | [`fused_dcp_lse_combine`](fused_dcp_lse_combine.md) | Merge rank-local attention outputs using packed log-sum-exp values. |
 | [`fused_eh_norm`](fused_eh_norm.md) | Mask embeddings and normalize two GLM MTP projection inputs. |
 | [`fused_gdn_gating_patch`](fused_gdn_gating_patch.md) | Compute the two gates used in Gated DeltaNet attention. |

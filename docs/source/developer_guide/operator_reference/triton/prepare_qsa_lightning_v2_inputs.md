@@ -73,3 +73,5 @@ Execution of the repository NPU test file remains pending.
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_v2_prepare.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_v2_prepare.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_qsa_lightning_v2_prepare.py).

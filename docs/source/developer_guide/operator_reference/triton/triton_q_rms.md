@@ -25,4 +25,8 @@ BLOCK_M = 1 << (max(raw, 1).bit_length() - 1)   # largest power-of-two <= raw
 
 This replaces the previous hardcoded `row_block_size = 16`, so small hidden dims get larger tiles (fewer loop iterations) and large hidden dims shrink the tile to avoid UB overflow. The UB size is auto-detected at runtime via `get_ub_size_bytes()`; `dim > 2048` raises `NotImplementedError`.
 
-See [batch-invariant RMS normalization](rms_norm.md) for the shared kernel and its tests.
+See [batch-invariant RMS normalization](rms_norm.md) for the batch-invariant entry point.
+
+## Operator test
+
+[`test_triton_q_rms_correctness`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rms_norm.py) compares results across dtypes, input shapes and epsilon values.

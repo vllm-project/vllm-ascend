@@ -40,3 +40,5 @@ The single-card matrix covers R2/4/8, both layouts, D127/496/512/513, BF16/FP16/
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py -k merge
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_dcp.py).

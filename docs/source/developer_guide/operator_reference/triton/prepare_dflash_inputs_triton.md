@@ -203,3 +203,5 @@ prepare_dflash_inputs_triton(
     kv_cache_block_size=128,
 )
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_dflash_inputs.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_prepare_dflash_inputs.py).

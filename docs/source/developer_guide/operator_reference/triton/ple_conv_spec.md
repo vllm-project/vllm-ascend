@@ -51,8 +51,10 @@ Apply speculative PLE convolution from the accepted state.
 
 - CPU unit contract: `pytest -q tests/ut/ops/test_triton_ple_spec.py` checks both kernel launches, grids, SD layouts and strides, weight-copy ownership, token-map routing, optional residual, and argument/shape validation without launching an NPU kernel.
 - NPU operator comparison: `pytest -q --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple_spec.py` compares output and updated state with upstream `ple_conv(mode="spec")` for BF16/FP16, `spec_query_len` 2-4, channel tails, null slots, mapped/unmapped tokens, and optional outer residuals. Output acceptance uses the same mixed tolerance as decode; state writeback is checked exactly. The file passed 12/12 on Ascend 910B3 with bit-exact state.
-- `test_triton_ple.py` additionally covers the model dispatch path and mixed decode/spec/prefill batches. Model-level accuracy, throughput, and recompilation measurements require a baseline and optimized service on equivalent hardware/configuration.
+- [`test_triton_ple.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple.py) additionally covers the model dispatch path and mixed decode/spec/prefill batches. Model-level accuracy, throughput, and recompilation measurements require a baseline and optimized service on equivalent hardware/configuration.
 
 ```bash
 python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple_spec.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple_spec.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple_spec.py), [`tests/ut/ops/test_triton_ple_spec.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/ops/test_triton_ple_spec.py).

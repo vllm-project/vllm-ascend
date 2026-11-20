@@ -215,3 +215,5 @@ must not be described as guaranteed cold compilation. Counts describe the
 measured serving snapshot; source/module renames can invalidate cached artifacts. This tracing used the
 r89 serving adapter with the tested operator; it is not a full latest-main
 framework installation or a completed model performance comparison.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_ple_quant_lookup.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_ple_quant_lookup.py).

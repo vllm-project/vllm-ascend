@@ -80,3 +80,5 @@ The existing NPU suite is in the one-card PR directory. This documentation chang
 pytest -sv tests/e2e/pull_request/one_card/test_turboquant_finalize.py
 pytest -sv tests/ut/quantization/methods/kv_cache/turboquant/test_latent.py
 ```
+
+Test sources: [`tests/e2e/pull_request/one_card/test_turboquant_finalize.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_turboquant_finalize.py), [`tests/ut/quantization/methods/kv_cache/turboquant/test_latent.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/quantization/methods/kv_cache/turboquant/test_latent.py).

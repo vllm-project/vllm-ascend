@@ -50,10 +50,12 @@ Apply the PLE prefill convolution and update request state.
 ## Test Cases
 
 - CPU unit contract: `pytest -q tests/ut/ops/test_triton_ple_prefill.py` checks the convolution and separate writeback launches, SD layout and strides, weight-copy ownership, token-map routing, initial-state flags, and argument/shape validation without launching an NPU kernel.
-- NPU operator comparison: `test_triton_ple.py` compares the Ascend adapter with upstream PLE for FP16/BF16, prefill/decode/spec dispatch, 256- and 8192-token one-request prefill, multi-request boundaries, optional residuals, null state slots, initial-state flags, token mapping, and both contiguous and transposed SD state views. Output acceptance uses `abs(actual - golden) <= atol + rtol * abs(golden)` for at least 99% of elements, plus the dtype-specific maximum absolute error limit: FP16 `atol=rtol=2^-9`, max `0.1`; BF16 `atol=rtol=2^-6`, max `1`. State writeback is checked exactly. FP32 is not covered. The dedicated speculative operator is covered by `test_triton_ple_spec.py` (see `ple_spec.md`).
+- NPU operator comparison: [`test_triton_ple.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple.py) compares the Ascend adapter with upstream PLE for FP16/BF16, prefill/decode/spec dispatch, 256- and 8192-token one-request prefill, multi-request boundaries, optional residuals, null state slots, initial-state flags, token mapping, and both contiguous and transposed SD state views. Output acceptance uses `abs(actual - golden) <= atol + rtol * abs(golden)` for at least 99% of elements, plus the dtype-specific maximum absolute error limit: FP16 `atol=rtol=2^-9`, max `0.1`; BF16 `atol=rtol=2^-6`, max `1`. State writeback is checked exactly. FP32 is not covered. The dedicated speculative operator is covered by `test_triton_ple_spec.py` (see `ple_spec.md`).
 
 ```bash
 python -m pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_triton_ple.py
 ```
 
 The full file passed 6/6 on A3 Ascend910_9382 and A5 Ascend950DT. On Ascend 910B3, the updated SD-layout file passed 7/7 together with the 6/6 decode file and the 12/12 spec file. The PR description contains the operator timing. GPQA model accuracy, model performance, and model-level recompilation evidence are tracked separately there.
+
+Test sources: [`tests/ut/ops/test_triton_ple_prefill.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/ops/test_triton_ple_prefill.py).

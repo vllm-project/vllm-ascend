@@ -39,3 +39,5 @@ Nightly NPU tests cover split views, feature stride two, non-power-of-two widths
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k query_prep
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py).

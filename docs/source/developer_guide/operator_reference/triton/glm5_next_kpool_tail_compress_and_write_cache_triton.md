@@ -71,3 +71,7 @@ is known. `C=R+num_speculative_tokens` prevents those candidates from wrapping
 onto the committed open pool. Rejection then needs only the normal logical
 length rollback: replacement tokens overwrite the rejected positions while the
 historical rows required to recompute a boundary pool remain intact.
+
+## Operator test
+
+[`test_empty_compression_preserves_caches`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_kpool_tail_triton.py) checks that empty compression preserves cache contents.

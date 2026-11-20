@@ -2,7 +2,7 @@
 
 Gather selected KDA cache pages into packed state.
 
-[Implementation of `_kda_state_gather`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py) · [Production caller in kda_state_copy_plan.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py)
+[Implementation of `_kda_state_gather`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py) · [Caller `KDAStateCopyPlan.gather` in kda_state_copy_plan.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/kda_state_copy_plan.py)
 
 ## Calling convention
 
@@ -14,4 +14,4 @@ Supply a bound cache shaped `[N,H,V,K]`, one-dimensional int32 or int64 indices 
 
 ## Validation
 
-[Integration and semantic tests](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py)
+[`test_plan_matches_pr17301_native_operator`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py) compares the prepared plan with native state copy across cache and index dtypes.

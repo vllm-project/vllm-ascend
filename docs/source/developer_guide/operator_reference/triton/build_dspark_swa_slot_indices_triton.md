@@ -66,3 +66,5 @@ Accuracy tests use the real inference shapes of DeepSeek V4.1 DSpark drafting (`
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_swa_indices.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_swa_indices.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dspark_swa_indices.py).

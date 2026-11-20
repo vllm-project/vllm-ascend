@@ -77,3 +77,5 @@ With `positions = [11, 0]`, `window_size = 4`, and `visible_lengths = [2]`,
 the first row is `[10, 11, -1, -1]` with count 2. The second row is padding
 and contains four `-1` entries with count 0. The ordinary window for position
 11 would contain `[8, 9, 10, 11]`.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_build_window_indices.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_build_window_indices.py).

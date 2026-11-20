@@ -97,3 +97,5 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_prep
 
 Model accuracy and performance measurements are recorded in
 [PR #19954](https://github.com/vllm-project/vllm-ascend/pull/19954).
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_prepare.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_gdn_prepare.py).

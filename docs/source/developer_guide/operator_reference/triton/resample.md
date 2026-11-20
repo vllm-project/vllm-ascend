@@ -235,7 +235,7 @@ resample(
 
 ## Test Cases
 
-The focused test replaces the previous Gumbel-specific `test_resample.py` and tests the public categorical `resample()` API rather than launching a private Triton stage directly.
+The focused test replaces the previous Gumbel-specific [`test_resample.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py) and tests the public categorical `resample()` API rather than launching a private Triton stage directly.
 
 It defines no Triton kernel and does not reproduce the operator. Deterministic cases construct exact support; random cases compare empirical frequencies against independent analytic probability vectors.
 

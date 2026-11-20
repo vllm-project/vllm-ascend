@@ -84,3 +84,5 @@ The 8/16-head cases cover 1, 4, 8, 16, 32, 64, 128, 192, 256 and 512 tokens with
 5392 cache blocks. JSON records and JUnit properties include both timings and
 the percentage change; no hardware-independent microsecond threshold is imposed.
 Performance coverage lives in e2e rather than a separate `benchmarks/` script.
+
+Test sources: [`tests/e2e/nightly/single_node/ops/test_minimax_qknorm_rope_cache_performance.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/test_minimax_qknorm_rope_cache_performance.py), [`tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_minimax_qknorm_rope_cache.py).

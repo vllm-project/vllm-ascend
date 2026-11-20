@@ -58,3 +58,5 @@ The test compares the Triton kernel (through its 1:1 wrapper `fused_gdn_gating_p
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py).

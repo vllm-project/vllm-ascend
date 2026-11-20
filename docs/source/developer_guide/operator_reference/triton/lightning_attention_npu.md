@@ -222,7 +222,7 @@ triggers a recompilation.
 
 ## Test Cases
 
-Numerical tests: `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py`
+Numerical tests: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py)
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_lightning_attn.py

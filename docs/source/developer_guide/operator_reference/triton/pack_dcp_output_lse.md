@@ -51,3 +51,5 @@ The single-card nightly test compares packed output bit-exactly with the expecte
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py), [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py).

@@ -144,3 +144,5 @@ GQA and partial-RoPE cases, token counts from 0 to 4096, both
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_qknorm_rope.py
 ```
+
+Test sources: [`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_qknorm_rope.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_step5_fused_qknorm_rope.py).

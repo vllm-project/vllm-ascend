@@ -52,3 +52,7 @@ Select KeyPools and expand them into causal token indices.
 - **Origin**: Developed for GLM-5.3-Flash pooled-key selection.
 - **Differences**: Retains device `torch.topk`, with request lookup, paged scoring, and final index expansion implemented in Triton. Larger token batches reuse each head-weighted query across several pool tiles; small batches expose more pool-level parallelism. Contiguous pool-ID reads avoid repeatedly gathering each ID for all tokens in its pool. Larger batches also expand output indices in wider blocks. The model no longer needs separate tail scatter, padding-mask, buffer fill, and copy operations.
 - **Tiling**: Packed scoring and paged gathering use 128-pool tiles to bound local-memory usage for FP32 multiplication and reduction. Index expansion uses 256-column blocks below 512 token rows and 4096-column blocks for larger chunks.
+
+## Operator test
+
+[`test_pool_selection_real_shape_paging_and_causal_tail`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_pool_key_indexer_triton.py) covers paged pool selection and the causal tail.
