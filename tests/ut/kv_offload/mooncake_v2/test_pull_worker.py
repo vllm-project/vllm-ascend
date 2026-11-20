@@ -1555,18 +1555,19 @@ def test_circular_transfer_rejects_equal_size_different_layout(local_shape, remo
     assert not src and not dst and not lengths
 
 
-def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
+@pytest.mark.parametrize("strides", [[128, 128], [256, 256], [128, 256]])
+def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers(strides) -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     thread = make_thread(
         layer_names=["layer.0", "layer.1"],
         kv_cache_specs=[spec],
         kv_caches_base_addr=[[1000], [2000]],
-        block_strides=[[128], [128]],
+        block_strides=[[stride] for stride in strides],
         block_lens=[[128], [128]],
     )
     remote = make_pp_metadata(
         layer_names=["layer.0", "layer.1"],
-        block_strides=[[128], [128]],
+        block_strides=[[stride] for stride in strides],
         block_lens=[[128], [128]],
         tp_base_addrs={0: [[5000], [6000]]},
     )
@@ -1579,9 +1580,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     lengths: list[int] = []
 
     with patch.object(
-        pull_worker,
-        "group_concurrent_contiguous",
-        wraps=group_concurrent_contiguous,
+        thread,
+        "_prepare_block_transfer_runs",
+        wraps=thread._prepare_block_transfer_runs,
     ) as mock_group:
         thread._append_spec_transfer_addresses(
             0,
@@ -1597,12 +1598,20 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
             lengths,
         )
 
-    assert mock_group.call_count == 2
-    mock_group.assert_any_call([1, 2], [3, 4])
-    mock_group.assert_any_call([3, 5], [5, 8])
-    assert src == [1128, 1384, 1640, 2128, 2384, 2640]
-    assert dst == [5384, 5640, 6024, 6384, 6640, 7024]
-    assert lengths == [256, 128, 128, 256, 128, 128]
+    modes = {stride == 128 for stride in strides}
+    assert mock_group.call_count == 2 * len(modes)
+    for coalesce in modes:
+        mock_group.assert_any_call([1, 2], [3, 4], coalesce)
+        mock_group.assert_any_call([3, 5], [5, 8], coalesce)
+    expected_src, expected_dst, expected_lengths = [], [], []
+    for layer, stride in enumerate(strides):
+        local_ids, remote_ids, sizes = (
+            ([1, 3, 5], [3, 5, 8], [256, 128, 128]) if stride == 128 else ([1, 2, 3, 5], [3, 4, 5, 8], [128] * 4)
+        )
+        expected_src.extend(1000 * (layer + 1) + block * stride for block in local_ids)
+        expected_dst.extend(5000 + 1000 * layer + block * stride for block in remote_ids)
+        expected_lengths.extend(sizes)
+    assert (src, dst, lengths) == (expected_src, expected_dst, expected_lengths)
 
 
 @pytest.mark.parametrize("remote_pcp", [False, True])
@@ -2494,3 +2503,39 @@ def test_transfer_bucket_caches_remote_interleave_separately() -> None:
     calls = thread._compute_group_block_ids.call_args_list
     assert len(calls) == 2
     assert [call.args[16] for call in calls] == [8, 16]
+
+
+@pytest.mark.parametrize("coalesce", [False, True])
+@pytest.mark.parametrize(
+    "local_ids,remote_ids", [([], []), ([7], [3]), ([1, 2, 5, 6], [4, 5, 9, 11]), ([8, 3, 4], [2, 7, 8])]
+)
+def test_vector_addresses_match_scalar_ranges(local_ids, remote_ids, coalesce):
+    thread = make_thread()
+    local_base, remote_base = 2**63 + 1024, 2**63 + 4096
+    local_stride, remote_stride, size = (128, 128, 128) if coalesce else (256, 384, 64)
+    groups = (
+        group_concurrent_contiguous(local_ids, remote_ids)
+        if coalesce
+        else ([[block] for block in local_ids], [[block] for block in remote_ids])
+    )
+    expected = (
+        [local_base + group[0] * local_stride + 16 for group in groups[0]],
+        [remote_base + group[0] * remote_stride + 32 for group in groups[1]],
+        [len(group) * size for group in groups[0]],
+    )
+    src, dst, lengths = [], [], []
+    thread._append_block_transfer_addresses(
+        thread._prepare_block_transfer_runs(local_ids, remote_ids, coalesce),
+        local_base,
+        remote_base,
+        local_stride,
+        remote_stride,
+        size,
+        src,
+        dst,
+        lengths,
+        16,
+        32,
+    )
+    assert (src, dst, lengths) == expected
+    assert all(type(value) is int for column in (src, dst, lengths) for value in column)
