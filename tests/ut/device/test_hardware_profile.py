@@ -57,6 +57,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.ENGRAM_UNROTATED_GATE,
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
@@ -65,6 +66,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
+        HardwareCapability.ENGRAM_UNROTATED_GATE,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,

@@ -384,6 +384,7 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
+    HardwareCapability.ENGRAM_UNROTATED_GATE,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
@@ -414,6 +415,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {
+                HardwareCapability.ENGRAM_UNROTATED_GATE,
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
                 HardwareCapability.RMS_NORM_CAST,
