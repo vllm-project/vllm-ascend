@@ -1317,10 +1317,7 @@ guide_sections:
 
     #### Single-host PD configurations
 
-    A3 uses devices 0–7 for Prefill and 8–15 for Decode. The A3 tutorial sets
-    `--shm-size=128g` in Sections 4.1 and 4.3. Check `df -h /dev/shm` inside the
-    container while both roles are running under the target workload. Budget host
-    memory for MemCache DRAM and UBS IO separately when using pooling.
+    A3 uses devices 0–7 for Prefill and 8–15 for Decode with 128g of container shared memory.
     950DT uses devices 0–3 for Prefill and 4–7 for Decode with 500g of container shared memory.
     Open a topology in the table to select the hardware, quantized checkpoint, worker and workload.
     To select them manually, choose **Tensor Parallel**, the **Prefill** or **Decode** worker preset,
