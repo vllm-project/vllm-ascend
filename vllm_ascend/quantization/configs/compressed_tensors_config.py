@@ -126,14 +126,15 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
                 target_scheme_map[target]["format"] = quant_config.get("format")
                 format = target_scheme_map[target].get("format")
                 # If no per-config format defined, use global format in config
-                effective_format = format if format is not None else quant_format
-                act_quant_format = is_activation_quantization_format(effective_format)
-                # Packed MXFP4 can declare activations; preserve them for scheme validation.
-                mxfp4_format = effective_format == CompressionFormat.mxfp4_pack_quantized.value
+                act_quant_format = (
+                    is_activation_quantization_format(format)
+                    if format is not None
+                    else is_activation_quantization_format(quant_format)
+                )
                 mixed_precision_format = quant_format == CompressionFormat.mixed_precision.value
 
                 input_activations = quant_config.get("input_activations")
-                if (act_quant_format or mixed_precision_format or mxfp4_format) and input_activations is not None:
+                if (act_quant_format or mixed_precision_format) and input_activations is not None:
                     target_scheme_map[target]["input_activations"] = QuantizationArgs.model_validate(input_activations)
         return target_scheme_map
 
