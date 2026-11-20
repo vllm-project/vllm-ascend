@@ -170,7 +170,9 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt)
+        signature = generation_signature(
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+        )
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
@@ -198,7 +200,9 @@ def _quadrant_png_data_url(size: int = 384) -> str:
 IMAGE_DATA_URL = _quadrant_png_data_url()
 
 
-def generation_signature(client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False) -> list[tuple[str, tuple[float, ...]]]:
+def generation_signature(
+    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False
+) -> list[tuple[str, tuple[float, ...]]]:
     """Capture deterministic text and logprobs for exact reload comparison.
 
     ``image_prompt`` appends one chat request carrying an image for multimodal
@@ -285,7 +289,9 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt)
+        dummy_signature = generation_signature(
+            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
+        )
         yield server, reference, dummy_signature
 
 
