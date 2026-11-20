@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from vllm_ascend.ops.gbsa import generic_block_sparse_attention_metadata
+from vllm_ascend.ops.triton.linearnorm.qsa_rope_utils import prepare_qsa_rope_cache
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
 
@@ -188,19 +189,23 @@ class Qwen4ExpPreparedInputAdapter:
                 else:
                     layer._qsa_prepared_cos_sin = prepared
                 continue
-            safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-            gathered = cache[safe_positions]
             target_dtype = layer.q_norm.weight.dtype
-            if gathered.device != layer.q_norm.weight.device:
-                gathered = gathered.to(layer.q_norm.weight.device)
-            if gathered.dtype != target_dtype:
-                gathered = gathered.to(target_dtype)
-            key = (cache.data_ptr(), tuple(gathered.shape), gathered.dtype, gathered.device)
+            target_device = layer.q_norm.weight.device
+            prepared_shape = (*positions.shape, cache.shape[-1])
+            key = (cache.data_ptr(), prepared_shape, target_dtype, target_device)
             buffer = self._rope_buffers.get(key)
             if buffer is None:
-                buffer = torch.empty_like(gathered)
+                buffer = torch.empty(prepared_shape, dtype=target_dtype, device=target_device)
                 self._rope_buffers[key] = buffer
-            buffer.copy_(gathered)
+            if positions.device.type == "npu" and positions.device == cache.device == buffer.device:
+                prepare_qsa_rope_cache(positions, cache, buffer)
+            else:
+                # CPU tests and cross-device configurations retain the portable
+                # fallback; the NPU hot path writes the persistent buffer in one
+                # Triton launch without intermediate clamp/index/copy tensors.
+                safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+                gathered = cache[safe_positions].to(device=target_device, dtype=target_dtype)
+                buffer.copy_(gathered)
             if isinstance(layer.rotary_emb, _Qwen4ExpPreparedRotaryEmbedding):
                 layer.rotary_emb.set_prepared_cos_sin(buffer)
             else:
