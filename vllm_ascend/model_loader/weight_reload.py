@@ -10,7 +10,6 @@ import torch
 import torch_npu
 from vllm.model_executor.model_loader.reload import direct as vllm_direct
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
-from vllm.model_executor.utils import storage_view
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, _should_trans_nz
 
@@ -111,47 +110,29 @@ def refill_nz_weight(layer, name, *, force: bool = True):
 def checkpoint_views(
     model: torch.nn.Module,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """(tensor, view of its storage in its checkpoint layout) for every
-    tensor post-load processing re-laid out; raises if a storage cannot
-    hold its checkpoint layout."""
-    if not any(getattr(t, "_direct_reload_staging", None) is not None for _, t in vllm_direct.loadable_tensors(model)):
-        return _UPSTREAM_CHECKPOINT_VIEWS(model)
+    """Use Ascend staging for NZ tensors and upstream planning for ND tensors."""
     views: list[tuple[torch.Tensor, torch.Tensor]] = []
+    nd_tensors = {}
     for name, t in vllm_direct.loadable_tensors(model):
-        ckpt = getattr(t, "_ckpt", None)
-        if ckpt is None:
-            continue  # no layout: created by post-load processing, derived
         staging = getattr(t, "_direct_reload_staging", None)
-        if staging is not None:
-            # A hardware plugin may retain a physical-format graph allocation
-            # and provide separate checkpoint-layout storage for its loaders.
-            # Never build a logical ND view over an opaque physical format.
-            if ckpt[0] is not model._ckpt_owner:
-                raise RuntimeError(f"direct reload: {name} staging belongs to another model")
-            if vllm_direct._layout(staging) != ckpt[1] or staging.device != t.device:
-                raise RuntimeError(f"direct reload: {name} has incompatible checkpoint staging")
-            views.append((t, staging))
+        if staging is None:
+            nd_tensors[name] = t
             continue
-        if vllm_direct._layout(t) == ckpt[1]:
-            continue
+        ckpt = t._ckpt
         if ckpt[0] is not model._ckpt_owner:
-            # Preserve upstream ownership checks for parameters shared with
-            # another model; this transaction may not reprocess their bytes.
-            raise RuntimeError(
-                f"direct reload: {name} is shared from another model and its post-load processing changed its layout"
-            )
-        shape, stride, dtype, offset = ckpt[1]
-        storage = t.untyped_storage()
-        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
-            offset = t.storage_offset()
-        span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
-        need = (offset + span) * dtype.itemsize
-        if need > storage.nbytes():
-            raise RuntimeError(
-                f"direct reload: {name} storage has {storage.nbytes()} bytes, its checkpoint layout needs {need}"
-            )
-        views.append((t, storage_view(storage, offset, shape, stride, dtype)))
-    return views
+            raise RuntimeError(f"direct reload: {name} staging belongs to another model")
+        if vllm_direct._layout(staging) != ckpt[1] or staging.device != t.device:
+            raise RuntimeError(f"direct reload: {name} has incompatible checkpoint staging")
+        views.append((t, staging))
+    if not views:
+        return _UPSTREAM_CHECKPOINT_VIEWS(model)
+    # A read-only planning container: keep original names, objects and owner,
+    # but exclude NZ tensors whose physical storage cannot be viewed as ND.
+    # Persistent buffers are included too; upstream only reads these tensors.
+    nd_model = torch.nn.Module()
+    nd_model._ckpt_owner = model._ckpt_owner
+    nd_model._buffers.update(nd_tensors)
+    return _UPSTREAM_CHECKPOINT_VIEWS(nd_model) + views
 
 
 def install_direct_reload_patch():

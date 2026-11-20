@@ -10,6 +10,7 @@ import torch
 import torch_npu
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
+from vllm.model_executor.model_loader.reload.direct import record_checkpoint_layout
 from vllm.model_executor.model_loader.reload.layerwise import record_metadata_for_reloading
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -136,6 +137,65 @@ def _runtime(layer):
     for name in ("w13_weight_list", "w2_weight_list"):
         tensors.update({f"{name}.{index}": value for index, value in enumerate(getattr(layer, name, ()))})
     return tensors
+
+
+def _mixed_checkpoint_model():
+    model = torch.nn.Module()
+    model.dense = torch.nn.Module()
+    model.dense.weight = torch.nn.Parameter(torch.arange(6, dtype=torch.bfloat16).reshape(2, 3))
+    model.dense.register_buffer("persistent", torch.arange(6, dtype=torch.bfloat16).reshape(2, 3))
+    model.dense.register_buffer("scratch", torch.ones(1), persistent=False)
+    model.alias = model.dense
+    model.nz = torch.nn.Module()
+    model.nz.weight = torch.nn.Parameter(torch.ones(2, 3, dtype=torch.bfloat16))
+    record_checkpoint_layout(model)
+    model.dense.weight.data = model.dense.weight.data.T
+    model.dense.persistent.data = model.dense.persistent.data.T
+    model.nz.weight.data = model.nz.weight.data.T
+    model.nz.weight._direct_reload_staging = torch.zeros(2, 3, dtype=torch.bfloat16)
+    return model
+
+
+def test_mixed_checkpoint_views_preserve_nd_buffers_and_nz_staging(config):
+    model = _mixed_checkpoint_model()
+    staging = model.nz.weight._direct_reload_staging
+    with torch.no_grad():
+        start_reload(model)
+    expected = torch.arange(6, dtype=torch.bfloat16).reshape(2, 3)
+    assert torch.equal(model.dense.weight, expected)
+    assert torch.equal(model.dense.persistent, expected)
+    assert model.alias.weight is model.dense.weight
+    assert model.nz.weight.data_ptr() == staging.data_ptr()
+    assert torch.equal(model.nz.weight, staging)
+    assert model.dense.scratch.shape == (1,)
+
+
+@pytest.mark.parametrize(
+    "invalid,match",
+    [
+        ("nd_owner", "dense.weight is shared from another model"),
+        ("nd_capacity", "dense.weight storage has"),
+        ("nz_owner", "nz.weight staging belongs to another model"),
+        ("nz_layout", "nz.weight has incompatible checkpoint staging"),
+    ],
+)
+def test_mixed_checkpoint_validation_precedes_all_rebinding(config, invalid, match):
+    model = _mixed_checkpoint_model()
+    parameter = model.dense.weight if invalid.startswith("nd_") else model.nz.weight
+    if invalid.endswith("owner"):
+        parameter._ckpt = (object(), *parameter._ckpt[1:])
+    elif invalid == "nd_capacity":
+        parameter.data = torch.zeros(1, dtype=torch.bfloat16)
+    else:
+        parameter._direct_reload_staging = torch.zeros(1, dtype=torch.bfloat16)
+    before = {name: (tensor.data_ptr(), tensor.clone()) for name, tensor in _runtime(model).items()}
+    with pytest.raises(RuntimeError, match=match), torch.no_grad():
+        start_reload(model)
+    assert not getattr(model, "_direct_reload_begun", False)
+    for name, tensor in _runtime(model).items():
+        pointer, value = before[name]
+        assert tensor.data_ptr() == pointer
+        assert torch.equal(tensor, value)
 
 
 @pytest.mark.parametrize("layout", ["dense-nd", "dense-wo-a", "moe-nd", "moe-nz", "moe-list", "kpool-bf16"])
