@@ -615,19 +615,12 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 
 
-@pytest.mark.parametrize("draft", [False, True])
-def test_external_dcp_graph_skips_fia_parameter_updates(draft):
-    metadata = {"flash": SimpleNamespace(decode=object(), external_flashmla=object())}
-    scope = {
-        "_EXTRA_CTX": SimpleNamespace(is_draft_model=draft, is_draft_model_prefill=False),
-        "get_graph_params": lambda: object(),
-        "get_draft_graph_params": lambda: object(),
-    }
+def test_dcp_rejects_legacy_graph_parameter_updates():
     update = load_method(
-        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", scope
+        "vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", "update_graph_params", {}
     )
-    # No torch.npu stream or FIA graph registry access is possible in this scope.
-    update(None, SimpleNamespace(attn_metadata=metadata), 4, draft_attn_metadatas=[metadata])
+    with pytest.raises(NotImplementedError, match="UpdatableGraph"):
+        update(None, None, 4)
 
 
 @pytest.mark.parametrize("bad_lse", ["layout", "dtype"])

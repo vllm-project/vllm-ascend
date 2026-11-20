@@ -2012,7 +2012,13 @@ def use_updatable_graph(
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    if attn_backend is None:
+        return False
+    if issubclass(attn_backend, AscendAttentionBackend):
+        return True
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    return issubclass(attn_backend, AscendMLABackend)
 
 
 def _is_glm_model(model_config) -> bool:
