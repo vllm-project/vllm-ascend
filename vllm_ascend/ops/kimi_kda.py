@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -452,7 +453,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         q_hidden = owner
         gather_work = None
         if layout.group is not None:
-            q_hidden, gather_work = all_gather_async(owner, layout.group)
+            if get_mrv2_in_profile_run():
+                # Use the coordinator's synchronous gather during memory profiling.
+                q_hidden = layout.group.all_gather(owner, dim=0)
+            else:
+                q_hidden, gather_work = all_gather_async(owner, layout.group)
         forget = self.f_b_proj(self.f_a_proj(owner)[0])[0]
         if gather_work is not None:
             gather_work.wait()

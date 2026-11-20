@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 import vllm_ascend.ops.kimi_kda as projection_module
+from vllm_ascend.ascend_forward_context import override_mrv2_in_profile_run
 from vllm_ascend.models.glm5next import kda_input_projection_tp as common_projection
 from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
 from vllm_ascend.ops.kimi_kda import (
@@ -807,7 +808,8 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
 @pytest.mark.parametrize("groups", ["shared", "distinct", "qkv_only", "gate_only"])
 @pytest.mark.parametrize("mode", ["decode", "verify", "mixed", "idle", "no_metadata"])
 @pytest.mark.parametrize("comm_mode", ["CCU_SCHED", "AIV", "AIV_ONLY"])
-def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode):
+@pytest.mark.parametrize("in_profile_run", [False, True])
+def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode, in_profile_run):
     """Trace stream submissions through the real KDA dispatch, including owners with no recurrent work."""
     trace = []
     main, aux = MagicMock(), MagicMock()
@@ -966,9 +968,13 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode):
     layer._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(layer)
     hidden = torch.ones((0 if mode == "idle" else 2, 4))
     layer._forward_local_tp = AscendKimiK3DeltaAttention._forward_local_tp.__get__(layer)
-    output = AscendKimiK3DeltaAttention.forward(layer, hidden, torch.arange(len(hidden)))
-    assert trace.count(("AG", "main")) == int(g_group is not None and g_group is not q_group)
-    assert trace.count(("AG_submit", "main")) == int(q_group is not None)
+    with override_mrv2_in_profile_run(in_profile_run):
+        output = AscendKimiK3DeltaAttention.forward(layer, hidden, torch.arange(len(hidden)))
+    sync_qkv_gather = q_group is not None and in_profile_run
+    sync_gate_gather = g_group is not None and g_group is not q_group
+    assert trace.count(("AG", "main")) == int(sync_qkv_gather) + int(sync_gate_gather)
+    assert trace.count(("AG_submit", "main")) == int(q_group is not None and not in_profile_run)
+    assert trace.count(("AG_wait", "main")) == int(q_group is not None and not in_profile_run)
     qkv_exchange_stream = "aux" if comm_mode == "CCU_SCHED" else "main"
     assert trace.count(("QKV_A2A", qkv_exchange_stream)) == int(q_group is not None)
     assert trace.count(("G_A2A", "aux")) == int(g_group is not None)
@@ -985,13 +991,16 @@ def test_local_tp_projection_stream_order(monkeypatch, groups, mode, comm_mode):
     if q_group is not None:
         qkv_exchange_index = trace.index(("QKV_A2A", qkv_exchange_stream))
         assert gate_index < qkv_exchange_index
-        assert (
-            trace.index(("AG_submit", "main"))
-            < trace.index(("F_a", "main"))
-            < trace.index(("F_b", "main"))
-            < trace.index(("AG_wait", "main"))
-            < trace.index(("beta", "aux"))
-        )
+        if in_profile_run:
+            assert trace.index(("AG", "main")) < trace.index(("F_a", "main"))
+        else:
+            assert (
+                trace.index(("AG_submit", "main"))
+                < trace.index(("F_a", "main"))
+                < trace.index(("F_b", "main"))
+                < trace.index(("AG_wait", "main"))
+                < trace.index(("beta", "aux"))
+            )
         if comm_mode == "CCU_SCHED":
             assert trace.index(("pack_ready", "main")) < gate_index < trace.index(("wait_pack", "aux"))
             assert trace[qkv_exchange_index + 1] == ("join", "main")
