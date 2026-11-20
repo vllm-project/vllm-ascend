@@ -100,7 +100,7 @@ def test_fia_passes_gqa_heads_causal_mask_and_zeroes_empty_rows(implementation):
 @pytest.mark.parametrize("groups", [31, 128, 511, 512])
 @pytest.mark.parametrize("tail", range(4))
 @pytest.mark.parametrize("holes", [False, True])
-def test_fia_mask_matches_latest_gbsa_explicit_tail_policy(implementation, groups, tail, holes):
+def test_fia_mask_preserves_full_groups_and_implicit_tail(implementation, groups, tail, holes):
     from tests.ut.models.qwen4_exp.gbsa_reference import reference_prepare
 
     visible = 4096 + tail
@@ -120,6 +120,7 @@ def test_fia_mask_matches_latest_gbsa_explicit_tail_policy(implementation, group
     expected = torch.zeros(visible, dtype=torch.bool)
     for group in packed[0, 0, : counts[0, 0]].tolist():
         expected[group * 4 : min(group * 4 + 4, visible)] = True
+    expected[visible // 4 * 4 : visible] = True
     selected = implementation["expand_qsa_selected_tokens"](indices, lengths)
     actual = implementation["build_selected_token_mask"](selected[None], lengths[None], visible)
     torch.testing.assert_close(actual[0, 0, 0], expected)
@@ -374,3 +375,96 @@ def test_fia_helper_tiles_mask_memory_for_eligible_prefill(implementation):
         torch.empty_like(query),
     )
     assert [c["query"].shape[1] for c in calls] == [2, 2, 1]
+
+
+@pytest.mark.parametrize(
+    "visible",
+    [
+        2047,
+        2048,
+        2049,
+        2050,
+        2051,
+        2052,
+        2053,
+        32768,
+        32769,
+        32770,
+        32771,
+        32772,
+        131072,
+        131073,
+        131074,
+        131075,
+        131076,
+    ],
+)
+@pytest.mark.parametrize("valid_groups", [0, 1, 31, 511, 512])
+def test_gbsa_fia_selected_ranges_at_top512_boundary(implementation, visible, valid_groups):
+    from tests.ut.models.qwen4_exp.test_gbsa_preparation import _Kernel, _Language, load_cpu_preparation
+
+    # The oracle comes from the selected full-group IDs, not GBSA's reference
+    # implementation. Unused lanes and the packed tail slots are poisoned.
+    full = visible // 4
+    count = min(full, valid_groups)
+    compact = torch.full((1, 515), -1, dtype=torch.int32)
+    chosen = torch.linspace(0, max(full - 1, 0), max(count, 1)).long()[:count].flip(0).int()
+    compact[0, :count] = chosen
+    compact[0, count:512:3] = full + 7
+    compact[0, 512:] = 999999
+    lengths = torch.tensor([visible], dtype=torch.int32)
+    packed, counts, effective, *_ = load_cpu_preparation()(
+        compact, lengths - 1, lengths, torch.tensor([0]), torch.zeros((1, (visible + 127) // 128), dtype=torch.int32), 2
+    )
+    assert packed.shape == (2, 1, 512)
+    assert counts.tolist() == [[count], [count]]
+    assert effective.tolist() == [visible]
+    assert packed[0, 0, :count].tolist() == chosen.tolist()
+    expected = torch.zeros(visible, dtype=torch.bool)
+    for group in chosen.tolist():
+        expected[group * 4 : group * 4 + 4] = True
+    expected[full * 4 : visible] = True
+    selected = implementation["expand_qsa_selected_tokens"](compact, lengths)
+    mask = implementation["build_selected_token_mask"](selected[None], lengths[None], visible)
+    torch.testing.assert_close(mask[0, 0, 0], expected)
+
+    # Execute the production Triton FIA mask-preparation body on CPU too.
+    source = MODEL_DIR.parents[1] / "ops/triton/qwen4_exp/fia.py"
+    module = ast.parse(source.read_text())
+    node = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_prepare_qsa_mask_words_kernel")
+    node.decorator_list = []
+    module.body = [node]
+    language = _Language()
+    namespace = {"tl": language}
+    exec(compile(module, str(source), "exec"), namespace)
+    kernel = _Kernel(namespace[node.name], language)
+    words = (visible + 31) // 32 * 8
+    width = 520
+    targets = torch.empty((1, width), dtype=torch.int64)
+    updates = torch.empty((1, width), dtype=torch.int32)
+    has_selection = torch.empty(1, dtype=torch.bool)
+    kernel[(1,)](
+        compact,
+        lengths,
+        targets,
+        updates,
+        has_selection,
+        *compact.stride(),
+        targets.stride(0),
+        updates.stride(0),
+        kv_length=visible,
+        mask_words=words,
+        update_width=width,
+        GROUPS=512,
+        BLOCK=1024,
+        num_warps=1,
+    )
+    storage = torch.full((1, words + width), 0x01010101, dtype=torch.int32)
+    storage.scatter_(1, targets, updates)
+    allowed = ~storage[:, :words].contiguous().view(torch.bool)[0, :visible]
+    if not expected.any():
+        # The kernel enables a safe dummy token, then zeros the attention output.
+        assert not has_selection.item()
+        allowed[0] = False
+    torch.testing.assert_close(allowed, expected)
+    assert allowed.sum().item() == count * 4 + visible % 4
