@@ -4,7 +4,7 @@
 import math
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from vllm_ascend.models.qwen4_exp.quantization import (
     C8_QUANT_MAX,
@@ -74,6 +74,89 @@ def quantize_qsa_query(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
         SCALE_MIN=C8_SCALE_MIN,
     )
     return codes, scales
+
+
+@triton.jit
+def _prepare_qli_metadata_inputs_kernel(
+    block_table,
+    token_to_req,
+    query_positions,
+    sequence_lengths,
+    cu_query,
+    visible_groups,
+    row_table,
+    rows,
+    num_requests,
+    table_width,
+    table_row_stride,
+    table_column_stride,
+    request_stride,
+    position_stride,
+    length_stride,
+    TABLE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+):
+    row = tl.program_id(0)
+    request = tl.load(token_to_req + row * request_stride).to(tl.int64)
+    # Torch indexing wraps negative in-range request IDs.
+    request = tl.where(request < 0, request + num_requests, request)
+    position = tl.load(query_positions + row * position_stride)
+    length = tl.load(sequence_lengths + request * length_stride)
+    # Triton signed division truncates toward zero. Match torch floor division.
+    compressed_length = tl.where(length >= 0, length // COMPRESS_RATIO, (length + 1) // COMPRESS_RATIO - 1)
+    visible = tl.minimum(tl.maximum(position + 1, 0) // COMPRESS_RATIO, compressed_length)
+    tl.store(visible_groups + row, visible.to(tl.int32))
+    tl.store(cu_query + row, row)
+    if row == 0:
+        tl.store(cu_query + rows, rows)
+    columns = tl.arange(0, TABLE_BLOCK)
+    pages = tl.load(
+        block_table + request * table_row_stride + columns * table_column_stride, columns < table_width, other=0
+    )
+    tl.store(row_table + row * table_width + columns, pages, columns < table_width)
+
+
+def prepare_qli_metadata_inputs(
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    compress_ratio: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build the independent query rows consumed by the C8 QLI v2 TND ABI."""
+    rows = query_positions.shape[0]
+    if query_positions.device.type != "npu" or not HAS_TRITON or not rows:
+        requests = token_to_req.long()
+        visible = torch.minimum(
+            (query_positions + 1).clamp_min(0).floor_divide(compress_ratio),
+            sequence_lengths[requests].floor_divide(compress_ratio),
+        ).to(torch.int32)
+        cu_query = torch.arange(rows + 1, dtype=torch.int32, device=query_positions.device)
+        return cu_query, visible, block_table[requests].contiguous()
+    table_width = block_table.shape[1]
+    cu_query = torch.empty((rows + 1,), dtype=torch.int32, device=query_positions.device)
+    visible = torch.empty((rows,), dtype=torch.int32, device=query_positions.device)
+    row_table = torch.empty((rows, table_width), dtype=block_table.dtype, device=block_table.device)
+    _prepare_qli_metadata_inputs_kernel[(rows,)](
+        block_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        cu_query,
+        visible,
+        row_table,
+        rows,
+        block_table.shape[0],
+        table_width,
+        *block_table.stride(),
+        token_to_req.stride(0),
+        query_positions.stride(0),
+        sequence_lengths.stride(0),
+        TABLE_BLOCK=triton.next_power_of_2(table_width),
+        COMPRESS_RATIO=compress_ratio,
+        num_warps=1,
+    )
+    return cu_query, visible, row_table
 
 
 @triton.jit

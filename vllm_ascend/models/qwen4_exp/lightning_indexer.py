@@ -15,7 +15,7 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
-from vllm_ascend.ops.triton.qwen4_exp.c8 import QLI_V2_QUERY_HEADS, prepare_qli_query
+from vllm_ascend.ops.triton.qwen4_exp.c8 import QLI_V2_QUERY_HEADS, prepare_qli_metadata_inputs, prepare_qli_query
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 from .quantization import qsa_c8_indexer_cache_views
@@ -186,12 +186,9 @@ def _prepare_quantized_indexer_metadata(
         if cached is not None:
             return cached
     rows = query_positions.shape[0]
-    requests = token_to_req.long()
-    visible_groups = torch.minimum(
-        (query_positions + 1).clamp_min(0).floor_divide(compress_ratio),
-        sequence_lengths[requests].floor_divide(compress_ratio),
-    ).to(torch.int32)
-    cu_query = torch.arange(rows + 1, dtype=torch.int32, device=query_positions.device)
+    cu_query, visible_groups, row_table = prepare_qli_metadata_inputs(
+        block_table, token_to_req, query_positions, sequence_lengths, compress_ratio
+    )
     metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
         num_heads_q=QLI_V2_QUERY_HEADS,
         num_heads_k=1,
@@ -208,7 +205,7 @@ def _prepare_quantized_indexer_metadata(
         mask_mode=0,
         cmp_ratio=1,
     )
-    inputs = cu_query, visible_groups, block_table[requests].contiguous(), metadata
+    inputs = cu_query, visible_groups, row_table, metadata
     if cache is not None:
         cache[cache_key] = inputs
     return inputs

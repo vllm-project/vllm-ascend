@@ -22,6 +22,7 @@ from vllm_ascend.models.qwen4_exp.quantization import (  # noqa: E402
     quantize_qsa_values,
 )
 from vllm_ascend.ops.triton.qwen4_exp.c8 import (  # noqa: E402
+    prepare_qli_metadata_inputs,
     prepare_qli_query,
     quantize_qsa_query,
     store_qsa_c8_rows,
@@ -184,6 +185,40 @@ def test_c8_prefill_grouped_attention_matches_independent_rows(rows, length):
         )
 
     torch.testing.assert_close(run(length), run(None), rtol=0, atol=0)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("width", [1, 509, 1024])
+def test_c8_qli_metadata_preparation_capture_tracks_replay_inputs(width):
+    block_table = torch.arange(4 * width * 2, dtype=torch.int32, device="npu").view(4, -1)[:, ::2]
+    query_positions = torch.tensor([-1, 1, 3, 15, 131, 65535], device="npu", dtype=torch.int64)
+    request_ids = torch.tensor([0, 2, 1, 2, -1, 3], device="npu", dtype=torch.int32)
+    lengths = torch.tensor([0, 3, 21, 65533], device="npu", dtype=torch.int32)
+
+    def check(results):
+        owners = request_ids.cpu().long()
+        expected = (
+            torch.arange(7, dtype=torch.int32),
+            torch.minimum((query_positions.cpu() + 1).clamp_min(0) // 4, lengths.cpu()[owners] // 4).int(),
+            block_table.cpu()[owners].contiguous(),
+        )
+        for actual, reference in zip(results, expected, strict=True):
+            assert actual.is_contiguous()
+            torch.testing.assert_close(actual.cpu(), reference, rtol=0, atol=0)
+
+    def prepare():
+        return prepare_qli_metadata_inputs(block_table, request_ids, query_positions, lengths, 4)
+
+    check(prepare())
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = prepare()
+    request_ids.copy_(torch.tensor([1, 0, 2, 3, 2, -2], dtype=torch.int32, device="npu"))
+    lengths.add_(13)
+    query_positions.sub_(7)
+    block_table.add_(4)
+    graph.replay()
+    check(captured)
 
 
 @torch.inference_mode()
