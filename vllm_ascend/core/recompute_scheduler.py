@@ -440,9 +440,8 @@ class RecomputeScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
                     logger.debug(
-                        "[PD-RECOMPUTE] try to preempt or recompute: "
-                        "request_id=%s, preempted_req_id=%s, step=%d",
-                        request_id,
+                        "[PD-RECOMPUTE] Try to preempt or recompute: "
+                        "preempted_req_id=%s, step=%d",
                         preempted_req.request_id,
                         self.current_step,
                     )
