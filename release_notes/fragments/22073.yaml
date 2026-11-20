@@ -1,0 +1,10 @@
+pr: 22073
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the balance scheduling and dynamic load balancing schedulers
+      silently skipping the running requests that follow a preempted request
+      when the `priority` scheduling policy is used. The preemption victim is
+      now removed by index and the scheduling cursor is moved back with it,
+      so the remaining requests are still scheduled in the same step instead
+      of holding their KV blocks without producing a token.

@@ -1184,6 +1184,46 @@ def test_balance_allocation_retry_waits_for_fence_then_succeeds(policy, failed_c
         assert tail.request_id in resumed.num_scheduled_tokens
 
 
+# ---------------------------------------------------------------------------
+# PRIORITY preemption must not skip the rest of the running queue
+# ---------------------------------------------------------------------------
+# The copied schedule() removes the preemption victim from ``self.running``.
+# When the victim sits before the loop cursor, every request behind it shifts
+# one slot to the left, so the cursor has to move back as well. Otherwise the
+# requests behind the victim are silently dropped for the rest of the step:
+# they keep their KV blocks but produce no token, and the token budget of the
+# step is under-used.
+
+
+def test_balance_priority_preempt_keeps_running_queue_cursor():
+    scheduler = _make_balance_scheduler(policy="priority")
+    requests = _create_requests(3, num_tokens=4 * _BLOCK_SIZE, max_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+    first = scheduler.schedule()
+    scheduler.update_from_output(first, _make_output(scheduler))
+
+    victim, trigger, tail = requests
+    # The preemption victim is the running request with the numerically
+    # largest priority value.
+    victim.priority, trigger.priority, tail.priority = 9, 0, 1
+    # The victim is skipped in this step (decode stagger), so it is not part of
+    # ``scheduled_running_reqs`` when it gets preempted. This is the case the
+    # old ``self.running.remove(victim)`` handling got wrong: the cursor was
+    # only corrected for victims that had already been scheduled this step.
+    victim.next_decode_eligible_step = scheduler.current_step + 10
+    assert scheduler.running == [victim, trigger, tail]
+
+    # The trigger cannot allocate, so the victim is preempted to free blocks.
+    with _fail_one_allocation(scheduler, 1) as allocate:
+        output = scheduler.schedule()
+
+    assert allocate.call_count == 3, "the request behind the victim was skipped"
+    assert victim.request_id in output.preempted_req_ids
+    assert trigger.request_id in output.num_scheduled_tokens
+    assert tail.request_id in output.num_scheduled_tokens
+
+
 def test_balance_full_pool_does_not_cascade_preempt_on_deferred_free():
     def run(balance_enabled):
         # Long prompt chunked in two steps plus three short prompts: the first
