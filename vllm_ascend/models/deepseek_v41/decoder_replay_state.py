@@ -13,6 +13,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -139,7 +140,7 @@ class DecoderReplayState:
                 for req, kept in enumerate(global_kept_lens)
             ]
         )
-        global_rows = torch.as_tensor(source_rows, device=self.rows.device)
+        global_rows = async_tensor_h2d(source_rows, device=self.rows.device)
         local_rows = context.local_token_indices.index_select(0, self.rows[: self.num_actual_tokens])
         padded_rows = torch.full(
             (self.num_tokens,), global_batch.num_tokens, dtype=torch.int64, device=self.rows.device
@@ -159,7 +160,7 @@ class DecoderReplayState:
                 num_scheduled_tokens=global_kept_lens,
                 num_computed_tokens_np=global_batch.seq_lens_np[:num_reqs] - global_kept_lens,
                 query_start_loc_np=global_offsets,
-                query_start_loc=torch.as_tensor(global_offsets, device=self.rows.device),
+                query_start_loc=async_tensor_h2d(global_offsets, device=self.rows.device),
                 input_ids=global_batch.input_ids.index_select(0, global_rows),
                 positions=global_batch.positions.index_select(0, global_rows),
                 max_query_len=int(global_kept_lens.max(initial=0)),
