@@ -1722,11 +1722,12 @@ def _validate_flash_attn_backend(backend_key, selector) -> bool:
 
 
 def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
-    """Keep the Flash checkpoint's eager-only guards separate from M3 drafts."""
+    """Keep the Flash checkpoint's compatibility guards separate from M3 drafts."""
     from vllm.v1.attention.backend import AttentionType
 
     spec = config.speculative_config
-    if spec.method != "dspark" or not spec.enforce_eager:
+    # Device lengths and tiling are captured by the existing FlashAttn graph path.
+    if spec.method != "dspark":
         return False
     if spec.target_model_config.hf_text_config.model_type != "minimax_m3_text":
         return False
