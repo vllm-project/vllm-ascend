@@ -494,8 +494,10 @@ def _collect_perf(
     runner: Any,
     prompt_tokens: int,
     *,
+    prompt_ids: list[int] | None = None,
     reset_local_cache: bool = False,
     concurrency: int = AB_CONCURRENCY,
+    batch_requests: int = 0,
     sample_count: int = AB_SAMPLES,
     warmup_count: int = AB_WARMUP,
     drift_count: int = AB_DRIFT_SAMPLES,
@@ -516,8 +518,17 @@ def _collect_perf(
     damps one-off scheduler/harness outliers while keeping the throughput
     wall clock over the full kept window. The same trimming applies to the
     pool (A) and control (B) legs because both go through this helper.
+
+    ``batch_requests`` sets how many requests one sample issues: 0 keeps the
+    legacy one-wave behaviour (``concurrency`` requests per sample), larger
+    values issue ``batch_requests // concurrency`` sequential waves of the
+    same single prompt and time the whole batch.
     """
-    prompt, _ = build_pool_prompts(prompt_tokens)
+    batch_requests = batch_requests or concurrency
+    if batch_requests < concurrency or batch_requests % concurrency:
+        raise ValueError("batch_requests must be a positive multiple of concurrency")
+    waves = batch_requests // concurrency
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     timed: list[float] = []
     kept_started = 0.0
     if sample_count < 1 or warmup_count < 0 or drift_count < 0:
@@ -542,12 +553,14 @@ def _collect_perf(
         else:
             phase = "timed"
         begin = time.perf_counter()
-        runner.generate_greedy([prompt] * concurrency, 1)
+        for _ in range(waves):
+            runner.generate_greedy([prompt] * concurrency, 1)
         elapsed = (time.perf_counter() - begin) * 1000.0
         # Progress line per call: the next CI hang must show which call stalled.
         print(
             f"[kv_pool_perf] call {index + 1}/{total_calls} phase={phase} "
-            f"prompt_tokens={prompt_tokens} concurrency={concurrency} elapsed_ms={elapsed:.1f}",
+            f"prompt_tokens={prompt_tokens} concurrency={concurrency} "
+            f"batch_requests={batch_requests} elapsed_ms={elapsed:.1f}",
             flush=True,
         )
         if index >= warmup_count:
@@ -556,7 +569,7 @@ def _collect_perf(
                 kept_started = begin
             timed.append(elapsed)
     kept_all = timed[drift_count:]
-    produced = prompt_tokens * concurrency * len(kept_all)
+    produced = prompt_tokens * batch_requests * len(kept_all)
     wall = time.perf_counter() - kept_started
     if trim_count:
         ordered = sorted(kept_all)
@@ -709,6 +722,7 @@ def run_pool_ab(
     prompt_tokens: int = POOL_PROMPT_TOKENS,
     prompt_ids: list[int] | None = None,
     perf_prompt_tokens: int | None = None,
+    perf_prompt_ids: list[int] | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
     acceptance_tolerance: float | None = None,
@@ -720,6 +734,7 @@ def run_pool_ab(
     perf_drift_count: int = AB_DRIFT_SAMPLES,
     perf_trim_count: int = 0,
     perf_concurrency: int = AB_CONCURRENCY,
+    perf_batch_requests: int = 0,
     perf_stability_policy: str = "fail",
 ) -> PoolABReport:
     perf_tokens = perf_prompt_tokens or prompt_tokens
@@ -756,8 +771,10 @@ def run_pool_ab(
                 p50, p95, throughput, ttft_mean, ttft_min, ttft_max = _collect_perf(
                     runner,
                     perf_tokens,
+                    prompt_ids=perf_prompt_ids,
                     reset_local_cache=perf_reset_local and use_pool,
                     concurrency=perf_concurrency,
+                    batch_requests=perf_batch_requests,
                     sample_count=perf_sample_count,
                     warmup_count=perf_warmup_count,
                     drift_count=perf_drift_count,

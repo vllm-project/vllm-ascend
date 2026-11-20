@@ -155,9 +155,9 @@ a3:
         size: 2
   single_node:
     test_config:
-      - name: dsv4-mooncake-multiprefix
+      - name: dsv4-memcache-multiprefix-64k
         os: linux-aarch64-a3-800i-16
-        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_mooncake_multiprefix
+        tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_memcache_multiprefix_64k
       - name: dsv4-memcache-dsa-pcp-dspark
         os: linux-aarch64-a3-800i-8
         tests: tests/SIT/cases/features/kv_pool/test_pool_nightly.py::test_dsv4_memcache_dsa_pcp_dspark
