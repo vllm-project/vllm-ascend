@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Full-model Direct transport matrix with runtime and original-graph probes.
+
+Each cell cold-loads generated checkpoint A and compares A -> A -> B -> A against
+independent cold references. No sleep is implicit in these BF16 cells.
+"""
+
+import pytest
+
+from tests.e2e.common.rlhf.weight_transfer.case import DIRECT_QWEN_CASES, WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.direct import run_direct_reload_transaction
+
+
+@pytest.mark.parametrize("execution_mode", ["eager", "graph"])
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize("backend", ["hccl", "npu_ipc"])
+@pytest.mark.parametrize(
+    "case",
+    [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in DIRECT_QWEN_CASES],
+)
+def test_direct_reload_transport_matrix(case: WeightUpdateModelCase, backend: str, packed: bool, execution_mode: str):
+    run_direct_reload_transaction(case, backend, packed, execution_mode)
