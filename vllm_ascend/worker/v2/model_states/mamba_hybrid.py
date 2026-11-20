@@ -378,6 +378,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
 
+        skipped_groups = getattr(self, "_target_draft_only_groups", ())
+        if skipped_groups:
+            # Keep the KV-group indices and use the same groups for RecoverSSM.
+            attn_groups = [
+                [group for group in groups if all(group is not skip for skip in skipped_groups)]
+                for groups in attn_groups
+            ]
+
         def build_metadata(**kwargs):
             if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
                 # Recurrent state uses global request order; SFA keeps local queries.
@@ -528,13 +536,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         max_query_len = getattr(input_batch, "max_query_len", None)
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
-        skipped_groups = getattr(self, "_target_draft_only_groups", ())
-        if skipped_groups:
-            # Preserve the outer KV-group indices and any shared target group.
-            attn_groups = [
-                [group for group in groups if all(group is not skip for skip in skipped_groups)]
-                for groups in attn_groups
-            ]
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

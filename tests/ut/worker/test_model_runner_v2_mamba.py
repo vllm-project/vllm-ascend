@@ -442,10 +442,13 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
     )
 
     assert metadata is expected_metadata
-    if recover:
-        state.recoverssm.record_step.assert_called_once_with(expected_metadata, target_groups, for_capture=for_capture)
     kwargs = mock_build_attn_metadata.call_args.kwargs
-    assert kwargs["attn_groups"] == [[target_group], [], [mixed_group]]
+    filtered_groups = [[target_group], [], [mixed_group]]
+    assert kwargs["attn_groups"] == filtered_groups
+    if recover:
+        state.recoverssm.record_step.assert_called_once_with(
+            expected_metadata, filtered_groups, for_capture=for_capture
+        )
     assert kwargs["num_actual_reqs"] == 2
     assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
     graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
