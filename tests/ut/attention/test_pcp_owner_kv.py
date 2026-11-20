@@ -27,24 +27,22 @@ def _config(*, pcp=4, dcp=1, tp=1, kv_transfer=None, additional_config=None):
     )()
 
 
-def test_owner_sharing_mode_flag_defaults_to_replicated(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_PCP_KV_SHARING", raising=False)
-    assert owner_kv.get_pcp_kv_sharing_mode() == owner_kv.PCP_KV_SHARING_REPLICATED
-    monkeypatch.setenv("VLLM_ASCEND_PCP_KV_SHARING", "owner")
-    assert owner_kv.owner_sharding_enabled()
-    monkeypatch.setenv("VLLM_ASCEND_PCP_KV_SHARING", "invalid")
-    with pytest.raises(ValueError, match="must be one of"):
-        owner_kv.get_pcp_kv_sharing_mode()
+def test_owner_sharing_mode_defaults_to_replicated():
+    assert owner_kv.pcp_kv_sharing_mode_from_config(_config()) == owner_kv.PCP_KV_SHARING_REPLICATED
+    assert owner_kv.owner_sharding_enabled(_config()) is False
+    # No vllm_config means the replicated defaults; nothing reads the process
+    # environment anymore.
+    assert owner_kv.owner_sharding_enabled() is False
 
 
-def test_additional_config_takes_precedence_over_the_env_flag(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_PCP_KV_SHARING", "replicated")
-    config = _config(additional_config={"pcp_kv_sharing": "owner"})
+def test_typed_pcp_config_selects_owner_and_rejects_unknown_mode():
+    config = _config(additional_config={"pcp_config": {"kv_sharing": "owner"}})
     assert owner_kv.pcp_kv_sharing_mode_from_config(config) == owner_kv.PCP_KV_SHARING_OWNER
     assert owner_kv.owner_sharding_enabled(config)
-    monkeypatch.setenv("VLLM_ASCEND_PCP_KV_SHARING", "owner")
-    config = _config(additional_config={"pcp_kv_sharing": "replicated"})
-    assert owner_kv.pcp_kv_sharing_mode_from_config(config) == owner_kv.PCP_KV_SHARING_REPLICATED
+
+    invalid = _config(additional_config={"pcp_config": {"kv_sharing": "invalid"}})
+    with pytest.raises(ValueError):
+        owner_kv.pcp_kv_sharing_mode_from_config(invalid)
 
 
 def test_validate_owner_sharing_rejects_incompatible_topologies():
