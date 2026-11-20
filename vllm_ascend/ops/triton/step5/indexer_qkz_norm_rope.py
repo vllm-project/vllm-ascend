@@ -360,18 +360,17 @@ def _indexer_qkz_norm_rope_kernel(
         b_all_q = tl.zeros((BLOCK_D,), dtype=tl.float32)
         b_real_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
         b_imag_q = tl.zeros((BLOCK_R,), dtype=tl.float32)
-    num_q_tokens = tokens
-    num_q_tiles = (num_q_tokens + ROWS_PER_PROGRAM_Q - 1) // ROWS_PER_PROGRAM_Q
+    num_q_tiles = (tokens + ROWS_PER_PROGRAM_Q - 1) // ROWS_PER_PROGRAM_Q
     for t in range(pid, num_q_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_Q
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_Q)
-        token_ok = token_idx < num_q_tokens
+        token_ok = token_idx < tokens
         _norm_rope_tile_npu(
             x_q_ptr, out_q_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
             stride_x_q, stride_out_q, stride_cos, 0,
             w_all_q, w_real_q, w_imag_q, b_all_q, b_real_q, b_imag_q, eps, weight_bias_q,
-            num_q_tokens,
+            tokens,
             num_heads=num_q_heads, head_dim=head_dim, rotary_dim=rotary_dim,
             SUBTRACT_MEAN=SUBTRACT_MEAN_Q, HAS_BIAS=HAS_BIAS_Q,
             BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_Q,
@@ -389,18 +388,17 @@ def _indexer_qkz_norm_rope_kernel(
         b_all_k = tl.zeros((BLOCK_D,), dtype=tl.float32)
         b_real_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
         b_imag_k = tl.zeros((BLOCK_R,), dtype=tl.float32)
-    num_k_tokens = tokens
-    num_k_tiles = (num_k_tokens + ROWS_PER_PROGRAM_KZ - 1) // ROWS_PER_PROGRAM_KZ
+    num_k_tiles = (tokens + ROWS_PER_PROGRAM_KZ - 1) // ROWS_PER_PROGRAM_KZ
     for t in range(pid, num_k_tiles, nprog):
         token_start = t * ROWS_PER_PROGRAM_KZ
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_KZ)
-        token_ok = token_idx < num_k_tokens
+        token_ok = token_idx < tokens
         _norm_rope_tile_npu(
             x_k_ptr, out_k_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
             stride_x_k, stride_out_k, stride_cos, 0,
             w_all_k, w_real_k, w_imag_k, b_all_k, b_real_k, b_imag_k, eps, weight_bias_k,
-            num_k_tokens,
+            tokens,
             num_heads=num_k_heads, head_dim=head_dim, rotary_dim=rotary_dim,
             SUBTRACT_MEAN=SUBTRACT_MEAN_K, HAS_BIAS=HAS_BIAS_K,
             BLOCK_D=BLOCK_D, BLOCK_R=BLOCK_R, ROWS_PER_PROGRAM=ROWS_PER_PROGRAM_KZ,
@@ -408,7 +406,7 @@ def _indexer_qkz_norm_rope_kernel(
         )
         z_bp = tl.make_block_ptr(
             base=x_z_ptr,
-            shape=(num_k_tokens, num_k_heads * head_dim),
+            shape=(tokens, num_k_heads * head_dim),
             strides=(stride_x_z, 1),
             offsets=(token_start, 0),
             block_shape=(ROWS_PER_PROGRAM_KZ, num_k_heads * head_dim),
@@ -417,7 +415,7 @@ def _indexer_qkz_norm_rope_kernel(
         z_vals = tl.load(z_bp, boundary_check=(0,), padding_option="zero")
         z_out_bp = tl.make_block_ptr(
             base=out_z_ptr,
-            shape=(num_k_tokens, num_k_heads * head_dim),
+            shape=(tokens, num_k_heads * head_dim),
             strides=(num_k_heads * head_dim, 1),
             offsets=(token_start, 0),
             block_shape=(ROWS_PER_PROGRAM_KZ, num_k_heads * head_dim),
