@@ -502,7 +502,6 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.attention_config.hisparse_config = None
         mock_vllm_config.scheduler_config = MagicMock()
-        mock_vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         mock_vllm_config.scheduler_config.max_num_seqs = None
         mock_vllm_config.scheduler_config.policy = "fcfs"
         mock_vllm_config.scheduler_config.async_scheduling = False
@@ -1527,7 +1526,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         # Use importlib.reload to reload the platform module, ensuring the mocked init_ascend_config method is used.
         # Without this reload, when calling self.platform.check_and_update_config,
@@ -1558,7 +1556,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         from vllm_ascend import platform
 
@@ -1591,7 +1588,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         from vllm_ascend import platform
 
@@ -1637,7 +1633,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
@@ -1713,7 +1708,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         from vllm_ascend import platform
 
@@ -1743,7 +1737,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
@@ -1779,7 +1772,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
@@ -1815,7 +1807,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
-        scheduler_config = MagicMock(max_async_kv_loads_per_step=None)
+        scheduler_config = MagicMock()
         vllm_config.scheduler_config = scheduler_config
         mock_init_recompute.return_value = MagicMock()
 
@@ -1854,7 +1846,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = True
         mock_init_ascend.return_value = mock_ascend_config
 
-        recompute_scheduler_config = MagicMock(max_async_kv_loads_per_step=None)
+        recompute_scheduler_config = MagicMock()
         mock_init_recompute.return_value = recompute_scheduler_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -1865,7 +1857,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
         vllm_config.cache_config.block_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         vllm_config.scheduler_config.async_scheduling = False
 
         from vllm_ascend import platform
@@ -1917,7 +1908,7 @@ class TestNPUPlatform(TestBase):
                 mock_ascend_config.scheduler_config.dyntra_lb_config.enabled = True
                 mock_init_ascend.return_value = mock_ascend_config
 
-                recompute_scheduler_config = MagicMock(max_async_kv_loads_per_step=None)
+                recompute_scheduler_config = MagicMock()
                 mock_init_recompute.return_value = recompute_scheduler_config
 
                 vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -2127,7 +2118,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
         vllm_config.cache_config.block_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         vllm_config.scheduler_config.async_scheduling = False
 
         from vllm_ascend import platform
@@ -2189,7 +2179,6 @@ class TestNPUPlatform(TestBase):
                 vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
                 vllm_config.cache_config.block_size = 1
                 vllm_config.scheduler_config = MagicMock()
-                vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
                 from vllm_ascend import platform
 
@@ -2223,7 +2212,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
         vllm_config.cache_config.block_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         from vllm_ascend import platform
 
@@ -2258,7 +2246,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
@@ -2294,7 +2281,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
@@ -2613,7 +2599,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
 
         from vllm_ascend import platform
 
@@ -2643,7 +2628,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.scheduler_config = MagicMock()
 
-        vllm_config.scheduler_config.max_async_kv_loads_per_step = None
         from vllm_ascend import platform
 
         with (
