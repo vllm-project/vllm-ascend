@@ -54,7 +54,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
@@ -115,9 +114,9 @@ def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     ascend_config = get_ascend_config()
     return (
-        ascend_envs.VLLM_ASCEND_MOE_ALLGATHER_SKIP_PADDING
-        and envs.VLLM_MOE_SKIP_PADDING
+        envs.VLLM_MOE_SKIP_PADDING
         and use_v2_model_runner(vllm_config)
+        and parallel.prefill_context_parallel_size == 1
         # Skip the MoE GEMMs of padding tokens by assigning these tokens to a no-local expert
         # Thus, the EP group needs more than one rank.
         and parallel.enable_expert_parallel
@@ -1057,8 +1056,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         topology = build_layer_plan(self.config)
         self.skip_padding_tokens_in_moe = _can_skip_padding_tokens_in_moe(vllm_config)
         if self.skip_padding_tokens_in_moe:
-            needs_cross_group_mask = parallel.data_parallel_size > 1 or parallel.prefill_context_parallel_size > 1
-            overlap_stream = torch.npu.Stream() if needs_cross_group_mask else None
+            overlap_stream = torch.npu.Stream() if parallel.data_parallel_size > 1 else None
             for layer in self.layers[self.start_layer : self.end_layer]:
                 moe = layer.mlp
                 routed = moe.experts.routed_experts

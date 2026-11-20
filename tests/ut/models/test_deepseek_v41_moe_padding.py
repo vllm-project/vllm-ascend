@@ -14,7 +14,6 @@ from vllm_ascend.models.deepseek_v41 import model as model_module
     "section,option,value",
     [
         (None, None, None),
-        ("ascend_env", "VLLM_ASCEND_MOE_ALLGATHER_SKIP_PADDING", None),
         ("env", "VLLM_MOE_SKIP_PADDING", False),
         ("runner", "v2", False),
         ("parallel", "decode_context_parallel_size", 2),
@@ -30,10 +29,12 @@ from vllm_ascend.models.deepseek_v41 import model as model_module
     ],
 )
 @pytest.mark.parametrize(
-    "dp_size,pcp_size,tp_size",
-    [(1, 1, 1), (1, 1, 8), (2, 1, 1), (2, 1, 4), (1, 4, 1), (2, 4, 1), (2, 2, 2)],
+    "dp_size,pcp_size,tp_size,supported",
+    [(1, 1, 1, False), (1, 1, 8, True), (2, 1, 1, True), (2, 1, 4, True), (1, 2, 4, False), (2, 2, 2, False)],
 )
-def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, dp_size, pcp_size, tp_size):
+def test_skip_moe_padding_requires_supported_layout(
+    monkeypatch, section, option, value, dp_size, pcp_size, tp_size, supported
+):
     parallel = SimpleNamespace(
         data_parallel_size=dp_size,
         prefill_context_parallel_size=pcp_size,
@@ -50,10 +51,6 @@ def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option
     config = SimpleNamespace(parallel_config=parallel, speculative_config=None)
     ep_size = dp_size * pcp_size * tp_size
     monkeypatch.setattr(model_module, "get_ep_group", lambda: SimpleNamespace(world_size=ep_size))
-    if section == "ascend_env":
-        monkeypatch.delenv(option, raising=False)
-    else:
-        monkeypatch.setenv("VLLM_ASCEND_MOE_ALLGATHER_SKIP_PADDING", "1")
     monkeypatch.setattr(model_module.envs, "VLLM_MOE_SKIP_PADDING", section != "env")
     monkeypatch.setattr(model_module, "use_v2_model_runner", lambda config: section != "runner")
     monkeypatch.setattr(model_module, "get_ascend_config", lambda: ascend)
@@ -62,7 +59,7 @@ def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option
         "select_moe_comm_method",
         lambda num_tokens, config: value if section == "communication" else MoECommType.ALLGATHER,
     )
-    enabled = section is None and ep_size > 1
+    enabled = section is None and supported
     assert model_module._can_skip_padding_tokens_in_moe(config) is enabled
     if enabled:
         config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)

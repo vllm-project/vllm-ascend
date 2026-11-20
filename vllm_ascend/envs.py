@@ -89,10 +89,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Skip padding tokens in DeepSeek V4.1 AllGather MoE expert GEMMs.
-    # 0 (default): disabled. 1: enable on supported layouts when VLLM_MOE_SKIP_PADDING is enabled.
-    # Set the same value on every worker before startup. Non-sensitive.
-    "VLLM_ASCEND_MOE_ALLGATHER_SKIP_PADDING": lambda: _bool_env("VLLM_ASCEND_MOE_ALLGATHER_SKIP_PADDING", False),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),

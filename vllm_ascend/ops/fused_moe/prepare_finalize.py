@@ -605,7 +605,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if ubatch not in masks:
             padding = context.is_padding
             assert padding is not None
-            if self.moe_config.dp_size > 1 or self.moe_config.pcp_size > 1:
+            if self.moe_config.dp_size > 1:
                 if self._use_ep_sequence_parallel():
                     # Each EP rank contributes the same TP shard as its router logits.
                     padding = torch.ops.vllm.ascend_sp_padding_mask_impl(padding)
