@@ -308,6 +308,8 @@ class EplbConfig:
     # as prefill.
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
+    # Native HIXL initialization options, including communication topology.
+    hixl_options: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_config(self):

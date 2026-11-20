@@ -730,6 +730,19 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
+    def test_validate_eplb_config_preserves_v2_hixl_options(self):
+        for extra in ({}, {"not_a_v2_parameter": 1}):
+            with self.subTest(extra=extra):
+                config = self.mock_vllm_config()
+                config.use_v2_model_runner = True
+                config.parallel_config.enable_eplb = True
+                options = {"LocalCommRes": '{"version":"1.3"}'}
+                config.additional_config = {"eplb_config": {"hixl_options": options, **extra}}
+                with patch.dict("os.environ", {}, clear=True):
+                    _validate_eplb_config(config)
+                validated = EplbConfig(**config.additional_config["eplb_config"])
+                self.assertEqual(validated.hixl_options, options)
+
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True

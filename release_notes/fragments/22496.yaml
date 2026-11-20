@@ -1,0 +1,8 @@
+pr: 22496
+entries:
+  - category: bugfix
+    text: >-
+      Async EPLB deployments can now configure HIXL topology through
+      `additional_config.eplb_config.hixl_options` to avoid startup connection
+      timeouts when default links are unavailable. The option defaults to an empty
+      dictionary, preserving existing behavior unless explicitly configured.

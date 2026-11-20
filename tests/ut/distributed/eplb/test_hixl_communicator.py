@@ -10,9 +10,23 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from pydantic import ValidationError
 from vllm.v1.executor.multiproc_executor import WorkerProc
 
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.distributed.eplb import eplb_communicator
+
+
+def test_hixl_config_defaults_are_independent():
+    first = EplbConfig()
+    first.hixl_options["LocalCommRes"] = '{"version":"1.3"}'
+    assert EplbConfig().hixl_options == {}
+
+
+@pytest.mark.parametrize("options", [[], {"LocalCommRes": {}}, {"LocalCommRes": 13}, {13: "value"}])
+def test_hixl_config_rejects_non_string_options(options):
+    with pytest.raises(ValidationError):
+        EplbConfig(hixl_options=options)
 
 
 class _Tensor:
@@ -108,7 +122,8 @@ def _fake_hixl(engine):
     )
 
 
-def test_hixl_reads_registered_remote_expert(monkeypatch):
+@pytest.mark.parametrize("initialize_options", [None, {"LocalCommRes": '{"version":"1.3"}'}])
+def test_hixl_reads_registered_remote_expert(monkeypatch, initialize_options):
     engine = _Engine()
     monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock())
     monkeypatch.setitem(sys.modules, "hixl", _fake_hixl(engine))
@@ -177,7 +192,10 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     ]
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
-    session = eplb_communicator._HixlSession(group)
+    session = eplb_communicator._HixlSession(group, initialize_options)
+    expected_options = dict(initialize_options or {})
+    if initialize_options is not None:
+        initialize_options.clear()
     assert engine.initializations == 0
     session.initialize({"main": communicator})
     communicator.set_stream(None)
@@ -198,7 +216,7 @@ def test_hixl_reads_registered_remote_expert(monkeypatch):
     communicator.execute()
 
     assert engine.local_engine == "192.0.2.1:12345"
-    assert engine.options == {}
+    assert engine.options == expected_options
     assert engine.connected == [("192.0.2.2:12346", 300_000)]
     assert len(engine.registered) == 1
     assert (engine.registered[0].addr, engine.registered[0].len) == (0, 2_097_152)

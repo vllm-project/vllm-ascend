@@ -231,8 +231,9 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
 class _HixlSession:
     """Own registrations and connections for every model in one EPLB state."""
 
-    def __init__(self, cpu_group: ProcessGroup) -> None:
+    def __init__(self, cpu_group: ProcessGroup, initialize_options: dict[str, str] | None = None) -> None:
         self._cpu_group = cpu_group
+        self._initialize_options = dict(initialize_options or {})
         self._rank = cpu_group.rank()
         self._world_size = cpu_group.size()
         self._group_error: Exception | None = None
@@ -270,7 +271,7 @@ class _HixlSession:
             self._check_status(status, "get ACL context")
             self._engine = self._hixl.Hixl()
             local_engine = join_host_port(get_ip(), get_open_port())
-            self._check_status(self._engine.initialize(local_engine, {}), "initialize")
+            self._check_status(self._engine.initialize(local_engine, self._initialize_options), "initialize")
 
         self._initializing = True
         for communicator in communicators.values():
