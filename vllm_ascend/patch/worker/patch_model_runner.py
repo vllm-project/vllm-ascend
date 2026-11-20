@@ -1,22 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-import sys
 from contextlib import AbstractContextManager
-from dataclasses import replace
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu import dp_utils as upstream_dp_utils
 from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.utils import (
-    align_num_tokens_to_tp,
-    get_tp_token_alignment,
-    vllm_version_is,
-)
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -28,30 +20,7 @@ def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_tok
         # num_tokens is already the largest rank-local count, and each sharded
         # decode request stays whole on one rank.
         num_reqs = num_tokens // uniform_token_count
-    alignment = get_tp_token_alignment(vllm_config) if vllm_config is not None else 1
-    reused_sync = kwargs.get("dp_sync_state")
-    if reused_sync is not None and reused_sync.eager:
-        num_tokens = align_num_tokens_to_tp(num_tokens, alignment)
-
-    batch_desc, dp_sync_state = _dispatch_cg_and_sync_dp(
-        cudagraph_manager,
-        num_reqs,
-        num_tokens,
-        uniform_token_count,
-        *args,
-        **kwargs,
-    )
-    if alignment <= 1 or batch_desc.cg_mode != CUDAGraphMode.NONE:
-        return batch_desc, dp_sync_state
-
-    aligned_tokens = align_num_tokens_to_tp(batch_desc.num_tokens, alignment)
-    if aligned_tokens != batch_desc.num_tokens:
-        batch_desc = replace(batch_desc, num_tokens=aligned_tokens)
-    if dp_sync_state is not None:
-        counts = dp_sync_state.num_tokens_across_dp
-        aligned_counts = (counts + alignment - 1) // alignment * alignment
-        dp_sync_state = replace(dp_sync_state, num_tokens_across_dp=aligned_counts)
-    return batch_desc, dp_sync_state
+    return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
 
 
 # Adapted from vLLM ced6857afa GPUModelRunner.initialize_kv_cache.
@@ -273,15 +242,6 @@ def initialize_kv_cache(
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
-upstream_dp_utils.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
-upstream.__dict__["dispatch_cg_and_sync_dp"] = dispatch_cg_and_sync_dp
-for module_name in (
-    "vllm.v1.worker.gpu.spec_decode.dflash.speculator",
-    "vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator",
-    "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator",
-):
-    module = sys.modules.get(module_name)
-    if module is not None:
-        module.__dict__["dispatch_cg_and_sync_dp"] = dispatch_cg_and_sync_dp
+upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
 
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache

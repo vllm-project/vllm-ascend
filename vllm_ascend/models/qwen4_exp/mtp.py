@@ -21,11 +21,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.models.config import _strip_qwen4_exp_mrope
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import iter_rope_parameters
 
-from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
 
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
@@ -214,7 +215,7 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         # Match the upstream transport contract: the drafter boundary is
         # full-token, and HC SP owns the local shard independently of MoE SP.
         if self.use_hc_sequence_parallel:
-            hidden_states = sp_shard(hidden_states)
+            hidden_states = sequence_parallel_chunk(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=None,

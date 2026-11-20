@@ -1467,20 +1467,6 @@ def _setup_compile_backend(
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
 
-    tp_alignment = get_tp_token_alignment(
-        vllm_config,
-        enable_shared_expert_dp,
-        sequence_parallel=enable_sp(vllm_config),
-    )
-    if tp_alignment > 1:
-        scheduler_config = vllm_config.scheduler_config
-        logical_capacity = scheduler_config.max_num_batched_tokens
-        physical_capacity = align_num_tokens_to_tp(logical_capacity, tp_alignment)
-        if physical_capacity != logical_capacity:
-            if scheduler_config.max_num_scheduled_tokens is None:
-                scheduler_config.max_num_scheduled_tokens = logical_capacity
-            scheduler_config.max_num_batched_tokens = physical_capacity
-
     reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
     if reduced_cg_cap is not None:
         # Add the off-stride default before upstream rebuilds and truncates the list.
@@ -1508,6 +1494,14 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
+    # Models pad eager token rows inside sequence_parallel_chunk(). Graph
+    # gears remain initialization-time contracts and must already describe a
+    # TP-divisible physical layout.
+    tp_alignment = get_tp_token_alignment(
+        vllm_config,
+        enable_shared_expert_dp,
+        sequence_parallel=enable_sp(vllm_config),
+    )
     requires_tp_aligned_capture_sizes = tp_alignment > 1
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1

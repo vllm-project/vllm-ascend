@@ -1347,6 +1347,7 @@ class TestNPUPlatform(TestBase):
                 vllm_config.parallel_config.tensor_parallel_size = 8
                 vllm_config._set_cudagraph_sizes = MagicMock()
                 vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[8])
+                logical_capacity = vllm_config.scheduler_config.max_num_batched_tokens
 
                 with patch("vllm_ascend.platform.enable_sp", return_value=upstream_sp):
                     _setup_compile_backend(
@@ -1362,6 +1363,7 @@ class TestNPUPlatform(TestBase):
                 else:
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
+                self.assertEqual(vllm_config.scheduler_config.max_num_batched_tokens, logical_capacity)
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))

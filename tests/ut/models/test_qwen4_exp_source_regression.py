@@ -36,7 +36,7 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "for layer_idx" not in model
     assert "output = super().forward(" in model
     assert 'sp_all_gather(output["hidden_states"])' in model
-    assert '"hidden_states": sp_shard(hidden_states)' in model
+    assert '"hidden_states": sequence_parallel_chunk(hidden_states)' in model
     assert "intermediate_tensors.tensors" in model
     assert "output.tensors" in model
     assert "pp_intermediate_tensors_are_full_tokens = True" in model
@@ -52,6 +52,7 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "inputs_embeds=inputs_embeds" in model
     assert "hidden_states.shape[0] == positions.shape[-1]" not in model + mtp
     assert "if self.use_hc_sequence_parallel:" in mtp
+    assert "hidden_states = sequence_parallel_chunk(hidden_states)" in mtp
     assert "hidden_states = sp_all_gather(hidden_states)" not in mtp
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
     assert not (ROOT / "vllm_ascend/patch/platform/patch_qwen4_exp_pp.py").exists()
