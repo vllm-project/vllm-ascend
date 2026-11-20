@@ -1,0 +1,8 @@
+pr: 22600
+entries:
+  - category: bugfix
+    hardware: [A3]
+    text: >-
+      HiSparse can now start on Ascend A3 with HDK 25.5.1 when
+      the HiSparse connector's extra configuration sets
+      `transfer_backend` to `memfabric`.
