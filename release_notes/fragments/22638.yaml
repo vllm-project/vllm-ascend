@@ -1,0 +1,8 @@
+pr: 22638
+entries:
+  - category: bugfix
+    text: >-
+      Restored the 208 MiB HC pre workspace minimum for DeepSeek V4 Flash
+      sleep and wake-up stability on Ascend A3.
+    model: deepseek-v4
+    hardware: [A3]
