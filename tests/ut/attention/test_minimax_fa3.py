@@ -419,8 +419,9 @@ def test_physical_cache_layout_write_and_fa3_view(fa3, monkeypatch, layout, head
 
 
 @pytest.mark.parametrize("layout_source", ["env", "connector"])
-@pytest.mark.parametrize("layout", ["HND", "LBHNC"])
-def test_cache_layout_alias_resolution(fa3, monkeypatch, layout_source, layout):
+def test_cache_layout_alias_resolution(fa3, monkeypatch, layout_source):
+    # Canonical HND is covered by physical writes and the connector regression.
+    layout = "LBHNC"
     from vllm.config import CacheConfig
     from vllm.v1.attention.backends import utils
 
