@@ -3,7 +3,8 @@ entries:
   - category: performance
     text: >-
       DeepSeek-V4.1 skips padding tokens in local expert GEMMs by default on
-      Model Runner V2 with fixed AllGather, EP enabled, TP > 1, and DP, PCP,
-      PP, and DCP each set to 1, using static linear expert placement with
-      mixed placement, EPLB, and forced load balancing disabled.
+      Model Runner V2 with fixed AllGather, EP enabled across at least two ranks,
+      and PCP, PP, and DCP each set to 1. Both DP = 1 and DP > 1 are supported,
+      including TP = 1 with DP > 1. This requires static linear expert placement
+      with mixed placement, EPLB, and forced load balancing disabled.
       Set VLLM_MOE_SKIP_PADDING=0 to disable the optimization.
