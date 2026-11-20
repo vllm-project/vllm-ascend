@@ -1025,11 +1025,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            try:
-                put_result = self.m_store.put(keys, addrs, sizes)
-            except Exception:
-                logger.exception("KV store backend failed to put request %s", req_id)
-                return False
+            put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
