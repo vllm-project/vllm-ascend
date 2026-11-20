@@ -114,44 +114,9 @@ variants:
         docker_serve_command: "vllm serve"
         install:
           pip: false
-  ascend_mxfp_a5:
-    model_id: deepseek-ai/DeepSeek-V4.1-Flash-1017
-    label: MXFP (Ascend 950DT)
-    precision: fp8
-    # Capacity estimate inherited from the upstream 1017 checkpoint recipe.
-    vram_minimum_gb: 614
-    description: Mixed MXFP4/MXFP8 checkpoint with Engram host offload for eight-NPU Ascend 950DT nodes.
-    supported_hardware: [ascend_950dt]
-    supported_features: [tool_calling, reasoning, spec_decoding]
-    supported_frontends: [python]
-    min_vllm_version: '0.32.0'
-    tp: 1
-    extra_args:
-      - '--served-model-name'
-      - dsv41
-      - '--max-model-len'
-      - '1048576'
-      - '--max-num-seqs'
-      - '64'
-      - '--gpu-memory-utilization'
-      - '0.90'
-      - '--block-size'
-      - '128'
-      - '--quantization'
-      - deepseek_v4_fp8
-      - '--engram-config'
-      - '{"cpu_offload":true,"dp_shared_memory":true}'
-      - '--trust-remote-code'
-    extra_env:
-      VLLM_USE_V2_MODEL_RUNNER: '1'
-      HCCL_OP_EXPANSION_MODE: CCU_SCHED
-      HCCL_BUFFSIZE: '1600'
-      HCCL_CONNECT_TIMEOUT: '1200'
-      HCCL_EXEC_TIMEOUT: '2040'
-      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
-      OMP_PROC_BIND: 'false'
-      OMP_NUM_THREADS: '10'
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  default:
+    tp:
+      ascend_950dt: 1
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1-a5
@@ -159,6 +124,32 @@ variants:
         docker_serve_command: vllm serve
         install:
           pip: false
+        extra_args:
+          - '--served-model-name'
+          - dsv41
+          - '--max-model-len'
+          - '1048576'
+          - '--max-num-seqs'
+          - '64'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--block-size'
+          - '128'
+          - '--quantization'
+          - deepseek_v4_fp8
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--trust-remote-code'
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: '1'
+          HCCL_OP_EXPANSION_MODE: CCU_SCHED
+          HCCL_BUFFSIZE: '1600'
+          HCCL_CONNECT_TIMEOUT: '1200'
+          HCCL_EXEC_TIMEOUT: '2040'
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+          OMP_PROC_BIND: 'false'
+          OMP_NUM_THREADS: '10'
+          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
 presets:
   ascend_a2_w4a8_pd:
     label: Ascend A2 W4A8 PD (1P + 1D)
@@ -279,7 +270,7 @@ presets:
     label: 950DT MXFP 1P1D (DP8/TP1 per role)
     hardware: ascend_950dt
     strategy: pd_cluster
-    variants: [ascend_mxfp_a5]
+    variants: [default]
     default: true
     description: Direct KV transfer between two eight-NPU nodes, with eager Prefill and graph-mode Decode.
     image:
@@ -288,7 +279,9 @@ presets:
       pd_router: ascend
       pd_connector: mooncake_ascend
       frontend: python
-      features: { spec_decoding: true }
+      features:
+        spec_decoding: true
+        encoder_parallel: false
       kv_offload: 'off'
     args:
       - '--port'
