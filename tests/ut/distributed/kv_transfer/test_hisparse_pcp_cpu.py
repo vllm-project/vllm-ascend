@@ -423,10 +423,11 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl.hisparse_cache._prepare_for_batch(meta)
     impl.hisparse_cache.submit_layer_mirror = Mock()
     monkeypatch.setattr(module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    resources = {}
     monkeypatch.setattr(
         module,
         "current_workspace_manager",
-        lambda: NS(get_persistent_resource=lambda key, allocate: allocate()),
+        lambda: NS(get_persistent_resource=lambda key, allocate: resources.setdefault(key, allocate())),
     )
     impl.hisparse_cache.slot_mapping = torch.arange(num_write_rows) + 10
     impl.hisparse_cache.slot_mapping[2::3] = -1
