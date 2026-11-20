@@ -6,7 +6,6 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from math import prod
 from typing import Any
 
 import msgspec
@@ -1009,24 +1008,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
-                    if (
-                        isinstance(spec, MLAAttentionSpec)
-                        and not isinstance(spec, AscendSFAIndexerCacheSpec)
-                        and len(local_base_addrs) == 1
-                    ):
-                        local_shape = self.block_shapes[local_layer_index][cache_index]
-                        remote_shape = remote_metadata.block_shapes[remote_layer_index][cache_index]
-                        # Token-interleaved byte-wide MLA keeps its NHD shape in the descriptor.
-                        # Component-major pages publish a flat shape even at the same byte length.
-                        if local_shape != remote_shape and any(
-                            len(shape) == 3 and shape[1] == 1 and prod(shape) == local_block_len
-                            for shape in (local_shape, remote_shape)
-                        ):
-                            raise ValueError(
-                                f"Mooncake MLA page layout mismatch for layer "
-                                f"{self.layer_names[local_layer_index]!r}: "
-                                f"local={local_shape}, remote={remote_shape}"
-                            )
                     block_ids_to_transfer = (
                         contiguous_block_ids_by_request
                         if local_block_stride == remote_block_stride == local_block_len
