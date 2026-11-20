@@ -1,0 +1,5 @@
+pr: 20944
+entries:
+  - category: performance
+    text: Fused QSA compressed-key pooling, RMSNorm, MRoPE and cache writes while retaining the ordering of raw ring-cache updates.
+    model: Qwen3.8-Flash-Next
