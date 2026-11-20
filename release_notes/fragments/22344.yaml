@@ -1,0 +1,4 @@
+pr: 22344
+entries:
+  - category: bugfix
+    text: Fixed the runtime guard KV dump directory tag resolving the prefill context parallel rank to 0 on every PCP rank, which made all PCP ranks of a stage write their shards into the same cp0 directory.
