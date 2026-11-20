@@ -2,7 +2,7 @@
 
 Gather recurrent state and zero rows for fresh sequences.
 
-[Wrapper implementation](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/ops/triton/mamba/state_ops.py#L38) · [Call or registration](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/models/glm5next/ops/kda.py#L71)
+[Implementation of `gather_initial_states`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/mamba/state_ops.py) · [Caller `chunk_kda` in kda.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/glm5next/ops/kda.py)
 
 ## Description
 
@@ -57,6 +57,8 @@ All three public parameters are required. The function returns `output`; callers
     - Keep the public tensor API directly imported by GLM; no global replacement of upstream or unrelated same-named functions is needed.
 
 ## Test Cases
+
+[test_glm5next_state_gather_npu.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_state_gather_npu.py) · [test_glm5next_state_ops.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/models/test_glm5next_state_ops.py) · [test_glm5next_kda_contracts.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/models/test_glm5next_kda_contracts.py)
 
 This is pure data movement. Compare copied values and zero-filled rows with `rtol=0`, `atol=0`; use `equal_nan=True` when intentionally preserving NaNs in valid history. NaN payload bit patterns are not an accuracy requirement.
 

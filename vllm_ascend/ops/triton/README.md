@@ -4,3 +4,5 @@ Place implementations in their functional directory under this package. Determin
 
 - [Triton operator reference](../../../docs/source/developer_guide/operator_reference/triton/index.md)
 - [Contributing Triton operators](../../../docs/source/developer_guide/contribution/triton_operators.md)
+
+- [Earlier operator notes awaiting migration](docs/)

@@ -4,7 +4,7 @@ Use the callable name as the page title. A complete example is [fused_qkvzba_spl
 
 ## Description
 
-Describe the operation from the caller's perspective. Link to the qualified wrapper definition and a representative production call or registration. Summarize the algorithm or formula when it explains observable behavior.
+Describe the operation from the caller's perspective. Link to the qualified wrapper definition and a representative production call or registration. Use site-relative links between documentation pages. For implementation, caller and test references, link to the file on the repository’s main branch and name the symbol; line numbers move as the code changes. Summarize the algorithm or formula when it explains observable behavior.
 
 ## Parameters and results
 

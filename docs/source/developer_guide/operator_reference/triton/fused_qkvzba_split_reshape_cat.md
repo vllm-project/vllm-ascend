@@ -2,7 +2,7 @@
 
 Unpack fused GDN projections into type-contiguous layouts.
 
-[Wrapper implementation](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/ops/triton/fla/fused_qkvzba_split_reshape.py#L144) · [Call or registration](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/ops/gdn.py#L416)
+[Implementation of `fused_qkvzba_split_reshape_cat`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/fla/fused_qkvzba_split_reshape.py) · [Caller `forward` in gdn.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/gdn.py)
 
 ## Description
 
@@ -54,6 +54,8 @@ Unpack fused GDN projections into type-contiguous layouts.
     - Modified for a specific vllm-ascend logic or different input parameters: consumes the interleaved GQA layout `[seq, num_heads_qk, (Q, K, V, Z)]` / `[seq, num_heads_qk, (B, A)]` produced by the `gqa_interleaved_layout` linear projections, and outputs the type-contiguous `mixed_qkv` expected by the `qwen_gdn_attention_core` custom op.
 
 ## Test Cases
+
+[test_fused_qkvzba_split_reshape_cat.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py)
 
 The test covers both real inference shapes (Qwen3-GDN-10B, `gqa_interleaved_layout=True`, TP=1: `num_heads_qk=16`, `num_heads_v=128`, `head_qk=512`, `head_v=512`) and a broader generic parameter space. As this is a pure data-movement operator (no arithmetic), the unified precision tolerance is bit-exact (`rtol=0, atol=0`).
 

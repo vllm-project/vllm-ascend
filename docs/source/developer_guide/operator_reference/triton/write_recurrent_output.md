@@ -2,7 +2,7 @@
 
 Write valid recurrent KDA rows and clear destination padding.
 
-[Wrapper implementation](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/ops/triton/kda/output_writeback.py#L40) · [Call or registration](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/models/glm5next/ops/kda.py#L48)
+[Implementation of `write_recurrent_output`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/kda/output_writeback.py) · [Caller `recurrent_kda` in kda.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/glm5next/ops/kda.py)
 
 ## Description
 
@@ -49,6 +49,8 @@ All three public entry-point parameters are required. `write_recurrent_output(so
     - Use dtype-sized 16 KiB tiles and runtime token-count scalars to limit local-memory use and repeated compilation. Moving the module into `ops/triton/kda` leaves the implementation unchanged.
 
 ## Test Cases
+
+[test_glm5next_output_writeback.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_output_writeback.py)
 
 The existing nine-case operator suite compares against an independent CPU PyTorch reference with `rtol=0`, `atol=0` for FP16/BF16/FP32. It covers valid-row copies, zero padding, empty source/output, single-token decode, unaligned destination guards, and the observed DP allocation-end regression (`Ts=63`, `Td=1771`, `H=16`, `D=128`). The graph case changes source values and the final query end between replays, with NaNs in invalid rows to expose accidental reads. No additional cases are introduced by this documentation change.
 

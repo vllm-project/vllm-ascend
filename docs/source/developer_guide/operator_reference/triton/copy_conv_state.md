@@ -2,7 +2,7 @@
 
 Stage convolution state in contiguous storage or write it back.
 
-[Wrapper implementation](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/ops/triton/kda/conv_state.py#L59) · [Call or registration](https://github.com/vllm-project/vllm-ascend/blob/c3afc3faab78a012cd519aba0e8f3b618eea3ca3/vllm_ascend/models/glm5next/ops/causal_conv1d.py#L49)
+[Implementation of `copy_conv_state`](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/kda/conv_state.py) · [Caller `causal_conv1d` in causal_conv1d.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/glm5next/ops/causal_conv1d.py)
 
 ## Description
 
@@ -51,6 +51,8 @@ All parameters are required; `write_back` is keyword-only. The function mutates 
     - Preserve the existing pack/convolution/writeback ordering, invalid-slot behavior, and the original strided cache view. The move into `ops/triton/kda` does not change the copy algorithm.
 
 ## Test Cases
+
+[test_copy_conv_state.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_copy_conv_state.py)
 
 `test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages` calls the public tensor API and covers both state layouts with `[4, 6, 384]` FP32 cache views, physical-page gaps, negative/out-of-range slots, a zero-length request, and unchanged backing storage outside the updated states. `test_conv_state_copy_padding_and_graph_replay` adds eight direct-copy cases for FP16/BF16, page-strided/channel-strided layouts, and eager/graph execution. These ten cases call `copy_conv_state` directly and have no FLA convolution import dependency.
 
