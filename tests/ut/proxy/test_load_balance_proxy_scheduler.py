@@ -42,6 +42,7 @@ def test_failed_reassignment_releases_previous_decoder_once(monkeypatch, failure
             await proxy.reassign_instances(
                 "/v1/chat/completions",
                 {},
+                128,
                 previous_instance,
                 previous_prefiller_kv_released=True,
             )

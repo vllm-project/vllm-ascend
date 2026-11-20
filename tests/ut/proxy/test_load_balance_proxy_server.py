@@ -596,7 +596,7 @@ def test_native_text_recompute_continues_over_http(proxy_server, api, streaming)
     request["model"] = MODEL
     partial = _text_result(api, "first-attempt", "prefix ", 5)
     final = _text_result(api, "final-attempt", "suffix", 2, input_tokens=58)
-    progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
+    progress = {"output_tokens": 5, "remaining_tokens": 112}
     _set_script(
         MOCK_PREFILL_PORT,
         [

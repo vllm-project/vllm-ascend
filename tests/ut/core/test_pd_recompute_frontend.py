@@ -104,7 +104,7 @@ def test_messages_serializer_keeps_scheduler_signal():
 @pytest.mark.parametrize("output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.parametrize("serialize_partial", [False, True])
 def test_native_resume_preserves_partial_text_and_budget(output_kind, serialize_partial):
-    progress = {"output_tokens": 3, "remaining_tokens": 7, "input_tokens": 19}
+    progress = {"output_tokens": 3, "remaining_tokens": 7}
 
     async def generate(self, prompt, sampling_params, request_id):
         yield _output("Text with /tmp/example", [31, 32, 33], signal=PD_RECOMPUTE_INTERRUPTED, progress=progress)
@@ -147,7 +147,6 @@ def test_messages_partial_tool_arguments_keep_private_recompute_signal(interrupt
         PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED,
         "output_tokens": 3,
         "remaining_tokens": 7,
-        "input_tokens": 19,
     }
     tool_call = SimpleNamespace(id="call_1", function=SimpleNamespace(name="lookup", arguments='{"key":'))
     choice = SimpleNamespace(

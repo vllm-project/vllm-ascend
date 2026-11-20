@@ -21,7 +21,7 @@
 # - Native recompute needs the matching Ascend decode scheduler and API server.
 #   On recompute the proxy selects a fresh P/D pair, up to --max-retries times.
 #   It retries with the remaining token budget and continues plain text.
-#   Partial thinking and client-tool events are held until the attempt completes.
+#   Thinking and tool events are forwarded when their native block or item closes.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -161,6 +161,7 @@ PD_CONTINUE_MESSAGE = "ascend_pd_continue_message"
 PD_RECOMPUTE_RETRY = "ascend_pd_recompute_before_output"
 PD_RECOMPUTE_INTERRUPTED = "ascend_pd_recompute_after_output"
 NATIVE_STREAM_START_EVENTS = ("message_start", "response.created", "response.in_progress", "ping")
+NATIVE_BLOCK_START_EVENTS = ("content_block_start", "response.output_item.added", "response.content_part.added")
 NATIVE_STREAM_END_EVENTS = ("message_stop", "response.completed", "response.incomplete", "response.failed", "error")
 MAX_DEFERRED_STREAM_BYTES = 64 * 1024
 
@@ -1241,18 +1242,15 @@ async def assign_instances(
 async def reassign_instances(
     api: str,
     req_data: Any,
+    request_length: int,
     previous_instance: InstanceInfo,
     *,
     previous_prefiller_kv_released: bool,
-    remaining_tokens: int | None = None,
 ) -> InstanceInfo:
     runtime = get_runtime()
     if not previous_prefiller_kv_released:
         await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
     await _release_decoder_once(runtime, previous_instance)
-    if remaining_tokens is not None:
-        req_data["max_output_tokens" if _api_kind(api) == "responses" else "max_tokens"] = remaining_tokens
-    request_length = len(json.dumps(req_data).encode("utf-8"))
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 
@@ -1291,86 +1289,159 @@ def _delta_text(event: dict) -> str:
 
 
 async def _native_sse_frames(chunks: AsyncIterator[bytes], state: "NativeStream") -> AsyncGenerator[bytes, None]:
-    pending: list[bytes] = []
+    pending: list[SSEFrame] = []
     pending_size = 0
-    deferred: list[SSEFrame] = []
-    attempt_committed = False
-    decode = state.decode
-    continuing = bool(decode.prefix)
-    finished_attempt = False
+    held: dict[int, list[SSEFrame]] = {}
+    committed = False
+    resumed = state.sent
+    indices: dict[int, int] = {}
+    rewrite = resumed
+    completed_output = 0
+    merging = resumed and state.open_text
+    terminal = False
+    index_key = "index" if state.messages else "output_index"
     async with aclosing(_split_sse_frames(chunks)) as frames:
         async for frame in frames:
-            raw_frame, complete = frame.raw, frame.complete
-            if finished_attempt:
-                yield raw_frame
+            if terminal:
+                yield frame.raw
                 continue
-            data = frame.data
-            event = data.get("type") if data is not None else None
-            if (event == "error" or frame.event == b"error") and (recompute := _decode_recompute(data)):
-                if attempt_committed and recompute.signal == PD_RECOMPUTE_RETRY:
+            data = frame.data or {}
+            event = data.get("type")
+            index = data.get(index_key)
+            if (event == "error" or frame.event == b"error") and (exc := _decode_recompute(data)):
+                if committed and exc.signal == PD_RECOMPUTE_RETRY:
                     raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-                # Once a non-text block starts, its events stay private until the attempt finishes.
-                # Keep text generated later in that attempt, even if it followed a tool or thinking block.
-                if recompute.signal == PD_RECOMPUTE_INTERRUPTED and any(_delta_text(f.data or {}) for f in deferred):
-                    for start in pending:
-                        yield start
-                    for outgoing in state.forward_held_text(deferred):
-                        yield outgoing
-                raise recompute
-            preamble = (
-                event in NATIVE_STREAM_START_EVENTS
-                if data is not None
-                else all(not line.strip() or line.startswith(b":") for line in frame.lines)
+                raise exc
+            if resumed and not frame.complete:
+                raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
+            opening = event in NATIVE_STREAM_START_EVENTS or (
+                frame.data is None and all(not line.strip() or line.startswith(b":") for line in frame.lines)
             )
-            if continuing and preamble:
+            if opening and not committed:
+                if not resumed:
+                    if event in ("message_start", "response.created"):
+                        state.envelope = data.get("message") or data.get("response") or {}
+                    if (not data or event == "ping") and pending_size + len(frame.raw) > MAX_DEFERRED_STREAM_BYTES:
+                        continue
+                    pending.append(frame)
+                    pending_size += len(frame.raw)
                 continue
-            if deferred or state.defer_event(data) or (continuing and event in NATIVE_STREAM_END_EVENTS):
-                if not complete:
-                    raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-                deferred.append(frame)
-                if event in NATIVE_STREAM_END_EVENTS:
-                    for start in pending:
-                        yield start
+
+            start = event in ("content_block_start", "response.output_item.added")
+            if start and isinstance(index, int):
+                block = data.get("content_block") or data.get("item") or {}
+                is_text = block.get("type") == ("text" if state.messages else "message")
+                if state.open_text and not (merging and index == 0 and is_text):
+                    for header in pending:
+                        yield state.encode(header, rewrite)
                     pending.clear()
-                    if continuing:
-                        for outgoing in state.finish_continued(deferred):
-                            yield outgoing
-                        return
-                    for held in deferred:
-                        yield patch_cached_tokens_in_sse_frame(decode.api, held, decode.info.prefiller_cached_tokens)
-                    deferred.clear()
-                    finished_attempt = True
-                continue
-
-            if continuing:
-                if data is None or not complete:
-                    raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-                for outgoing in state.continue_event(frame):
-                    attempt_committed = True
-                    yield outgoing
-                continue
-
-            state.observe(data)
-            patched = (
-                patch_cached_tokens_in_sse_frame(decode.api, frame, decode.info.prefiller_cached_tokens)
-                if complete
-                else raw_frame
-            )
-            if not attempt_committed and (preamble or state.text_setup(data)):
-                if (data is None or event == "ping") and pending_size + len(patched) > MAX_DEFERRED_STREAM_BYTES:
+                    for outgoing in state.close_text():
+                        yield outgoing
+                    merging = False
+                if not is_text:
+                    held[index] = []
+                elif merging and index == 0:
+                    indices[index] = state.text_index
                     continue
-                pending.append(patched)
-                pending_size += len(patched)
-                continue
-            for start_frame in pending:
-                yield start_frame
-            pending.clear()
-            attempt_committed = True
-            yield patched
-    if continuing or deferred:
+                else:
+                    state.item = block
+                    state.open_text = True
+                    state.item_text = block.get("text", "")
+                    state.text.append(state.item_text)
+                    state.item_prefix = ""
+                    state.part = {}
+            if index in held:
+                held[index].append(frame)
+                if event not in ("content_block_stop", "response.output_item.done"):
+                    continue
+                ready = held.pop(index)
+            else:
+                ready = [frame]
+            if event == "error":
+                held.clear()
+            elif event in NATIVE_STREAM_END_EVENTS and held:
+                raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
+
+            for ready_frame in ready:
+                obj = ready_frame.data or {}
+                kind = obj.get("type")
+                idx = obj.get(index_key)
+                if kind == "response.output_item.done" and isinstance(idx, int):
+                    completed_output = max(completed_output, idx + 1)
+                if isinstance(idx, int) and kind in ("content_block_start", "response.output_item.added"):
+                    indices[idx] = state.count
+                    state.count += 1
+                    if state.open_text and len(ready) == 1:
+                        state.text_index = indices[idx]
+                public_index = indices.get(idx) if isinstance(idx, int) else None
+                if (public_index is not None and public_index != idx) or (
+                    committed and "sequence_number" in obj and obj["sequence_number"] != state.sequence + 1 and held
+                ):
+                    rewrite = True
+                if kind == "response.content_part.added" and merging and idx == 0 and obj.get("content_index") == 0:
+                    continue
+                if kind == "response.content_part.added":
+                    state.part = obj["part"]
+                delta = _delta_text(obj)
+                if delta:
+                    state.text.append(delta)
+                    state.item_text += delta
+                if (
+                    kind
+                    in (
+                        "content_block_stop",
+                        "response.output_text.done",
+                        "response.content_part.done",
+                        "response.output_item.done",
+                    )
+                    and state.open_text
+                    and public_index == state.text_index
+                ):
+                    state.closers.append(ready_frame)
+                    continue
+                if kind in ("message_delta", "message_stop", "response.completed", "response.incomplete"):
+                    if state.open_text:
+                        for header in pending:
+                            yield state.encode(header, rewrite)
+                        pending.clear()
+                    for outgoing in state.close_text(status=(obj.get("response") or {}).get("status")):
+                        yield outgoing
+                if kind in NATIVE_STREAM_END_EVENTS:
+                    terminal = True
+                    if rewrite and isinstance(response := obj.get("response"), dict):
+                        response["id"] = state.envelope["id"]
+                        if "created_at" in state.envelope:
+                            response["created_at"] = state.envelope["created_at"]
+                        if kind != "response.failed":
+                            # Some backends include additional items only in the final snapshot.
+                            tail = response.get("output", [])[completed_output:]
+                            if (
+                                merging
+                                and not completed_output
+                                and tail
+                                and tail[0].get("type") == "message"
+                                and not tail[0].get("content")
+                            ):
+                                tail = tail[1:]
+                            response["output"] = [*(state.items[k] for k in sorted(state.items)), *tail]
+                if public_index is not None and rewrite:
+                    obj[index_key] = public_index
+                    if merging and idx == 0 and "item_id" in obj:
+                        obj["item_id"] = state.item["id"]
+                if kind == "response.output_item.done" and public_index is not None:
+                    state.items[public_index] = obj["item"]
+                if not committed and (kind in NATIVE_BLOCK_START_EVENTS and len(ready) == 1):
+                    pending.append(ready_frame)
+                    continue
+                for header in pending:
+                    yield state.encode(header, rewrite)
+                pending.clear()
+                committed = True
+                yield state.encode(ready_frame, rewrite)
+    if held or (resumed and not terminal):
         raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-    for start_frame in pending:
-        yield start_frame
+    for header in pending:
+        yield state.encode(header, rewrite)
 
 
 def _native_decode_error(api: str, signal: str, message: str) -> dict:
@@ -1444,235 +1515,99 @@ class NativeStream:
 
     def __init__(self, decode: "NativeDecode"):
         self.decode = decode
+        self.messages = decode.kind == "messages"
         self.sent = False
         self.sequence = -1
-        self.envelope: dict | None = None
-        self.item: dict | None = None
-        self.part: dict | None = None
-        self.block_open = False
-        self.resumable = True
+        self.envelope: dict = {}
+        self.count = 0
+        self.items: dict[int, dict] = {}
+        self.text_index = 0
+        self.open_text = False
+        self.item: dict = {}
+        self.part: dict = {}
+        self.item_text = ""
+        self.item_prefix = ""
+        self.closers: list[SSEFrame] = []
         self.text: list[str] = []
-        self.merged_attempt_text = False
-        self.attempt_item_start: SSEFrame | None = None
 
-    def text_setup(self, data: dict | None) -> bool:
-        if data is None:
-            return False
-        event = data.get("type")
-        if event == "content_block_start":
-            block = data.get("content_block") or {}
-            return data.get("index") == 0 and block.get("type") == "text" and not block.get("text")
-        if event == "response.output_item.added":
-            item = data.get("item") or {}
-            return data.get("output_index") == 0 and item.get("type") == "message" and isinstance(item.get("id"), str)
-        if event == "response.content_part.added":
-            part = data.get("part") or {}
-            return (
-                data.get("output_index") == 0
-                and data.get("content_index") == 0
-                and part.get("type") == "output_text"
-                and not part.get("text")
-            )
-        return False
-
-    def defer_event(self, data: dict | None) -> bool:
-        if data is None:
-            return False
-        event = data.get("type")
-        if event in ("content_block_start", "response.output_item.added", "response.content_part.added"):
-            return not self.text_setup(data)
-        if event == "content_block_delta":
-            return data.get("index") != 0 or (data.get("delta") or {}).get("type") != "text_delta"
-        if event == "response.output_text.delta":
-            return data.get("output_index", 0) != 0 or data.get("content_index", 0) != 0
-        if event in ("content_block_stop", "message_delta"):
-            return event == "content_block_stop" or bool(self.decode.prefix)
-        if isinstance(event, str) and event.startswith("response."):
-            return event not in NATIVE_STREAM_START_EVENTS and event not in NATIVE_STREAM_END_EVENTS
-        return False
-
-    def observe(self, data: dict | None) -> None:
-        if data is None:
-            return
-        if isinstance(data.get("sequence_number"), int):
-            self.sequence = data["sequence_number"]
-        event = data.get("type")
-        if event in ("message_start", "response.created"):
-            self.envelope = data.get("message") if event == "message_start" else data.get("response")
-        elif event == "response.output_item.added":
-            self.item = data["item"]
-        elif event == "response.content_part.added":
-            self.part = data["part"]
-        elif event == "content_block_start":
-            self.block_open = True
-        elif event in ("content_block_delta", "response.output_text.delta"):
-            self.text.append(_delta_text(data))
-        elif event in ("message_delta", "message_stop") or (
-            isinstance(event, str) and event.startswith("response.") and event != "response.in_progress"
-        ):
-            self.resumable = False
-
-    def continue_event(self, frame: SSEFrame) -> Iterator[bytes]:
-        data = cast(dict, frame.data)
-        event = data.get("type")
-        if event == "response.output_item.added":
-            self.attempt_item_start = frame
-            return
-        if event in ("content_block_start", "response.content_part.added"):
-            self.merged_attempt_text = True
-            return
-        if event not in ("content_block_delta", "response.output_text.delta"):
-            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        self.merged_attempt_text = True
-        self.text.append(_delta_text(data))
-        if self.decode.kind == "messages":
-            yield frame.raw
-        else:
-            if self.item is None:
-                raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-            data["item_id"] = self.item["id"]
-            yield self.encode_numbered(data, frame)
-
-    def finish_continued(self, frames: list[SSEFrame]) -> Iterator[bytes]:
-        terminal = frames[-1]
-        data = cast(dict, terminal.data)
-        if data["type"] == "error":
-            if self.decode.kind == "responses":
-                yield self.encode_numbered(data, terminal)
-            else:
-                yield terminal.raw
-            return
-        if self.decode.kind == "messages":
-            if not self.merged_attempt_text or not any(
-                frame.data and frame.data.get("type") == "content_block_stop" and frame.data.get("index") == 0
-                for frame in frames
-            ):
-                yield _encode_sse_event({"type": "content_block_stop", "index": 0})
-            for frame in frames:
-                event = frame.data or {}
-                if not self.merged_attempt_text and isinstance(event.get("index"), int):
-                    event["index"] += 1
-                    yield frame.encode()
-                else:
-                    yield patch_cached_tokens_in_sse_frame(
-                        self.decode.api, frame, self.decode.info.prefiller_cached_tokens
-                    )
-            return
-        yield from self.finish_responses(frames, data)
-
-    def finish_responses(self, frames: list[SSEFrame], terminal: dict) -> Iterator[bytes]:
-        if self.envelope is None or self.item is None or self.part is None:
-            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        response = terminal["response"]
-        response["id"] = self.envelope["id"]
-        if "created_at" in self.envelope:
-            response["created_at"] = self.envelope["created_at"]
-        if terminal["type"] == "response.failed":
-            yield self.encode_numbered(terminal, frames[-1])
-            return
-        output = response.get("output")
-        if not isinstance(output, list):
-            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        merge_first = self.merged_attempt_text or (
-            len(output) == 1 and output[0].get("type") == "message" and output[0].get("content") == []
+    def encode(self, frame: SSEFrame, rewrite: bool) -> bytes:
+        obj = frame.data
+        if obj is None:
+            return frame.raw
+        if not self.messages and "sequence_number" in obj:
+            if rewrite:
+                obj["sequence_number"] = self.sequence + 1
+            self.sequence = obj["sequence_number"]
+        changed = frame.complete and write_cached_tokens_for_api(
+            self.decode.api, obj, self.decode.info.prefiller_cached_tokens
         )
-        native_item = output[0] if merge_first and output else {}
-        native_parts = native_item.get("content", [])
-        if native_parts and native_parts[0].get("type") != "output_text":
-            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED)
-        text = self.decode.prefix + "".join(self.text)
-        part = {**self.part, **(native_parts[0] if native_parts else {}), "text": text}
-        status = native_item.get("status") or ("incomplete" if response["status"] == "incomplete" else "completed")
-        item = {
-            **self.item,
-            **native_item,
-            "id": self.item["id"],
-            "content": [part, *native_parts[1:]],
-            "status": status,
-        }
-        response["output"] = [item, *output[int(merge_first) :]]
-        write_cached_tokens_for_api(self.decode.api, response, self.decode.info.prefiller_cached_tokens)
-        indices = {"output_index": 0, "content_index": 0, "item_id": item["id"]}
-        buffered = frames[:-1]
-        if not self.merged_attempt_text:
-            # The retry may start with a tool or produce no text at all. Close the
-            # text item already seen by the client before forwarding the new items.
-            for event in (
-                {"type": "response.output_text.done", **indices, "text": text, "logprobs": part.get("logprobs") or []},
-                {"type": "response.content_part.done", **indices, "part": part},
-                {"type": "response.output_item.done", "output_index": 0, "item": item},
-            ):
-                yield self.encode_numbered(event)
-            if self.attempt_item_start is not None and not merge_first:
-                buffered.insert(0, self.attempt_item_start)
-        for frame in buffered:
-            data = frame.data
-            if data is None:
-                yield frame.raw
-                continue
-            index = data.get("output_index")
-            if merge_first and index == 0:
-                if not self.merged_attempt_text:
-                    continue  # The backend only closed its empty message.
-                if "item_id" in data:
-                    data["item_id"] = item["id"]
-                if data["type"] == "response.output_item.done":
-                    data["item"] = item
-                elif data.get("content_index") == 0:
-                    if data["type"] == "response.output_text.done":
-                        data["text"] = text
-                    elif data["type"] == "response.content_part.done":
-                        data["part"] = part
-            elif isinstance(index, int) and not merge_first:
-                data["output_index"] = index + 1
-            yield self.encode_numbered(data, frame)
-        yield self.encode_numbered(terminal, frames[-1])
+        return frame.encode() if rewrite or changed else frame.raw
 
-    def forward_held_text(self, frames: list[SSEFrame]) -> Iterator[bytes]:
-        """Keep only backend text frames from the interrupted tail."""
-        for frame in frames:
-            data = frame.data or {}
-            event = data.get("type")
-            text = _delta_text(data)
-            if text:
-                self.text.append(text)
-            elif event == "content_block_start" and not self.block_open and data["content_block"]["type"] == "text":
-                self.block_open = True
-            elif event == "response.output_item.added" and self.item is None and data["item"]["type"] == "message":
-                self.item = data["item"]
-            elif event == "response.content_part.added" and self.part is None and data["part"]["type"] == "output_text":
-                self.part = data["part"]
+    def close_text(self, status: str | None = None) -> Iterator[bytes]:
+        if not self.open_text:
+            return
+        if self.messages:
+            if self.closers:
+                frame = self.closers[-1]
+                data = cast(dict, frame.data)
+                if data["index"] == self.text_index:
+                    yield frame.raw
+                else:
+                    data["index"] = self.text_index
+                    yield frame.encode()
             else:
-                continue
-            if self.decode.kind == "messages":
-                data["index"] = 0
-                yield frame.encode()
+                yield _encode_sse_event({"type": "content_block_stop", "index": self.text_index})
+        else:
+            part = {**self.part, "text": self.item_text}
+            item = {**self.item, "status": status or "completed", "content": [part]}
+            indices = {"output_index": self.text_index, "item_id": item["id"], "content_index": 0}
+            if not self.closers:
+                for obj in (
+                    {
+                        "type": "response.output_text.done",
+                        **indices,
+                        "text": self.item_text,
+                        "logprobs": part.get("logprobs", []),
+                    },
+                    {"type": "response.content_part.done", **indices, "part": part},
+                    {"type": "response.output_item.done", "output_index": self.text_index, "item": item},
+                ):
+                    self.sequence += 1
+                    yield _encode_sse_event({**obj, "sequence_number": self.sequence})
             else:
-                data["output_index"] = 0
-                if "content_index" in data:
-                    data["content_index"] = 0
-                if "item_id" in data and self.item is not None:
-                    data["item_id"] = self.item["id"]
-                yield self.encode_numbered(data, frame)
+                for frame in self.closers:
+                    data = cast(dict, frame.data)
+                    if (
+                        not self.item_prefix
+                        and data.get("output_index") == self.text_index
+                        and data.get("item_id", item["id"]) == item["id"]
+                        and data.get("sequence_number", self.sequence + 1) == self.sequence + 1
+                    ):
+                        if data["type"] == "response.output_item.done":
+                            item = data["item"]
+                        yield self.encode(frame, False)
+                        continue
+                    data["output_index"] = self.text_index
+                    if "item_id" in data:
+                        data["item_id"] = item["id"]
+                    if data["type"] == "response.output_text.done" and data.get("content_index") == 0:
+                        data["text"] = self.item_prefix + data["text"]
+                    elif data["type"] == "response.content_part.done" and data.get("content_index") == 0:
+                        data["part"]["text"] = self.item_prefix + data["part"]["text"]
+                    elif data["type"] == "response.output_item.done":
+                        item = {**data["item"], "id": item["id"]}
+                        if self.item_prefix and item.get("content"):
+                            item["content"][0]["text"] = self.item_prefix + item["content"][0]["text"]
+                        data["item"] = item
+                    yield self.encode(frame, True)
+            self.items[self.text_index] = item
+        self.open_text = False
+        self.closers.clear()
 
     def reset_attempt(self) -> None:
         self.text.clear()
-        self.merged_attempt_text = False
-        self.attempt_item_start = None
-
-    def encode_numbered(self, data: dict, frame: SSEFrame | None = None) -> bytes:
-        self.sequence += 1
-        data["sequence_number"] = self.sequence
-        return frame.encode() if frame is not None else _encode_sse_event(data)
-
-    def generated_text(self) -> str:
-        if not self.resumable or not isinstance((self.envelope or {}).get("id"), str):
-            return ""
-        if self.decode.kind == "messages" and not self.block_open:
-            return ""
-        if self.decode.kind == "responses" and (self.item is None or self.part is None):
-            return ""
-        return "".join(self.text)
+        self.item_prefix = self.item_text if self.open_text else ""
+        self.closers.clear()
 
 
 class NativeStreamingResponse(StreamingResponse):
@@ -1743,7 +1678,6 @@ class NativeDecode:
     async def retry(self, recompute: DecodeRecompute, text: str) -> bool:
         if self.retries >= self.args.max_retries:
             return False
-        remaining = None
         if recompute.signal == PD_RECOMPUTE_INTERRUPTED:
             progress = recompute.progress or {}
             used = progress.get("output_tokens")
@@ -1766,6 +1700,7 @@ class NativeDecode:
                         **(self.req_data.get("vllm_xargs") or {}),
                         PD_CONTINUE_MESSAGE: PD_RECOMPUTE_VERSION,
                     }
+            self.req_data[budget_key] = remaining
             if isinstance(minimum := self.req_data.get("min_tokens"), int):
                 self.req_data["min_tokens"] = max(0, minimum - used)
 
@@ -1773,8 +1708,9 @@ class NativeDecode:
         await self.release_prefill_once()
         self.req_data.pop("kv_transfer_params", None)
         self.req_data["request_id"] = next_req_id()
+        request_length = len(json.dumps(self.req_data).encode("utf-8"))
         self.info = await reassign_instances(
-            self.api, self.req_data, self.info, previous_prefiller_kv_released=True, remaining_tokens=remaining
+            self.api, self.req_data, request_length, self.info, previous_prefiller_kv_released=True
         )
         self.prefill_released = False
         return True
@@ -1823,9 +1759,7 @@ class NativeDecode:
                         parts = _visible_blocks(self.kind, exc.partial or {})
                         text = "".join(block["text"] for block in parts)
                     else:
-                        text = state.generated_text()
-                        if state.sent and (not state.resumable or not (self.prefix or text)):
-                            raise DecodeRecompute(PD_RECOMPUTE_INTERRUPTED) from exc
+                        text = "".join(state.text)
                     if not await self.retry(exc, text):
                         raise
                     if state is not None:
@@ -1838,7 +1772,7 @@ class NativeDecode:
                 raise
             yield _native_stream_error(self.api, PD_RECOMPUTE_INTERRUPTED, state.sequence + 1)
         except (httpx.RequestError, httpx.HTTPStatusError, RetryPrefillMissingKV):
-            if state is None or not state.sent or not self.prefix:
+            if state is None or not state.sent:
                 raise
             yield _native_stream_error(self.api, PD_RECOMPUTE_INTERRUPTED, state.sequence + 1)
         finally:
@@ -2061,12 +1995,14 @@ async def handle_completions_impl(api: str, request: Request):
                                 )
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
+                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await reassign_instances(
                                 api,
                                 req_data,
+                                tmp_request_length,
                                 instance_info,
                                 previous_prefiller_kv_released=released_kv,
-                                remaining_tokens=origin_max_tokens - completion_tokens + retry_count,
                             )
                             released_kv = False
                             break

@@ -205,7 +205,6 @@ class RecomputeScheduler(Scheduler):
                     PD_RECOMPUTE_ARG: PD_RECOMPUTE_INTERRUPTED,
                     "output_tokens": output_tokens,
                     "remaining_tokens": request.max_tokens - output_tokens,
-                    "input_tokens": request.num_prompt_tokens,
                 }
         self._recomputed_reqs.append(
             RecomputeReqInfo(

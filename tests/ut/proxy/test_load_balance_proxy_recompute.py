@@ -332,7 +332,7 @@ def test_recompute_selects_new_pd_and_preserves_request(installed_runtime, monke
     original = native_request(api, streaming)
     if api == "/responses":
         original.update(_structured_options(api, "mcp"))
-    progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
+    progress = {"output_tokens": 5, "remaining_tokens": 112}
     partial = _text_result(api, "first-attempt", "第一段 ", 5)
     final = _text_result(api, "winning-attempt", "第二段", 2, input_tokens=59)
     other_load = 10000.0
@@ -543,8 +543,8 @@ def test_two_recomputes_preserve_one_request_and_its_budget(installed_runtime, a
     attempt_ids = []
     opened = []
     partials = [
-        ("first-attempt", "first ", {"output_tokens": 6, "remaining_tokens": 111, "input_tokens": 50}),
-        ("second-attempt", "second ", {"output_tokens": 7, "remaining_tokens": 104, "input_tokens": 61}),
+        ("first-attempt", "first ", 50, {"output_tokens": 6, "remaining_tokens": 111}),
+        ("second-attempt", "second ", 61, {"output_tokens": 7, "remaining_tokens": 104}),
     ]
 
     async def backend(request):
@@ -564,10 +564,8 @@ def test_two_recomputes_preserve_one_request_and_its_budget(installed_runtime, a
         else:
             progress = None
             if index < len(partials):
-                attempt, text, progress = partials[index]
-                result = _text_result(
-                    api, attempt, text, progress["output_tokens"], input_tokens=progress["input_tokens"]
-                )
+                attempt, text, input_tokens, progress = partials[index]
+                result = _text_result(api, attempt, text, progress["output_tokens"], input_tokens=input_tokens)
                 if not streaming:
                     result["kv_transfer_params"] = {proxy.PD_RECOMPUTE_ARG: proxy.PD_RECOMPUTE_INTERRUPTED, **progress}
             else:
@@ -626,7 +624,7 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
     runtime = proxy.get_runtime()
     options = _structured_options(api, case)
     native = {**native_request(api, streaming), **options}
-    progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
+    progress = {"output_tokens": 5, "remaining_tokens": 112}
     first, first_events = _structured_attempt(api, case, "abandoned", interrupted=True)
     result, final_events = _structured_attempt(api, case, "winner", interrupted=False)
     resume_text = case == "schema"
@@ -647,7 +645,7 @@ def test_recompute_with_structured_output(installed_runtime, api, case, streamin
             error = _recompute_error(api, progress, streaming=streaming)
             if streaming:
                 tail = 2 if api == "/messages" else 1
-                emitted = first_events[:-tail]
+                emitted = first_events[: -(tail + int(not resume_text))]
                 chunks = _frame_chunks(api, [*emitted, error])
             else:
                 first["kv_transfer_params"] = {proxy.PD_RECOMPUTE_ARG: proxy.PD_RECOMPUTE_INTERRUPTED, **progress}
@@ -717,9 +715,9 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     key = "content" if api == "/messages" else "output"
     index_key = "index" if api == "/messages" else "output_index"
     tail, starts = (2, 1) if api == "/messages" else (1, 2)
-    progress = {"output_tokens": 5, "remaining_tokens": 112, "input_tokens": 50}
+    progress = {"output_tokens": 5, "remaining_tokens": 112}
     first = _text_result(api, "first-attempt", "prefix ", 5)
-    typed, structured = _structured_attempt(api, case, "discarded", interrupted=True)
+    typed, structured = _structured_attempt(api, case, "closed", interrupted=False)
     opening = _start(api, "first-attempt")
     text_events = _events(b"".join(_text_stream(api, first)))[starts:-tail]
     structured = structured[starts:-tail]
@@ -757,12 +755,13 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     assert requests[1][budget] == 112
     content = requests[1][history][-1]["content"]
     assert (content if api == "/messages" else content[0]["text"]) == "prefix "
-    assert b"discarded" not in raw and b"winner" in raw
+    assert b"winner" in raw
+    assert (b"closed" in raw) == streaming
     if streaming:
         received = _events(raw)
         if api == "/messages":
             assert received[-1]["type"] == "message_stop"
-            assert [e["index"] for e in received if e["type"] == "content_block_stop"] == [0, 1]
+            assert [e["index"] for e in received if e["type"] == "content_block_stop"] == [0, 1, 2]
             assert (
                 "".join(e["delta"]["text"] for e in received if e.get("delta", {}).get("type") == "text_delta")
                 == "prefix "
@@ -770,8 +769,7 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
         else:
             assert [e["sequence_number"] for e in received] == list(range(len(received)))
             assert received[-1]["type"] == "response.completed"
-            assert received[-1]["response"]["output"][0]["content"][0]["text"] == "prefix "
-            assert received[-1]["response"]["output"][1] == final[key][0]
+            assert received[-1]["response"]["output"] == [*first[key], *final[key]]
     else:
         blocks = json.loads(raw)[key]
         assert blocks[1:] == final[key]
@@ -779,22 +777,84 @@ def test_mixed_recompute_keeps_only_text(installed_runtime, api, case, streaming
     _assert_no_load(scheduler)
 
 
+def test_interleaved_response_tools_publish_with_consistent_indices(installed_runtime):
+    scheduler, _, _ = installed_runtime
+    api = "/responses"
+    first, left = _structured_attempt(api, "client-tool", "first", interrupted=False)
+    second, right = _structured_attempt(api, "client-tool", "second", interrupted=False)
+    for event in right:
+        if "output_index" in event:
+            event["output_index"] = 1
+    first["output"].extend(second["output"])
+    # The second tool closes while the first tool's arguments are still incomplete.
+    events = [*left[:3], *right[2:-1], *left[3:]]
+
+    async def backend(request):
+        return httpx.Response(200, stream=Chunks(_frame_chunks(api, events)))
+
+    async def run():
+        async with httpx.AsyncClient(base_url="http://decoder/v1", transport=httpx.MockTransport(backend)) as client:
+            proxy.get_runtime()._clients[proxy.ServerRole.DECODE][proxy.server_key("127.0.0.1", 8200)] = client
+            response = await proxy.handle_completions_impl(api, _request(native_request(api, True)))
+            return _events(await _body(response))
+
+    received = asyncio.run(run())
+    assert [e["sequence_number"] for e in received] == list(range(len(received)))
+    done = [e for e in received if e["type"] == "response.output_item.done"]
+    assert [e["output_index"] for e in done] == [0, 1]
+    assert [e["item"]["id"] for e in done] == ["tool-second", "tool-first"]
+    assert received[-1]["response"]["output"] == [e["item"] for e in done]
+    _assert_no_load(scheduler)
+
+
 @pytest.mark.parametrize("api", ["/messages", "/responses"])
-def test_plain_text_stream_sends_delta_before_backend_finishes(installed_runtime, api):
+@pytest.mark.parametrize("tool_first", [False, True])
+def test_text_stream_sends_delta_before_backend_finishes(installed_runtime, api, tool_first):
     scheduler, _, _ = installed_runtime
     runtime = proxy.get_runtime()
     result = _text_result(api, "winner", "live", 3)
     events = _events(b"".join(_text_stream(api, result)))
     delta_type = "content_block_delta" if api == "/messages" else "response.output_text.delta"
-    split = next(index for index, event in enumerate(events) if event["type"] == delta_type) + 1
+    if tool_first:
+        _, tool = _structured_attempt(api, "client-tool", "live-tool", interrupted=False)
+        starts, tail_size, key = (1, 2, "index") if api == "/messages" else (2, 1, "output_index")
+        for event in events:
+            if key in event:
+                event[key] += 1
+        events[starts:starts] = tool[starts:-tail_size]
+        if api == "/responses":
+            events[-1]["response"]["output"].insert(0, tool[-2]["item"])
+            for seq, event in enumerate(events):
+                event["sequence_number"] = seq
+    split = (
+        next(
+            i
+            for i, event in enumerate(events)
+            if event["type"] == delta_type and (not tool_first or event.get("index", event.get("output_index")) == 1)
+        )
+        + 1
+    )
     tail = b"event: ping\r\ndata: [DONE]\r\n\r\n"
 
     async def run():
         release_tail = asyncio.Event()
+        release_text = asyncio.Event()
 
         class PausedTail(Chunks):
             async def __aiter__(self):
-                yield b"".join(map(_event, events[:split]))
+                start = 0
+                if tool_first:
+                    start = (
+                        next(
+                            i
+                            for i, e in enumerate(events)
+                            if e["type"] in ("content_block_stop", "response.output_item.done")
+                        )
+                        + 1
+                    )
+                    yield b"".join(map(_event, events[:start]))
+                    await release_text.wait()
+                yield b"".join(map(_event, events[start:split]))
                 await release_tail.wait()
                 yield b"".join(map(_event, events[split:])) + tail
 
@@ -806,7 +866,15 @@ def test_plain_text_stream_sends_delta_before_backend_finishes(installed_runtime
             frames = []
             async for raw in response.body_iterator:
                 frames.append(raw)
-                if raw != tail and _events(raw)[0]["type"] == delta_type:
+                if (
+                    tool_first
+                    and raw != tail
+                    and _events(raw)[0]["type"] in ("content_block_stop", "response.output_item.done")
+                ):
+                    release_text.set()
+                if raw != tail and _events(raw)[0] == events[split - 1]:
+                    if tool_first:
+                        assert b"live-tool" in b"".join(frames)
                     release_tail.set()
             assert release_tail.is_set() and frames[-1] == tail
 
@@ -828,7 +896,7 @@ def test_text_retry_limit_ends_sse_after_visible_output(installed_runtime, api):
         nonlocal calls
         calls += 1
         partial = _text_result(api, f"attempt-{calls}", "partial ", 5)
-        progress = {"output_tokens": 5, "remaining_tokens": 117 - 5 * calls, "input_tokens": 50}
+        progress = {"output_tokens": 5, "remaining_tokens": 117 - 5 * calls}
         return httpx.Response(200, stream=Chunks(_text_stream(api, partial, recompute=progress)))
 
     async def run():
@@ -852,7 +920,7 @@ def test_partial_recompute_stream_failure_is_terminal(installed_runtime, api, ca
     scheduler, prefill, _ = installed_runtime
     runtime = proxy.get_runtime()
     request = native_request(api, True)
-    progress = {"output_tokens": 3, "remaining_tokens": 0 if case == "budget-exhausted" else 114, "input_tokens": 50}
+    progress = {"output_tokens": 3, "remaining_tokens": 0 if case == "budget-exhausted" else 114}
     result = _text_result(api, "first-attempt", "partial", 3)
     opened = []
 

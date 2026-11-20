@@ -11,6 +11,6 @@ entries:
       With matching Ascend backends, native Messages and Responses requests in the
       example proxy can retry decode recomputation through the load balancer.
       Text replies can continue from visible output with the remaining token
-      budget. Interrupted tool-call and thinking fragments are discarded;
+      budget. Completed tool and thinking blocks are forwarded. Unfinished fragments are discarded on retry;
       only visible text is used to continue generation. Retries retain the original tool configuration,
       so a server-side tool may run again.

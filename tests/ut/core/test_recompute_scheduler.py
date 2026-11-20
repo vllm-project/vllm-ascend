@@ -327,7 +327,7 @@ def test_recomputed_output_marks_native_api_interruptions(mode, token_count, exp
     assert output.stop_reason == "recomputed"
     transfer = {PD_RECOMPUTE_ARG: expected_signal} if expected_signal else None
     if expected_signal == PD_RECOMPUTE_INTERRUPTED:
-        transfer.update(output_tokens=3, remaining_tokens=7, input_tokens=19)
+        transfer.update(output_tokens=3, remaining_tokens=7)
     assert output.kv_transfer_params == transfer
 
 
