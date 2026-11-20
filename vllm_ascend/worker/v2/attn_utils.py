@@ -1534,13 +1534,20 @@ def create_cache_component_views(
 
 def create_kv_cache_runtime_views(
     kv_cache_config: KVCacheConfig,
-    backing: torch.Tensor,
+    backing: torch.Tensor | Mapping[int, torch.Tensor],
     attn_groups: Sequence[AttentionGroup],
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
 ) -> dict[str, Any]:
-    """Delegate component views to backends using the descriptor block strides."""
+    """Delegate component views to backends using the descriptor block strides.
+
+    ``backing`` is either the single shared allocation or a mapping from a
+    descriptor's ``size`` to the allocation that addresses it. The multi-
+    backing form exists because ``pcp_config.local_index`` emits the
+    replicated indexer tuple with a different size than the owner-sharded
+    long-KV tuple; descriptors never span backings.
+    """
     placements = {
         name: (descriptor, layer_index)
         for descriptor in kv_cache_config.kv_cache_tensors
@@ -1553,10 +1560,11 @@ def create_kv_cache_runtime_views(
         spec = group.kv_cache_spec
         for name in group.layer_names:
             descriptor, layer_index = placements[name]
+            layer_backing = backing[descriptor.size] if isinstance(backing, Mapping) else backing
             num_blocks = kv_cache_config.num_blocks_of(descriptor)
             start = descriptor.offset + layer_index * descriptor.layer_stride
             span = (num_blocks - 1) * descriptor.block_stride + spec.page_size_bytes
-            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > backing.nbytes:
+            if start < 0 or descriptor.block_stride < spec.page_size_bytes or start + span > layer_backing.nbytes:
                 raise ValueError(f"KV cache placement for {name} exceeds its backing allocation.")
             shapes = group.backend.get_runtime_shapes(
                 spec,
@@ -1574,7 +1582,7 @@ def create_kv_cache_runtime_views(
                 for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
             ]
             components = create_cache_component_views(
-                backing[start : start + span],
+                layer_backing[start : start + span],
                 cache_shapes,
                 dtypes,
                 descriptor.block_stride,
@@ -1588,6 +1596,69 @@ def create_kv_cache_runtime_views(
     return caches
 
 
+def _allocate_unified_kv_cache_backings(
+    kv_cache_config: KVCacheConfig,
+    layer_kv_cache_spec: Mapping[str, KVCacheSpec],
+    device: torch.device,
+) -> dict[int, torch.Tensor]:
+    """Allocate one backing per descriptor size for the unified DSV4 path.
+
+    Upstream emits each descriptor's ``size`` as the extent its byte offsets
+    address, so descriptors with different sizes cannot share an allocation.
+    ``pcp_config.local_index`` is the supported split: it moves the indexer K
+    plane into its own replicated tuple while the remaining tuple stays
+    owner-sharded. Grouping is by size because descriptors of one size are
+    views into the same bucket.
+
+    Owner slabs reduce the physical footprint by ``1 / pcp_size`` and are
+    mandatory when ``pcp_config.owner_capacity`` converted that saving into
+    extra blocks. Index-only tuples stay replicated; sharding them would make
+    the index reads run against peer pages.
+    """
+    vllm_config = get_current_vllm_config()
+    from vllm_ascend.ascend_config import pcp_config_from_vllm_config
+    from vllm_ascend.models.deepseek_v41.cache_config import (
+        local_index_copy_enabled,
+        owner_capacity_shard_size,
+    )
+
+    pcp_config = pcp_config_from_vllm_config(vllm_config)
+    by_size: dict[int, list] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        by_size.setdefault(int(descriptor.size), []).append(descriptor)
+    if len(by_size) != 1 and not local_index_copy_enabled(pcp_config):
+        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
+
+    require_owner_slab = owner_capacity_shard_size(vllm_config) > 1
+    owner_allocator = _deepseek_v41_owner_allocator(vllm_config, layer_kv_cache_spec, device)
+    # Preserve the existing 2 MiB base-address alignment for KV transfer.
+    alignment = 2 * 1024 * 1024
+    backings: dict[int, torch.Tensor] = {}
+    for backing_size, descriptors in by_size.items():
+        names = [name for descriptor in descriptors for name in get_kv_cache_tensor_layers(descriptor)]
+        index_only = bool(names) and all(".indexer.k_cache" in name for name in names)
+        if require_owner_slab and not index_only and owner_allocator is None:
+            raise RuntimeError(
+                "additional_config.pcp_config.owner_capacity sized the KV pool for owner sharding, but the "
+                f"owner slab allocator is unavailable; refusing to allocate a replicated {names[:1]} "
+                "slab that no longer fits. Disable additional_config.pcp_config.owner_capacity or fix the "
+                "VMM failure."
+            )
+        backing = None
+        if owner_allocator is not None and not index_only:
+            backing = owner_allocator.allocate_slab(names, backing_size)
+            if backing is None and require_owner_slab:
+                raise RuntimeError(
+                    "additional_config.pcp_config.owner_capacity sized the KV pool for owner sharding, but the "
+                    f"owner slab allocator could not map {names[:1]}. Disable "
+                    "additional_config.pcp_config.owner_capacity or fix the VMM failure."
+                )
+        if backing is None:
+            backing = _allocate_int8_cache_tensor(backing_size, alignment, device)
+        backings[backing_size] = backing
+    return backings
+
+
 def unified_allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1598,24 +1669,21 @@ def unified_allocate_kv_cache(
 
     Backends interpret each layer's page through their runtime view interface;
     allocation and component construction do not use the legacy reshape path.
+    A pool split by ``pcp_config.local_index`` gets one backing per descriptor
+    size, and owner mode routes the non-index backing through the PCP slab.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
-    sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-    if len(sizes) != 1:
-        raise ValueError("Unified KV cache descriptors must share one backing allocation.")
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = get_shared_kv_cache_layers(vllm_config)
-    backing_size = sizes.pop()
-
-    # Preserve the existing 2 MiB base-address alignment for KV transfer.
-    alignment = 2 * 1024 * 1024
-    logger.info("Allocating unified KV cache: %d bytes", backing_size)
-    buf = _allocate_int8_cache_tensor(backing_size, alignment, device)
+    layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    backings = _allocate_unified_kv_cache_backings(kv_cache_config, layer_kv_cache_spec, device)
+    for backing_size in backings:
+        logger.info("Allocating unified KV cache backing: %d bytes", backing_size)
     return create_kv_cache_runtime_views(
         kv_cache_config,
-        buf,
+        backings,
         _get_cache_attention_groups(kv_cache_config, attn_layers, shared_layers),
         kernel_block_sizes,
         shared_layers,
