@@ -75,7 +75,7 @@ def rms_norm(
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize(
     "num_tokens,num_q_heads,num_kv_heads,rope_dim",
-    [case for case in QKV_ROPE_CASES if case != (10240, 64, 4, 128)],
+    [case for case in QKV_ROPE_CASES if case != (10240, 64, 4, 128)] + [(1024, 12, 1, 128)],
 )
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("eps", EPS)
@@ -149,7 +149,7 @@ def test_split_qkv_rmsnorm_rope(
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize(
     "num_tokens,num_q_heads,num_kv_heads,rope_dim",
-    [case for case in QKV_ROPE_CASES if case != (10240, 12, 1, 64)],
+    [case for case in QKV_ROPE_CASES if case != (10240, 12, 1, 64)] + [(1024, 12, 1, 64)],
 )
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("eps", EPS)

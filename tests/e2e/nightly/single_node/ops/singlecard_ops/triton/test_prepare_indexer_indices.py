@@ -27,7 +27,8 @@ def reference(selected, positions, compress_ratio):
         )
         for tokens, topks in ((1, single_row_topks), (129, multi_row_topks), (3, (8,)), (41, (2048,)), (0, (1,)))
         for topk in topks
-    ],
+    ]
+    + [(1, 1, 512)],  # Preserve the independent 512-column specialization.
 )
 @torch.inference_mode()
 def test_prepare_indexer_indices(topk, tokens, compress_ratio):

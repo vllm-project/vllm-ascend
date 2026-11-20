@@ -387,6 +387,55 @@ class TestApplyPenalties:
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    )
+    @torch.inference_mode()
+    def test_apply_penalties_permuted_request_groups(self):
+        """Grouped draft rows can reference request states in a different order."""
+        data = create_test_data(
+            num_tokens=4,
+            vocab_size=VOCAB_SIZE[0],
+            num_status=4,
+            num_speculative_tokens=1,
+            device=DEVICES[0],
+            dtype=torch.bfloat16,
+            seed=SEEDS[0],
+            spec_decode_groups=True,
+        )
+        (
+            logits,
+            idx_mapping,
+            token_ids,
+            expanded_local_pos,
+            repetition_penalty,
+            frequency_penalty,
+            presence_penalty,
+            prompt_bin_mask,
+            output_bin_counts,
+        ) = data
+        # Keep each two-row group contiguous, with positions [0, 1], while
+        # reversing its request-state ID. State-owned arrays stay in ID order.
+        idx_mapping.copy_(idx_mapping.new_tensor([1, 1, 0, 0]))
+        torch.testing.assert_close(expanded_local_pos, expanded_local_pos.new_tensor([0, 1, 0, 1]), rtol=0, atol=0)
+        token_ids.copy_(token_ids.new_tensor([4, 0, 1, 3]))
+        repetition_penalty.copy_(repetition_penalty.new_tensor([1.0, 2.0, 1.0, 1.0]))
+        frequency_penalty.copy_(frequency_penalty.new_tensor([0.25, 0.75, 0.0, 0.0]))
+        presence_penalty.copy_(presence_penalty.new_tensor([0.1, 0.5, 0.0, 0.0]))
+        prompt_bin_mask.zero_()
+        prompt_bin_mask[0, 0] = 1
+        prompt_bin_mask[1, 0] = 1 << 2
+        output_bin_counts.zero_()
+        output_bin_counts[0, 1] = 2
+        output_bin_counts[1, 4] = 3
+        logits.fill_(1.0)
+        logits[:, :5] = logits.new_tensor([2.0, -2.0, 3.0, -3.0, 1.0])
+
+        expected = pytorch_apply_penalties(logits.clone(), *data[1:])
+        apply_penalties(*data)
+        torch.testing.assert_close(logits, expected, atol=1e-2, rtol=1e-2)
+        cleanup()
+
     # The test above runs at vocab_size=1000, a single block, so it never
     # exercises the per-block address arithmetic or the masked tail.
     @pytest.mark.parametrize(

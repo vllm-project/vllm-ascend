@@ -67,8 +67,10 @@ def test_adaptive_device_boundaries_match_generic_metadata(mixed, graph_mode):
 @pytest.mark.parametrize(
     "query_len,num_spec,projection_size",
     [
+        (1, 0, 0),  # Ordinary decode without speculation or a shared convolution output.
         (1, 3, 11),  # Ordinary decode with speculation configured but no draft tokens.
         (5, 4, 11),  # Pure speculative decode at the longest original query.
+        ([1, 1, 17, 257], 0, 11),  # Ordinary decode + fresh/chunked prefill without speculation.
         ([4, 257, 2, 1], 3, 11),  # Speculative decode + prefill + ordinary decode.
     ],
 )

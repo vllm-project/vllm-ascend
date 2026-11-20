@@ -765,7 +765,7 @@ def test_same_seed_and_position_are_deterministic():
 @pytest.mark.parametrize(
     "use_block_verification,rejection_step,has_draft_logits",
     # Cover each pair of verification mode, rejection step and draft-logits path.
-    [(False, 0, False), (False, 1, True), (True, 0, True), (True, 1, False)],
+    [(False, 0, False), (False, 1, True), (True, 0, True), (True, 1, False), (True, 1, True)],
 )
 @torch.inference_mode()
 def test_rejection_sample_residual_is_independent_of_acceptance_draw(

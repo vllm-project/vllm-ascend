@@ -84,7 +84,7 @@ def v_rms_norm(v, num_tokens, head_size, eps):
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize(
     "num_tokens,num_q_heads,num_kv_heads,head_size,rope_dim",
-    QKV_CASES,
+    QKV_CASES + [(1024, 4, 2, 256, 256)],
 )
 @pytest.mark.parametrize("eps", EPS)
 @pytest.mark.parametrize("dtype", DTYPES)

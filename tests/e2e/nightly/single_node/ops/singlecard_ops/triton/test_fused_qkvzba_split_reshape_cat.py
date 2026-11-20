@@ -65,6 +65,7 @@ def validate_cmp(y_cal, y_ref, device="npu"):
 # The smaller generic shape covers unequal head dimensions in both dtypes.
 TEST_CASES = [
     (128, 8, 32, 128, 64, torch.float32),
+    (64, 16, 128, 512, 512, torch.float32),
     (2048, 16, 128, 512, 512, torch.bfloat16),
     (128, 8, 32, 128, 64, torch.bfloat16),
 ]

@@ -110,6 +110,7 @@ def test_fused_rms_norm_silu_gate_preserves_prenorm_contract(residual_dtype, ele
         (768, torch.bfloat16, False),
         (37, torch.float16, False),
         (37, torch.bfloat16, True),
+        (64, torch.bfloat16, True),  # 12 heads reach the 768-row medium-batch limit.
     ],
 )
 def test_kimi_norm_gate_strides_and_direct_output(tokens, dtype, inplace):

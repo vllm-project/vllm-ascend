@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize(
     "ratio,packed",
     # Cover the minimum ratio, padded pooling, the 8/9 chunk boundary and the maximum ratio.
-    [(8, False), (128, False), (2, True), (3, True), (9, True)],
+    [(8, False), (128, False), (2, True), (3, True), (9, True), (16, True)],
 )
 @torch.inference_mode()
 def test_compressor_matches_torch(ratio, packed):

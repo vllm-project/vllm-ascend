@@ -19,6 +19,7 @@ MROPE_CASES = [
     # Use the original small-head decode shape for the single-token boundary.
     (1, 2, 1, 128, [24, 20, 20], torch.bfloat16, False, False),
     (1, 2, 1, 128, [24, 20, 20], torch.bfloat16, True, True),
+    (1, 16, 2, 128, [11, 11, 10], torch.float16, True, False),
 ]
 EPS = [1e-6]
 DEVICES = [f"npu:{0}"]

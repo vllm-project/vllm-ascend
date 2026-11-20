@@ -247,8 +247,12 @@ def _assert_bincount_case(request_ids, prompts, prefills, vocab_size, dtype=torc
         torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("vocab_size", [33, 4097, 151000])
+@pytest.mark.parametrize(
+    "dtype,vocab_size",
+    [(dtype, vocab_size) for vocab_size in (33, 4097, 151000) for dtype in (torch.int32, torch.int64)]
+    # A one-token vocabulary has only a partial bitmap word and counter zero.
+    + [(torch.int32, 1)],
+)
 def test_bincount_ragged_strides(dtype, vocab_size):
     _assert_bincount_case([3, 0, 2], [1025, 0, 31, 2049], [1058, 0, 1024, 2050], vocab_size, dtype)
 

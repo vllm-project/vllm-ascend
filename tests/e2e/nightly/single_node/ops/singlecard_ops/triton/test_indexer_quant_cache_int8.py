@@ -119,7 +119,9 @@ def snapshot(cache):
         (tokens, paired, slot_dtype, True)
         for tokens in (16, 17, 128)
         for paired, slot_dtype in ((False, torch.int64), (True, torch.int32))
-    ],
+    ]
+    # Cover paired cache with INT64 slots at non-unit stride as well.
+    + [(17, True, torch.int64, True)],
 )
 @torch.inference_mode()
 def test_native_quantization_and_cache_contents(tokens, paired, slot_dtype, strided):
@@ -246,8 +248,8 @@ def test_registry_warmup_prevents_runtime_compilation(paired, slot_dtype, monkey
         module = importlib.import_module(name)
         if callable(getattr(module, "compile", None)):
             monkeypatch.setattr(module, "compile", forbid_compile)
-    # Keep both ends of each INPUT_ROWS bucket, plus the 127/128 boundary.
-    for count in (1, 2, 3, 4, 5, 8, 9, 16, 17, 32, 33, 64, 65, 127, 128):
+    # Every supported runtime count must reuse the kernels prepared by warmup.
+    for count in range(1, 129):
         x, slots, host_slots = make_inputs(count, slot_dtype)
         for offset in (0, 1):
             storage = torch.empty(count + offset, dtype=slot_dtype, device="npu")

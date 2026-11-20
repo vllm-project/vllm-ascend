@@ -88,6 +88,7 @@ def _build_rejection_sample_inputs(
     "num_speculative_steps,temperature,unconditional_rates",
     [
         (3, 1.0, [0.9, 0.5, 0.2]),
+        (3, 0.0, [0.9, 0.5, 0.2]),
         (3, 1.0, [1.0, 1.0, 1.0]),
         (3, 0.0, [1.0, 1.0, 1.0]),
         (3, 1.0, [0.0, 0.0, 0.0]),

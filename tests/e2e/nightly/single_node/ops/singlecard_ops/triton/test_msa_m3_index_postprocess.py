@@ -177,6 +177,7 @@ def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int,
         (1, True, 32, 2055),
         (4, True, 16, 513),
         (4, False, 3, 7),
+        (1, False, 1, 0),  # Sort an empty selection with active decode tokens.
     ],
 )
 def test_sorted_decode_indices_match_normalized_selection(query_len: int, strided: bool, topk: int, width: int) -> None:
