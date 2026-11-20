@@ -27,22 +27,20 @@ _FA3_TARGET_ARCHITECTURES = {
 
 def supports_fa3_model(spec: SpeculativeConfig, model_tag: str, minimax_m3_architectures: frozenset[str]) -> bool:
     """Match the FA3 target/draft architecture pair for the active loader."""
+    if model_tag not in _FA3_TARGET_ARCHITECTURES:
+        return False
+
     target = spec.target_model_config
     target_hf = getattr(target, "hf_config", None)
     is_minimax_target = not minimax_m3_architectures.isdisjoint(getattr(target_hf, "architectures", None) or ())
-    draft_architectures = spec.draft_model_config.architectures or ()
-    if (
-        model_tag == "dspark_head"
-        and spec.method == "dspark"
-        and is_minimax_target
-        and not _FA3_TARGET_ARCHITECTURES[model_tag].isdisjoint(draft_architectures)
-    ):
-        return True
-
-    # MiniMax targets only support FA3 on a DSpark draft.
-    if spec.method != "dflash" or is_minimax_target:
+    supported_method = "dspark" if is_minimax_target else "dflash"
+    if spec.method != supported_method:
         return False
+
+    draft_tag = f"{supported_method}_head"
+    if _FA3_TARGET_ARCHITECTURES[draft_tag].isdisjoint(spec.draft_model_config.architectures or ()):
+        return False
+
     if model_tag == "backbone":
-        draft_supports_fa3 = not _FA3_TARGET_ARCHITECTURES["dflash_head"].isdisjoint(draft_architectures)
-        return draft_supports_fa3 and getattr(target, "architecture", None) in _FA3_TARGET_ARCHITECTURES[model_tag]
-    return model_tag == "dflash_head" and not _FA3_TARGET_ARCHITECTURES[model_tag].isdisjoint(draft_architectures)
+        return not is_minimax_target and getattr(target, "architecture", None) in _FA3_TARGET_ARCHITECTURES[model_tag]
+    return model_tag == draft_tag
