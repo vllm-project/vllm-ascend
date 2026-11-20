@@ -476,6 +476,46 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
+    def _find_repair_fence_layer(self):
+        """Locate the first decoder layer the repair fence reads the cache of.
+
+        Core's repair executor reaches the cache through
+        ``layer.self_attn.attn.kv_cache`` and derives the block size from that
+        cache's geometry (``_repair_block_size``); it finds the layer stack as
+        ``model.model.layers``, but model zoos name the stack differently
+        (ChatGLM ``transformer.encoder.layers``, Falcon ``transformer.h``,
+        MPT ``transformer.blocks``) and multimodal wrappers nest the backbone
+        below ``language_model``. Discover the first layer that actually has
+        the fence's cache seam (``self_attn.attn``), which cannot pick up an
+        unrelated attention module (e.g. a vision encoder, whose attention
+        keeps no KV cache seam the fence reads).
+
+        Returns (layer, path) of the first candidate with the seam, or
+        (None, tried_paths); the caller refuses with an actionable error
+        instead of deriving a block size from a wrong module.
+        """
+        containers = (
+            ("model", "layers"),
+            ("transformer", "encoder", "layers"),
+            ("transformer", "h"),
+            ("transformer", "blocks"),
+            ("language_model", "model", "layers"),
+            ("language_model", "transformer", "encoder", "layers"),
+            ("layers",),
+        )
+        for path in containers:
+            node = self.model
+            for attr in path:
+                node = getattr(node, attr, None)
+                if node is None:
+                    break
+            if not node:
+                continue
+            for layer in node:
+                if getattr(getattr(layer, "self_attn", None), "attn", None) is not None:
+                    return layer, ".".join(path)
+        return None, containers
+
     def _check_repair_kv_layout_capability(self) -> None:
         """Refuse kv_load_failure_policy='repair' on fence-incompatible layouts.
 
@@ -506,23 +546,33 @@ class NPUModelRunner(GPUModelRunner):
         except ImportError:
             return
         block_size = self.vllm_config.cache_config.block_size
+        layer, layer_path = self._find_repair_fence_layer()
+        if layer is None:
+            raise RuntimeError(
+                "kv_load_failure_policy='repair': no decoder layer with the "
+                "repair fence's KV cache seam (self_attn.attn) was found on "
+                "this model; the hole-repair policy is unsupported for it. "
+                "Switch the policy to 'fail' or 'recompute'."
+            )
         try:
-            derived = _repair_block_size(self.model.model.layers[0])
+            derived = _repair_block_size(layer)
         except Exception as exc:
             raise RuntimeError(
-                "kv_load_failure_policy='repair': layer 0's KV cache geometry "
-                f"is not repair-fence compatible ({exc}). Set the KV cache "
-                "layout to a [B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) "
+                f"kv_load_failure_policy='repair': the KV cache geometry of "
+                f"the first decoder layer ({layer_path}) is not "
+                f"repair-fence compatible ({exc}). Set the KV cache layout "
+                "to a [B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) "
                 "or switch the policy to 'fail' or 'recompute'."
             ) from exc
         if derived != block_size:
             raise RuntimeError(
                 "kv_load_failure_policy='repair': the repair fence derives a "
-                f"block size of {derived} from layer 0's KV cache geometry, but "
-                f"the cache is managed in blocks of {block_size}; every repair "
-                "would be refused at repair time. Set the KV cache layout to a "
-                "[B, H, N, C] layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) or switch "
-                "the policy to 'fail' or 'recompute'."
+                f"block size of {derived} from the first decoder layer's "
+                f"({layer_path}) KV cache geometry, but the cache is managed "
+                f"in blocks of {block_size}; every repair would be refused at "
+                "repair time. Set the KV cache layout to a [B, H, N, C] "
+                "layout (e.g. VLLM_KV_CACHE_LAYOUT=HND) or switch the policy "
+                "to 'fail' or 'recompute'."
             )
 
     def initialize_kv_cache(
