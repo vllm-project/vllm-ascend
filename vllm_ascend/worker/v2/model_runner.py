@@ -124,7 +124,6 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
-from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, supports_router, verify_graph_eligible
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -155,7 +154,6 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
-    dspark_expert_pool: DSparkExpertPool | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -357,35 +355,6 @@ class NPUModelRunner(GPUModelRunner):
             join_nz_warm_thread()
 
         expert_offload.initialize(self)
-
-        expert_offload_manager = expert_offload.get_manager(self.model)
-        pool_config = (
-            getattr(self.ascend_config, "dspark_expert_pool", None) if expert_offload_manager is not None else None
-        )
-        if pool_config is not None and pool_config.enabled:
-            assert pool_config.protected_positions is not None and pool_config.suffix_experts is not None
-            assert self.speculative_config is not None and self.speculative_config.num_speculative_tokens is not None
-            num_device_experts = self.ascend_config.expert_offload_config.num_device_experts
-            assert num_device_experts is not None
-            layers = [
-                layer
-                for layer in self.model.modules()
-                if getattr(layer, "_expert_offload_binding", None) is not None and supports_router(layer)
-            ]
-            if not layers:
-                raise ValueError("dspark_expert_pool found no supported target routed expert layer")
-            pool = DSparkExpertPool(
-                self.device,
-                self.max_num_tokens,
-                pool_config.protected_positions,
-                pool_config.suffix_experts,
-                num_speculative_tokens=self.speculative_config.num_speculative_tokens,
-                num_device_experts=num_device_experts,
-            )
-            self.dspark_expert_pool = pool
-            self.model_state.dspark_expert_pool = pool
-            for layer in layers:
-                layer.dspark_expert_pool = pool
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -783,8 +752,8 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        if self.dspark_expert_pool is not None:
-            self.dspark_expert_pool.active = False
+        if (pool := expert_offload.get_dspark_expert_pool(self.model)) is not None:
+            pool.active = False
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -898,21 +867,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
-        expert_offload.prepare_batch(self, batch_state)
-        if (
-            self.dspark_expert_pool is not None
-            and batch_state is not None
-            and uniform_token_count not in (None, 1)
-            and not verify_graph_eligible(
-                batch_state,
-                num_speculative_tokens=self.dspark_expert_pool.num_speculative_tokens,
-                structured=scheduler_output.has_structured_output_requests
-                or bool(scheduler_output.num_invalid_spec_tokens),
-            )
-        ):
-            # Verification graphs capture the pure verification routing path.
-            # Mixed or short verification still uses L in eager mode.
-            uniform_token_count = None
+        uniform_token_count = expert_offload.prepare_batch(self, batch_state, uniform_token_count, scheduler_output)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1205,8 +1160,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
 
-        if self.dspark_expert_pool is not None:
-            self.dspark_expert_pool.prepare(input_batch, invalid_drafts=bool(scheduler_output.num_invalid_spec_tokens))
+        if (pool := expert_offload.get_dspark_expert_pool(self.model)) is not None:
+            pool.prepare(input_batch, invalid_drafts=bool(scheduler_output.num_invalid_spec_tokens))
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

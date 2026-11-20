@@ -21,7 +21,7 @@ from vllm_ascend.ops.fused_moe import routed_experts
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.worker.v2.dspark_expert_pool import verify_graph_eligible
+from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +76,6 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
         {
             "torch": torch,
             "expert_offload": expert_offload,
-            "verify_graph_eligible": verify_graph_eligible,
             "logger": Mock(),
             "CUDAGraphMode": SimpleNamespace(NONE=0),
             "C8KVBlockZeroer": type("C8KVBlockZeroer", (), {}),
@@ -95,6 +94,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     runner = runner_class()
     runner.model = torch.nn.Module()
     if manager is not None:
+        manager.dspark_expert_pool = None
         runner.model._expert_offload_manager = manager
     runner._target_uses_flashmla = False
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None, model_config=object())
@@ -148,37 +148,6 @@ def test_disabled_load_does_not_initialize_offload(load_hook_class, loading_memo
     loading_memory.assert_not_called()
 
 
-def test_expert_pool_initialization_uses_model_owned_manager(load_hook_class):
-    manager = Mock()
-    runner, _ = make_runner(load_hook_class, manager=manager)
-    runner.max_num_tokens = 12
-    runner.speculative_config = SimpleNamespace(num_speculative_tokens=5)
-    runner.ascend_config.expert_offload_config = ExpertOffloadConfig(enabled=True, num_device_experts=12)
-    runner.ascend_config.dspark_expert_pool = SimpleNamespace(enabled=True, protected_positions=2, suffix_experts=2)
-    layer = torch.nn.Module()
-    layer._expert_offload_binding = object()
-    manager.initialize.side_effect = lambda model: model.add_module("experts", layer)
-    pool = Mock()
-    pool_factory = Mock(return_value=pool)
-    with (
-        patch(
-            "vllm_ascend.distributed.expert_transfer.expert_offload_manager.ExpertOffloadManager",
-            return_value=manager,
-        ),
-        patch.dict(
-            runner.load_model.__globals__,
-            {"DSparkExpertPool": pool_factory, "supports_router": lambda candidate: candidate is layer},
-        ),
-    ):
-        runner.load_model()
-
-    pool_factory.assert_called_once_with("cpu", 12, 2, 2, num_speculative_tokens=5, num_device_experts=12)
-    assert expert_offload.get_manager(runner.model) is manager
-    assert runner.dspark_expert_pool is pool
-    assert runner.model_state.dspark_expert_pool is pool
-    assert layer.dspark_expert_pool is pool
-
-
 @pytest.mark.parametrize(
     "rows,drafts,prefilling,structured,invalid,width,expected",
     [
@@ -196,7 +165,7 @@ def test_expert_pool_graph_dispatch_preserves_offload_metadata(
 ):
     manager = Mock()
     runner, _ = make_runner(load_hook_class, manager=manager)
-    runner.dspark_expert_pool = SimpleNamespace(num_speculative_tokens=5)
+    manager.dspark_expert_pool = SimpleNamespace(num_speculative_tokens=5)
     state = SimpleNamespace(
         num_scheduled_tokens=rows,
         num_draft_tokens_np=drafts,
@@ -214,7 +183,7 @@ def test_expert_pool_graph_dispatch_preserves_offload_metadata(
 
 @pytest.mark.parametrize(
     "active,has_native_rows,capturing,expected",
-    [(True, False, True, "pool"), (True, True, False, "merged"), (False, False, True, "native")],
+    [(True, False, True, "pool"), (True, True, False, "mixed"), (False, False, True, "native")],
 )
 def test_expert_pool_routing_calls_native_only_for_real_native_rows(
     monkeypatch, active, has_native_rows, capturing, expected
@@ -225,27 +194,31 @@ def test_expert_pool_routing_calls_native_only_for_real_native_rows(
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
     results = {
         name: (torch.full((2, 6), float(index)), torch.full((2, 6), index, dtype=torch.int32))
-        for index, name in enumerate(("pool", "native", "merged"), start=1)
+        for index, name in enumerate(("pool", "native"), start=1)
     }
     router = Mock()
     router._select_experts.return_value = results["native"]
-    pool = Mock(active=active, has_native_rows=has_native_rows)
-    pool.route.return_value = results["pool"]
-    pool.merge_native.return_value = results["merged"]
+    pool = DSparkExpertPool(torch.device("cpu"), 2, 2, 2, num_speculative_tokens=5, num_device_experts=12)
+    pool.active, pool.has_native_rows, pool.num_rows = active, has_native_rows, 2
+    pool.roles.copy_(torch.tensor([0, 1] if has_native_rows else [1, 2], dtype=torch.int32))
+    pool.route = Mock(return_value=results["pool"])
     layer = SimpleNamespace(
         router=router,
-        dspark_expert_pool=pool,
+        _expert_offload_binding=SimpleNamespace(dspark_expert_pool=pool),
         log2phy=None,
         n_shared_experts=0,
         moe_config=SimpleNamespace(num_experts=256),
         global_redundant_expert_num=0,
     )
     weights, ids = AscendRoutedExperts._select_experts(layer, torch.zeros(2, 4), torch.zeros(2, 256), False)
-    assert weights is results[expected][0]
-    assert ids is results[expected][1]
+    if expected == "mixed":
+        assert weights[:1].equal(results["native"][0][:1]) and ids[:1].equal(results["native"][1][:1])
+        assert weights[1:].equal(results["pool"][0][1:]) and ids[1:].equal(results["pool"][1][1:])
+    else:
+        assert weights is results[expected][0]
+        assert ids is results[expected][1]
     assert pool.route.call_count == int(active)
     assert router._select_experts.call_count == int(not active or has_native_rows)
-    assert pool.merge_native.call_count == int(active and has_native_rows)
 
 
 def test_execute_preserves_dummy_pool_and_restores_decode_phase(load_hook_class):

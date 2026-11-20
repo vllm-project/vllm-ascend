@@ -686,8 +686,11 @@ ASCEND_RT_VISIBLE_DEVICES=0 VLLM_USE_V2_MODEL_RUNNER=1 \
       "cudagraph_capture_sizes": [1, 2, 6, 12]
     }' \
     --additional-config '{
-      "expert_offload_config": {"enabled": true, "num_device_experts": 84},
-      "dspark_expert_pool": {"enabled": true, "protected_positions": 2, "suffix_experts": 0}
+      "expert_offload_config": {
+        "enabled": true,
+        "num_device_experts": 84,
+        "dspark_expert_pool": {"enabled": true, "protected_positions": 2, "suffix_experts": 0}
+      }
     }'
 ```
 
@@ -697,7 +700,8 @@ offload checks the padded row count times Top-6 against the slot budget. Mixed
 or shorter verification batches use eager execution, where eligible verification
 rows can still use the expert pool.
 
-Set `dspark_expert_pool.enabled` to `false` or omit `dspark_expert_pool` to
+Set `expert_offload_config.dspark_expert_pool.enabled` to `false` or omit the
+nested `dspark_expert_pool` option to
 return to native routing with expert offload. See the
 [configuration reference](../configuration/additional_config.md#dspark-expert-pool-routing-with-expert-offload)
 for the parameter settings.

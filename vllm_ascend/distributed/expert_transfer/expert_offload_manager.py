@@ -16,6 +16,7 @@ from .expert_offload_utils import ExpertMapBuffer, ExpertWeightView, PreparedExp
 from .expert_weight_transfer import TorchExpertTransfer
 
 if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 ACL_MEMCPY_DEVICE_TO_HOST = 2
@@ -146,9 +147,16 @@ class LayerOffloadBinding:
         self.host_store = HostExpertStore(layer, self.adapter.tensor_names)
         self.slot_to_expert: tuple[int, ...]
         self.manager: ExpertOffloadManager | None = None
+        self._uses_dspark_expert_pool = False
         self.resident: dict[str, torch.Tensor] = {}
         self.mapping: ExpertMapBuffer | None = None
         self.topk_ids_cpu: torch.Tensor
+
+    @property
+    def dspark_expert_pool(self) -> DSparkExpertPool | None:
+        if self._uses_dspark_expert_pool and self.manager is not None:
+            return self.manager.dspark_expert_pool
+        return None
 
     def initialize_storage(self, layer) -> None:
         self.host_store.copy_from_layer(layer, pin_memory=self.device.type == "npu")
@@ -304,6 +312,7 @@ class ExpertOffloadManager:
 
     def __init__(self):
         self.bindings: dict[str, LayerOffloadBinding] = {}
+        self.dspark_expert_pool: DSparkExpertPool | None = None
         self.full_pool = FullExpertPool()
         self.comm_methods = {}
         self.has_prefill = True
@@ -371,6 +380,40 @@ class ExpertOffloadManager:
             binding.manager = self
         self.full_pool.allocate(self.bindings.values())
 
+    def initialize_dspark_expert_pool(self, runner: NPUModelRunner) -> None:
+        """Allocate one optional pool inside the offload loading-memory window."""
+        self.dspark_expert_pool = None
+        for binding in self.bindings.values():
+            binding._uses_dspark_expert_pool = False
+        offload_config = runner.ascend_config.expert_offload_config
+        pool_config = offload_config.dspark_expert_pool
+        if not pool_config.enabled:
+            return
+
+        # Import only for enabled pools; router compatibility imports MoE code.
+        from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, supports_router
+
+        bindings = [
+            binding
+            for layer in runner.model.modules()
+            if (binding := getattr(layer, "_expert_offload_binding", None)) is not None and supports_router(layer)
+        ]
+        if not bindings:
+            raise ValueError("dspark_expert_pool found no supported target routed expert layer")
+        assert pool_config.protected_positions is not None and pool_config.suffix_experts is not None
+        assert runner.speculative_config is not None and runner.speculative_config.num_speculative_tokens is not None
+        assert offload_config.num_device_experts is not None
+        self.dspark_expert_pool = DSparkExpertPool(
+            runner.device,
+            runner.max_num_tokens,
+            pool_config.protected_positions,
+            pool_config.suffix_experts,
+            num_speculative_tokens=runner.speculative_config.num_speculative_tokens,
+            num_device_experts=offload_config.num_device_experts,
+        )
+        for binding in bindings:
+            binding._uses_dspark_expert_pool = True
+
     def get_comm(self, binding, moe_config, num_physical_experts):
         # Lazy import avoids an initialization cycle with quantization and routed experts.
         from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
@@ -389,6 +432,7 @@ def initialize_expert_offload(runner: NPUModelRunner) -> None:
     expert_offload_manager = ExpertOffloadManager()
     memory_allocated_before = torch.npu.memory_allocated(runner.device)
     expert_offload_manager.initialize(runner.model)
+    expert_offload_manager.initialize_dspark_expert_pool(runner)
     runner.model._expert_offload_manager = expert_offload_manager
     # The shared pool is allocated after the parent's loading profiler.
     runner.model_memory_usage += torch.npu.memory_allocated(runner.device) - memory_allocated_before

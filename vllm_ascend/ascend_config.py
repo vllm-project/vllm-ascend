@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, StrictBool, StrictInt, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -506,35 +506,19 @@ class SharedEngramConfig:
 
 
 @config(config=ConfigDict(frozen=True))
-class ExpertOffloadConfig:
-    """Configuration for exact single-worker expert offload."""
-
-    enabled: bool = False
-    num_device_experts: int | None = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def _validate_capacity(self):
-        if self.enabled and self.num_device_experts is None:
-            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
-        return self
-
-
-@config(config=ConfigDict(frozen=True))
 class DSparkExpertPoolConfig:
     """Opt-in L routing for the single-device DSpark expert-offload path."""
 
-    enabled: StrictBool = False
-    protected_positions: StrictInt | None = None
-    suffix_experts: StrictInt | None = None
+    enabled: bool = False
+    protected_positions: int | None = None
+    suffix_experts: int | None = None
 
-    def validate(self, vllm_config: VllmConfig, offload: ExpertOffloadConfig) -> None:
+    def validate(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
 
         from vllm_ascend.worker.v2.dspark_expert_pool import TOP_K
 
-        if not offload.enabled:
-            raise ValueError("dspark_expert_pool requires enabled expert offload")
         spec = vllm_config.speculative_config
         draft_tokens = spec.num_speculative_tokens if spec is not None and spec.method == "dspark" else None
         if draft_tokens is None or draft_tokens <= 0:
@@ -544,6 +528,23 @@ class DSparkExpertPoolConfig:
             raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {verify_width}]")
         if self.suffix_experts is None or not 0 <= self.suffix_experts <= TOP_K:
             raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")
+
+
+@config(config=ConfigDict(frozen=True))
+class ExpertOffloadConfig:
+    """Configuration for exact single-worker expert offload."""
+
+    enabled: bool = False
+    num_device_experts: int | None = Field(default=None, gt=0)
+    dspark_expert_pool: DSparkExpertPoolConfig = dataclasses.field(default_factory=DSparkExpertPoolConfig)
+
+    @model_validator(mode="after")
+    def _validate_capacity(self):
+        if self.enabled and self.num_device_experts is None:
+            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
+        if self.dspark_expert_pool.enabled and not self.enabled:
+            raise ValueError("expert_offload_config.dspark_expert_pool requires enabled expert offload")
+        return self
 
 
 @config
@@ -794,7 +795,6 @@ class AscendConfig:
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
     expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
-    dspark_expert_pool: DSparkExpertPoolConfig = dataclasses.field(default_factory=DSparkExpertPoolConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -856,7 +856,7 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         validate_expert_offload_config(self.expert_offload_config, vc, self)
-        self.dspark_expert_pool.validate(vc, self.expert_offload_config)
+        self.expert_offload_config.dspark_expert_pool.validate(vc)
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
@@ -1971,6 +1971,10 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    if "dspark_expert_pool" in additional_config:
+        raise ValueError(
+            "additional_config.dspark_expert_pool moved to additional_config.expert_offload_config.dspark_expert_pool"
+        )
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
