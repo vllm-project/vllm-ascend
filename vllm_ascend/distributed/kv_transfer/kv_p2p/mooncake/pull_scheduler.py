@@ -556,7 +556,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
     ) -> tuple[bool, dict[str, Any] | None]:
         """Release unstarted consumer transfers or expose completed producer blocks."""
         params = request.kv_transfer_params
-        if self.kv_transfer_config.is_kv_consumer and params is not None and params.get("do_virtual", False):
+        if params is not None and params.get("do_virtual", False) and self.kv_transfer_config.is_kv_consumer:
             # Health probes never own remote KV blocks or a producer lease.
             self._reqs_need_recv.pop(request.request_id, None)
             self._reqs_recv_info.pop(request.request_id, None)

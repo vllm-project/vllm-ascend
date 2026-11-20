@@ -165,6 +165,7 @@ class PushReqMeta:
     local_block_ids: tuple[tuple[int, ...], ...]
     num_computed_tokens: int
     num_external_tokens: int
+    do_virtual: bool = False
 
 
 @dataclass(frozen=True)
@@ -242,6 +243,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             local_block_ids=tuple(tuple(group) for group in local_block_ids),
             num_computed_tokens=kv_transfer_params["num_computed_tokens"],
             num_external_tokens=num_external_tokens,
+            do_virtual=kv_transfer_params.get("do_virtual", False),
         )
 
     def add_new_push_send_req(
