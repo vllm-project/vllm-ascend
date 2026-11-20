@@ -67,22 +67,6 @@ def _pick_head_chunk(num_heads: int, head_dim: int) -> int:
     return h
 
 
-def _allocate_indexer_outputs(
-    index_q: torch.Tensor,
-    index_k: torch.Tensor,
-    index_z: torch.Tensor,
-    q_width: int,
-    kv_width: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Allocate Q/K/Z outputs for real, zero-token and fake paths."""
-    tokens = index_q.shape[0]
-    return (
-        index_q.new_empty((tokens, q_width), dtype=torch.float8_e4m3fn),
-        index_k.new_empty((tokens, kv_width)),
-        index_z.new_empty((tokens, kv_width)),
-    )
-
-
 @triton.jit
 def _norm_rope_tile_npu_chunk(
     x_ptr,
@@ -403,7 +387,7 @@ def _indexer_qkz_norm_rope_kernel(
         tl.store(z_out_bp, z_vals.to(out_z_ptr.dtype.element_ty), boundary_check=(0,))
 
 
-def _fused_indexer_qkz_norm_rope_impl(
+def fused_indexer_qkz_norm_rope(
     index_q: torch.Tensor,
     index_k: torch.Tensor,
     index_z: torch.Tensor,
@@ -420,6 +404,21 @@ def _fused_indexer_qkz_norm_rope_impl(
     eps: float = 1e-6,
     q_norm_weight_bias: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused Step5 sparse-indexer Q/K norm + RoPE with Z passthrough.
+
+    ``index_q`` is ``[tokens, num_q_heads * head_dim]`` (RMSNorm, zero-
+    centered weights add ``q_norm_weight_bias``), ``index_k`` /
+    ``index_z`` are ``[tokens, num_k_heads * head_dim]`` (K: LayerNorm with
+    ``k_norm_bias``; Z: passthrough). Inputs may be strided views (the
+    ``split_indexer`` slices of the packed qkv+indexer GEMM output) -- the
+    kernel reads them in place through their row strides. RoPE angles come
+    from a single caller-provided ``[cos | sin]`` cache
+    (``cos_sin_cache``), rows indexed by ``positions``; ``rotary_dim`` is
+    the rotated dim count and is converted to NeoX pairs internally.
+    Returns ``(index_q e4m3, index_k bf16, index_z bf16)``: the fp8
+    quantization of index_q rides along with the norm+rope store (its only
+    consumer, the fused indexer scoring, wants fp8).
+    """
     # ``rotary_dim`` follows the module convention: the number of rotated
     # dims at the head of each indexer head (sparse_indexer_rope_dim, e.g.
     # 32). The kernel works in NeoX pairs: real = dims[:rotary_pairs],
@@ -453,9 +452,9 @@ def _fused_indexer_qkz_norm_rope_impl(
             f"index_k and index_z must have shape ({tokens}, {num_k_heads * head_dim}), "
             f"got {tuple(index_k.shape)} and {tuple(index_z.shape)}"
         )
-    out_q, out_k, out_z = _allocate_indexer_outputs(
-        index_q, index_k, index_z, num_q_heads * head_dim, num_k_heads * head_dim
-    )
+    out_q = index_q.new_empty((tokens, num_q_heads * head_dim), dtype=torch.float8_e4m3fn)
+    out_k = index_k.new_empty((tokens, num_k_heads * head_dim))
+    out_z = index_z.new_empty((tokens, num_k_heads * head_dim))
     if tokens == 0:
         return out_q, out_k, out_z
     # index_q comes out pre-quantized to e4m3: its only consumer (the fused
@@ -506,53 +505,3 @@ def _fused_indexer_qkz_norm_rope_impl(
         REM_K=num_k_heads % hc_k,
     )
     return out_q, out_k, out_z
-
-
-def fused_indexer_qkz_norm_rope(
-    index_q: torch.Tensor,
-    index_k: torch.Tensor,
-    index_z: torch.Tensor,
-    q_norm_weight: torch.Tensor,
-    k_norm_weight: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    positions: torch.Tensor,
-    k_norm_bias: torch.Tensor,
-    *,
-    head_dim: int,
-    num_q_heads: int,
-    num_k_heads: int,
-    rotary_dim: int,
-    eps: float = 1e-6,
-    q_norm_weight_bias: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused Step5 sparse-indexer Q/K norm + RoPE with Z passthrough.
-
-    ``index_q`` is ``[tokens, num_q_heads * head_dim]`` (RMSNorm, zero-
-    centered weights add ``q_norm_weight_bias``), ``index_k`` /
-    ``index_z`` are ``[tokens, num_k_heads * head_dim]`` (K: LayerNorm with
-    optional bias; Z: passthrough). Inputs may be strided views (the
-    ``split_indexer`` slices of the packed qkv+indexer GEMM output) -- the
-    kernel reads them in place through their row strides. RoPE angles come
-    from a single caller-provided ``[cos | sin]`` cache
-    (``cos_sin_cache``), rows indexed by ``positions``; ``rotary_dim`` is
-    the rotated dim count and is converted to NeoX pairs internally.
-    Returns ``(index_q e4m3, index_k bf16, index_z bf16)``: the fp8
-    quantization of index_q rides along with the norm+rope store (its only
-    consumer, the fused indexer scoring, wants fp8).
-    """
-    return _fused_indexer_qkz_norm_rope_impl(
-        index_q,
-        index_k,
-        index_z,
-        q_norm_weight,
-        k_norm_weight,
-        cos_sin_cache,
-        positions,
-        k_norm_bias,
-        head_dim=head_dim,
-        num_q_heads=num_q_heads,
-        num_k_heads=num_k_heads,
-        rotary_dim=rotary_dim,
-        eps=eps,
-        q_norm_weight_bias=q_norm_weight_bias,
-    )
