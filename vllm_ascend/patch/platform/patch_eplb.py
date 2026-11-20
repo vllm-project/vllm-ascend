@@ -36,6 +36,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
 )
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.utils import vllm_version_is
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
@@ -818,15 +819,15 @@ def _patch_changed_layer_transfer() -> None:
         _async_worker.transfer_run_periodically = _wrap_async_worker(original_worker)
 
 
-def _wrap_move_to_workspace(original_move):
+def _wrap_move_to_workspace(original_move, model_state_parameter: str = "model_state"):
     move_signature = signature(original_move)
-    if not {"model_state", "ep_rank"}.issubset(move_signature.parameters):
+    if not {model_state_parameter, "ep_rank"}.issubset(move_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: async workspace move signature changed.")
 
     @wraps(original_move)
     def _move_to_workspace(*args, **kwargs):
         bound = move_signature.bind(*args, **kwargs)
-        model_state = bound.arguments["model_state"]
+        model_state = bound.arguments[model_state_parameter]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
         is_last_result = (
@@ -897,9 +898,21 @@ def _wrap_move_to_workspace(original_move):
 
 
 def _patch_async_move_to_workspace() -> None:
-    original_move = _eplb_state._move_to_workspace
-    if not getattr(original_move, _PATCH_MARKER, False):
-        _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+    if vllm_version_is("0.33.0"):
+        original_move = _eplb_state._move_to_workspace
+        if not getattr(original_move, _PATCH_MARKER, False):
+            _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
+        return
+
+    base_state = _eplb_state.EplbState.model_state_cls
+    if getattr(base_state._move_to_workspace, _PATCH_MARKER, False):
+        return
+
+    class AscendEplbModelState(_eplb_state.EplbModelState):
+        # Ascend attaches routing and transfer bookkeeping to each model.
+        _move_to_workspace = _wrap_move_to_workspace(base_state._move_to_workspace, model_state_parameter="self")
+
+    _eplb_state.EplbState.model_state_cls = AscendEplbModelState
 
 
 _patch_eplb_policy_config()
