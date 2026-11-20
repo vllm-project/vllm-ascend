@@ -60,7 +60,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, is_c8_mxfp_kv_quant
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -512,6 +512,47 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             raise ValueError("MooncakeConnector single-head NHD requires contiguous bytes within each KV block.")
         return (1, shape[0], shape[2])  # [tokens, 1, dim] has the same bytes as [1, tokens, dim].
 
+    def _mxfp_transfer_views(
+        self, spec: FullAttentionSpec, caches: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, ...]:
+        """Validate the PA_NZ packet; publish request data and dynamic K scales."""
+        if len(caches) != 4 or not self.num_blocks:
+            raise ValueError("Mooncake MXFP8 expects K, V, K scale and local V scale views.")
+        key, value, key_scale, value_scale = caches
+        if tuple(cache.ndim for cache in caches) != (5, 5, 6, 6):
+            raise ValueError("Mooncake MXFP8 expects the PA_NZ data and scale views.")
+        if (key.dtype, value.dtype, key_scale.dtype, value_scale.dtype) != (
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fn,
+            torch.uint8,
+            torch.uint8,
+        ):
+            raise ValueError("Unexpected Mooncake MXFP8 data or scale dtype.")
+        pitches = {cache.stride(0) * cache.element_size() for cache in caches}
+        storage_keys = {tensor_storage_key(cache) for cache in caches}
+        if len(pitches) != 1 or len(storage_keys) != 1:
+            raise ValueError("Mooncake MXFP8 cache components must share one backing and page pitch.")
+        pitch = key.stride(0) * key.element_size()
+        count = key.shape[0]
+        if not count or count % self.num_blocks:
+            raise ValueError("Invalid Mooncake MXFP8 physical block count.")
+        if key.shape[3] * (count // self.num_blocks) != spec.block_size:
+            raise ValueError("Mooncake MXFP8 packet block size does not match its scheduler page.")
+        offset = 0
+        for cache in (key, key_scale, value, value_scale):
+            if (
+                cache.shape[:2] != (count, spec.num_kv_heads)
+                or not cache[0].is_contiguous()
+                or cache.data_ptr() != key.data_ptr() + offset
+            ):
+                raise ValueError("Mooncake MXFP8 packet component has an incompatible layout.")
+            offset += cache[0].nbytes
+        storage = key.untyped_storage()
+        packet_end = key.storage_offset() * key.element_size() + (count - 1) * pitch + offset
+        if offset > pitch or packet_end > storage.nbytes():
+            raise ValueError("Mooncake MXFP8 packet exceeds its registered storage.")
+        return key, value, key_scale
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -565,6 +606,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                is_mxfp = is_c8_mxfp_kv_quant(self.vllm_config) and type(spec) is FullAttentionSpec
+                if is_mxfp:
+                    caches = self._mxfp_transfer_views(spec, caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
@@ -594,7 +638,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        block_shape = tuple(cache.shape[1:]) if is_mxfp else self._get_transfer_block_shape(spec, cache)
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)
