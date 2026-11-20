@@ -6,14 +6,15 @@ import os
 import socket
 from contextlib import nullcontext
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 from vllm.distributed.weight_transfer.base import (
+    ParamMeta,
     TrainerWeightTransferEngine,
+    WeightSource,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
@@ -40,8 +41,21 @@ if TYPE_CHECKING:
     from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         VLLMWeightSyncClient,
-        WeightSource,
     )
+
+
+@dataclass
+class _TensorBatch(WeightSource):
+    """Expose an owned, bounded batch through the upstream source contract."""
+
+    weights: list[tuple[str, torch.Tensor]]
+
+    @cached_property
+    def metadata(self) -> list[ParamMeta]:
+        return [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self.weights]
+
+    def iter_full(self):
+        return iter(self.weights)
 
 
 @dataclass
@@ -143,9 +157,6 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
         self._packed_importer.close()
         super().start_weight_update()
 
-    def shutdown(self) -> None:
-        self._packed_importer.close()
-
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Bind the assigned device for rebuilding, loading and synchronization."""
         with torch.npu.device(self.device):
@@ -154,15 +165,11 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     def finish_weight_update(self) -> None:
         """Release packed mappings even when reload finalization fails."""
         try:
-            if vllm_version_is("0.33.0"):
+            with torch.npu.device(self.device):
                 super().finish_weight_update()
-            else:
-                from vllm.model_executor.model_loader.reload import finish_reload
-
-                with torch.npu.device(self.device):
-                    finish_reload(self.model, self.model_config, self.device)
-        finally:
+        except BaseException:
             self._packed_importer.close()
+            raise
 
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
@@ -284,38 +291,6 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         # Upstream's unpacked sender treats gpu_uuid as an opaque wire key.
         self.gpu_uuid = self.npu_uuid
 
-    def _all_gather_and_merge_handles(
-        self,
-        handles: list[dict[str, tuple]],
-    ) -> list[dict[str, tuple]]:
-        """All-gather and merge IPC handle dicts across ranks in one call.
-
-        Each rank contributes a list of ``{npu_uuid: ipc_args}`` dicts.
-        A single all_gather_object collects every rank's full list, then
-        the sender merges per-index so each dict maps every NPU UUID to
-        its args. No-op (returns handles unchanged) when no distributed
-        group exists.
-        """
-        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-            return handles
-
-        world_size = torch.distributed.get_world_size()
-        gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
-        torch.distributed.all_gather_object(gathered, handles)
-        torch.distributed.barrier()
-        torch.npu.synchronize()
-
-        if self.is_sender:
-            merged: list[dict[str, tuple]] = []
-            for param_idx in range(len(handles)):
-                m: dict[str, tuple] = {}
-                for rank_handles in gathered:
-                    if rank_handles is not None:
-                        m.update(rank_handles[param_idx])
-                merged.append(m)
-            return merged
-        return [{} for _ in handles]
-
     @staticmethod
     def _post_send_sync() -> None:
         """Synchronize each send and keep all trainer ranks in step."""
@@ -382,13 +357,6 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     def _send_unpacked_batch(self, weights: list[tuple[str, torch.Tensor]]) -> None:
         """Acknowledge a batch before its producer-owned storage is released."""
         torch.npu.current_stream().synchronize()
-        handles = self._all_gather_and_merge_handles(
-            [{self.npu_uuid: reduce_tensor(weight)[1]} for _, weight in weights]
-        )
-        self._do_send(
-            names=[name for name, _ in weights],
-            dtype_names=[str(weight.dtype).removeprefix("torch.") for _, weight in weights],
-            shapes=[list(weight.shape) for _, weight in weights],
-            ipc_handles=handles,
-        )
+        weight_refs = super()._send_unpacked(_TensorBatch(weights))
         self._post_send_sync()
+        del weight_refs

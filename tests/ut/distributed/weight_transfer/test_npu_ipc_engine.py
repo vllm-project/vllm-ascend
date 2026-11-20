@@ -120,10 +120,7 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
     rebuild_args = (None, None, None, None, None, None, 999, None)
     fake_reduce = MagicMock(return_value=("rebuild_func_sentinel", rebuild_args))
 
-    with (
-        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce),
-        patch(f"{_MODULE}.reduce_tensor", fake_reduce),
-    ):
+    with patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", fake_reduce):
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
             NPUIPCTrainerWeightTransferEngine,
         )
@@ -215,17 +212,22 @@ def test_start_weight_update():
     engine._packed_importer.close.assert_called_once_with()
 
 
-def test_finish_weight_update():
+@pytest.mark.parametrize("failure", [False, True])
+def test_finish_weight_update(failure):
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
     engine.model_config = MagicMock()
     engine.device = torch.device("cpu")
     engine._packed_importer = MagicMock()
     engine._packed_consumer = None
-    mock_finalize = MagicMock()
+    mock_finalize = MagicMock(side_effect=RuntimeError("reload failed") if failure else None)
 
     with _patch_reload_module(finalize=mock_finalize):
-        engine.finish_weight_update()
+        if failure:
+            with pytest.raises(RuntimeError, match="reload failed"):
+                engine.finish_weight_update()
+        else:
+            engine.finish_weight_update()
 
     if vllm_version_is("0.33.0"):
         mock_finalize.assert_called_once_with(engine.model, engine.model_config)
@@ -347,7 +349,7 @@ def test_multi_rank_handles_are_merged_and_synchronized_on_npu(is_sender):
         patch.object(torch.distributed, "get_world_size", return_value=2),
         patch.object(torch.distributed, "all_gather_object", side_effect=gather),
         patch.object(torch.distributed, "barrier", side_effect=lambda: events.append("barrier")),
-        patch.object(torch, "npu", types.SimpleNamespace(synchronize=lambda: events.append("npu")), create=True),
+        patch.object(torch.accelerator, "synchronize", side_effect=lambda: events.append("npu")),
         patch.object(torch.cuda, "synchronize", side_effect=AssertionError("CUDA used")),
     ):
         result = engine._all_gather_and_merge_handles(local)
@@ -518,6 +520,7 @@ def test_packed_export_replacement_and_failed_rebuild_release():
 def test_unpacked_batches_own_reused_inputs_until_ack():
     engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
     engine.npu_uuid = "node-0"
+    engine.gpu_uuid = engine.npu_uuid
     engine._all_gather_and_merge_handles = lambda handles: handles
     refs, batches, active = [], [], []
 
@@ -543,7 +546,7 @@ def test_unpacked_batches_own_reused_inputs_until_ack():
         patch(f"{_MODULE}.vllm_version_is", return_value=False),
         patch(f"{_MODULE}.UNPACKED_BATCH_SIZE_BYTES", 8),
         # A Mock records its Tensor arguments and would itself keep exports alive.
-        patch(f"{_MODULE}.reduce_tensor", new=reduce),
+        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", new=reduce),
         patch.object(torch.npu, "current_stream", return_value=MagicMock()),
     ):
         result = engine._send_unpacked(types.SimpleNamespace(iter_full=inputs))
@@ -558,6 +561,7 @@ def test_unpacked_batches_own_reused_inputs_until_ack():
 def test_unpacked_sends_oversized_parameter_alone():
     engine = object.__new__(NPUIPCTrainerWeightTransferEngine)
     engine.npu_uuid = "node-0"
+    engine.gpu_uuid = engine.npu_uuid
     engine._all_gather_and_merge_handles = lambda handles: handles
     engine._post_send_sync = MagicMock()
     engine._do_send = MagicMock()
@@ -565,7 +569,7 @@ def test_unpacked_sends_oversized_parameter_alone():
     with (
         patch(f"{_MODULE}.vllm_version_is", return_value=False),
         patch(f"{_MODULE}.UNPACKED_BATCH_SIZE_BYTES", 12),
-        patch(f"{_MODULE}.reduce_tensor", return_value=(None, ("export",))),
+        patch("vllm.distributed.weight_transfer.ipc_engine.reduce_tensor", return_value=(None, ("export",))),
         patch.object(torch.npu, "current_stream", return_value=MagicMock()),
     ):
         engine._send_unpacked(types.SimpleNamespace(iter_full=lambda: iter(weights)))
