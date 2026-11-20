@@ -379,10 +379,8 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _resolve_fused_mla_prolog(config):
-        if (
-            not config.ascend_fusion_config.fuse_sparse_mla_prologue
-            or config.weight_nz_mode != 1
-            or not get_current_hardware_profile().supports(HardwareCapability.DSV41_MLA_PROLOG)
+        if config.weight_nz_mode != 1 or not get_current_hardware_profile().supports(
+            HardwareCapability.DSV41_MLA_PROLOG
         ):
             return None, None
         vllm_config = get_current_vllm_config()
@@ -394,7 +392,10 @@ class AscendDSAV41Impl:
         ):
             return None, None
         ops = torch.ops._C_ascend
-        return getattr(ops, "dsv41_mla_prolog", None), getattr(ops, "dsv41_mla_prolog_no_cache", None)
+        decode_op = (
+            getattr(ops, "dsv41_mla_prolog", None) if config.ascend_fusion_config.fuse_sparse_mla_prologue else None
+        )
+        return decode_op, getattr(ops, "dsv41_mla_prolog_no_cache", None)
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
@@ -575,10 +576,18 @@ class AscendDSAV41Impl:
         if self._fused_mla_prolog is not None or self._fused_mla_prolog_no_cache is not None:
             mode = get_forward_context().cudagraph_runtime_mode
             replicated_cache = local_metadata is not global_metadata or swa.global_metadata is not None
-            pure_decode = swa.num_prefills == 0 and (mode == CUDAGraphMode.FULL or swa.num_decodes == swa.num_reqs)
+            # A PCP rank may have no local prefill tokens in a global prefill batch.
+            has_prefill = global_metadata.swa.num_prefills > 0
+            pure_decode = not has_prefill and (mode == CUDAGraphMode.FULL or swa.num_decodes == swa.num_reqs)
             # Prefill and PCP retain the framework's SWA write ordering and gathers.
             write_cache = pure_decode and not replicated_cache
-            if mode == CUDAGraphMode.NONE or (mode == CUDAGraphMode.FULL and write_cache):
+            if write_cache:
+                use_fused = self._fused_mla_prolog is not None
+            else:
+                use_fused = self._fused_mla_prolog_no_cache is not None and (
+                    has_prefill or self._fused_mla_prolog is not None
+                )
+            if use_fused and (mode == CUDAGraphMode.NONE or (mode == CUDAGraphMode.FULL and write_cache)):
                 fused_tokens = swa.num_input_tokens if mode == CUDAGraphMode.FULL else num_tokens
                 if 0 < fused_tokens <= hidden_states.shape[0]:
                     # A replay uses the capture bucket's shape and persistent slots.
