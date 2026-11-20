@@ -306,8 +306,8 @@ class BaseKVPoolWorker(ABC):
             requested = str(self._extra_config.get("evidence_certification", "content"))
             if self.backend_name in ("yuanrong", "memcache"):
                 # Neither backend can honestly claim the "content" level.
-                # Memcache's installed service was MEASURED to behave
-                # add-if-absently and atomically (second put to an existing
+                # Memcache's installed service was MEASURED to behave as
+                # add-if-absent and write atomically (second put to an existing
                 # key is a silent no-op; no torn reads observed), but that
                 # behavior is undocumented and version-specific, so it is
                 # not a citable contract. The load-bearing reason stands
@@ -1015,7 +1015,7 @@ class BaseKVPoolWorker(ABC):
         ret,
         logical_ids: list[int] | None = None,
     ) -> bool:
-        """Fold one batch GET's per-key outcomes into failure channels.
+        """Fold the per-key outcomes of one batch GET into failure channels.
 
         logical_ids carries, parallel to block_ids (the physical ids), the
         request-absolute LOGICAL block indices of the GET'd objects -- the
