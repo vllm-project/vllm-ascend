@@ -408,9 +408,9 @@ def test_fa3_target_and_draft_use_separate_allowlists(
 def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft):
     r = qwen_dflash2_fa3
     r.target.architecture = target
-    r.target.hf_config.architectures = [target]
+    r.target.hf_config.architectures = ["OtherTarget", target]
     r.spec.method = "dspark"
-    r.draft.architectures = [draft]
+    r.draft.architectures = ["OtherDraft", draft]
 
     assert r.select("backbone") == "AscendAttentionBackend"
     assert r.select("dspark_head") == "AscendFlashAttentionBackend"
