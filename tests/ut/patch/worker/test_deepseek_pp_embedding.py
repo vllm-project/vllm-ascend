@@ -7,12 +7,14 @@ from unittest.mock import Mock
 import pytest
 import torch
 from safetensors.torch import save_file
+from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers import vocab_parallel_embedding
 from vllm.model_executor.models import deepseek_v2
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.models import quarot_utils, qwen3_dflash2
 from vllm_ascend.ops import vocab_parallel_embedding as ascend_vocab
 from vllm_ascend.patch.worker import patch_deepseek_v2
@@ -71,6 +73,17 @@ def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant
     return model, initial
 
 
+@pytest.fixture
+def _initialized_ascend_config():
+    # Ascend embedding helpers consult the process config even in this CPU-only
+    # test. Give the real code path its default config and avoid depending on
+    # whichever singleton a preceding test left behind.
+    clear_ascend_config()
+    init_ascend_config(VllmConfig())
+    yield
+    clear_ascend_config()
+
+
 @pytest.mark.parametrize(
     "pp_size,pp_rank,method,existing,create_embedding",
     [
@@ -98,7 +111,9 @@ def test_target_embedding_provisioning_scope(monkeypatch, pp_size, pp_rank, meth
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("rotated", [False, True])
-def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(monkeypatch, tmp_path, tp_rank, rotated):
+def test_pp_target_embedding_uses_normal_weight_loader_before_dflash_sharing(
+    monkeypatch, tmp_path, tp_rank, rotated, _initialized_ascend_config
+):
     # Exercise the real embedding factory, TP shard loader, target load_weights
     # and upstream sharing check. Only distributed setup and unrelated MoE /
     # transformer-layer construction are replaced for this CPU regression.
