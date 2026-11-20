@@ -29,6 +29,12 @@ def selector_runtime(monkeypatch):
     )
     runtime = SimpleNamespace(config=None, tag="dspark_head", supported=True)
     backend = SimpleNamespace(AttentionType=SimpleNamespace(DECODER="decoder"))
+    # Keep selector contracts independent of native attention imports.
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.attention.fa_v1",
+        SimpleNamespace(AscendFlashAttentionBackend=SimpleNamespace(get_supported_head_sizes=lambda: [128])),
+    )
     config_module = SimpleNamespace(get_current_vllm_config_or_none=lambda: runtime.config)
     backends = SimpleNamespace(model_tag="dspark_head")
     monkeypatch.setitem(sys.modules, "vllm.compilation", SimpleNamespace(backends=backends))
