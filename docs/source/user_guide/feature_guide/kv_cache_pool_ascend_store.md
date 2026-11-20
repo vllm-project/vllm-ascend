@@ -550,7 +550,7 @@ Note: `--max-num-batched-tokens` only chunks prefill compute; it does not reduce
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | int (bytes) | 1342177280 (1280 MB) | No | Must align to 1 GB when A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1` | Per-rank SSD read/write buffer size (bytes). Not configurable in mooncake.json. Increase when `BUFFER_OVERFLOW` occurs. |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | int (bytes) | 1342177280 (1.25 GB) | No | Must align to 1 GB when A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1` | Per-rank SSD read/write buffer size (bytes). Not configurable in mooncake.json. Increase when `BUFFER_OVERFLOW` occurs. |
 | `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | int (bytes) | 0 | No | Bytes; 0 means 90% of physical disk capacity | Eviction threshold (bytes). Set an explicit value to control disk usage precisely. |
 | `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | str | none | No | none / fifo / lru | SSD eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
 | `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | int (bytes) | 2199023255552 (2 TB) | Strongly recommended to set explicitly | Must match actual disk capacity | Per-rank maximum disk usage reported to Mooncake master, aggregated by master across clients (roughly 2 TB x rank count). Default far exceeds real disk capacity; must be overridden. |
@@ -805,7 +805,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 1GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 # SSD feature related parameters below
 ock.mmc.local_service.storage.enabled = false
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
@@ -1075,7 +1075,7 @@ Steps:
 
     ```ini
     ock.mmc.local_service.dram.size = 600GB
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.max.dram.size = 1TB
     ```
 
 3. Wait for all nodes to report successful initialization.
@@ -1083,7 +1083,7 @@ Steps:
 
     ```ini
     ock.mmc.local_service.dram.size = 0GB
-    ock.mmc.local_service.max.dram.size = 1024GB
+    ock.mmc.local_service.max.dram.size = 1TB
     ```
 
 Startup script reference: [Memcache + vLLM + A3 Separated Deployment Case](https://gitcode.com/Ascend/memcache/wiki/MemCache+vLLM+A3%E5%88%86%E7%A6%BB%E9%83%A8%E7%BD%B2%E6%A1%88%E4%BE%8B.md)
@@ -1101,7 +1101,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 0GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 ```
 
 ##### mmc-local-standalone.conf (used by the standalone MemCache process)
@@ -1113,7 +1113,7 @@ ock.mmc.log_level = info
 ock.mmc.local_service.world_size = 256
 ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 600GB
-ock.mmc.local_service.max.dram.size = 1024GB
+ock.mmc.local_service.max.dram.size = 1TB
 # SSD feature related parameters below
 ock.mmc.local_service.storage.enabled = true
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
@@ -1413,6 +1413,7 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 export PYTHONHASHSEED=0
 export DS_WORKER_ADDR="${WORKER_IP}:31501"
 export DATASYSTEM_CLIENT_LOG_DIR="/var/log/yuanrong/client"
+export YR_CONFIG_PATH="<config_dir>/yuanrong.json"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
 
@@ -1434,7 +1435,7 @@ mkdir -p "${DATASYSTEM_CLIENT_LOG_DIR}"
 
 Set `DATASYSTEM_CLIENT_LOG_DIR` before starting vLLM because the Yuanrong client reads it during logging initialization. Client SDK logs, whose base name is normally `ds_client`, are written to this directory. Use a directory separate from the worker logs.
 
-Configure `yuanrong.json` (pointed to by `YR_CONFIG_PATH`):
+Configure `yuanrong.json` and point `YR_CONFIG_PATH` to its full path:
 
 ```json
 {
