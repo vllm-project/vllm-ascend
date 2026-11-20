@@ -3,9 +3,11 @@
 """CPU checks for full-model GLM PD allocation, role recipes and Nightly dispatch."""
 
 import base64
+import io
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -136,9 +138,7 @@ class FullModelConfigTests(unittest.TestCase):
                 name = case["benchmark_name"]
                 if name.startswith("reset_before_"):
                     self.assertEqual(case["case_type"], "curl_cmd")
-                    self.assertIn("--fail", case["cmds"][0])
-                    reset_host = "192.0.2.3" if "-A3-" in path.stem else "127.0.0.1"
-                    self.assertIn(f"http://{reset_host}:7100/reset_prefix_cache", case["cmds"][0])
+                    self.assertIn(":7100/reset_prefix_cache", case["cmds"][0])
                 elif name.startswith(("prefill_", "pd_")) and not name.endswith("_warmup"):
                     self.assertEqual(names[index - 1], "reset_before_" + name)
                 elif name.startswith("decode_") and not name.endswith("_warmup"):
@@ -318,8 +318,26 @@ class FullModelConfigTests(unittest.TestCase):
                 self.assertEqual(command.env["VLLM_SERVER_DEV_MODE"], "1")
         for benchmark in resolved.benchmark_cases:
             if benchmark["benchmark_name"].startswith("reset_before_"):
-                self.assertIn("192.0.2.3:7100/reset_prefix_cache", benchmark["cmds"][0])
-                self.assertIn("json.load(sys.stdin).get('success') is True", benchmark["cmds"][0])
+                command = shlex.split(benchmark["cmds"][0])
+                self.assertEqual(command[:2], ["python3", "-c"])
+                with (
+                    patch(
+                        "tests.e2e.common.multi_node.utils.get_cluster_ips", return_value=resolved.cluster_ips
+                    ) as ips,
+                    patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"success": true}')) as request,
+                ):
+                    exec(command[2], {})
+                    ips.assert_called_once_with(4)
+                    args, kwargs = request.call_args
+                    self.assertEqual(args[0].full_url, "http://192.0.2.3:7100/reset_prefix_cache")
+                    self.assertEqual(args[0].get_method(), "POST")
+                    self.assertEqual(kwargs["timeout"], 120)
+                with (
+                    patch("tests.e2e.common.multi_node.utils.get_cluster_ips", return_value=resolved.cluster_ips),
+                    patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"success": false}')),
+                    self.assertRaisesRegex(AssertionError, "prefix cache reset failed"),
+                ):
+                    exec(command[2], {})
 
     def test_decode_uses_existing_shared_prefix_dataset(self):
         config = yaml.safe_load(next(CONFIG_DIR.glob("*.yaml")).read_text(encoding="utf-8"))

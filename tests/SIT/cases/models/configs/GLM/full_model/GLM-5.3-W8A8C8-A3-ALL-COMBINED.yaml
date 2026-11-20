@@ -344,8 +344,12 @@ benchmarks:
   reset_before_prefill_perf_16k:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
-      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   prefill_perf_16k:
     case_type: performance
     input_throughput_baseline: 39643.0557
@@ -369,8 +373,12 @@ benchmarks:
   reset_before_pd_perf_16k:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
-      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   pd_perf_16k:
     case_type: performance
     baseline: 1546.4292
@@ -386,8 +394,12 @@ benchmarks:
   reset_before_decode_perf_16k_20ms:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
-      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   decode_perf_16k_20ms_warmup:
     case_type: performance
     request_conf: vllm_api_stream_chat
@@ -413,8 +425,12 @@ benchmarks:
   reset_before_gpqa:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3
-      -c "import json,sys; assert json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
+    - >-
+      python3 -c "import json; from urllib.request import Request, urlopen;
+      from tests.e2e.common.multi_node.utils import get_cluster_ips;
+      host = get_cluster_ips(4)[2];
+      response = urlopen(Request('http://' + host + ':7100/reset_prefix_cache', method='POST'), timeout=120);
+      assert json.load(response).get('success') is True, 'prefix cache reset failed'"
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
