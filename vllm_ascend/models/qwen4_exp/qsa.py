@@ -236,13 +236,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize and rotate compressed Indexer keys."""
+        original_pooled = pooled
+        original_positions = first_positions
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return super().normalize_compressed_keys(
+                original_pooled,
+                original_positions,
+            )
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -305,7 +310,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+            return super().project_qk(hidden_states, positions)
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
@@ -372,6 +377,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             # Host counts are prepared with this batch's QSA metadata.
             num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
             num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
+            prepared_metadata=getattr(metadata, "qsa_lightning_v2_metadata", None),
         )
 
 
@@ -446,6 +452,7 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(attn_metadata, "qsa_gbsa_metadata", None),
             )
         return dispatch_qsa_attention(
             query[:num_tokens],
@@ -609,13 +616,20 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if self.layer_name.startswith("mtp."):
             return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
-            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+            # Graph warmup can use padded projection geometry that is outside
+            # the Ascend fused kernel ABI. Keep the portable upstream
+            # decomposition as the compatibility path instead of failing
+            # service initialization.
+            return super()._project_qkv_gate(qkv, positions)
 
         # Preserve valid scheduler positions while mapping padded profiling rows
         # to a safe cache entry, matching the QSA indexer path above.
-        cache = self.rotary_emb.cos_sin_cache
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
+        cos_sin = getattr(self, "_qsa_prepared_cos_sin", None)
+        expected_shape = (*positions.shape, self.rotary_emb.cos_sin_cache.shape[-1])
+        if cos_sin is None or tuple(cos_sin.shape) != expected_shape:
+            cache = self.rotary_emb.cos_sin_cache
+            safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
+            cos_sin = cache[safe_positions]
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
