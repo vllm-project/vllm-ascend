@@ -1,4 +1,0 @@
-pr: 22383
-entries:
-  - category: bugfix
-    text: Fixes GLM-5.3-Flash inference with BF16 KV cache on Ascend 950 with CANN 9.3.0.
