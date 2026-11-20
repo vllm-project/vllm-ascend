@@ -2102,6 +2102,16 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         # config flowing to upstream instead of clearing it; model/layer/device
         # validation is already patched in patch_engram_config.py.
         return
+    if model_config is not None and model_config.architecture in (
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+    ):
+        if engram_config is None:
+            from vllm.config import EngramConfig, VllmConfig
+
+            vllm_config.engram_config = EngramConfig(cpu_offload=True)
+            VllmConfig._resolve_and_verify_engram_config(vllm_config)
+        return
     if engram_config is None:
         if (
             model_config is None
