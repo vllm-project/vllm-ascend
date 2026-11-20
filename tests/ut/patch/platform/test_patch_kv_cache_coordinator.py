@@ -33,6 +33,7 @@ with ``__new__`` and drive it through recording fake managers, and the
 scheduler wrapper is exercised against one-off scheduler double classes.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -77,23 +78,21 @@ class _FakeBlockPool:
 
 
 class _FakeFAManager:
-    def __init__(self, **kwargs):
+    def __init__(self):
         self.use_eagle = False
-        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
-    def __init__(self, **kwargs):
+    def __init__(self):
         self.use_eagle = False
         self.drop_eagle_checkpoint_block = False
-        self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
     if isinstance(spec, MambaSpec):
-        return _FakeMambaManager(**kwargs)
-    return _FakeFAManager(**kwargs)
+        return _FakeMambaManager()
+    return _FakeFAManager()
 
 
 def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
@@ -301,7 +300,9 @@ class _RecordingManager:
         dcp_world_size=1,
         pcp_world_size=1,
     ):
-        cls.calls.append({"max_length": max_length, "drop_eagle_block": drop_eagle_block})
+        cls.calls.append(
+            {"max_length": max_length, "drop_eagle_block": drop_eagle_block, "dcp_world_size": dcp_world_size}
+        )
         return (([],), max_length)
 
 
@@ -406,6 +407,19 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+def test_per_group_lookup_preserves_replicated_draft_positions():
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.dcp_world_size = 2
+    draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
+    coordinator.attention_groups = [
+        SpecGroup(FA_SPEC, [0], _RecordingFA, False),
+        SpecGroup(draft_spec, [1], _RecordingMamba, True),
+    ]
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
+    assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
 
 
 if __name__ == "__main__":

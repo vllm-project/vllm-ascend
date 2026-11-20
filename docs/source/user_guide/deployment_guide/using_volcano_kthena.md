@@ -41,9 +41,9 @@ This section uses the `deepseek-ai/DeepSeek-V2-Lite` example, but you can swap i
 
 - Kthena installed. Please follow the [Kthena installation guide](https://kthena.volcano.sh/docs/getting-started/installation).
 
-### 2.2 Deploy Prefill-Decode Disaggregated DeepSeek-V2-Lite on Kubernetes
+### 2.2 Deploy Prefill–Decode Disaggregated DeepSeek-V2-Lite on Kubernetes
 
-A concrete example is provided in Kthena as [prefill-decode-disaggregation.yaml](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml)
+A concrete example is provided in Kthena as [prefill-decode-disaggregation.yaml](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/prefill-decode-disaggregation.yaml).
 
 Deploy it with the command below:
 
@@ -430,4 +430,4 @@ kubectl delete modelserving deepseek-v2-lite -n dev
 
 ## 5. Summary
 
-For more advanced features, please refer to the [Kthena website](https://kthena.volcano.sh/).
+For more advanced features, please refer to the [Kthena](https://kthena.volcano.sh/).

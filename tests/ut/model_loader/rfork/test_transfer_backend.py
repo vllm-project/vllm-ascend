@@ -1082,10 +1082,9 @@ def test_unregister_requires_error_code_to_interpret_not_found():
 
 
 def test_can_reuse_shared_weights_requires_every_weight_to_be_shared(tensor_runtime, monkeypatch):
-    layout = tensor_runtime.tensor_layout
     transfer = tensor_runtime.transfer_backend
-    monkeypatch.setattr(layout, "is_tensor_on_transfer_device", lambda tensor: True)
-    monkeypatch.setattr(layout, "is_transferable_tensor", lambda tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_tensor_on_transfer_device", lambda tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_transferable_tensor", lambda tensor: True)
     monkeypatch.setattr(transfer, "find_non_npu_state_tensors", lambda model: [])
 
     storage = torch.arange(8, dtype=torch.float32)

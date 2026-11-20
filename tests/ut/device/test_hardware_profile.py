@@ -14,6 +14,7 @@ from vllm_ascend.device.hardware_profile import (
     CPUBindingMode,
     DeviceAdaptorFamily,
     DeviceAddressingMode,
+    FlashAttentionNpu3Model,
     HardwareCapability,
     MoECommPolicy,
     QuantizationBackendFamily,
@@ -56,18 +57,23 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.FLASH_ATTN_NPU_3,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.ENGRAM_LOCAL_HOST_VMM,
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
+        HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -93,6 +99,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
+            HardwareCapability.FLASH_ATTN_NPU_3,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
@@ -103,7 +110,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
-            HardwareCapability.POOL_KEY_INDEXER_FP8,
             HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
             HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
@@ -114,7 +120,9 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+            HardwareCapability.MINIMAX_M3_INDEX_SCORE_TOPK_FUSION,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+            HardwareCapability.MM_REDUCE_SCATTER_BF16,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
@@ -313,3 +321,18 @@ def test_unknown_device_type_is_rejected() -> None:
 def test_every_device_type_has_a_profile() -> None:
     for device_type in AscendDeviceType:
         assert get_hardware_profile(device_type)._device_type is device_type
+
+
+@pytest.mark.parametrize(
+    ("device_type", "models"),
+    [
+        (AscendDeviceType.A2, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A3, frozenset({FlashAttentionNpu3Model.MINIMAX})),
+        (AscendDeviceType.A5, frozenset({FlashAttentionNpu3Model.STEP5})),
+        (AscendDeviceType._310P, frozenset()),
+    ],
+)
+def test_flash_attn_npu_3_supported_models(device_type, models) -> None:
+    profile = get_hardware_profile(device_type)
+    assert profile.flash_attn_npu_3_models == models
+    assert profile.supports(HardwareCapability.FLASH_ATTN_NPU_3) == bool(models)

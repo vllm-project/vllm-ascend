@@ -1,0 +1,10 @@
+pr: 21737
+entries:
+  - category: breaking
+    text: >-
+      Removed Decode Context Parallelism (DCP) support for GQA/MQA target
+      models: configurations setting `decode_context_parallel_size` greater
+      than 1 now fail at startup. Set `decode_context_parallel_size=1` for
+      GQA/MQA targets; GQA PCP, MLA/SFA DCP, and GQA draft models under DCP
+      targets (which now run with DCP disabled and a full-sequence KV cache
+      per rank) are unaffected.
