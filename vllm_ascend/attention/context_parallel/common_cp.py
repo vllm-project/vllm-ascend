@@ -36,17 +36,6 @@ def use_dcp_q_replicate(vllm_config) -> bool:
     return True
 
 
-def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
-    """Shard PCP decode requests, including speculative target verification.
-
-    The decision uses declared vLLM fields so cloning a draft
-    ``ParallelConfig`` with ``replace()`` remains supported. KPool models
-    restore global request order inside KDA to advance their recurrent state,
-    while the rest of the model consumes rank-local decode requests.
-    """
-    return vllm_config.parallel_config.pcp_shard_decode_requests
-
-
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
     """Return the leading rank-local tokens that every PCP rank computes identically.
 

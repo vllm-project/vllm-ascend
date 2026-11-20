@@ -33,7 +33,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_max_num_reqs,
     get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     _index_select_kv_blocks,
@@ -303,7 +302,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # non-replicated token across the CP group. Base layout is a no-op.
         parallel_config = get_current_vllm_config().parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(get_current_vllm_config())
+        self._is_pcp_decode_sharded = parallel_config.pcp_shard_decode_requests
         self._use_fused_cache_store = (
             type(self) is AscendSFAIndexerBackend
             and not self.use_pcp  # Keep PCP cache gathering and slot remapping on the existing path.
@@ -1102,7 +1101,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self._is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._group_metadata_buffers: dict[
             object,
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],

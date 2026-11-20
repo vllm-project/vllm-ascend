@@ -13,7 +13,6 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
 )
@@ -110,7 +109,7 @@ class AscendDSAPCPMetadataBuilder(AscendDSAMetadataBuilder):
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self._pcp_world_size > 1
         self._pcp_rank = get_pcp_group().rank_in_group
-        self._is_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self._is_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._hidden_restore_idx_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             dtype=torch.int64,
@@ -535,7 +534,7 @@ class AscendDSAPCPImpl(AscendDSAImpl):
             pool=self.o_proj_full_pools,
             pool_key=self.o_proj_weight_switch_pool_key,
             project_full=super()._forward_o_proj,
-            decode_sharded=is_pcp_decode_sharding_enabled(self.vllm_config),
+            decode_sharded=self.vllm_config.parallel_config.pcp_shard_decode_requests,
             input_layer=self.wo_a,
             input_projection=self._wo_a_bmm,
             num_input_groups=self.n_local_groups,

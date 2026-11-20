@@ -33,7 +33,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.models.deepseek_v41.engram import model_state as engram_state
 from vllm_ascend.models.glm5next.pcp_metadata import Glm5NextGDNHostMetadataBuilder
 from vllm_ascend.platform import _setup_worker_and_scheduler
@@ -121,7 +120,7 @@ def test_decode_sharding_uses_parallel_config(cudagraph_mode, speculative, pcp_s
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
     config.speculative_config = SimpleNamespace(method="mtp") if speculative else None
-    assert is_pcp_decode_sharding_enabled(config) is expected_sharding
+    assert config.parallel_config.pcp_shard_decode_requests is expected_sharding
     manager = _make_factory_pcp_manager(config, pcp_size - 1)
     if pcp_size == 1:
         assert manager is None
@@ -303,8 +302,7 @@ def test_setup_preserves_upstream_decode_sharding_policy():
         _setup_worker_and_scheduler(config, ascend_config)
     # vLLM main declares this on ParallelConfig itself.
     assert parallel_config.pcp_shard_decode_requests is True
-    replace(parallel_config)
-    assert is_pcp_decode_sharding_enabled(config) is True
+    assert replace(parallel_config).pcp_shard_decode_requests is True
 
 
 @pytest.mark.parametrize("bind_runner_state", [False, True])
@@ -320,12 +318,11 @@ def test_kpool_decode_sharding_follows_parallel_config(speculative: bool, bind_r
     sharded = dcp_size == 1
     assert manager.shard_decode_requests is sharded
     assert config.parallel_config.pcp_shard_decode_requests is sharded
-    replace(config.parallel_config)
+    assert replace(config.parallel_config).pcp_shard_decode_requests is sharded
     query_len = 6 if speculative else 1
     counts = np.array([query_len, query_len], dtype=np.int32)
     prefilling = np.array([False, False])
 
-    assert is_pcp_decode_sharding_enabled(config) is sharded
     expected = [(1, 0, query_len)] if sharded else [(0, 0, query_len), (1, 0, query_len)]
     assert list(manager._iter_rank_chunks(1, counts, prefilling)) == expected
 

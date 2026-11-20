@@ -35,7 +35,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -206,7 +205,7 @@ class AscendPCPManager(PCPManager):
     @property
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""
-        return is_pcp_decode_sharding_enabled(self.vllm_config)
+        return self.vllm_config.parallel_config.pcp_shard_decode_requests
 
     @property
     def global_batch(self) -> AscendInputBatch:

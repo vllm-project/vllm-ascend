@@ -6,7 +6,6 @@ from dataclasses import replace
 
 import torch
 
-from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBuilder
 from vllm_ascend.ops.kda_pcp import prepare_kda_pcp_config
 
@@ -14,7 +13,7 @@ from vllm_ascend.ops.kda_pcp import prepare_kda_pcp_config
 def prepare_glm_pcp_config(vllm_config):
     if (
         vllm_config.use_v2_model_runner
-        and is_pcp_decode_sharding_enabled(vllm_config)
+        and vllm_config.parallel_config.pcp_shard_decode_requests
         and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
     ):
         return prepare_kda_pcp_config(vllm_config)
@@ -24,7 +23,7 @@ def prepare_glm_pcp_config(vllm_config):
 class Glm5NextPCPMetadataMixin:
     def _init_pcp_permutation(self, vllm_config, device, decode_cudagraph_max_bs: int) -> None:
         self._pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
+        self._is_pcp_decode_sharded = vllm_config.parallel_config.pcp_shard_decode_requests
         self._pcp_gather_indices: torch.Tensor | None = None
         if self._pcp_size > 1:
             capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, decode_cudagraph_max_bs)
@@ -34,7 +33,7 @@ class Glm5NextPCPMetadataMixin:
         context = getattr(metadata, "pcp_context", None)
         if context is None or self._pcp_size == 1:
             return metadata
-        if not self._is_pcp_decode_sharded and not bool(context.global_batch.is_prefilling_np.any()):
+        if not self._is_pcp_decode_sharded and not context.global_batch.has_prefill:
             # Replicated decode never gathers KDA tokens or consumes this permutation.
             return metadata
         local_tokens = context.local_num_tokens
