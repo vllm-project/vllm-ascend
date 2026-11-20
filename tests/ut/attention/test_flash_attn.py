@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -273,11 +273,16 @@ def qwen_dflash2_fa3(monkeypatch, dflash2_config):
         architecture="Qwen3_5ForConditionalGeneration",
         hf_config=SimpleNamespace(architectures=["Qwen3_5ForConditionalGeneration"]),
         hf_text_config=SimpleNamespace(model_type="qwen3_5_text"),
+        get_total_num_hidden_layers=lambda: 64,
     )
-    spec.draft_model_config.hf_config = SimpleNamespace(architectures=["DFlash2DraftModel"])
+    spec.draft_model_config.hf_config = SimpleNamespace(
+        architectures=["DFlash2DraftModel"], dflash_config={}, num_hidden_layers=2
+    )
+    spec.kv_cache_dtype = None
+    spec.draft_load_config = None
     config.model_config = spec.target_model_config
-    config.cache_config = SimpleNamespace(cache_dtype="auto")
-    config.load_config = SimpleNamespace()
+    config.cache_config = SimpleNamespace(cache_dtype="auto", kv_cache_dtype_skip_layers=[], sliding_window=None)
+    config.load_config = SimpleNamespace(load_format="auto")
     config.quant_config = None
     spec.draft_model_config.quantization = None
     config.use_v2_model_runner = True
@@ -358,18 +363,26 @@ def test_qwen_dflash2_fa3_selection_does_not_import_operator(qwen_dflash2_fa3, m
         "Qwen3_5MoeForConditionalGeneration",
     ],
 )
-@pytest.mark.parametrize("method", [None, "mtp"])
-def test_hybrid_qwen_fa3_target_is_independent_of_draft(qwen_dflash2_fa3, architecture, method):
+def test_hybrid_qwen_target_uses_fa3_with_dflash2(qwen_dflash2_fa3, architecture):
     r = qwen_dflash2_fa3
     r.target.architecture = architecture
     r.target.hf_config.architectures = [architecture]
-    if method is None:
+    assert r.select("backbone") == "AscendFlashAttentionBackend"
+    assert r.select("dflash_head") == "AscendFlashAttentionBackend"
+
+
+@pytest.mark.parametrize("speculation", ["disabled", "missing_draft", "mtp"])
+def test_hybrid_qwen_target_requires_fa3_draft(qwen_dflash2_fa3, speculation):
+    r = qwen_dflash2_fa3
+    if speculation == "disabled":
         r.config.speculative_config = None
+    elif speculation == "missing_draft":
+        r.spec.draft_model_config = None
     else:
-        r.spec.method = method
+        r.spec.method = "mtp"
         r.draft.architectures = ["Qwen3_5MTP"]
 
-    assert r.select("backbone") == "AscendFlashAttentionBackend"
+    assert r.select("backbone") == "AscendAttentionBackend"
     assert r.select("eagle_head") == "AscendAttentionBackend"
     assert r.select("dflash_head") == "AscendAttentionBackend"
 
@@ -381,10 +394,10 @@ def test_hybrid_qwen_fa3_target_is_independent_of_draft(qwen_dflash2_fa3, archit
         ("Qwen3MoeForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
         ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
         ("Qwen4ExpForConditionalGeneration", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
-        ("Qwen3NextForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", True, False),
+        ("Qwen3NextForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
         ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dflash", "dspark_head", True, False),
-        ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dspark", "dflash_head", True, False),
-        ("Qwen3NextForCausalLM", "Qwen3DSparkModel", "dspark", "dspark_head", True, False),
+        ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dspark", "dflash_head", False, False),
+        ("Qwen3NextForCausalLM", "Qwen3DSparkModel", "dspark", "dspark_head", False, False),
         ("MiniMaxM3SparseForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, False),
     ],
 )
@@ -433,11 +446,76 @@ def test_fa3_minimax_keeps_only_dspark_drafts(qwen_dflash2_fa3, target, draft, e
 def test_qwen_fa3_checks_target_and_draft_c8_separately(qwen_dflash2_fa3, monkeypatch, target_c8, draft_c8):
     r = qwen_dflash2_fa3
     r.config.quant_config = SimpleNamespace(enable_c8_quant=target_c8)
-    monkeypatch.setattr(
-        "vllm.model_executor.models.utils.get_draft_quant_config", lambda _: SimpleNamespace(enable_c8_quant=draft_c8)
-    )
-    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (not target_c8)
+    r.spec.draft_load_config = SimpleNamespace(load_format="safetensors")
+
+    def quant_config(model, load):
+        assert model is r.draft
+        return SimpleNamespace(enable_c8_quant=draft_c8 and load is r.spec.draft_load_config)
+
+    monkeypatch.setattr("vllm.config.VllmConfig.get_quantization_config", quant_config)
+    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (not target_c8 and not draft_c8)
+    r.config.load_config = r.spec.draft_load_config
     assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == (not draft_c8)
+
+
+@pytest.mark.parametrize(
+    "run_dtype,draft_override,scale_strategy,draft_layer_dtype,expected",
+    [
+        ("auto", "fp8", None, "fp8", False),
+        ("fp8", None, None, "fp8", False),
+        ("fp8", "bfloat16", None, "bfloat16", True),
+        ("auto", None, "tensor", "fp8", False),
+        ("auto", "bfloat16", "attn_head", "bfloat16", False),
+        ("auto", "bfloat16", "tensor", "bfloat16", True),
+    ],
+)
+def test_qwen_target_checks_draft_kv_cache(
+    qwen_dflash2_fa3, monkeypatch, run_dtype, draft_override, scale_strategy, draft_layer_dtype, expected
+):
+    r = qwen_dflash2_fa3
+    r.config.cache_config.cache_dtype = run_dtype
+    # The selected target layer can be unquantized even when the draft inherits FP8.
+    r.config.cache_config.kv_cache_dtype_skip_layers = ["0"] if run_dtype == "fp8" else []
+    r.spec.kv_cache_dtype = draft_override
+    scheme = {"strategy": scale_strategy} if scale_strategy else None
+    monkeypatch.setattr(
+        "vllm.config.VllmConfig.get_quantization_config", lambda *_: SimpleNamespace(kv_cache_scheme=scheme)
+    )
+    assert (r.select("backbone") == "AscendFlashAttentionBackend") == expected
+
+    # The draft loader applies its override; Attention resolves checkpoint KV scales per layer.
+    r.config.cache_config.cache_dtype = draft_override or run_dtype
+    r.selector = r.selector._replace(
+        kv_cache_dtype=draft_layer_dtype, use_per_head_quant_scales=scale_strategy == "attn_head"
+    )
+    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == expected
+
+
+@pytest.mark.parametrize(
+    "layer_sink,override,has_sink", [(False, True, True), (True, None, True), (True, False, False)]
+)
+def test_qwen_target_checks_dflash_attention_sinks(qwen_dflash2_fa3, layer_sink, override, has_sink):
+    r = qwen_dflash2_fa3
+    r.draft.hf_config.add_swa_attention_sink_bias = layer_sink
+    if override is not None:
+        r.draft.hf_config.dflash_config["attention_sink_bias"] = override
+    assert (r.select("backbone") == "AscendFlashAttentionBackend") == (not has_sink)
+    r.selector = r.selector._replace(has_sink=has_sink)
+    assert (r.select("dflash_head") == "AscendFlashAttentionBackend") == (not has_sink)
+
+
+@pytest.mark.parametrize(
+    "skip_layers,expected",
+    [(["64", "65"], True), (["64"], False), (["sliding_window"], False), (["64", "sliding_window"], True)],
+)
+def test_qwen_target_requires_all_draft_layers_to_skip_fp8(qwen_dflash2_fa3, skip_layers, expected):
+    r = qwen_dflash2_fa3
+    r.spec.kv_cache_dtype = "fp8"
+    r.config.cache_config.kv_cache_dtype_skip_layers = skip_layers
+    r.draft.hf_config.layer_types = ["full_attention", "sliding_attention"]
+    r.draft.hf_config.sliding_window = 128
+    with set_current_vllm_config(r.config):
+        assert (r.select("backbone") == "AscendFlashAttentionBackend") == expected
 
 
 @pytest.mark.parametrize(
