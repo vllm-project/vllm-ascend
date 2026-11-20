@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import get_request_state_plan
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
@@ -593,6 +594,8 @@ class AscendModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             # Same wiring as model_runner_v1
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+            skip_ring_state_update=ring_state_update_skipped()
+            or (input_batch.is_dummy and not for_capture and get_request_state_plan(kv_cache_config) is not None),
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,

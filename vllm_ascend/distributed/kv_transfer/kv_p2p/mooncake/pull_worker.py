@@ -29,10 +29,18 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     is_circular_kv_cache_spec,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.dsv41_state import (
+    STATE_ACQUIRE_MSG,
+    STATE_META_MSG,
+    StateSnapshot,
+    state_source_rank,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
     MooncakeTransferAddressMixin,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.dsv41 import transfer_addresses, zero_state_destination
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakePPTransferMetadata,
@@ -47,6 +55,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     group_concurrent_contiguous,
     zmq_ctx,
 )
+
+
+class UnfencedStateTransferError(RuntimeError):
+    """The SDK returned without a proof that submitted state DMA has ended."""
 
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
@@ -78,6 +90,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         dcp_size: int,
         device: Any,
         ready_event: threading.Event,
+        state_caches: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(daemon=True, name="MooncakePullRecvingThread")
         self.engine = engine
@@ -88,6 +101,7 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self.layer_name_to_group_index = layer_name_to_group_index
         self.layer_name_to_spec_index = layer_name_to_spec_index
         self.local_metadata = local_metadata
+        self.state_caches = state_caches
 
         self.block_size = local_metadata.block_size
         self.layer_names = local_metadata.layer_names
@@ -137,7 +151,10 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         # engine_id -> remote_pp_rank
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
+        self._shutdown_lock = threading.Lock()
+        self._closing = False
+        self._unfenced_state_requests: dict[str, ReqMeta] = {}
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -147,13 +164,44 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self,
         remote_engine_id: str,
         requests: dict[str, ReqMeta],
+        *,
+        state_destination_ready: bool = False,
     ) -> None:
         """Queue requests for one remote engine."""
         if requests:
-            self.request_queue.put((remote_engine_id, requests))
+            if any(meta.state_snapshot is not None for meta in requests.values()) and not state_destination_ready:
+                raise RuntimeError("State destinations must be ready before publishing a pull request")
+            with self._shutdown_lock:
+                if self._closing:
+                    raise RuntimeError("Mooncake pull receiver is shutting down")
+                self.request_queue.put((remote_engine_id, requests))
+
+    def shutdown(self, timeout: float = 60.0) -> None:
+        """Drain accepted transfers before dropping SDK and cache references.
+
+        A timeout is not a DMA fence: keep all references intact so the caller
+        cannot mistake an incomplete shutdown for safe buffer reclamation.
+        """
+        with self._shutdown_lock:
+            if not self._closing:
+                self._closing = True
+                self.request_queue.put(None)
+        self.join(timeout=timeout)
+        if self.is_alive():
+            raise TimeoutError("Mooncake pull receiver still has unfinished transfers; buffers remain retained")
+        # A joined Python thread does not drain work the SDK retained after a
+        # timeout. Do not drop cache/engine references or claim safe shutdown.
+        self.raise_if_unfenced_state_dma()
+        self.executor.shutdown(wait=True)
+        # A live daemon retaining the SDK until C++ static teardown can outlive
+        # the NPU runtime. Release this thread's references after it has joined.
+        # GlobalTE remains the owner of the process-wide registered engine.
+        self.engine = None
+        self.state_caches = None
 
     def get_and_clear_finished_requests(self) -> KVConnectorTransferResults:
         """Drain completion and failure together for each finished request."""
+        self.raise_if_unfenced_state_dma()
         results = KVConnectorTransferResults()
         while True:
             try:
@@ -164,8 +212,32 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             if failed:
                 results.failed_recving.add(request_id)
 
+    def _quarantine_state_dma(self, request_id: str, metadata: ReqMeta) -> None:
+        with self._shutdown_lock:
+            self._unfenced_state_requests[request_id] = metadata
+            self._closing = True
+
+    def raise_if_unfenced_state_dma(self) -> None:
+        """Escalate on the model thread before publication or another step.
+
+        Without finished_recving, vLLM keeps WAITING_FOR_REMOTE_KVS blocks
+        retained on cancellation. P's acquired SourceLease also cannot expire
+        without aggregate DONE. Instance retirement, not retry or a timer, is
+        required because the synchronous SDK API exposes no drain handle.
+        """
+        if self.state_caches is None:
+            return
+        with self._shutdown_lock:
+            request_ids = tuple(self._unfenced_state_requests)
+        if request_ids:
+            raise UnfencedStateTransferError(
+                "State READ did not establish a terminal DMA fence; stop and retire this engine. "
+                f"No receive completion or source DONE may be published; requests={request_ids}"
+            )
+
     def get_and_clear_invalid_block_ids(self) -> set[int]:
         """Drain local block IDs affected by failed pull attempts."""
+        self.raise_if_unfenced_state_dma()
         with self.invalid_block_ids_lock:
             invalid_block_ids = self.invalid_block_ids
             self.invalid_block_ids = set()
@@ -176,7 +248,11 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         torch.npu.set_device(self.device)
         self.ready_event.set()
         while True:
-            remote_engine_id, requests = self.request_queue.get()
+            item = self.request_queue.get()
+            if item is None:
+                self.request_queue.task_done()
+                break
+            remote_engine_id, requests = item
             failed_request_ids: set[str] = set()
             request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
@@ -202,9 +278,19 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                     exc,
                 )
             finally:
-                for request_id in requests:
-                    self.finished_requests.put((request_id, request_id in failed_request_ids))
+                with self._shutdown_lock:
+                    unfenced = bool(self._unfenced_state_requests)
+                    if unfenced:
+                        # Retain the whole accepted batch. Publishing even a
+                        # failed completion would let the scheduler reuse its
+                        # destinations and notify P while DMA may still run.
+                        self._unfenced_state_requests.update(requests)
+                if not unfenced:
+                    for request_id in requests:
+                        self.finished_requests.put((request_id, request_id in failed_request_ids))
                 self.request_queue.task_done()
+            if unfenced:
+                return
 
     def _mark_request_failed(self, request_metadata: ReqMeta) -> None:
         if not self.can_report_invalid_block_ids:
@@ -518,6 +604,8 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     ) -> set[str]:
         """Build and execute transfer buckets for one producer engine."""
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
+        if self.local_metadata.state_layout is not None:
+            return self._handle_state_requests(remote_metadata, remote_host, remote_port, requests)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
         # Cache block mappings for this producer-engine batch:
@@ -590,6 +678,103 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         if submission_error is not None:
             raise submission_error
         return failed_request_ids
+
+    def _handle_state_requests(
+        self,
+        remote_metadata: MooncakeTransferMetadataGroups,
+        remote_host: str,
+        remote_port: int,
+        requests: dict[str, ReqMeta],
+    ) -> set[str]:
+        """Read one full producer replica using the usual completion path."""
+        if (remote_metadata.pp_size, remote_metadata.pcp_size, remote_metadata.dcp_size) != (1, 1, 1):
+            raise ValueError("State PD requires PP=PCP=DCP=1 on both peers")
+        if remote_metadata.use_kv_pp:
+            raise ValueError("State PD does not support KVPP")
+        source_rank = state_source_rank(remote_metadata.tp_size, self.tp_size, self.tp_rank)
+        remote = remote_metadata.metadata_by_pp_rank[0]
+        failed = set()
+        for request_id, meta in requests.items():
+            self.raise_if_unfenced_state_dma()
+            try:
+                if meta.state_snapshot is None or not meta.state_consumer:
+                    raise ValueError("State snapshot and consumer identity are required")
+                snapshot = StateSnapshot.from_wire(meta.state_snapshot)
+                if (
+                    snapshot.tp_size != remote_metadata.tp_size
+                    or meta.num_computed_tokens != 0
+                    or meta.num_external_tokens != snapshot.boundary
+                    or meta.local_num_prompt_tokens != snapshot.original_prompt_tokens
+                    or meta.remote_num_prompt_tokens != snapshot.boundary
+                    or meta.remote_request_id != snapshot.source_request_id
+                ):
+                    raise ValueError("Worker received inconsistent state boundary metadata")
+                # Every plane in a snapshot comes from the same producer rank.
+                remote_sources, local_destinations, sizes = transfer_addresses(
+                    snapshot,
+                    self.local_metadata,
+                    remote,
+                    source_rank,
+                    meta.local_full_block_ids,
+                    meta.remote_block_ids,
+                )
+                path = make_zmq_path("tcp", remote_host, remote_port)
+                with zmq_ctx(zmq.REQ, path) as sock:
+                    sock.setsockopt(zmq.SNDTIMEO, 1000)
+                    sock.setsockopt(zmq.RCVTIMEO, 1000)
+                    ensure_zmq_send(
+                        sock,
+                        self.encoder.encode(
+                            (
+                                STATE_ACQUIRE_MSG,
+                                snapshot.transfer_id,
+                                meta.state_consumer,
+                                source_rank,
+                                snapshot.to_wire(),
+                                meta.remote_block_ids,
+                                remote_metadata.engine_id,
+                            )
+                        ),
+                        path,
+                    )
+                    if ensure_zmq_recv(sock, path) != b"ACK":
+                        raise RuntimeError("Producer rejected expired, stale, or competing state snapshot")
+                # start_load_kv cleared the destinations and completed its
+                # bounded event before publishing this batch. Do not submit
+                # device work on a default stream shared with dummy/MoE here.
+                remote_tp = remote.metadata_by_pcp_rank[0].metadata_by_tp_rank[source_rank]
+                session_id = f"{remote_tp.local_ip}:{remote_tp.te_rpc_port}"
+                start = time.perf_counter()
+                # Mooncake READ's ABI is (session, local buffers, peer buffers,
+                # lengths). Remote sources must not be passed as local memory.
+                try:
+                    ret = self.engine.batch_transfer_sync_read(session_id, local_destinations, remote_sources, sizes)
+                except BaseException:
+                    # An exception after entering the SDK is equally unable to
+                    # prove that submitted work has terminated.
+                    self._quarantine_state_dma(request_id, meta)
+                    raise
+                if ret != 0:
+                    self._quarantine_state_dma(request_id, meta)
+                    raise UnfencedStateTransferError(f"State READ returned unfenced status {ret}")
+                logger.info(
+                    "DSV4.1 state READ complete: request=%s transfer=%s boundary=%d rank=%d "
+                    "ranges=%d bytes=%d elapsed_ms=%.3f source_rank=%d",
+                    request_id,
+                    snapshot.transfer_id,
+                    snapshot.boundary,
+                    self.tp_rank,
+                    len(sizes),
+                    sum(sizes),
+                    (time.perf_counter() - start) * 1000,
+                    source_rank,
+                )
+            except Exception:
+                failed.add(request_id)
+                logger.exception("DSV4.1 state handoff failed for request %s", request_id)
+        # The existing receiver publishes failure/completion together, and D
+        # scheduler aggregates every TP worker before ACK or slot reclamation.
+        return failed
 
     def _build_transfer_block_buckets(
         self,
@@ -1296,7 +1481,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             sock.setsockopt(zmq.RCVTIMEO, 1000)  # type: ignore[attr-defined]
             ensure_zmq_send(
                 sock,
-                self.encoder.encode((b"get_meta_msg",)),
+                self.encoder.encode(
+                    (STATE_META_MSG if self.local_metadata.state_layout is not None else GET_META_MSG,)
+                ),
                 path,
             )
             metadata_bytes = ensure_zmq_recv(sock, path)
@@ -1308,6 +1495,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
 
         transfer_metadata = self.decoder.decode(metadata_bytes)
         self._validate_remote_metadata(transfer_metadata, remote_engine_id)
+        if self.local_metadata.state_layout is not None:
+            self.remote_metadata[remote_engine_id] = transfer_metadata
+            return transfer_metadata
         remote_tp_rank_groups, remote_layer_index_pairs = self._build_remote_transfer_layout(transfer_metadata)
         self.remote_metadata[remote_engine_id] = transfer_metadata
         self.remote_tp_rank_groups[remote_engine_id] = remote_tp_rank_groups
@@ -1332,6 +1522,13 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
+        self._shutdown = False
+
+    def shutdown(self) -> None:
+        self._shutdown = True
+        if self._recving_thread is not None:
+            self._recving_thread.shutdown()
+            self._recving_thread = None
 
     def register_kv_caches(
         self,
@@ -1363,6 +1560,7 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
                 dcp_size=self.dcp_size,
                 device=torch.npu.current_device(),
                 ready_event=ready_event,
+                state_caches=kv_caches if self.xfer_handshake_metadata.state_layout is not None else None,
             )
             self._recving_thread.start()
             if not ready_event.wait(timeout=10):
@@ -1372,17 +1570,42 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         """Start the pull operations described by scheduler metadata."""
+        if getattr(self, "_shutdown", False):
+            raise RuntimeError("Mooncake pull worker is shutting down")
+        if self.kv_transfer_config.is_kv_consumer and self._recving_thread is not None:
+            self._recving_thread.raise_if_unfenced_state_dma()
+            for request_id in metadata.pull_failed_requests:
+                self._recving_thread.finished_requests.put((request_id, True))
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
             assert self._recving_thread is not None
+            state_requests = [meta for meta in metadata.requests.values() if meta.state_snapshot is not None]
+            if state_requests:
+                assert self._recving_thread.state_caches is not None
+                assert self._recving_thread.local_metadata.state_layout is not None
+                # This runs on the model execution thread before any following
+                # dummy/forward work. Keep reset writes out of the receiver;
+                # wait only for this event, not an open-ended shared stream.
+                for meta in state_requests:
+                    zero_state_destination(
+                        self._recving_thread.state_caches,
+                        meta.local_full_block_ids,
+                        self._recving_thread.local_metadata.state_layout,
+                    )
+                destination_ready = torch.npu.Event()
+                destination_ready.record(torch.npu.current_stream())
+                destination_ready.synchronize()
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 
             for remote_engine_id, requests in request_groups.items():
-                self._recving_thread.add_requests(remote_engine_id, requests)
+                if state_requests:
+                    self._recving_thread.add_requests(remote_engine_id, requests, state_destination_ready=True)
+                else:
+                    self._recving_thread.add_requests(remote_engine_id, requests)
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Return completed receives, including their failure status."""

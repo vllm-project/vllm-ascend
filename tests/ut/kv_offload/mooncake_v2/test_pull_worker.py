@@ -70,6 +70,9 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.invalid_block_ids_lock = threading.Lock()
     thread.finished_requests = queue.SimpleQueue()
     thread.request_queue = queue.Queue()
+    thread.state_caches = None
+    thread._shutdown_lock = threading.Lock()
+    thread._unfenced_state_requests = {}
     for name, value in overrides.items():
         setattr(thread, name, value)
     return thread

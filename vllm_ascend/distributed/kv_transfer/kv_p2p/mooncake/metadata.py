@@ -41,6 +41,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    state_layout: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
@@ -122,6 +123,7 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    state_layout: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,8 @@ class ReqMeta:
     remote_request_id: str
     remote_num_prompt_tokens: int
     local_full_block_ids: BlockIds
+    state_snapshot: dict[str, Any] | None = None
+    state_consumer: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,6 +200,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self) -> None:
         self.requests: dict[str, ReqMeta] = {}
+        self.pull_failed_requests: set[str] = set()
         self.push_requests: dict[str, PushReqMeta] = {}
         self.push_send_requests: dict[str, PushSendReqMeta] = {}
         # P request ID -> D completion routing, including pre-dispatch aborts.
@@ -226,6 +231,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_request_id=kv_transfer_params["remote_request_id"],
             remote_num_prompt_tokens=kv_transfer_params["remote_num_prompt_tokens"],
             local_full_block_ids=local_full_block_ids or tuple(),
+            state_snapshot=kv_transfer_params.get("dsv41_state_snapshot"),
+            state_consumer=kv_transfer_params.get("dsv41_state_consumer", ""),
         )
 
     def add_new_push_req(

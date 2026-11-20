@@ -34,7 +34,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import get_request_state_plan, is_prefix_cacheable
+from vllm_ascend.core.request_state_manager import create_request_state_managers
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -179,22 +180,33 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
-        self.single_type_managers = tuple(
-            get_manager_for_kv_cache_spec(
-                kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
-                block_pool=self.block_pool,
-                enable_caching=enable_caching,
-                kv_cache_group_id=i,
-                dcp_world_size=(
-                    1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
-                ),
+        if get_request_state_plan(kv_cache_config) is not None:
+            self.single_type_managers = create_request_state_managers(
+                kv_cache_config,
+                self.block_pool,
+                scheduler_block_size=scheduler_block_size,
+                dcp_world_size=dcp_world_size,
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
-                **extra_mgr_kwargs,
             )
-            for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
-        )
+        else:
+            self.single_type_managers = tuple(
+                get_manager_for_kv_cache_spec(
+                    kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
+                    block_pool=self.block_pool,
+                    enable_caching=enable_caching,
+                    kv_cache_group_id=i,
+                    dcp_world_size=(
+                        1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
+                    ),
+                    pcp_world_size=1,
+                    max_in_flight_tokens=token_budget,
+                    max_model_len=max_model_len,
+                    **extra_mgr_kwargs,
+                )
+                for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
+            )
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
@@ -556,6 +568,8 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         return _orig_get_kv_cache_coordinator(
             **{name: value for name, value in hybrid_kwargs.items() if name != "eagle_attn_layer_names"}
         )
+    if get_request_state_plan(kv_cache_config) is not None:
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
     num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)

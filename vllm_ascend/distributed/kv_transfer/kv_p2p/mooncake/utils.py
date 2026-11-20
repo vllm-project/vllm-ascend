@@ -23,6 +23,7 @@ from vllm import envs
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
 
+from vllm_ascend.core.kv_cache_interface import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     tensor_storage_key,
@@ -31,9 +32,6 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-
-KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
 class MooncakeMetaserverClient:

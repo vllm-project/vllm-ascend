@@ -230,7 +230,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """MooncakeConnector does not save KV cache explicitly."""
 
     def wait_for_save(self) -> None:
-        """MooncakeConnector does not save KV cache explicitly."""
+        """Pull saves no cache explicitly."""
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Return this worker's out-of-band transfer handshake metadata."""
@@ -255,6 +255,18 @@ class MooncakePullConnector(MooncakeBaseConnector):
             self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def shutdown(self) -> None:
+        if isinstance(self.connector_worker, MooncakePullConnectorWorker):
+            self.connector_worker.shutdown()
+        super().shutdown()
+
+    def wait_for_save(self) -> None:
+        """Fence P state writes on the MRV2 model stream before publication."""
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.dsv41_state import is_state_config
+
+        if self.kv_transfer_config.is_kv_producer and is_state_config(self.kv_cache_config):
+            torch.npu.current_stream().synchronize()
 
 
 class MooncakePushConnector(MooncakeBaseConnector):

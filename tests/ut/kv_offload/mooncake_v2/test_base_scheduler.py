@@ -270,6 +270,7 @@ def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> No
 @pytest.mark.parametrize("params", [None, {}, {"do_remote_prefill": True}, {"do_remote_decode": True}])
 def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_truncate, params):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.state_mode = False
     scheduler.need_truncate = need_truncate
     request = make_request(
         prompt_token_ids=[1, 2, 3],
@@ -309,6 +310,7 @@ def test_base_scheduler_on_new_request_truncates_only_stateful_producer(need_tru
 )
 def test_shared_remote_prefill_tokens(need_truncate, computed, expected):
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.state_mode = False
     scheduler.need_truncate = need_truncate
     request = make_request(kv_transfer_params={"do_remote_prefill": True})
 

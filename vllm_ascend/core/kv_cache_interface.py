@@ -15,6 +15,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -23,6 +24,27 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm_ascend.core.kv_cache_pool_plan import RequestStatePoolPlan
+
+KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+@dataclass(kw_only=True)
+class AscendKVCacheConfig(KVCacheConfig):
+    """Carry per-pool capacity across scheduler copies and worker serialization."""
+
+    request_state_plan: RequestStatePoolPlan | None = None
+    staging_rows: int = 0
+
+
+def get_request_state_plan(config: KVCacheConfig | None) -> RequestStatePoolPlan | None:
+    return config.request_state_plan if isinstance(config, AscendKVCacheConfig) else None
+
+
+def get_cache_group_capacity(config: KVCacheConfig, group_id: int) -> int:
+    plan = get_request_state_plan(config)
+    return config.num_blocks if plan is None else plan.pool_for_group(group_id).capacity
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
