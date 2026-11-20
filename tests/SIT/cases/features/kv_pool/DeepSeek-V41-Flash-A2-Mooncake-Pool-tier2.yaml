@@ -8,8 +8,9 @@
 # YAML-driven variant passed the single-node harness validation on the same
 # runner.
 #
-# The mooncake tier-3 (DRAM + SSD) variant is covered by the pytest A/B case
-# on provisioned environments until the nightly runners carry the SSD paths.
+# The tier-3 variant (DRAM + SSD offload) is the sibling YAML: it needs a
+# writable SSD-offload root with tens of GiB free plus the MOONCAKE_OFFLOAD_*
+# disk budget envs, all declared in that YAML itself.
 test_cases:
   - name: "DeepSeek-V41-Flash-A2-Mooncake-Pool-tier2"
     model: "Eco-Tech/DeepSeek-V4.1-Flash-w4a8"

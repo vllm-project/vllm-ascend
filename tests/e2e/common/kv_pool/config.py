@@ -61,6 +61,7 @@ def parse_kv_pool_config(raw_kv_pool: Any) -> KVPoolConfig | None:
             config=dict(pool_config),
             master_port=int(raw_kv_pool["master_port"]),
             metrics_port=int(raw_kv_pool["metrics_port"]),
+            master_extra_args=tuple(raw_kv_pool.get("master_extra_args", ())),
         )
     else:
         kv_pool = MemcacheKVPoolConfig(

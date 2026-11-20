@@ -8,8 +8,9 @@
 # variant passed the single-node harness validation on the same runner.
 #
 # The memcache tier-3 (DRAM + UBS IO raw block device) variant is not
-# registered here: it needs a runner-provisioned /dev/loopN raw device and
-# is covered by the pytest A/B case on provisioned environments until the
+# registered here: it needs a runner-provisioned /dev/loopN raw block device
+# and the single-node harness has no skip-on-missing-device mechanism, so an
+# unprovisioned runner would hard-fail every night. Register it once the
 # nightly runners carry the device.
 test_cases:
   - name: "GLM-5.3-Flash-W8A8-A2-Memcache-Pool-tier2"
