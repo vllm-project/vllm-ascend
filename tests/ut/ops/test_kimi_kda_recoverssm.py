@@ -64,6 +64,24 @@ def test_context_binds_request_records_and_detects_rebinding():
     assert not context.is_bound_to(layers)
 
 
+def test_context_binds_normalized_key_record(monkeypatch):
+    monkeypatch.setattr(recoverssm, "is_950", lambda: True)
+    layer = make_layer()
+    decay, normalized_key = recoverssm.allocate_kda_verify_caches(layer.recoverssm_records.key_gate)
+    assert normalized_key is not None and decay is not None
+    assert normalized_key.shape == layer.recoverssm_records.correction.shape
+    assert normalized_key.dtype == torch.float32 and normalized_key.data_ptr() != decay.data_ptr()
+    layer.recoverssm_normalized_key_cache = normalized_key
+    with pytest.raises(ValueError, match="require the decay record"):
+        recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
+    layer.recoverssm_decay_cache = decay
+    context = recoverssm.KDARecoverSSMCommitContext.create([layer], spec_query_len=4, max_num_reqs=4)
+    assert context.normalized_key_base_addrs.tolist() == [normalized_key.data_ptr()]
+    assert context.is_bound_to([layer])
+    layer.recoverssm_normalized_key_cache = normalized_key.clone()
+    assert not context.is_bound_to([layer])
+
+
 def test_context_rejects_mixed_layout_and_insufficient_scratch():
     layer = make_layer()
     layer.kv_cache = (*layer.kv_cache, torch.zeros(1))

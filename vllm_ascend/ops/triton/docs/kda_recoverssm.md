@@ -156,7 +156,12 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   persistent state/history. Rejected suffix records are not read by commit.
 - The caller prepares convolution state before commit. Commit writes only the
   accepted checkpoint destinations and the first `W` convolution positions;
-  verification writes only `out` and the valid correction/key/gate record spans.
+  verification writes `out` and the valid correction/key/gate record spans.
+  On A5 the Kimi and GLM5Next integration also supplies two contiguous FP32
+  buffers of shape `[capacity, H, Q, K]` per layer. Verify stores the decay
+  and normalized key once per valid record, and commit reuses both. Together
+  the buffers require `8 * capacity * H * Q * K` bytes per layer. Callers
+  that omit these optional buffers can still commit from the raw records.
   Input/output buffers must not alias these write regions unexpectedly.
 - `block_table`, `num_computed_tokens` and `mamba_block_size` must either all be
   absent or all be supplied. Low-level align can additionally write a boundary
@@ -180,12 +185,10 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   Ordinary and aligned grouped commit cap their value tiles using the existing
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
-  lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
-  On A5, when an ordinary non-boundary launch has at least one task per vector
-  core, it launches one program per reported vector core. Each program owns a
-  contiguous range of layer, request, head and value tiles. A single buffer stage
-  keeps the task loop within the UB budget. Fully accepted windows use an
-  unrolled update without a length check at each step.
+  lifetimes. Ordinary A5 non-boundary launches use one program per reported
+  vector core and one buffer stage. Each program owns a contiguous range of
+  layer, request, head and value tiles. The kernel unrolls the configured
+  window and applies the update only to steps in each request's accepted prefix.
   The estimate covers two matrix buffers without boundary reconstruction and
   six per head for the ordinary or grouped boundary recovery path.
   Non-crossing aligned requests do not reserve boundary matrices.
