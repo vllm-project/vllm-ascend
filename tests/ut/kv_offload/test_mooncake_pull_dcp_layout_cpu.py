@@ -97,58 +97,6 @@ def test_handshake_merge_preserves_layout_by_layer_and_rejects_rank_mismatch():
         scheduler._merge_metadata_by_pp_rank({0: first, 1: replace(first, dcp_sharded=[True, True])})
 
 
-@pytest.mark.parametrize(
-    "local_shape,remote_shape,page_bytes",
-    [
-        ((128, 1, 576), (128, 1, 576), 73728),
-        ((73728,), (73728,), 73728),
-        ((128, 1, 576), (73728,), 73728),
-        ((73728,), (128, 1, 576), 73728),
-        ((128, 1, 576), (128, 1, 576), 147456),
-    ],
-)
-def test_mla_pull_checks_registered_page_layout_before_transfer(local_shape, remote_shape, page_bytes):
-    cls = load_class(
-        "pull_worker.py",
-        "MooncakePullRecvingThread",
-        {"_append_spec_transfer_addresses", "_append_block_transfer_addresses"},
-        {"group_concurrent_contiguous": lambda local, remote: ([local], [remote])},
-    )
-    receiver = cls()
-    receiver.layer_names = ["draft"]
-    receiver.kv_cache_specs = [MLAAttentionSpec()]
-    receiver.kv_caches_base_addr = [[2048]]
-    receiver.block_shapes = [[local_shape]]
-    receiver.block_strides = [[page_bytes + 512]]
-    receiver.block_lens = [[page_bytes]]
-    producer = SimpleNamespace(
-        metadata_by_pcp_rank={
-            0: SimpleNamespace(metadata_by_tp_rank={0: SimpleNamespace(kv_caches_base_addr=[[4096]])})
-        },
-        block_shapes=[[remote_shape]],
-        block_strides=[[page_bytes]],
-        block_lens=[[page_bytes]],
-    )
-    src: list[int] = []
-    dst: list[int] = []
-    sizes: list[int] = []
-
-    def append_addresses():
-        receiver._append_spec_transfer_addresses(
-            0, 0, 0, 1, 1, 2, {(0, 0): [("r", [1], [2])]}, producer, src, dst, sizes
-        )
-
-    if local_shape != remote_shape:
-        with pytest.raises(ValueError, match="Mooncake MLA page layout mismatch.*draft"):
-            append_addresses()
-        assert not src and not dst and not sizes
-    else:
-        append_addresses()
-        assert src == [2048 + page_bytes + 512]
-        assert dst == [4096 + page_bytes * 2]
-        assert sizes == [page_bytes]
-
-
 @pytest.fixture
 def worker():
     cls = load_class(

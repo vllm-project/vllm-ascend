@@ -38,10 +38,9 @@ path; writing FP8 context KV is not a QuantFlashMLA prefill-attention call.
 
 With Mooncake pull P/D (`MooncakePullConnector` or `MooncakeConnectorV2`
 without layerwise mode), both endpoints must use the same KV page layout and
-cache dtype for each transferred layer. For asymmetric TP/DCP, check the head
-counts and QuantFlashMLA operator availability on both sides. Upgrade the
-decode endpoint to a revision with MLA page-layout validation before
-enabling QuantFlashMLA on either endpoint.
+cache dtype for each transferred layer. Deploy compatible operator packages
+on both sides and verify that the local and gathered query-head counts in an
+asymmetric TP/DCP deployment select the same cache layout on both endpoints.
 
 ## Integration contracts
 
