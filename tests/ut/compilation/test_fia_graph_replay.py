@@ -65,3 +65,29 @@ def test_rebind_leaves_different_block_tables_on_original_update_path(monkeypatc
 
     assert fia_graph_replay.FIAReplay.bind(42, tasks) is None
     native.bind_lengths.assert_not_called()
+
+
+def test_rebind_leaves_unnamed_provider_on_original_update_path(monkeypatch):
+    native = MagicMock(ARGS_CAPACITY=4096)
+    monkeypatch.setattr(fia_graph_replay, "_native", native)
+    task = make_task(torch.zeros((2, 4), dtype=torch.int32), None)
+    task.provider = SimpleNamespace()
+
+    assert fia_graph_replay.FIAReplay.bind(42, [task]) is None
+    native.bind_lengths.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["metadata", "block_tables", "seq_lens_gpu"])
+def test_replay_requires_layer_metadata(missing):
+    table = torch.zeros((2, 4), dtype=torch.int32)
+    lengths = torch.tensor([129, 0])
+    replay = fia_graph_replay.FIAReplay("first", table, lengths, torch.empty(1))
+    metadata = SimpleNamespace(block_tables=table, seq_lens_gpu=lengths, max_query_len=1)
+
+    if missing == "metadata":
+        with pytest.raises(RuntimeError, match="Missing FIA replay metadata for layer first"):
+            replay.prepare({})
+    else:
+        setattr(metadata, missing, None)
+        with pytest.raises(RuntimeError, match="captured single-token batch shape"):
+            replay.prepare({"first": metadata})

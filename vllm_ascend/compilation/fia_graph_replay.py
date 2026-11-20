@@ -5,6 +5,8 @@
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from importlib import import_module
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,8 +16,9 @@ from vllm.logger import logger
 if TYPE_CHECKING:
     from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 
+_native: ModuleType | None
 try:
-    from vllm_ascend import _experimental_fia_replay as _native
+    _native = import_module("vllm_ascend._experimental_fia_replay")
 except ImportError:
     _native = None
 
@@ -42,6 +45,9 @@ class FIAReplay:
     @classmethod
     def bind(cls, model: int, tasks: list["GraphUpdateTask"]) -> "FIAReplay | None":
         if _native is None or not tasks:
+            return None
+        layer_name = getattr(tasks[0].provider, "layer_name", None)
+        if not isinstance(layer_name, str):
             return None
         first = tasks[0].kwargs
         table = first.get("block_table")
@@ -73,14 +79,19 @@ class FIAReplay:
             logger.debug("FIA capture did not match the experimental ACL Graph ABI.")
             return None
         logger.info("Bound %d captured FIA kernels to one device KV length buffer.", len(tasks))
-        return cls(tasks[0].provider.layer_name, table, shared_lengths, launch_args)
+        return cls(layer_name, table, shared_lengths, launch_args)
 
     def prepare(self, attn_metadata) -> None:
-        metadata = attn_metadata[self.layer_name]
+        metadata = attn_metadata.get(self.layer_name) if attn_metadata is not None else None
+        if metadata is None:
+            raise RuntimeError(f"Missing FIA replay metadata for layer {self.layer_name}.")
+        block_table = metadata.block_tables
         seq_lens = metadata.seq_lens_gpu
         if (
             metadata.max_query_len != 1
-            or metadata.block_tables.data_ptr() != self.block_table.data_ptr()
+            or block_table is None
+            or seq_lens is None
+            or block_table.data_ptr() != self.block_table.data_ptr()
             or seq_lens.shape != self.lengths.shape
         ):
             raise RuntimeError("Shared FIA graph replay requires the captured single-token batch shape.")
