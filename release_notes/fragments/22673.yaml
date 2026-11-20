@@ -1,0 +1,9 @@
+pr: 22673
+entries:
+  - category: performance
+    text: >-
+      Restored the A3 hyper-connection kernel optimizations for DeepSeek V4.1.
+      HC pre uses the fused kernel for external pre-mix inputs, and HC post
+      reuses coefficient broadcasts across tiles.
+    model: deepseek-v4.1
+    hardware: [A3]
