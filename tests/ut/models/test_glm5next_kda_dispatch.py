@@ -308,7 +308,13 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     events: list[object] = []
     monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append(("load", prefix)))
     monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
-    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
+
+    def save(layer_name, caches):
+        assert layer_name == layer.prefix
+        assert caches == []
+        events.append("save")
+
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", save)
     conv_calls = []
     conv_entry = model_kda.causal_conv1d
 
@@ -535,7 +541,13 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
     events = []
     monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append("load"))
     monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
-    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
+
+    def save(layer_name, caches):
+        assert layer_name == layer.prefix
+        assert caches == []
+        events.append("save")
+
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", save)
 
     def recurrent(q, k, v, gate, beta, state, ends, slots, *args, output_buffer=None):
         assert output_buffer is target

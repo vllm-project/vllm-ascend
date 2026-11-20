@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -49,8 +50,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         self.layerwise_offload = (
-            self.use_layerwise_transfer and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
+            self.layerwise_data_plane in ("block_key", "gva")
+            and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
         )
+        self._prefix_probe: tuple[str, int] | None = None
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -80,7 +83,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
-        if self.layerwise_offload:
+        if self.use_layerwise_transfer and self.layerwise_offload:
             return target_token_len
         return min(target_token_len, len(request.all_token_ids))
 
@@ -94,6 +97,32 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         return None
 
+    def _build_req_meta(self, request_tracker, block_hashes, load_spec, prompt_token_ids, skip_save):
+        if self.use_block_key_layerwise and self.layerwise_offload and request_tracker.layerwise_request_id is None:
+            request_tracker.layerwise_request_id = uuid4().hex
+        return super()._build_req_meta(request_tracker, block_hashes, load_spec, prompt_token_ids, skip_save)
+
+    def get_local_prefix_cache_limit(self, request: Request) -> int | None:
+        if not (self.use_block_key_layerwise and self.layerwise_offload):
+            return None
+        hit = self._lookup_mooncake_offload_prefix(request)
+        self._prefix_probe = (request.request_id, hit)
+        return hit
+
+    def _lookup_mooncake_offload_prefix(self, request: Request) -> int:
+        # The last prompt token must run through the model. KDA cannot roll
+        # back a full-prompt checkpoint to that older restart point.
+        limit = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids) - 1)
+        return self._get_block_key_layerwise_hit_tokens(request, limit, 0) if limit > 0 else 0
+
+    def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if self.use_block_key_layerwise and self.layerwise_offload:
+            load_spec = self.load_specs.get(request.request_id)
+            if (load_spec.kvpool_cached_tokens if load_spec is not None else 0) < num_computed_tokens:
+                raise RuntimeError("Mooncake local prefix has no complete Store restore point")
+        return result
+
     def _use_hybrid(self, vllm_config: VllmConfig, kv_cache_groups: list[Any] | None) -> bool:
         return super()._use_hybrid(vllm_config, kv_cache_groups) or (
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
@@ -102,6 +131,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
+            if self.layerwise_offload:
+                probe, self._prefix_probe = self._prefix_probe, None
+                if probe is not None and probe[0] == request.request_id:
+                    return probe[1]
+                return self._lookup_mooncake_offload_prefix(request)
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))

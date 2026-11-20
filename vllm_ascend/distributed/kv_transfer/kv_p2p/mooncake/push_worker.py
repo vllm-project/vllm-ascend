@@ -41,6 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
+)
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -213,8 +216,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sending_futures: dict[str, list[Future]] = {}
         self._shared_layer_indices: dict[str, int] = {}
         self._shared_layer_writes: dict[int, tuple[Future, ...]] = {}
-        if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False):
-            layout = kv_cache_config.layerwise_reuse_layout
+        layout = get_layerwise_reuse_layout(kv_cache_config)
+        if layout is not None:
+            if self.pp_size != 1 or self.pcp_size != 1:
+                raise ValueError("Mooncake Push with shared buffers requires P PP=PCP=1")
             stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
             self._shared_layer_indices = {
                 name: stage_indices[layout.cache_layer_indices[name]] for name in layout.reused_cache_names
@@ -275,6 +280,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if self.kv_transfer_config.is_kv_producer:
             # The previous step's wait_for_save has joined its WRITE tasks.
             self._shared_layer_writes.clear()
+            if self._shared_layer_indices:
+                for state in self._reqs_send_state.values():
+                    state.available_layers.clear()
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
@@ -911,6 +919,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
                 if layer_name in self._shared_layer_indices:
+                    if self._shared_layer_indices[layer_name] not in self._shared_layer_writes:
+                        state.error = f"Missing Mooncake Push save hook for shared cache {layer_name}"
+                        break
                     continue
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
                     if event is None:

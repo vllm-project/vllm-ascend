@@ -69,12 +69,45 @@ def get_layerwise_gva_config(kv_transfer_config: Any) -> dict[str, Any] | None:
 
 def get_layerwise_offload_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Find a layerwise store with an explicit shared-buffer count."""
-    # TODO(bowgneo): Mooncake support for shared-buffer offload is pending. Detect the
-    # request from config regardless of backend.
-    extra_config = get_layerwise_ascend_store_config(kv_transfer_config)
-    if extra_config is not None and extra_config.get("layerwise_num_shared_buffers") is not None:
-        return extra_config
-    return None
+    extra = get_layerwise_ascend_store_config(kv_transfer_config)
+    if extra is None or extra.get("layerwise_num_shared_buffers") is None:
+        return None
+    if _is_mooncake(extra):
+        _validate_mooncake_offload_connectors(kv_transfer_config, extra)
+    return extra
+
+
+def _is_mooncake(extra: dict[str, Any]) -> bool:
+    return str(extra.get("backend", "mooncake")).lower() == "mooncake"
+
+
+def _validate_mooncake_offload_connectors(kv_transfer_config: Any, extra: dict[str, Any]) -> None:
+    role = kv_transfer_config.kv_role
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        children = kv_transfer_config.kv_connector_extra_config["connectors"]
+        store = next(child for child in children if child.get("kv_connector_extra_config") is extra)
+        role = store.get("kv_role", role)
+        siblings = [child for child in children if child is not store]
+        if siblings and (
+            len(siblings) != 1
+            or siblings[0].get("kv_connector") != "MooncakePushConnector"
+            or siblings[0].get("kv_role", role) != "kv_producer"
+        ):
+            raise ValueError("Mooncake shared KV buffers require a standalone Store or Mooncake Push")
+    if role != "kv_producer":
+        raise ValueError("Mooncake shared KV buffers require kv_role=kv_producer")
+
+
+def keep_recurrent_state_resident(vllm_config: VllmConfig) -> bool:
+    if getattr(vllm_config, "speculative_config", None) is None:
+        return False
+    extra = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra is None or not _is_mooncake(extra):
+        return False
+    reuse = extra.get("layerwise_reuse_mtp_state", True)
+    if not isinstance(reuse, bool):
+        raise TypeError("layerwise_reuse_mtp_state must be a boolean")
+    return not reuse
 
 
 class LayerwiseCachePlanner:
@@ -99,6 +132,7 @@ class LayerwiseCachePlanner:
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
+        self.keep_recurrent_resident = keep_recurrent_state_resident(vllm_config)
         self.group_id_by_entry = {
             entry_name: group_id
             for group_id, group in enumerate(config.kv_cache_groups)
@@ -140,6 +174,7 @@ class LayerwiseCachePlanner:
                 if entry_name not in self.draft_names
                 and self.layer_id_by_entry[entry_name] not in independent
                 and self.can_reuse_spec(self.spec_by_entry[entry_name], self.spec_reuse_rules)
+                and not (self.keep_recurrent_resident and isinstance(self.spec_by_entry[entry_name], MambaSpec))
             }
         if reusable_entry_names:
             native_cache_views = get_cache_views(self.config, self.spec_by_entry)
@@ -278,6 +313,8 @@ def plan_layerwise_cache_reuse(
         return None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
+        if _is_mooncake(extra_config):
+            raise ValueError("Mooncake shared KV buffers require a model with registered reuse rules")
         return None
     planner = LayerwiseCachePlanner(
         kv_cache_config,

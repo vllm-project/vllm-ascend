@@ -9,6 +9,7 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pcp_group,
     get_tp_group,
 )
 from vllm.logger import logger
@@ -229,7 +230,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
-            if self.use_layerwise_transfer:
+            if self.use_layerwise_transfer or self.use_block_key_layerwise:
                 self._layerwise_reuse_layout = get_layerwise_reuse_layout(self.kv_cache_config)
                 if (
                     draft_names
@@ -306,7 +307,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.next_layer_to_submit = 0
         self.layerwise_offload = False
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer or self._layerwise_reuse_layout is not None:
             if self._layerwise_reuse_layout is None:
                 stage_start = self.layerwise_key_layer_offset
                 stage_layers = range(stage_start, stage_start + stage_num_layers)
@@ -479,7 +480,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         externally supplied slot-release callback, so the gate lives here
         (at the data-plane consumer) instead of at the connector proxy.
         """
-        if not self.use_layerwise_transfer:
+        if not (self.use_layerwise_transfer or self.layerwise_offload):
             return False
         self.external_slot_release_waiter = waiter
         # The receive thread snapshots the waiter at construction; if it is
@@ -659,8 +660,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # The final-layer fence drains this rank only. Readers of replicated
         # KV must also wait for the writer before querying the previous step.
         # Use configuration, never local requests/tasks, to gate the collective.
-        if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
-            get_tp_group().barrier()
+        if self.layerwise_offload:
+            if self.tp_size > 1:
+                get_tp_group().barrier()
+            if self.use_block_key_layerwise and self.pcp_size > 1:
+                get_pcp_group().barrier()
         self.current_layer = 0
         self._dflash_save_pending = False
         self.layerwise_retrievers: list[Any] = []
@@ -988,6 +992,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
+            if self.use_block_key_layerwise and self.layerwise_offload:
+                start = request.save_key_block_offset
+                end = start + len(request.save_block_keys)
+                tail = request.partial_block_index if request.save_last_block_key else None
+                if end > start or tail is not None:
+                    request_block_ranges.append(LayerBlockRange(request, start, end, tail))
+                continue
             save_start_block = request.save_start_token // block_size
             group_block_hashes = get_block_hashes(
                 request.block_hashes,
@@ -1204,16 +1215,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
-                populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
-                if not populated_slots:
-                    continue
-                request_block_ranges.append(
-                    LayerBlockRange(
-                        request=request,
-                        start_block=min(populated_slots),
-                        end_block=max(populated_slots) + 1,
-                    )
-                )
+                if self.layerwise_offload:
+                    if not request.load_block_keys or (
+                        request.load_spec is not None
+                        and request.load_spec.layerwise_previous_step
+                        and not reuses_buffer
+                    ):
+                        continue
+                    start, end = 0, len(request.load_block_keys)
+                else:
+                    populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
+                    if not populated_slots:
+                        continue
+                    start, end = min(populated_slots), max(populated_slots) + 1
+                request_block_ranges.append(LayerBlockRange(request=request, start_block=start, end_block=end))
                 continue
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
@@ -1478,6 +1493,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self._process_load_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
+        if self.use_block_key_layerwise and self.layerwise_offload:
+            # A resident layer can finish a group without needing a restore.
+            last_loads = {task.group_id: task for tasks in self.layer_load_tasks for task in tasks}
+            for task in last_loads.values():
+                task.final_group_layer = True
         self._build_shared_load_data()
         if self.layerwise_offload:
             self._check_hybrid_load_errors()
@@ -1670,7 +1690,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
-                if layer_id not in self._recurrent_layers:
+                if layer_id not in self._recurrent_layers and not self.layerwise_offload:
                     gate.on_start = lambda: self._submit_attention_save(layer_id)
                 gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
@@ -1745,7 +1765,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
-            if _LW_DEFER_LAST_SAVE:
+            if _LW_DEFER_LAST_SAVE and not (self.use_block_key_layerwise and self.layerwise_offload):
                 # The next step drains pending saves before it can reuse cache pages.
                 self._pending_last_save_drain = True
             else:

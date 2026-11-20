@@ -144,6 +144,56 @@ def register_cache_specs():
     register_all_kvcache_specs(None)
 
 
+@pytest.mark.parametrize(("backend", "reuse_kda"), [("memcache", True), ("mooncake", True), ("mooncake", False)])
+def test_prefill_offload_uses_native_glm_cache_plan(backend, reuse_kda):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+        plan_layerwise_cache_reuse,
+    )
+
+    config = make_config()
+    config.model_config.hf_text_config = SimpleNamespace(model_type="glm5_next_text")
+    config.model_config.get_total_num_hidden_layers = lambda: 8
+    config.speculative_config = SimpleNamespace(method="deepseek_mtp")
+    config.kv_transfer_config = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "backend": backend,
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_reuse_mtp_state": reuse_kda,
+        },
+    )
+    first = make_specs()
+    specs = {
+        name.replace("layers.3.", f"layers.{layer}."): spec
+        for name, spec in first.items()
+        if name.startswith("model.layers.3.")
+        for layer in (3, 7)
+    }
+    specs.update(
+        {
+            f"model.layers.{layer}.linear_attn": replace(
+                first[f"model.layers.{layer % 4}.linear_attn"], mamba_cache_mode="align"
+            )
+            for layer in (0, 1, 2, 4, 5, 6)
+        }
+    )
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    native = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    layout = plan_layerwise_cache_reuse(native, config)
+    assert layout is not None
+    assert {name for name in layout.reused_cache_names if name.endswith(".attn")} == {
+        "model.layers.3.attn",
+        "model.layers.7.attn",
+    }
+    assert all(".indexer." not in name for name in layout.reused_cache_names)
+    recurrent = {name for name in layout.reused_cache_names if name.endswith(".linear_attn")}
+    assert bool(recurrent) is reuse_kda
+    if not reuse_kda:
+        assert all(len(group.layer_names) == 1 for group in groups if group.layer_names[0].endswith(".linear_attn"))
+
+
 @pytest.mark.parametrize("pool", [4, 16])
 def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     config = make_config()

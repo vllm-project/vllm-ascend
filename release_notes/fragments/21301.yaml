@@ -1,0 +1,6 @@
+pr: 21301
+entries:
+  - category: feature
+    text: Added opt-in Mooncake Store layerwise KV offload with model-registered component planning, target KDA reuse with native MTP, Store-verified local prefix admission, exact recurrent-state snapshots, and slot-release fencing for the mainline Mooncake Push connector.
+  - category: bugfix
+    text: Fixed GLM-5.3-Flash KDA save hooks to report registered layer names so shared recurrent buffers wait for Mooncake Push WRITEs and complete destination transfers.
