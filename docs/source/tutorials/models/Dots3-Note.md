@@ -4,7 +4,7 @@
 
 Dots3 Note is a large language model based on the Dots3 Note MoE + MLA architecture, with audio and vision multimodal encoders. The text, image, and audio forms are not mutually exclusive and can be enabled simultaneously; when device memory is limited, it is recommended to enable the required forms on demand. The forms cannot be switched dynamically within the same process, and the service must be restarted when switching.
 
-| Form | Input | Typical scenario | Modal configuration |
+| Form | Input | Typical scenario | Modality configuration |
 |---|---|---|---|
 | text-only | Text | Long-context dialogue, text reasoning | `--language-model-only` |
 | image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` |
@@ -20,7 +20,7 @@ Dots3 Note supports the following features on vLLM-Ascend:
 
 | Feature | Support | Description |
 |---|---|---|
-| Model architecture | Dots3 Note MoE + MLA | MoE mixture of experts + multi-head latent attention |
+| Model architecture | Dots3 Note MoE + MLA | MoE (Mixture of Experts) + multi-head latent attention |
 | Multimodal | audio + vision | Audio / vision encoders, enabled per form (see §5.1) |
 | MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (Model Runner V1 limitation) |
 | FusedMC2 | ✅ | Fused `dispatch_ffn_combine` / `mega_moe` operators for MoE (`--additional-config`) |
@@ -101,7 +101,7 @@ This chapter provides a single installation method: use the official prebuilt im
 
 > This document recommends the all-in-one image `quay.io/ascend/vllm-ascend:dots3-note-prev-a3-openeuler`. The image bundles vLLM, vLLM-Ascend, torch-npu, and CANN, so no separate installation is required.
 
-### 4.2 Image Acquisition and Build
+### 4.2 Image Acquisition
 
 The runtime uses the official vLLM-Ascend all-in-one image, which already contains vLLM, vLLM-Ascend, torch-npu, CANN, and NNAL. Choose the image matching your hardware series and OS:
 
@@ -217,7 +217,7 @@ This chapter starts one service form at a time. For the first deployment, it is 
 
 The three deployment forms are compared as follows:
 
-| Form | Input | Typical scenario | Modal configuration | Context | KV cache | MTP | Weight per worker |
+| Form | Input | Typical scenario | Modality configuration | Context | KV cache | MTP | Weight per worker |
 |---|---|---|---|---|---|---|---|
 | text-only | Text | Long-context dialogue, text reasoning | `--language-model-only` | 32768 | `--gpu-memory-utilization 0.92` | ✅ MTP3 | 36.26 GB |
 | image | Text + images (≤ 7 per request) | MMMU and other vision tasks | `--limit-mm-per-prompt '{"image":7,"video":0,"audio":0}'` | 32768 | `--kv-cache-memory-bytes 2816M` | ❌ | ~48.8 GB (+12.5 GB) |
@@ -416,7 +416,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 
 Do not judge startup success only by process existence. First wait for model loading and graph capture to complete; the success log should contain:
 
-```text
+```output
 GPU KV cache size: <tokens>
 Maximum concurrency for ... tokens per request: ...
 Graph capturing finished ...

@@ -35,7 +35,7 @@ extern "C" __global__ __aicore__ void hc_pre_coefficients(
         projectionPipe.Destroy();
 
         TPipe coefficientPipe;
-        HcPre::HcPreMembaseKSplitCorePremixPart2<DTYPE_X, false> coefficients;
+        HcPre::HcPreMembaseKSplitCorePart2<DTYPE_X, true, false> coefficients;
         coefficients.Init(nullptr, hc_scale, hc_base, nullptr, post, comb_frag, nullptr, pre,
             userWs, &tilingData, &coefficientPipe);
         coefficients.Process();

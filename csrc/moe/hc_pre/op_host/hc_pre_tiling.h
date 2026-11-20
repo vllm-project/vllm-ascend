@@ -122,32 +122,6 @@ TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfTailBlock);
 
 END_TILING_DATA_DEF;
 
-struct HcPrePremixRowSplit {
-    int64_t rowsPerCore;
-    int64_t tailRows;
-    int64_t usedCores;
-};
-
-inline HcPrePremixRowSplit SplitHcPrePremixRows(int64_t rows, int64_t vectorCores)
-{
-    const int64_t rowsPerCore = (rows - 1) / vectorCores + 1;
-    const int64_t usedCores = (rows - 1) / rowsPerCore + 1;
-    return {rowsPerCore, rows - (usedCores - 1) * rowsPerCore, usedCores};
-}
-
-inline void SetHcPrePremixRowTiling(
-    HcPreTilingData &data, const HcPrePremixRowSplit &split, int64_t rowsPerLoop)
-{
-    data.set_rowOfFormerBlock(split.rowsPerCore);
-    data.set_rowOfTailBlock(split.tailRows);
-    data.set_rowLoopOfFormerBlock((split.rowsPerCore - 1) / rowsPerLoop + 1);
-    data.set_rowLoopOfTailBlock((split.tailRows - 1) / rowsPerLoop + 1);
-    data.set_tailRowFactorOfFormerBlock((split.rowsPerCore - 1) % rowsPerLoop + 1);
-    data.set_tailRowFactorOfTailBlock((split.tailRows - 1) % rowsPerLoop + 1);
-    data.set_stage2RowFactor(rowsPerLoop);
-    data.set_secondUsedCoreNum(split.usedCores);
-}
-
 // ----------算子CompileInfo定义----------
 struct HcPreCompileInfo {
     uint64_t coreNum = 0;
@@ -171,7 +145,6 @@ public:
     ge::graphStatus CalcOpTiling();
     void CalcVectorCoreNum();
     ge::graphStatus CalcMKSplitCoreMembasePart2Tiling();
-    ge::graphStatus CalcPremixPart2Tiling();
     ge::graphStatus CalcSinkhornTiling();
 
 private:

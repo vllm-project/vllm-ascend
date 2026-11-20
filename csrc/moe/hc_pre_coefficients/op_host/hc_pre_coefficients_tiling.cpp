@@ -57,9 +57,11 @@ ge::graphStatus TilingForHcPreCoefficients(gert::TilingContext *context)
     const int64_t rowsL1 = std::min(rowsPerMGroup, MAX_M_L1_ROWS);
     const int64_t splitK = Align(CeilDiv(width, cubeCores / mGroups), CORE_K_ALIGN);
     const int64_t kBlocks = CeilDiv(width, splitK);
-    const auto rowSplit = SplitHcPrePremixRows(rows, cubeCores * VECTORS_PER_CUBE);
+    const int64_t rowsPerCore = CeilDiv(rows, cubeCores * VECTORS_PER_CUBE);
+    const int64_t usedVectorCores = CeilDiv(rows, rowsPerCore);
+    const int64_t tailRows = rows - (usedVectorCores - 1) * rowsPerCore;
     const int64_t projectionBlocks = CeilDiv(rows, rowsPerMGroup) * kBlocks;
-    const int64_t launchBlocks = std::max(projectionBlocks, CeilDiv(rowSplit.usedCores, VECTORS_PER_CUBE));
+    const int64_t launchBlocks = std::max(projectionBlocks, CeilDiv(usedVectorCores, VECTORS_PER_CUBE));
     uint64_t ubBytes;
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubBytes);
     const int64_t bufferBytesPerRow = 2 * CV_K * (sizeof(uint16_t) + sizeof(float));
@@ -80,8 +82,15 @@ ge::graphStatus TilingForHcPreCoefficients(gert::TilingContext *context)
     data.set_kL1Size(std::min(CV_K, L1_ACTIVATION_ELEMENTS / rowsL1) / L1_K_ALIGN * L1_K_ALIGN);
     data.set_stage1MFactor(std::min<int64_t>(
         CeilDiv(std::min(rows, rowsL1), VECTORS_PER_CUBE), ubBytes / bufferBytesPerRow));
-    // Reuse the native Premix loop with one coefficient row per UB tile.
-    SetHcPrePremixRowTiling(data, rowSplit, 1);
+    // Process one coefficient row per UB tile.
+    data.set_rowOfFormerBlock(rowsPerCore);
+    data.set_rowOfTailBlock(tailRows);
+    data.set_rowLoopOfFormerBlock(rowsPerCore);
+    data.set_rowLoopOfTailBlock(tailRows);
+    data.set_tailRowFactorOfFormerBlock(1);
+    data.set_tailRowFactorOfTailBlock(1);
+    data.set_stage2RowFactor(1);
+    data.set_secondUsedCoreNum(usedVectorCores);
     data.set_iterTimes(*attrs->GetAttrPointer<int64_t>(0));
     data.set_hcEps(*attrs->GetAttrPointer<float>(1));
     data.set_normEps(*attrs->GetAttrPointer<float>(2));
