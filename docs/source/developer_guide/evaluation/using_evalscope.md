@@ -173,3 +173,55 @@ Percentile results:
 ```
 
 See more detail in [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).
+
+## 5. Troubleshooting: KV cache hit rate is always 0 under PD
+
+If a perf run against a Prefill-Decode (PD) deployment reports a KV cache hit
+rate of `0` even though the prefiller logs show prefix-cache hits, check how the
+prefiller was started.
+
+### Why this happens
+
+The PD proxy
+([load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py))
+returns the prefiller's `usage.prompt_tokens_details.cached_tokens` to the
+client. In PD the decoder receives the prompt KV cache from the prefiller and
+would count it as cached tokens, so its own value is not a prefiller cache hit;
+the proxy replaces it with the prefiller count for this reason.
+
+vLLM only fills `usage.prompt_tokens_details` when the server is started with
+`--enable-prompt-tokens-details`, and it also omits the field when the
+prefiller had no cache hits. Both cases look the same to the proxy, so it
+reports `cached_tokens: 0` and EvalScope shows a 0% hit rate. Before v0.27 the
+proxy left the decoder's own value untouched, which is why older versions could
+show a non-zero hit rate even without the flag.
+
+### Fix
+
+Start the prefiller with `--enable-prompt-tokens-details`:
+
+```shell
+vllm serve <MODEL_PATH> ... --enable-prompt-tokens-details
+```
+
+Add the same flag to the other engines if you also call them directly outside
+the proxy. For streaming requests, ensure the decode side emits a usage chunk by
+sending `"stream_options": {"include_usage": true}` (EvalScope does this) or by
+starting the decode engine with `--enable-force-include-usage`.
+
+Verify the flag with two identical requests:
+
+```shell
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm","messages":[{"role":"user","content":"hi"}],
+       "max_tokens":1,"stream":true,
+       "stream_options":{"include_usage":true}}'
+```
+
+The second response should contain a non-zero
+`"usage": {"prompt_tokens_details": {"cached_tokens": ...}}`. If it still
+contains `0` while the prefiller logs report hits, make sure every endpoint in
+`--prefiller-hosts`/`--prefiller-ports` was restarted with the flag. If the flag
+is missing, the proxy logs a warning when it first encounters a prefiller
+response without prompt-token details.

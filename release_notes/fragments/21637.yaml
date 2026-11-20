@@ -1,0 +1,9 @@
+pr: 21637
+entries:
+  - category: bugfix
+    text: >-
+      Warned when a PD prefiller omits prompt-token details, so a missing
+      --enable-prompt-tokens-details flag is no longer reported as a silent 0%
+      KV cache hit rate, and documented the prefiller flag and the decode-side
+      usage requirement in the EvalScope guide and the GLM-5.3-Flash PD
+      examples.

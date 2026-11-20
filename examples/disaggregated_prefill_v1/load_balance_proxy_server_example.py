@@ -45,6 +45,19 @@
 # This will start the proxy on port 9000, load balancing between two prefiller
 # and two decoder servers.
 #
+# Prefix-cache hit reporting:
+# ---------------------------
+# The proxy copies the prefiller's
+# usage.prompt_tokens_details.cached_tokens into the decoder's usage, because
+# the decoder counts KV transferred from the prefiller as "cached" and would
+# otherwise report an inflated hit count. vLLM only fills that field when the
+# prefiller runs with --enable-prompt-tokens-details, and it omits the field
+# when the prefiller had no cache hits at all. Without the flag the proxy
+# therefore reports cached_tokens=0 for every request. Start the prefiller
+# with --enable-prompt-tokens-details to get a real hit rate, and make sure
+# the decode side emits a usage chunk (stream_options.include_usage or
+# --enable-force-include-usage) so the proxy has a chunk to rewrite.
+#
 # Step 3: Send a Request to the Proxy
 # -----------------------------------
 # You can now send OpenAI-compatible requests to the proxy. For example:
@@ -168,12 +181,36 @@ class InstanceInfo:
 
 TAINT_PRIORITY = 1e15
 
+# Warn once per proxy process when the prefiller omits prompt-token details;
+# repeating it for every request would bury the signal in the request logs.
+_missing_prompt_tokens_details_warned = False
+
 
 def extract_cached_tokens(response_json: dict) -> int | None:
+    """Extract the prefiller's cached-token count from its usage block.
+
+    vLLM only populates ``usage.prompt_tokens_details`` when the prefiller is
+    started with ``--enable-prompt-tokens-details``, and it also drops the
+    field when the prefiller had zero cache hits. The two cases look identical
+    here, so fall back to 0 (the cold-cache value) and warn once so a missing
+    server flag is not silently reported as a 0% cache hit rate.
+    """
+    global _missing_prompt_tokens_details_warned
+
     usage = response_json.get("usage") or {}
     prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else 0
+    if isinstance(cached_tokens, int):
+        return cached_tokens
+    if not _missing_prompt_tokens_details_warned:
+        _missing_prompt_tokens_details_warned = True
+        logger.warning(
+            "Prefiller response has no usage.prompt_tokens_details.cached_tokens; "
+            "the proxy will report cached_tokens=0 for PD requests. If the "
+            "prefiller is expected to reuse prefixes, restart it with "
+            "--enable-prompt-tokens-details to report the real hit count."
+        )
+    return 0
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
