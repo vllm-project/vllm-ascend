@@ -129,7 +129,7 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enable_npugraph_ex`               | bool | `True` | Whether to enable npugraph_ex backend.                                                 |
-| `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. |
+| `enable_static_kernel` | bool | `False` | Whether to enable static kernel. Suitable for scenarios where shape changes are minimal and some time is available for static kernel compilation. Works under both full-graph and piecewise cudagraph modes. |
 | `enable_super_kernel` | bool | Inherits `enable_static_kernel` | Whether to enable Super Kernel optimization. When omitted, it follows `enable_static_kernel`; set it explicitly to override that behavior. Super Kernel requires static kernel. |
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
@@ -328,6 +328,54 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+### Quantized all-reduce
+
+Quantized communication is lossy and may reduce model accuracy; it is not a lossless speedup. The feature is disabled by default. If accuracy degradation is unacceptable, explicitly set `quantized_all_reduce_config.enable=false` or omit `quantized_all_reduce_config` from `--additional-config` on every worker.
+
+Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. A2 supports INT8; 950DT Products support INT8 and MXFP8. A3 is unsupported.
+
+#### Recommended parameter values
+
+| Parameter | Valid values and default | Recommendation |
+| --- | --- | --- |
+| `enable` | `true` or `false`; default `false` | Set `true` to enable quantized all-reduce. |
+| `quant_dtype` | `"int8"` or `"mxfp8"`; defaults to `"int8"` on A2 and `"mxfp8"` on 950DT Products | Use INT8 on A2 and MXFP8 on 950DT Products. Users of 950DT Products can explicitly select `"int8"`. |
+| `min_numel` | Positive integer; default `16777216` | Start with `16777216` (32 MiB BF16) for both INT8 and MXFP8. If enabling quantized communication degrades performance, raise it to `41943040` (80 MiB) or `83886080` (160 MiB) and compare again. |
+
+The threshold counts elements in each rank's original full BF16 tensor. Quantized communication requires `numel >= min_numel`. Use the same configuration on every worker.
+
+#### Supported configurations
+
+- INT8: TP=2 to 8; BF16 inputs with at least two dimensions and a last dimension of at least 64.
+- MXFP8: TP=2/4/8; BF16 inputs with at least two dimensions, a last dimension divisible by 64, and a flattened row count divisible by the communication group size.
+- TP=1 bypasses communication. Inputs outside the supported tensor conditions use ordinary all-reduce.
+- MXFP8 requires matching `torch_npu`/CANN versions providing `torch_npu.npu_dynamic_mx_quant` and `torch_npu.npu_anti_mx_quant`.
+
+#### INT8 example
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "quant_dtype": "int8",
+        "min_numel": 16777216
+    }
+}
+```
+
+#### MXFP8 example (950DT Products)
+
+Omitting `quant_dtype` selects MXFP8 on 950DT Products:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "min_numel": 16777216
+    }
+}
+```
 
 ## GDN internal prefill checkpoints
 

@@ -58,6 +58,9 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
 
+if not vllm_version_is("0.33.0"):
+    from vllm.config.utils import hash_config_cached
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -215,7 +218,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # Only graph-external phase hooks update draft source validity.
         if self._eplb_source_is_padding is None:
             self._eplb_source_is_padding = torch.ones_like(self.input_buffers.is_padding)
-        model_state = eplb_state.model_states[self.speculative_config.draft_model_config.compute_hash()]
+        model_config = self.speculative_config.draft_model_config
+        if vllm_version_is("0.33.0"):
+            key = model_config.compute_hash()
+        else:
+            key = hash_config_cached(model_config)
+        model_state = eplb_state.model_states[key]
         for layer in model_state.model.moe_layers:
             layer.eplb_state.allgather_source_is_padding = self._eplb_source_is_padding
 

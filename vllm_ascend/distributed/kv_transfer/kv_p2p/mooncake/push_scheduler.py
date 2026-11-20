@@ -24,6 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import MooncakeMetaserverClient
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -57,7 +58,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
-        self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
+        self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_sent_to_worker: set[str] = set()
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_pending_send: dict[str, float] = {}
@@ -88,6 +89,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             self._reqs_need_send_layerwise[request.request_id] = (
                 request,
                 tuple(list(group) for group in blocks.get_block_ids()),
+                num_external_tokens,
             )
         else:
             if not params or not params.get("do_remote_prefill"):
@@ -141,17 +143,17 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
                 if req_id not in self._reqs_need_send_layerwise:
                     continue
-                request, block_ids = self._reqs_need_send_layerwise[req_id]
+                request, block_ids, num_external_tokens = self._reqs_need_send_layerwise[req_id]
                 if new_blocks is not None:
-                    if req_id in cached_reqs.resumed_req_ids:
+                    if vllm_version_is("0.33.0") and req_id in cached_reqs.resumed_req_ids:
                         block_ids = tuple(list(group) for group in new_blocks)
                     else:
                         block_ids = tuple(old + new for old, new in zip(block_ids, new_blocks, strict=True))
-                    self._reqs_need_send_layerwise[req_id] = request, block_ids
+                    self._reqs_need_send_layerwise[req_id] = request, block_ids, num_external_tokens
             for req_id, num_scheduled_tokens in scheduler_output.num_scheduled_tokens.items():
                 if req_id not in self._reqs_need_send_layerwise or req_id in self._reqs_need_send:
                     continue
-                request, block_ids = self._reqs_need_send_layerwise[req_id]
+                request, block_ids, num_external_tokens = self._reqs_need_send_layerwise[req_id]
                 local_num_computed_tokens = num_computed_tokens[req_id]
                 if local_num_computed_tokens >= request.num_prompt_tokens:
                     continue
@@ -166,6 +168,7 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
                         num_scheduled_tokens, request.num_prompt_tokens - local_num_computed_tokens
                     ),
                     kv_transfer_params=request.kv_transfer_params,
+                    num_external_tokens=num_external_tokens,
                 )
                 self._reqs_sent_to_worker.add(req_id)
             # These notifications must also be delivered in connector-only steps.

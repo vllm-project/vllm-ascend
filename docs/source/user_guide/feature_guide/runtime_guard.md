@@ -55,13 +55,15 @@ Configure through `--additional-config` (or `LLM(..., additional_config=...)`):
 | `runtime_report_dir` | str | Override report root (default `<cwd>/runtime/report`) |
 | `runtime_dump_dir` | str | Seed KV dump root `dump.dump_dir` (default derived from report root). Hot-reload of `dump.dump_dir` in JSON wins after startup |
 
+**Bootstrap overwrite:** At process start the effective config is built from **built-in defaults + `additional_config.runtime_config` overlay** (and dump-dir seed). Any pre-existing file at `runtime_config_path` is **ignored for that first load** and then **rewritten** when the worker leader persists (`(overwrote)` in the startup log). Put detectors / dump quotas you need at boot into the `runtime_config` overlay (or edit the JSON **after** start with hot-reload). Pre-seeding only the on-disk JSON without an overlay will look like “my file was wiped” — that is expected.
+
 See [Additional Configuration](../configuration/additional_config.md#runtime_guard) and the full [runtime_config reference](../configuration/runtime_config.md).
 
 ## Architecture (summary)
 
 ```text
 RuntimeGuardProcessor.bind(runner)
-  → sync_for_step()        # config + wave + manual triggers
+  → begin_wave()        # config + wave + manual triggers
   → detector hooks         # before/after sample (and after spec)
   → ActionExecutor         # report | dump_kv (async queue)
 ```
@@ -100,7 +102,7 @@ Online KV / position meta detectors are **not** in this release; use `dump_kv` f
 | Action | Effect |
 |--------|--------|
 | `report` | Write JSON incident report (+ metric counter) |
-| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head claims the list (TP bus / merged due-bus), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave_sync`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_cp*/*.pt` |
+| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head delivers the list on the merged due-bus dump lane (`config_due` may be false when hot-reload is off; `tp_size<=1` stashes locally with no TP collective), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_cp*/*.pt` |
 
 Default `on_trigger` is `["report"]`. Per-detector overrides:
 
@@ -119,11 +121,40 @@ Default `on_trigger` is `["report"]`. Per-detector overrides:
 - **No additional-config / defaults**: bind-only path; intended to be noise-free.
 - **Hot-reload only** (`runtime_config_hot_reload=true`, all detectors off, dump off): on last-PP TP, the TP0 due-broadcast runs on the bus worker so the inference thread can overlap it with forward (C2); end-of-wave rate-limits a warning if the collective was not hidden. Other processes poll the config file.
 - **Detectors on**: cost depends on enabled checks (light: `token_repeat`; heavier: `logits_finite` — default async gate overlaps sample; `item_sync: true` pays sync `.item()` each step).
-- **dump_kv on hit**: detector arms queue for the **next** wave-head dump lane, then D2H at that wave's `end_of_wave_sync` (after bus drain / prepare). Manual dump D2H's locally at end-of-wave (no dump-job bcast). Idle/broadcast steps submit a cheap due-vector broadcast at wave-head; per-lane `broadcast_object` runs only when that lane is due. Finish-wave hits set `request_finished_at_dump` on the artifacts.
+- **dump_kv on hit**: detector arms queue for the **next** wave-head dump lane, then D2H at that wave's `end_of_wave` (after bus drain / prepare). Manual dump D2H's locally at end-of-wave (no dump-job bcast). Idle/broadcast steps submit a cheap due-vector broadcast at wave-head; per-lane `broadcast_object` runs only when that lane is due. Finish-wave hits set `request_finished_at_dump` on the artifacts.
 
 Throughput A/B (with vs without Runtime Guard) should be measured on Ascend hardware; it is not gated by default CI.
+
+## Feature compatibility
+
+Runtime Guard is wired on **Model Runner v2** only (v1 is not wired). Tracking epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976).
+
+Status meanings:
+
+- **Supported** — code path analyzed and exercised (unit tests and/or live NPU).
+- **Partial** — works with documented limits or follow-up fixes; see Notes / linked issues.
+- **Caveat** — usable only with the listed operational constraints.
+
+Code-path analysis and live verification are tracked separately; Status below reflects both.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| TP / PP | Supported | Detect last-PP TP0; `dump_kv` last PP × all TP. Exercised in functional runs. |
+| DP | Supported | Per-replica report/dump; watch multi-DP `manual_dump` quota. |
+| SP (MoE) | Supported | Sample-time rows are post all-gather; no Guard-specific SP handling needed. |
+| PCP | Partial | Detection must use the post-`restore_for_sampling` batch (see [#22026](https://github.com/vllm-project/vllm-ascend/issues/22026)). Dump path tags need `pcp_manager.pcp_rank` ([#22028](https://github.com/vllm-project/vllm-ascend/issues/22028)). |
+| DCP / CP interleave | Partial | Each rank dumps its **local dense shard**; no CP stitch in-tree. Treat `.pt` as per-rank shards. |
+| Spec / MTP / adaptive | Partial | `spec_acceptance` needs real draft lengths, not padded row width ([#22027](https://github.com/vllm-project/vllm-ascend/issues/22027)). |
+| Hybrid / multi KV group / draft KV | Partial | `dump_kv` must resolve `block_ids` per group ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| C8 (INT8 KV cache) / TQ4 (quantized sparse flash-attention KV) / kernel pages | Partial | Prefer forward-context tuple KV; expand manager→kernel ids when `blocks_per_kv_block > 1` ([#22025](https://github.com/vllm-project/vllm-ascend/issues/22025)). |
+| Prefix cache / APC | Caveat | Finish / +1-wave dump may see freed or reused pages (`request_finished_at_dump`). |
+| KV Pool / Offload / PD disagg | Caveat | Dump reads **device** `kv_caches` only; not a first-class offload/remote source. |
+| Grammar / structured output | Supported | `logits_finite` default async gate may observe post-grammar logits; use `item_sync: true` for sync kind. |
+
+Residual risks (PD cross-machine, DCP full-sequence stitch, offload-backed dump) stay documentation-only until product requires them.
 
 ## Related docs
 
 - [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
+- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)  
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`

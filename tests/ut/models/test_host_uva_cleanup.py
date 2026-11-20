@@ -44,7 +44,7 @@ def shared_buffer_factory(monkeypatch):
 
     def construct():
         try:
-            owner = npu.SharedUvaBuffer((8, 32), torch.bfloat16, "cpu", group)
+            owner = npu.SharedUvaBuffer((8, 32), torch.bfloat16, "cpu", group, "shared", torch.nn.Module())
         except npu.HostUvaBufferCleanupError as exc:
             owners.append(weakref.ref(exc.host_buffer))
             raise
