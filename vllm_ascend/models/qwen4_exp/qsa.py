@@ -14,6 +14,7 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+import math
 from dataclasses import replace
 from typing import Any, TypeAlias, cast
 
@@ -39,6 +40,10 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
+from vllm_ascend.ops.triton.qwen4_exp.gbsa import (
+    prepare_qsa_gbsa_shared,
+    prepare_qsa_lengths,
+)
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
 )
@@ -658,6 +663,93 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         metadata = super().build(0, common_attn_metadata, fast_build=True)
         metadata.qsa_request_plan = None
         return metadata
+
+    def postprocess_attn_metadata(
+        self,
+        *,
+        attn_metadata: dict[str, Any],
+        layer_names: list[str],
+        num_actual_reqs: int,
+        num_actual_tokens: int,
+    ) -> None:
+        """Prepare shared QSA metadata after every cache group is built."""
+        if not layer_names:
+            return
+        layer = self.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
+        if layer is None or not hasattr(layer, "indexer"):
+            return
+        main_metadata = attn_metadata.get(layer_names[0])
+        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
+        if main_metadata is None or compressed_metadata is None:
+            return
+        if getattr(main_metadata, "qsa_request_plan", None) is not None:
+            return
+
+        requests = min(
+            num_actual_reqs,
+            int(getattr(compressed_metadata, "qsa_num_live_requests", num_actual_reqs)),
+        )
+        rows = min(
+            num_actual_tokens,
+            int(getattr(compressed_metadata, "qsa_num_live_tokens", num_actual_tokens)),
+        )
+        device = compressed_metadata.seq_lens.device
+        max_requests = self.vllm_config.scheduler_config.max_num_seqs
+        max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        index_heads = int(layer.indexer.index_n_heads)
+        table_columns = int(main_metadata.block_table.shape[1])
+        signature = (device, max_requests, max_tokens, index_heads, table_columns, main_metadata.block_table.dtype)
+        buffer_cache = getattr(self, "_qsa_prepared_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            self._qsa_prepared_buffers = buffer_cache
+        buffers = buffer_cache.get(signature)
+        if buffers is None:
+            score_weight = math.ldexp(
+                round(math.ldexp(1.0 / math.sqrt(int(layer.indexer.index_head_dim)), 11)),
+                -11,
+            )
+            buffers = {
+                "compressed_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "residual_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "score_weights": torch.full(
+                    (max_tokens, index_heads),
+                    score_weight,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "visible_lengths": torch.empty(max_tokens, dtype=torch.int32, device=device),
+                "cu_query": torch.arange(max_tokens + 1, dtype=torch.int64, device=device),
+                "row_block_table": torch.empty(
+                    (max_tokens, table_columns),
+                    dtype=main_metadata.block_table.dtype,
+                    device=device,
+                ),
+            }
+            buffer_cache[signature] = buffers
+
+        prepare_qsa_lengths(
+            compressed_metadata.seq_lens,
+            buffers["compressed_lengths"],
+            buffers["residual_lengths"],
+            requests,
+            int(layer.indexer.compress_ratio),
+        )
+        prepare_qsa_gbsa_shared(
+            compressed_metadata.logical_positions,
+            compressed_metadata.seq_lens,
+            compressed_metadata.token_to_req,
+            main_metadata.block_table,
+            buffers["visible_lengths"],
+            buffers["row_block_table"],
+            rows,
+        )
+        compressed_metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        compressed_metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        compressed_metadata.qsa_score_weights = buffers["score_weights"]
+        main_metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
+        main_metadata.qsa_gbsa_cu_query = buffers["cu_query"]
+        main_metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
 
 
 class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]

@@ -2085,6 +2085,49 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
         return common_attn_metadata.is_prefilling
 
 
+class _PostprocessingStateBuilder(_PrefillStateBuilder):
+    def __init__(self):
+        super().__init__()
+        self.postprocess_kwargs = None
+
+    def postprocess_attn_metadata(self, **kwargs):
+        self.postprocess_kwargs = kwargs
+
+
+def test_build_attn_metadata_runs_builder_postprocessor_after_all_groups():
+    first_builder = _PostprocessingStateBuilder()
+    second_builder = _PrefillStateBuilder()
+    groups = [
+        SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: first_builder),
+        SimpleNamespace(layer_names=["layer.1"], get_metadata_builder=lambda _: second_builder),
+    ]
+
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[groups],
+        num_reqs=2,
+        num_actual_reqs=1,
+        num_tokens=3,
+        num_actual_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 2, 3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 3], dtype=torch.int32),
+        max_query_len=2,
+        seq_lens=torch.tensor([2, 1], dtype=torch.int32),
+        max_seq_len=2,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(3, dtype=torch.int64),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+        seq_lens_np=np.array([2, 1], dtype=np.int32),
+        positions=torch.arange(3, dtype=torch.int64),
+    )
+
+    assert first_builder.postprocess_kwargs is not None
+    assert first_builder.postprocess_kwargs["attn_metadata"] is metadata
+    assert first_builder.postprocess_kwargs["layer_names"] == ["layer.0"]
+    assert first_builder.postprocess_kwargs["num_actual_reqs"] == 1
+    assert first_builder.postprocess_kwargs["num_actual_tokens"] == 2
+    assert set(metadata) == {"layer.0", "layer.1"}
+
+
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("full_graph", [False, True])
 def test_v41_capture_keeps_compressed_indexer_branches(monkeypatch, capture, full_graph):
