@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
+from vllm.model_executor.models.utils import PPMissingLayer
 
 from vllm_ascend.models.deepseek_v41.engram.local_shared_vmm import (
     CHUNK_ROWS,
@@ -85,7 +86,8 @@ def _weight_storage(weight: nn.Parameter) -> tuple[torch.device, int]:
     return weight.device, weight.untyped_storage().data_ptr()
 
 
-def _input_layers(target: nn.Module, draft: nn.Module | None) -> list[VocabParallelEmbedding]:
+def get_input_embedding_layers(target: nn.Module, draft: nn.Module | None) -> list[VocabParallelEmbedding]:
+    """Return the rank-local input embeddings eligible for Host VMM."""
     models = [_language_model(target)]
     if draft is not None:
         models.append(_language_model(draft))
@@ -97,6 +99,8 @@ def _input_layers(target: nn.Module, draft: nn.Module | None) -> list[VocabParal
     layers = []
     seen = set()
     for layer in dict.fromkeys(model.model.embed_tokens for model in models):
+        if isinstance(layer, PPMissingLayer):
+            continue
         weight = getattr(layer, "weight", None)
         if (
             not isinstance(layer, VocabParallelEmbedding)
@@ -116,15 +120,12 @@ def _input_layers(target: nn.Module, draft: nn.Module | None) -> list[VocabParal
             raise ValueError("Host VMM cannot migrate distinct input layers sharing one weight allocation")
         layers.append(layer)
         seen.add(storage)
-    if not layers:
-        raise ValueError("Host VMM requires at least one input embedding independent of the LM head")
     return layers
 
 
 @torch.inference_mode()
-def offload_input_embeddings(target: nn.Module, draft: nn.Module | None) -> list[HostVmmEmbeddingMethod]:
+def offload_input_embeddings(layers: list[VocabParallelEmbedding]) -> list[HostVmmEmbeddingMethod]:
     """Prepare every mapping before replacing any input weight."""
-    layers = _input_layers(target, draft)
     prepared = []
     for layer in layers:
         weight = layer.weight

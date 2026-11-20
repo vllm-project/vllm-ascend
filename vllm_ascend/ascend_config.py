@@ -1105,27 +1105,15 @@ class AscendConfig:
 
     def _validate_input_embedding_host_vmm(self, vllm_config: VllmConfig) -> None:
         model = vllm_config.model_config
-        parallel = vllm_config.parallel_config
-        transfer = vllm_config.kv_transfer_config
         if (
             not vllm_config.use_v2_model_runner
             or not get_current_hardware_profile().supports(HardwareCapability.ENGRAM_LOCAL_HOST_VMM)
             or model.hf_text_config.model_type not in ("deepseek_v41", "deepseek_v41_text")
-            or transfer is None
-            or transfer.kv_role != "kv_consumer"
         ):
-            raise ValueError("input_embedding_host_vmm requires DeepSeek V4.1 PD Decode on A3 with Model Runner V2")
-        if (
-            parallel.tensor_parallel_size != 1
-            or parallel.pipeline_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or self.finegrained_tp_config.embedding_tensor_parallel_size != 1
-        ):
-            raise ValueError("input_embedding_host_vmm currently requires TP/PP/PCP/DCP=1 and no embedding TP")
+            raise ValueError("input_embedding_host_vmm requires DeepSeek V4.1 on A3 with Model Runner V2")
         spec = vllm_config.speculative_config
-        if spec is not None and (spec.method != "dspark" or spec.draft_parallel_config.tensor_parallel_size != 1):
-            raise ValueError("input_embedding_host_vmm supports DSpark with draft TP=1")
+        if spec is not None and spec.method != "dspark":
+            raise ValueError("input_embedding_host_vmm requires DSpark when speculative decoding is enabled")
         offload = vllm_config.offload_config
         if (
             model.enable_sleep_mode

@@ -90,6 +90,31 @@ def test_shared_engram_config_schema():
             TypeAdapter(SharedEngramConfig).validate_python(values)
 
 
+def test_input_embedding_host_vmm_allows_colocated_dspark_with_tensor_parallelism():
+    config = AscendConfig(input_embedding_host_vmm=True)
+    vc = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="deepseek_v41"), enable_sleep_mode=False
+        ),
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        speculative_config=SimpleNamespace(
+            method="dspark", draft_parallel_config=SimpleNamespace(tensor_parallel_size=2)
+        ),
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0), prefetch=SimpleNamespace(offload_group_size=0)
+        ),
+        lora_config=None,
+        weight_transfer_config=None,
+        load_config=SimpleNamespace(load_format="auto"),
+    )
+    with patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+    ):
+        config._validate_input_embedding_host_vmm(vc)
+
+
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
     """Build a test config with the model metadata required by AscendConfig."""
     config = _VllmConfig(*args, **kwargs)

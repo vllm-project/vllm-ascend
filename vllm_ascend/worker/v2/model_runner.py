@@ -377,15 +377,18 @@ class NPUModelRunner(GPUModelRunner):
         self._shared_engram_shutdown_pending = pending
 
     def _offload_input_embeddings(self) -> None:
-        from vllm_ascend.models.deepseek_v41.input_embedding import offload_input_embeddings
+        from vllm_ascend.models.deepseek_v41.input_embedding import get_input_embedding_layers, offload_input_embeddings
+
+        layers = get_input_embedding_layers(self.model, getattr(self.speculator, "model", None))
+        if not layers:
+            return
 
         # A rank-local mapping can fail after the shared Engram tables have
         # been loaded. Its rollback must only close the mappings it acquired.
         with track_host_offload_owners() as owners:
             try:
                 with DeviceMemoryProfiler(self.device) as memory:
-                    draft = getattr(self.speculator, "model", None)
-                    embeddings = offload_input_embeddings(self.model, draft)
+                    embeddings = offload_input_embeddings(layers)
                 if memory.consumed_memory >= 0:
                     raise RuntimeError("Host VMM input embeddings released no NPU tensor memory")
                 self.model_memory_usage += memory.consumed_memory
@@ -401,7 +404,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def reload_weights(self, *args, **kwargs) -> None:
-        if getattr(self, "_input_embedding_host_vmm_owners", None):
+        if self.ascend_config.input_embedding_host_vmm:
             raise RuntimeError("Restart the worker to reload weights with Host VMM input embeddings")
         super().reload_weights(*args, **kwargs)
 

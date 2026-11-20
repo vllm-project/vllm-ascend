@@ -15,6 +15,7 @@ from vllm.config.attention import AttentionConfig
 from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
 from vllm.model_executor.offloader.base import create_offloader as create_vllm_offloader
 from vllm.sequence import IntermediateTensors
@@ -46,6 +47,7 @@ def _make_runner(*args, **kwargs):
         scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
+        input_embedding_host_vmm=False,
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
@@ -790,6 +792,20 @@ def test_load_model_joins_warmups_when_weight_loading_fails():
 
     start_nz.assert_called_once_with("thread")
     join_nz.assert_called_once_with()
+
+
+def test_input_embedding_host_vmm_skips_memory_accounting_on_empty_pipeline_stage():
+    runner = _make_runner()
+    runner.ascend_config.input_embedding_host_vmm = True
+    runner.model = SimpleNamespace(model=SimpleNamespace(embed_tokens=PPMissingLayer()))
+    runner.speculator = None
+
+    with patch("vllm_ascend.worker.v2.model_runner.DeviceMemoryProfiler") as profiler:
+        runner._offload_input_embeddings()
+
+    profiler.assert_not_called()
+    with pytest.raises(RuntimeError, match="Restart the worker"):
+        runner.reload_weights()
 
 
 @pytest.mark.parametrize("with_draft", [False, True])

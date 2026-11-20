@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 from torch._subclasses.fake_tensor import FakeTensorMode
+from vllm.model_executor.models.utils import PPMissingLayer
 
 from vllm_ascend.models.deepseek_v41 import input_embedding
 
@@ -23,36 +24,44 @@ def _host_method(layer):
     return method
 
 
+def _rank_local_embedding(address):
+    embedding = nn.Module()
+    embedding.quant_method = input_embedding.UnquantizedEmbeddingMethod()
+    embedding.weight = Mock(device=Mock(type="npu"), dtype=torch.bfloat16, ndim=2)
+    embedding.weight.numel.return_value = 32
+    embedding.weight.is_contiguous.return_value = True
+    embedding.weight.untyped_storage.return_value.data_ptr.return_value = address
+    return embedding
+
+
 class TestHostVmmInputEmbedding(TestCase):
     def test_selects_independent_tables_and_deduplicates_shared_module(self):
-        device = Mock(type="npu")
-
-        def layer(address):
-            embedding = nn.Module()
-            embedding.quant_method = input_embedding.UnquantizedEmbeddingMethod()
-            embedding.weight = Mock(device=device, dtype=torch.bfloat16, ndim=2)
-            embedding.weight.numel.return_value = 32
-            embedding.weight.is_contiguous.return_value = True
-            embedding.weight.untyped_storage.return_value.data_ptr.return_value = address
-            return embedding
-
-        target, draft, head = layer(1), layer(2), layer(1)
+        target, draft, head = (_rank_local_embedding(address) for address in (1, 2, 1))
+        head.weight.device = target.weight.device
         target_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=target), lm_head=head)
         draft_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=draft))
         with patch.object(input_embedding, "VocabParallelEmbedding", nn.Module):
-            self.assertEqual(input_embedding._input_layers(target_model, draft_model), [draft])
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, None), [])
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, draft_model), [draft])
             target_model.model.embed_tokens = draft
-            self.assertEqual(input_embedding._input_layers(target_model, draft_model), [draft])
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, draft_model), [draft])
+
+    def test_selects_only_embeddings_resident_on_the_pipeline_stage(self):
+        target, draft = _rank_local_embedding(1), _rank_local_embedding(2)
+        target_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=target), lm_head=PPMissingLayer())
+        draft_model = SimpleNamespace(model=SimpleNamespace(embed_tokens=draft))
+        with patch.object(input_embedding, "VocabParallelEmbedding", nn.Module):
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, None), [target])
+            target_model.model.embed_tokens = PPMissingLayer()
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, None), [])
+            self.assertEqual(input_embedding.get_input_embedding_layers(target_model, draft_model), [draft])
 
     def test_prepares_both_tables_before_releasing_device_weights(self):
         target, draft = _device_embedding(), _device_embedding()
         methods = [_host_method(layer) for layer in (target, draft)]
 
-        with (
-            patch.object(input_embedding, "_input_layers", return_value=[target, draft]),
-            patch.object(input_embedding, "HostVmmEmbeddingMethod", side_effect=methods),
-        ):
-            self.assertEqual(input_embedding.offload_input_embeddings(target, draft), methods)
+        with patch.object(input_embedding, "HostVmmEmbeddingMethod", side_effect=methods):
+            self.assertEqual(input_embedding.offload_input_embeddings([target, draft]), methods)
 
         for layer, method in zip((target, draft), methods):
             self.assertEqual(layer.weight.device.type, "meta")
@@ -63,13 +72,12 @@ class TestHostVmmInputEmbedding(TestCase):
         target_weight, draft_weight = target.weight, draft.weight
 
         with (
-            patch.object(input_embedding, "_input_layers", return_value=[target, draft]),
             patch.object(
                 input_embedding, "HostVmmEmbeddingMethod", side_effect=[_host_method(target), RuntimeError("mapping")]
             ),
             self.assertRaisesRegex(RuntimeError, "mapping"),
         ):
-            input_embedding.offload_input_embeddings(target, draft)
+            input_embedding.offload_input_embeddings([target, draft])
 
         self.assertIs(target.weight, target_weight)
         self.assertIs(draft.weight, draft_weight)
@@ -81,11 +89,10 @@ class TestHostVmmInputEmbedding(TestCase):
         method.embedding.side_effect = lambda layer, ids: layer.quant_method.embedding(layer, ids) + 1
 
         with (
-            patch.object(input_embedding, "_input_layers", return_value=[layer]),
             patch.object(input_embedding, "HostVmmEmbeddingMethod", return_value=method),
             self.assertRaisesRegex(RuntimeError, "differs from the loaded weight"),
         ):
-            input_embedding.offload_input_embeddings(layer, None)
+            input_embedding.offload_input_embeddings([layer])
 
         self.assertIs(layer.weight, weight)
 
