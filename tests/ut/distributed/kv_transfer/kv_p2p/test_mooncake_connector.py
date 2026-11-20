@@ -3508,7 +3508,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         # Existing V1 constraints, not new compatibility rules invented by UT.
         cases = (
             (2, 4, 1, 1, 1, ValueError, "prefill_tp_size"),
-            (2, 2, 2, 1, 1, AssertionError, "decode pp size must be 1"),
+            (2, 2, 2, 1, 1, ValueError, "matching prefill/decode pp_size"),
             (2, 2, 1, 2, 2, AssertionError, "pp and pcp cannot open in same time"),
         )
         for prefill_tp, decode_tp, decode_pp, local_pp, local_pcp, error, message in cases:
@@ -3516,7 +3516,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 prefill_tp=prefill_tp, decode_tp=decode_tp, decode_pp=decode_pp, pp=local_pp, pcp=local_pcp
             ):
                 parallel = {
-                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1, "pp_size": local_pp},
                     "decode": {"tp_size": decode_tp, "dp_size": 1, "pp_size": decode_pp},
                 }
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
@@ -3538,7 +3538,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for prefill_tp, decode_tp, local_pp, local_pcp in ((2, 2, 1, 1), (4, 2, 2, 1), (4, 2, 1, 2)):
             with self.subTest(prefill_tp=prefill_tp, decode_tp=decode_tp, pp=local_pp, pcp=local_pcp):
                 parallel = {
-                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1, "pp_size": local_pp},
                     "decode": {"tp_size": decode_tp, "dp_size": 1},
                 }
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
@@ -3558,6 +3558,35 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
                 self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
                 self.assertEqual(worker.handshake_port, 5000)
+
+    def test_decode_pp_filters_to_the_matching_prefill_stage(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_consumer"
+        worker._decode_pp_size = 4
+        worker.pp_rank = 2
+
+        self.assertEqual(
+            worker._filter_prefill_ranks_for_decode_pp([[0, 2, 4, 6], [1, 3, 5, 7]], 2),
+            [[4], [5]],
+        )
+
+    def test_decode_pp_hybrid_mamba_pulls_only_matching_prefill_stage(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_consumer"
+        worker._decode_pp_size = 4
+        worker._prefill_pp_size = 4
+        worker.pp_rank = 2
+        worker.tp_rank = 1
+        worker.tp_size = 2
+        worker.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "MambaSpec"}, [0]),
+        }
+
+        remote_ranks, pulls = worker._get_hybrid_remote_rank_group_pulls("request", prefill_tp_size=2)
+
+        self.assertEqual(remote_ranks, [5])
+        self.assertEqual(len(pulls[5]), 1)
+        self.assertEqual(pulls[5][0].prefill_pp_rank, 2)
 
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"

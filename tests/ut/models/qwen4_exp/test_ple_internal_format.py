@@ -23,6 +23,54 @@ import torch.nn.functional as F
 from vllm_ascend.models.qwen4_exp import ple
 
 
+def test_ple_builder_scopes_generic_recoverssm_to_gdn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def base_init(
+        self: object,
+        kv_cache_spec: object,
+        layer_names: list[str],
+        vllm_config: object,
+        device: torch.device,
+    ) -> None:
+        observed.update(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=layer_names,
+            vllm_config=vllm_config,
+            device=device,
+        )
+        self.vllm_config = vllm_config  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        ple.PleShortConvAttentionMetadataBuilder,
+        "__init__",
+        base_init,
+    )
+    cache_config = SimpleNamespace(use_replayssm=True)
+    vllm_config = SimpleNamespace(cache_config=cache_config)
+    kv_cache_spec = object()
+    device = torch.device("cpu")
+
+    builder = ple.AscendQwen4ExpPLEMetadataBuilder(
+        kv_cache_spec,  # type: ignore[arg-type]
+        ["model.layers.0.ple"],
+        vllm_config,  # type: ignore[arg-type]
+        device,
+    )
+
+    assert cache_config.use_replayssm is True
+    assert observed["vllm_config"] is not vllm_config
+    assert observed["vllm_config"].cache_config is not cache_config
+    assert observed["vllm_config"].cache_config.use_replayssm is False
+    assert builder.vllm_config.cache_config.use_replayssm is False
+    assert observed["kv_cache_spec"] is kv_cache_spec
+    assert observed["layer_names"] == ["model.layers.0.ple"]
+    assert observed["device"] == device
+    assert ple.AscendQwen4ExpPLEBackend.get_builder_cls() is ple.AscendQwen4ExpPLEMetadataBuilder
+
+
 def test_compact_prefill_output_matches_dense_reference() -> None:
     torch.manual_seed(0)
     source = torch.randn(3, 5, 4)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Reuse upstream RecoverSSM request/commit metadata with AscendC descriptors."""
+"""GLM/KDA RecoverSSM metadata builder."""
 
 from contextlib import contextmanager
 from dataclasses import replace
@@ -10,7 +10,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
     GDNPrefillMetadata,
@@ -35,6 +35,8 @@ def _disable_upstream_graph_staging(builder):
 
 
 class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
+    """Add Ascend descriptors to the upstream KDA RecoverSSM lifecycle."""
+
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def build(
@@ -60,7 +62,13 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
                 "align",
             )
         with _disable_upstream_graph_staging(self):
-            metadata = super().build(common_prefix_len, m, num_accepted_tokens, num_decode_draft_tokens_cpu, fast_build)
+            metadata = super().build(
+                common_prefix_len,
+                m,
+                num_accepted_tokens,
+                num_decode_draft_tokens_cpu,
+                fast_build,
+            )
         self._build_conv_metadata(m, metadata, num_decode_draft_tokens_cpu)
         metadata.pcp_context = getattr(common_attn_metadata, "pcp_context", None)
         return metadata
@@ -115,7 +123,11 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         elif metadata.num_decodes:
             starts = metadata.non_spec_query_start_loc
             if starts is None:
-                starts = torch.arange(metadata.num_decodes + 1, dtype=torch.int32, device=m.query_start_loc.device)
+                starts = torch.arange(
+                    metadata.num_decodes + 1,
+                    dtype=torch.int32,
+                    device=m.query_start_loc.device,
+                )
                 metadata.non_spec_query_start_loc = starts
             metadata.non_spec_decode_metadata = GDNDecodeMetadata(
                 causal_conv1d=GDNCausalConv1dMetadata(
@@ -135,7 +147,10 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         metadata.prefill_state_indices = metadata.non_spec_state_indices_tensor[metadata.num_decodes :]
         metadata.prefill_has_initial_state = metadata.has_initial_state[metadata.num_decodes :]
         return _build_non_spec_chunked_prefill_metadata(
-            self, prefill_cpu_starts, m.query_start_loc.device, build_device_metadata=False
+            self,
+            prefill_cpu_starts,
+            m.query_start_loc.device,
+            build_device_metadata=False,
         )
 
     def _non_spec_cpu_starts(self, m, metadata, draft_counts):
@@ -170,4 +185,8 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         metadata.spec_state_indices_tensor = states
         metadata.spec_query_start_loc = starts
         metadata.num_accepted_tokens = accepted
-        metadata.recoverssm_commit = replace(metadata.recoverssm_commit, state_indices=states, query_start_loc=starts)
+        metadata.recoverssm_commit = replace(
+            metadata.recoverssm_commit,
+            state_indices=states,
+            query_start_loc=starts,
+        )

@@ -34,6 +34,10 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.models.qwen_gdn_recoverssm import (
+    gdn_mamba_state_dtype_from_config,
+    gdn_mamba_state_shape_from_config,
+)
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -42,7 +46,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendQwen4ExpPLEBackend, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -77,6 +81,9 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.use_sequence_parallel = use_sequence_parallel
+
+    def get_attn_backend(self) -> type[AscendQwen4ExpPLEBackend]:
+        return AscendQwen4ExpPLEBackend
 
     def _sequence_parallel_embeddings(
         self,
@@ -149,19 +156,14 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             )
 
         input_ids = input_ids.reshape(-1)
-        if self._use_local_ngram_lookup():
-            embeddings = self._sequence_parallel_embeddings(
-                input_ids,
-                query_start_loc,
-                ngram_context,
-            )
-        else:
-            embeddings = self.ple_embedding(
-                input_ids,
-                query_start_loc,
-                ngram_context,
-            )
-            embeddings = sp_shard(embeddings)
+        # PLE weights are vocabulary-sharded. Every vocabulary owner must
+        # look up the same token rows before those rows are sequence-sharded.
+        embeddings = self.ple_embedding(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
+        embeddings = sp_shard(embeddings)
         embeddings = self.ple_embedding.ngram_embedding.dequantize(embeddings, hidden_states.dtype)
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
@@ -175,14 +177,12 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             self.norm_key.eps,
         )
 
-        # PLE short-conv and the immediately following attention both need a
-        # full-token view. Gather the token-local residual branch and conv
-        # input together so the decoder can reuse the same full-token result
-        # instead of launching a second all-gather before attention.
-        gated_output.add_(hidden_states)
-        gated_output_size = gated_output.shape[-1]
-        gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))[: input_ids.shape[0]]
-        gated_output, conv_input = gathered_ple.split((gated_output_size, conv_input.shape[-1]), dim=-1)
+        # Short convolution updates full-token request state. Keep both
+        # residual additions local and in the upstream order: first add the
+        # convolution to the gated value, then add the outer hidden state.
+        # Reassociating these BF16 additions changes the rounding boundaries.
+        full_num_tokens = input_ids.shape[0]
+        conv_input = sp_all_gather(conv_input)[:full_num_tokens].contiguous()
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             conv_input,
@@ -190,8 +190,11 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             torch.zeros_like(conv_input),
             self.prefix,
         )
-        gated_output.add_(conv_output)
-        return gated_output
+        gated_output.add_(sp_shard(conv_output))
+        gated_output.add_(hidden_states)
+        # The next attention consumes full-token input, so preserve the PLE
+        # output contract while gathering the same total width as before.
+        return sp_all_gather(gated_output)[:full_num_tokens]
 
 
 class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
@@ -495,10 +498,18 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
+    def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_gdn_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
-        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
+        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if not spec.tp_replicated)
 
     @staticmethod
     def get_model_state_cls():
@@ -511,6 +522,14 @@ class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForCondition
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
