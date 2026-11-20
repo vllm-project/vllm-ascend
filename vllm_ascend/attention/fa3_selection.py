@@ -17,8 +17,6 @@ _FA3_TARGET_ARCHITECTURES = frozenset(
         "Qwen3_5MoeForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
-        "Qwen4ExpForCausalLM",
-        "Qwen4ExpForConditionalGeneration",
     }
 )
 # For MiniMax M3, only the paired DSpark draft can use FA3.

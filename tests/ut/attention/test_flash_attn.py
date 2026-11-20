@@ -356,8 +356,6 @@ def test_qwen_dflash2_fa3_selection_does_not_import_operator(qwen_dflash2_fa3, m
         "Qwen3_5MoeForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
-        "Qwen4ExpForCausalLM",
-        "Qwen4ExpForConditionalGeneration",
     ],
 )
 @pytest.mark.parametrize("method", [None, "mtp"])
@@ -381,6 +379,8 @@ def test_hybrid_qwen_fa3_target_is_independent_of_draft(qwen_dflash2_fa3, archit
     [
         ("Qwen3ForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
         ("Qwen3MoeForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", False, False),
+        ("Qwen4ExpForCausalLM", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
+        ("Qwen4ExpForConditionalGeneration", "DFlash2DraftModel", "dflash", "dflash_head", False, True),
         ("Qwen3NextForCausalLM", "Qwen3DFlashForCausalLM", "dflash", "dflash_head", True, False),
         ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dflash", "dspark_head", True, False),
         ("Qwen3NextForCausalLM", "DFlash2DraftModel", "dspark", "dflash_head", True, False),
