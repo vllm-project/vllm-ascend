@@ -6,9 +6,8 @@ from dataclasses import replace
 from itertools import chain, zip_longest
 
 import torch
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.config import VllmConfig
-
-# Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -29,6 +28,8 @@ from vllm_ascend.device.hardware_profile import (
 )
 
 STATE_RING_ROWS = 32
+MAX_MAIN_BLOCK_SIZE = 128
+SWA_BLOCK_SIZE = 32
 
 # Fixed dimensions accepted by the packaged mixed-quant attention ABI.
 # The actual head sizes come from the model config; these bounds reject
@@ -64,7 +65,13 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
     )
 
 
+def _check_main_block_size(block_size):
+    if block_size > MAX_MAIN_BLOCK_SIZE:
+        raise ValueError("DeepSeek V4.1 uses one kernel page per manager block; set --block-size to 128 or smaller.")
+
+
 def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
+    _check_main_block_size(block_size)
     if uses_a5_packed_cache():
         if head_size != MLA_HEAD_DIM:
             raise ValueError(f"A5 DeepSeek V4.1 requires head size {MLA_HEAD_DIM}, got {head_size}")
@@ -89,6 +96,7 @@ def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
 
 
 def make_index_cache_spec(*, block_size, head_size, compress_ratio):
+    _check_main_block_size(block_size)
     if uses_a5_packed_cache():
         if head_size != INDEX_HEAD_DIM:
             raise ValueError(f"A5 DeepSeek V4.1 requires head size {INDEX_HEAD_DIM}, got {head_size}")
@@ -109,6 +117,7 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
         model_version="deepseek_v41",
         # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
         **{},
+        state_content_bytes=head_size * get_dtype_size(dtype) + scale_dim * get_dtype_size(scale_dtype),
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
     )
@@ -116,6 +125,7 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
 
 def make_folded_index_cache_spec(*, block_size):
     """QSLI candidate-source view: eight K/scale rows per 544-byte row."""
+    _check_main_block_size(block_size)
     if block_size % INDEX_FOLD_ROWS:
         raise ValueError("A5 folded index page must contain full 8-token groups")
     return AscendMLAAttentionSpec(

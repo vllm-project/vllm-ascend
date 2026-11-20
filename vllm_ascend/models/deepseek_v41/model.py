@@ -99,6 +99,7 @@ from vllm_ascend.worker.v2.pp_transport import (
 )
 
 from .cache_config import (
+    SWA_BLOCK_SIZE,
     make_folded_index_cache_spec,
     make_index_cache_spec,
     make_mla_cache_spec,
@@ -770,8 +771,8 @@ def make_pp_cache_transport(vllm_config, config, prefix, start_layer, end_layer,
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
-    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
-        block_size = cache_config.block_size
+    def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False, *, pipeline_parallel=False):
+        block_size = cache_config.block_size if pipeline_parallel else min(cache_config.block_size, SWA_BLOCK_SIZE)
         spec = make_swa_cache_spec(
             block_size=block_size,
             window_size=window_size,
@@ -839,6 +840,7 @@ class DeepseekV41SWAAttention(nn.Module):
             # which rebuilds the spec without the flag, so the feature is a
             # strict addition to the target's group.
             bounded_replay=resolve_bounded_replay(vllm_config, cache_config),
+            pipeline_parallel=vllm_config.parallel_config.pipeline_parallel_size > 1,
         )
 
         dsa_modules = DSAModules(

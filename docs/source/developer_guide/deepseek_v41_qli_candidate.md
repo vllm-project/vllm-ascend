@@ -7,17 +7,56 @@ Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
 
 ## Data flow
 
+### Upstream planner, main128/SWA32
+
+The current candidate uses unmodified vLLM at Ascend's verified main pin. All implementation changes stay in vllm-ascend. Main KV and
+indexer manager blocks are 128 tokens; SWA pages are capped at 32 tokens,
+matching upstream V4.1. Each manager block is one kernel page. Main block sizes
+above 128 are rejected.
+
+With one pipeline stage, V4.1 delegates grouping, placement, and capacity
+accounting to the upstream planner through the Ascend platform builder.
+Pipeline parallelism keeps Ascend's stage-local placement and uses the
+configured block size for SWA.
+The upstream scheduler owns block IDs, prefix caching, and recycling.
+Ascend supplies storage specs, component views, strided C2 ring access, and
+Mooncake registration of complete shared pool pages. Block tables and writer
+slots retain the manager IDs without kernel-stripe remapping.
+
+Runtime validation of this planner integration is pending. The regression
+coverage exercises cache placement, component isolation, recycling, C1/C2 slot
+coordinates, strided compressor rings, and remapped PD pages. Group counts,
+usable capacity, operator correctness, and performance require validation on
+the paired CANN/NPU environment.
+
 `DeepseekV41Indexer.select` projects Q and head weights and applies RoPE.
 `select_projected` quantizes each Q head to INT8 with a representable FP16
 scale. Head weights and K scales are FP16. Existing source-owned K-cache
 updates remain unchanged.
 
-The operator consumes `TND` Q and `PA_BBND` index K directly. DeepSeek V4.1's
-four-slot layer-outermost allocator packs index K and FP16 scales after KV
-inside each shared page. C2 uses 64-row views with a 128KB block stride;
-C1 uses 128-row views with a 144.25KB block stride. The PyTorch adapter passes
-their actual leading strides to ACLNN.
-Neither layout requires gathering the whole context into a dense tensor.
+The operator consumes `TND` Q and `PA_BBND` index K directly. With main128,
+C1 stores 128 rows per page and C2 stores 64. Index K and FP16 scales are
+separate planes inside one resource page. The Torch adapter passes each page's
+leading stride to ACLNN without a gather or a native operator ABI change.
+Groups alias the same pool under scheduler ownership; group counts and padding
+are determined by the current upstream planner rather than fixed slot tuples.
+
+The C2 compressor owns one 32-row FP32 ring block per request. Pooling reads
+and ring writes use the tensor's block stride. Pooling must finish before ring
+updates overwrite residual rows; PCP gathered predecessors and tail writes
+retain the same rule.
+
+For a fixed-budget planning comparison on A2/A3, run:
+
+```bash
+python examples/deepseek_v41_cache_capacity.py MODEL --layout BLHNC --block-size 128 --swa-block-size 32
+python examples/deepseek_v41_cache_capacity.py MODEL --layout BLHNC --block-size 128 --swa-block-size 128
+```
+
+The SWA128 option probes alternative geometry; the model launch uses SWA32.
+Keep byte budget, context length, batch token limit, and concurrent batch count
+identical. Compare pool blocks and per-request block demand. A higher raw block
+count alone does not establish greater usable request capacity.
 
 Metadata receives original query boundaries, compressed K lengths, and the
 original sequence length modulo the compression ratio. The residual tensor
