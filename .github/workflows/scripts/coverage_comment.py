@@ -72,7 +72,7 @@ def _parse_bullet(line: str) -> tuple:
 def extract_diff_summary(markdown: str) -> dict | None:
     """Extract Total/Missing/Coverage from the diff-cover Summary section.
 
-    Returns {"total": str, "missing": str, "coverage_pct": float} or None.
+    Returns {"total": str, "missing": str, "coverage_data": float, "coverage_pct": float} or None.
     """
     result: dict = {}
     in_summary = False
@@ -81,18 +81,23 @@ def extract_diff_summary(markdown: str) -> dict | None:
         if stripped.startswith("## Summary"):
             in_summary = True
             continue
-        if in_summary:
-            if stripped.startswith("#"):
-                break
-            if stripped.startswith("- **"):
-                parsed = _parse_bullet(stripped)
-                if parsed:
-                    key = parsed[0].lower()
-                    if key in ("total", "missing", "coverage"):
-                        result[key] = parsed[1]
-                        if parsed[2] is not None:
-                            result["coverage_pct"] = parsed[2]
-    if "total" not in result or "missing" not in result or "coverage_pct" not in result:
+        if not in_summary:
+            continue
+        if stripped.startswith("#"):
+            break
+        if not stripped.startswith("- **"):
+            continue
+        parsed = _parse_bullet(stripped)
+        if not parsed:
+            continue
+        key = parsed[0].lower()
+        if key not in ("total", "missing", "coverage"):
+            continue
+        result[key] = parsed[1]
+        if parsed[2] is not None:
+            result["coverage_data"] = parsed[2]
+            result["coverage_pct"] = parsed[2]
+    if "total" not in result or "missing" not in result or "coverage_data" not in result:
         return None
     return result
 
@@ -100,45 +105,52 @@ def extract_diff_summary(markdown: str) -> dict | None:
 def extract_total_coverage(json_text: str) -> dict | None:
     """Extract Total/Missing/Coverage from slipcover coverage.json.
 
-    Returns {"total": str, "missing": str, "coverage_pct": float} or None.
+    Returns {"total": str, "missing": str, "coverage_data": float, "coverage_pct": float | None}
+    or None. coverage_data is the raw percentage (percent_covered) used for the
+    threshold comparison; coverage_pct is percent_covered_display kept for
+    display. Parsing the fallback inside the guard keeps a summary that lacks a
+    field from raising uncaught.
     """
     try:
         summary = json.loads(json_text)["summary"]
         covered = int(summary["covered_lines"])
         missing = int(summary["missing_lines"])
+        coverage_data = float(summary["percent_covered"])
+        display = summary.get("percent_covered_display")
+        coverage_pct = float(display) if display is not None else coverage_data
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
-
-    percent = summary.get("percent_covered_display")
-    if percent is None:
-        percent = round(float(summary["percent_covered"]))
-    if isinstance(percent, float) and percent.is_integer():
-        percent = int(percent)
     return {
         "total": f"{covered + missing} lines",
         "missing": f"{missing} lines",
-        "coverage_pct": float(percent),
+        "coverage_data": coverage_data,
+        "coverage_pct": coverage_pct,
     }
 
 
-def _fmt_coverage(pct: float, threshold: float) -> str:
-    """Format a coverage cell: highlight below threshold, plain at/above."""
+def _fmt_coverage(display: float, data: float, threshold: float) -> str:
+    """Format a coverage cell.
+
+    The threshold comparison uses the raw ``data`` percentage; the cell text
+    shows ``display`` (rounded for readability). Highlight when below threshold.
+    """
+    pct = display
     pct_str = f"{pct}%"
     if isinstance(pct, float) and pct.is_integer():
         pct_str = f"{int(pct)}%"
-    if pct < threshold:
+    if data < threshold:
         return f"<mark>~~***{pct_str}***~~<mark>"
     return pct_str
 
 
 def build_table(total: dict, diff: dict | None, summary_url: str = "") -> str:
     """Render the 4x3 markdown table with conditional formatting."""
-    total_cov = total["coverage_pct"]
-    total_cell = _fmt_coverage(total_cov, 70)
+    # Threshold is judged on the raw percentage (coverage_data); the cell shows
+    # the display percentage (coverage_pct) when available, else the raw value.
+    total_cell = _fmt_coverage(total["coverage_pct"], total["coverage_data"], 70)
 
     if diff:
-        diff_cov = diff["coverage_pct"]
-        diff_cell = _fmt_coverage(diff_cov, 80)
+        diff_cell = _fmt_coverage(diff["coverage_pct"], diff["coverage_data"], 80)
     else:
         diff_cell = "N/A"
 
