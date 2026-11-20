@@ -143,6 +143,8 @@ torch.npu.config.allow_internal_format = True
 
 
 class NPUWorker(WorkerBase):
+    _pp_runtime: Any = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -226,6 +228,7 @@ class NPUWorker(WorkerBase):
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
+        self._pp_runtime = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -301,6 +304,8 @@ class NPUWorker(WorkerBase):
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
+        if self._pp_runtime is not None:
+            self._pp_runtime.drain()
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level-1 only offloads the weights pool. Persistent metadata such as
@@ -433,6 +438,8 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        if self._pp_runtime is not None:
+            self._pp_runtime.drain()
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -716,6 +723,10 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        if self._pp_runtime is not None and self._pp_runtime.buffer is not None:
+            # Ascend profiling counts model weights and activation growth,
+            # so separately budget persistent snapshots allocated after loading.
+            self.available_kv_cache_memory_bytes -= self._pp_runtime.buffer.reserved_bytes
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -871,6 +882,9 @@ class NPUWorker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        runtime = self._pp_runtime
+        if runtime is not None:
+            runtime.prepare(scheduler_output)
         if forward_pass and not get_pp_group().is_first_rank:
             if self.use_v2_model_runner and enable_sp(self.vllm_config):
                 all_gather_group = None
@@ -888,11 +902,17 @@ class NPUWorker(WorkerBase):
 
         if self.profiler is not None:
             self.profiler.step()
-
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        try:
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        except Exception:
+            if runtime is not None:
+                runtime.cancel()
+            raise
         if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
             output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            if runtime is not None:
+                runtime.cancel()
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -902,10 +922,13 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        if runtime is not None and runtime.buffer is not None:
+            runtime.send(output.tensors)
+        else:
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=all_gather_group,
+            )
 
         # Align with upstream GPUWorker: Model Runner V2 has no
         # kv_connector_output to propagate from non-last PP ranks. Model Runner
@@ -959,6 +982,19 @@ class NPUWorker(WorkerBase):
 
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
+
+        additional = self.vllm_config.additional_config or {}
+        if additional.get("pp_send_buffer_size", 0):
+            from vllm.v1.worker.pp.runtime import PPSendRuntime
+
+            self._pp_runtime = PPSendRuntime(
+                self.vllm_config,
+                self.model_runner.model,
+                self.device,
+                torch.npu,
+                get_pp_group(),
+                get_tp_group(),
+            )
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
