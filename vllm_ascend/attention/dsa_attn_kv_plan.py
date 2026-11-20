@@ -30,7 +30,6 @@ _BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
 
 @lru_cache(maxsize=1)
 def _get_kv_compress_epilog() -> Callable[..., Any]:
-    # Empty-query PCP ranks still write global KV without building query metadata.
     import_module("cann_ops_transformer")
     return torch.ops.cann_ops_transformer.kv_compress_epilog
 
