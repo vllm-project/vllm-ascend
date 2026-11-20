@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core import kv_cache_planning as planning
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -30,9 +31,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
-)
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
 )
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
@@ -543,9 +541,10 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
-        DefaultKVCacheConfigBuilder(),
+    required_bytes = planning._max_memory_usage_bytes_from_groups(
+        AscendKVCacheConfigBuilder(),
         vllm_config,
         groups,
     )
@@ -592,6 +591,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
             prefix_cache_retention_interval=None,
         ),
         max_in_flight_tokens=4096,
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     def is_gdn_group(group) -> bool:
@@ -612,7 +612,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     gdn_blocks_each = required_blocks(gdn_groups[:1])
 
     blocks_before = required_blocks(groups)
-    bytes_before = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, groups)
+    bytes_before = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, groups)
 
     merged = _merge_mamba_state_groups(groups, 13)
 
@@ -635,7 +635,7 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         owner.spec.real_page_size_bytes for owner in probe.owners if owner.role == PLE
     )
 
-    bytes_after = _ascend_max_memory_usage_bytes_from_groups(DefaultKVCacheConfigBuilder(), vllm_config, merged)
+    bytes_after = planning._max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), vllm_config, merged)
     assert bytes_after == blocks_after * pool_block_bytes
     assert bytes_before - bytes_after == 33 * gdn_blocks_each * pool_block_bytes
 

@@ -52,6 +52,8 @@ def _inputs(a5=True):
         _a5_causal_swa_lengths=lengths,
         _device_backend=SimpleNamespace(build_window_indices=backend),
         common_v41_batch_metadata={},
+        common_v41_smla_metadata={},
+        _uses_a5_packed_cache=a5,
     )
     return builder, common, req, backend
 

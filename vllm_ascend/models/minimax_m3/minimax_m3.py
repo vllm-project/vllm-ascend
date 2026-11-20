@@ -116,6 +116,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
+from vllm_ascend.ops.mmrs import SequenceParallelMMReduceScatterOp
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -128,6 +129,10 @@ from vllm_ascend.worker.v2.pp_transport import (
 
 _FP8_E4M3_MAX = 448.0
 _MAX_FUSED_QKNORM_ROPE_CACHE_INSERT_TOKENS = 262144
+# Prefill batches fuse the O-projection MM + ReduceScatter only inside this
+# token-count range; other batches stay on the plain MM + ReduceScatter path.
+_MMRS_MIN_TOKENS = 256
+_MMRS_MAX_TOKENS = 16384
 
 
 def _resolve_layer_kv_cache_dtype(
@@ -1038,6 +1043,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
         else:
             self.self_attn = MiniMaxM3Attention(**attn_kwargs)
 
+        # With sequence parallelism, transfer the post-attention ReduceScatter
+        # to the O-projection: fused MMRS when possible, plain MM +
+        # ReduceScatter otherwise; both paths return the SP token shard, so
+        # no external ReduceScatter is needed here. Without SP the
+        # O-projection keeps its plain GEMM forward.
+        if self.use_sequence_parallel:
+            self.self_attn.o_proj.custom_op = SequenceParallelMMReduceScatterOp(
+                self.self_attn.o_proj,
+                attention_layer_name=f"{prefix}.self_attn.attn",
+                min_tokens=_MMRS_MIN_TOKENS,
+                max_tokens=_MMRS_MAX_TOKENS,
+            )
+
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
@@ -1105,7 +1123,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Fully Connected
         if self.use_sequence_parallel:
-            hidden_states = sp_reduce_scatter(hidden_states)
+            # `sp_reduce_scatter` has been included in `SequenceParallelMMReduceScatterOp`
             if not input_is_sequence_parallel:
                 residual = sp_shard(residual)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)

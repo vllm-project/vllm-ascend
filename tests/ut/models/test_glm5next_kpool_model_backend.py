@@ -40,8 +40,8 @@ with patch.dict(
 
 
 def test_glm_indexer_rejects_unsupported_cache_dtype_before_constructing_layers():
-    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="int8"))
-    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16 or fp8"):
+    config = SimpleNamespace(attention_config=SimpleNamespace(indexer_kv_dtype="mxfp4"))
+    with pytest.raises(ValueError, match="indexer_kv_dtype must be auto, bf16, fp8 or int8"):
         Indexer(config, None, 8, 8, None, None, None)
 
 
@@ -283,7 +283,7 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
 
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("quantized", [False, True])
-def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch, device, quantized):
+def test_fp8_backend_initialization_does_not_gate_on_device_capability(monkeypatch, device, quantized):
     source = SimpleNamespace(
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1)
@@ -310,17 +310,9 @@ def test_fp8_hardware_support_is_checked_by_execution_backend(monkeypatch, devic
     monkeypatch.setattr(backend_module, "get_current_hardware_profile", lambda: hardware)
     init = MagicMock()
     monkeypatch.setattr(Glm5NextKPoolIndexerBackend, "_init_cann_ops", init)
-    if quantized and device != AscendDeviceType.A5:
-        with pytest.raises(NotImplementedError, match="PoolKeyIndexer FP8 support"):
-            Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
-        init.assert_not_called()
-    else:
-        Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
-        init.assert_called_once_with()
-    if quantized:
-        hardware.supports.assert_called_once_with(backend_module.HardwareCapability.POOL_KEY_INDEXER_FP8)
-    else:
-        hardware.supports.assert_not_called()
+    Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
+    init.assert_called_once_with()
+    hardware.supports.assert_not_called()
 
 
 def test_bound_cache_resolves_complete_tuple_for_virtual_engine(monkeypatch):
@@ -448,6 +440,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
+    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2
@@ -691,6 +684,7 @@ def test_backend_restores_pcp_keys_before_kpool_cache_write(
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
+    backend.kpool_int8 = False
     backend.n_head = 2
     backend.head_dim = 2
     backend.topk_tokens = 2

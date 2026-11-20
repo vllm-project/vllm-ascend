@@ -1,0 +1,4 @@
+pr: 22530
+entries:
+  - category: bugfix
+    text: Fixed Model Runner V2 startup failures for multimodal and prompt-embedding models with the updated vLLM dependency. No configuration changes are required.

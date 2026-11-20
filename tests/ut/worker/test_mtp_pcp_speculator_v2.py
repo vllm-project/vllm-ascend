@@ -278,6 +278,7 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
                 patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=2))
             )
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     loading_config = get_model.call_args.kwargs["vllm_config"]
     assert loading_config.parallel_config.enable_eplb
     assert loading_config.parallel_config.enable_expert_parallel
@@ -537,6 +538,8 @@ def test_capture_follows_upstream_contract() -> None:
 def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.vllm_config = eplb_worker_config
+    speculator.draft_model_config = eplb_worker_config.speculative_config.draft_model_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
     original_tag = backends.model_tag
     seen = []
 
@@ -557,5 +560,6 @@ def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_conf
                 patch.object(spec_utils, "get_pp_group", return_value=SimpleNamespace(world_size=1))
             )
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     assert seen == ["eagle_head"]
     assert backends.model_tag == original_tag

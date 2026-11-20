@@ -39,17 +39,17 @@ The following table lists additional configuration options available in vLLM Asc
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `kv_trace`                  | dict | `{}`    | Per-engine KV cache address diagnostics for Model Runner V2. `enabled` defaults to `false`; `action` accepts `"log"` (default) or `"raise"`. See [KV Trace](../feature_guide/kv_trace.md). |
-| `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
+| `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
-| `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
+| `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
 | `runtime_config_hot_reload`         | bool | `false` | Enable hot-reload of `runtime_config.json` (startup-only; not a JSON field). |
 | `runtime_config`                    | dict | `None`  | Startup overlay merged into runtime config defaults (detectors, dump quota, report flags). |
 | `runtime_report_dir`                | str  | `None`  | Override report root directory. Default: `<cwd>/runtime/report`. |
 | `runtime_dump_dir`                 | str  | `None`  | Seed KV dump root (`dump.dump_dir`). Default derived from report root. |
-| `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
+| `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
 | `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. Cannot be combined with `eplb_config.dynamic_eplb`. |
@@ -59,7 +59,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
 | `kv_pool_range_debug`               | bool | `false` | Emit JSON audit logs for KV pool whole-key operations, per-layer ranges, and commits. Use instead of the legacy `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` environment variable; keep disabled during normal operation to avoid per-layer logging overhead. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
-| `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
+| `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by RoCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
@@ -80,11 +80,11 @@ The details of each configuration option are as follows:
 
 <span id="runtime_guard"></span>**runtime_guard**
 
-Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
+Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM-Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
+| `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
 | `runtime_config_hot_reload` | bool | `false` | Enable hot-reload (startup-only; not a JSON field). `false` = static config after startup. |
 | `runtime_config` | dict | `None` | Startup overlay: `defaults ← runtime_config`. Bootstrap overwrites the JSON file with this effective config. Hot-reload re-reads the JSON file only. |
 | `runtime_report_dir` | str | `None` | Report and KV dump root. Default `<cwd>/runtime/report`. |
@@ -152,7 +152,7 @@ default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
 `default` or `stair` only through the upstream `--eplb-config.policy` option.
 See the
-[EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
+[EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
 for the advanced STAIR fields and their defaults.
 
 The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
@@ -164,7 +164,7 @@ removed. They no longer take effect.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
-| `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+| `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [EPLB tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 

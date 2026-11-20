@@ -160,6 +160,7 @@ configuration rather than the runner input or sampling interface.
 | [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
+| [step5/fused_add_rms_norm.py](step5/fused_add_rms_norm.py) | Fused optional FP32 residual add, RMSNorm, and BF16 output cast. [Operator documentation](docs/fused_add_rms_norm_cast.md) |
 | [step5/fused_qknorm_rope.py](step5/fused_qknorm_rope.py) | Step5 fused QK RMSNorm + NeoX RoPE with V passthrough. [Operator documentation](docs/step5_fused_qknorm_rope.md) |
 | [step5/summary_update.py](step5/summary_update.py) | Step5 CSA region summaries: [decode](docs/step5_update_decode.md), [verify](docs/step5_update_verify.md), [prefill](docs/step5_update_prefill.md), [prefill grouping](docs/step5_build_prefill_groups.md), [GBSA id pack](docs/step5_append_current_region.md) |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |

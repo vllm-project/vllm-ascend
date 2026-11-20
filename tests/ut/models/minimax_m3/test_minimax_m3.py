@@ -20,6 +20,8 @@ from vllm_ascend.models.minimax_m3 import (
     _sparse_attention_layer_ids,
 )
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    _MMRS_MAX_TOKENS,
+    _MMRS_MIN_TOKENS,
     MiniMaxM3DecoderLayer,
     MiniMaxM3MLP,
     MiniMaxM3Model,
@@ -128,6 +130,10 @@ def _make_decoder_layer(*, use_sequence_parallel: bool, is_moe: bool = True) -> 
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_mmrs_token_limits(self):
+        self.assertEqual(_MMRS_MIN_TOKENS, 256)
+        self.assertEqual(_MMRS_MAX_TOKENS, 16384)
+
     def test_pp_auxiliary_states_match_unsplit_target(self):
         from vllm.v1.worker.gpu.pp_utils import PPHandler
 
@@ -218,16 +224,13 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
                         torch.testing.assert_close(state, torch.full((2, 4), 12.0 + 11 * index))
 
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_shard")
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     def test_decoder_enters_sequence_parallel(
         self,
-        reduce_scatter: Mock,
         shard: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True)
         hidden_states = torch.arange(6, dtype=torch.float32).reshape(3, 2)
         residual = hidden_states + 10
-        reduce_scatter.side_effect = lambda value: torch.nn.functional.pad(value, (0, 0, 0, 1))[:2]
         shard.side_effect = lambda value: torch.nn.functional.pad(value, (0, 0, 0, 1))[:2]
 
         output, output_residual = layer(
@@ -236,25 +239,23 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             residual=residual,
         )
 
-        reduce_scatter.assert_called_once()
+        # The O-projection custom op owns the hidden-states ReduceScatter on
+        # every path, so the decoder only shards the residual.
         shard.assert_called_once()
         torch.testing.assert_close(shard.call_args.args[0], residual)
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
 
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_all_gather")
     def test_consecutive_moe_keeps_residual_sharded(
         self,
         all_gather: Mock,
-        reduce_scatter: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True)
         hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         residual = hidden_states + 10
         all_gather.side_effect = lambda value: torch.cat((value, value + 100), dim=0)
-        reduce_scatter.side_effect = lambda value: value[:2]
 
         output, output_residual = layer(
             positions=torch.arange(3),
@@ -264,25 +265,21 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
 
         # Only the normalized attention input is gathered. The residual stays
-        # sharded and the attention partial output is reduce-scattered.
+        # sharded and the O-projection owns the hidden ReduceScatter.
         all_gather.assert_called_once()
-        reduce_scatter.assert_called_once()
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
         torch.testing.assert_close(output_residual, residual)
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
 
-    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_all_gather")
     def test_dense_decoder_keeps_sequence_parallel_region(
         self,
         all_gather: Mock,
-        reduce_scatter: Mock,
     ) -> None:
         layer = _make_decoder_layer(use_sequence_parallel=True, is_moe=False)
         hidden_states = torch.arange(4, dtype=torch.float32).reshape(2, 2)
         residual = hidden_states + 10
         all_gather.side_effect = lambda value: torch.cat((value, value + 100), dim=0)
-        reduce_scatter.side_effect = lambda value: value[:2]
 
         output, output_residual = layer(
             positions=torch.arange(3),
@@ -292,9 +289,8 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
 
         all_gather.assert_called_once()
-        reduce_scatter.assert_called_once()
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
-        self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output.shape, torch.Size([3, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
 
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
