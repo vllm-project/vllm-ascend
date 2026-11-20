@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.hisparse.pcp import (
     PCPHiSparseConnector,
+    prepare_pcp_mirror_staging,
     prepare_pcp_query_metadata,
     prepare_pcp_query_states,
 )
@@ -50,6 +51,35 @@ def handle():
     return cache
 
 
+def test_pcp_mirror_staging_uses_runner_physical_capacity():
+    worker = NS(
+        vllm_config=NS(
+            scheduler_config=NS(max_num_batched_tokens=15, max_num_seqs=1),
+            parallel_config=NS(prefill_context_parallel_size=2),
+            num_lookahead_tokens=0,
+        ),
+        _slot_mapping_staging=NS(slots=torch.empty(31, dtype=torch.int64)),
+    )
+
+    prepare_pcp_mirror_staging(worker, max_num_tokens=16, max_num_reqs=1)
+
+    assert worker._slot_mapping_staging.slots.numel() == 33
+
+
+def test_metadata_builder_uses_physical_token_capacity(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+
+    def init(builder, *args, **kwargs):
+        builder.use_pcp = False
+
+    monkeypatch.setattr(sfa_hisparse.AscendSFAMetadataBuilder, "__init__", init)
+    monkeypatch.setattr(sfa_hisparse, "get_mrv2_physical_batch_capacity", lambda config: (16, 1))
+
+    builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], NS(), torch.device("cpu"))
+
+    assert builder._row_capacity == 16
+
+
 @pytest.mark.parametrize(
     "world_size,dtype,rope_dim,decode",
     [
@@ -61,8 +91,9 @@ def handle():
 def test_unquantized_pcp_writes_all_gathered_rows_without_query_truncation(
     monkeypatch, world_size, dtype, rope_dim, decode
 ):
-    from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+    from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.hisparse import cache_ops
 
     impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
@@ -249,8 +280,9 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
 
 
 def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
-    from vllm_ascend.attention import sfa_hisparse
     from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
+
+    from vllm_ascend.attention import sfa_hisparse
 
     def init(builder, *args, **kwargs):
         builder.device = torch.device("cpu")
@@ -273,7 +305,15 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     config = NS(
         scheduler_config=NS(max_num_seqs=2, max_num_batched_tokens=8),
         compilation_config=NS(max_cudagraph_capture_size=8),
-        parallel_config=NS(prefill_context_parallel_size=2),
+        parallel_config=NS(
+            prefill_context_parallel_size=2,
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            enable_hc_sp=False,
+            use_sequence_parallel_moe=True,
+        ),
+        additional_config={},
+        uniform_decode_query_len=1,
     )
     builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], config, torch.device("cpu"))
     common = NS(num_reqs=3, query_start_loc_cpu=torch.tensor([0, 2, 3, 4], dtype=torch.int32))
@@ -299,9 +339,9 @@ def test_builder_padding_uses_safe_prefill_request_without_forward_ops(
     monkeypatch, use_pcp, num_decodes, prefill_lens, padding
 ):
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
+    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 
     from vllm_ascend.attention import sfa_hisparse
-    from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 
     query_lens = torch.tensor([1] * num_decodes + list(prefill_lens), dtype=torch.int32)
     starts = torch.cat((torch.zeros(1, dtype=torch.int32), query_lens.cumsum(0).to(torch.int32)))
@@ -394,9 +434,9 @@ def test_empty_query_rank_still_prepares_host_mirror(monkeypatch):
 )
 def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill, dtype):
     from vllm.config.compilation import CUDAGraphMode
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
     import vllm_ascend.attention.sfa_hisparse as module
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
 
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)

@@ -17,7 +17,6 @@ from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan as build_core_prefill_plan
 from vllm.v1.worker.workspace import current_workspace_manager
-
 from vllm_ascend.attention.context_parallel.common_cp import get_cp_max_num_reqs
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -26,8 +25,10 @@ from vllm_ascend.attention.sfa_v1 import (
     needs_pcp_kv_gather,
 )
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.hisparse import cache_ops
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.utils import get_mrv2_physical_batch_capacity
+
+from vllm_ascend.hisparse import cache_ops
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -135,10 +136,7 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             self._pcp_request_state_indices = torch.empty(
                 get_cp_max_num_reqs(vllm_config), dtype=torch.int32, device=device
             )
-        self._row_capacity = max(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
-        )
+        self._row_capacity, _ = get_mrv2_physical_batch_capacity(vllm_config)
 
     def _build(
         self,
