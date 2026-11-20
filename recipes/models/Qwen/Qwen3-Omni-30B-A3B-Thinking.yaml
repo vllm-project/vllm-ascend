@@ -3,12 +3,12 @@ meta:
   title: "Qwen3-Omni-30B-A3B-Thinking (Ascend)"
   slug: "qwen3-omni-30b-a3b-thinking"
   provider: "Qwen"
-  description: "Omni-modal Qwen3 Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated W8A8 presets for high throughput, low latency, and 128K long context."
+  description: "Omni-modal Qwen3 Mixture-of-Experts model (30.5B total / 3.3B active) served with vLLM Ascend on Atlas 800I A3, with validated BF16 presets for high throughput, low latency, and 128K long context (W8A8 remains an optional path)."
   date_added: "2026-11-19"
-  date_updated: "2026-11-19"
+  date_updated: "2026-11-20"
   tasks:
     - multimodal
-  performance_headline: "Atlas 800I A3 W8A8: 906 tok/s output at concurrency 32, 17.85 ms TPOT in the TP4 low-latency preset"
+  performance_headline: "Atlas 800I A3 BF16: 961 tok/s output at concurrency 32 (TP2), 15.92 ms TPOT in the TP4 low-latency preset"
   default_hardware: ascend_910c
   hardware:
     ascend_910c: verified
@@ -38,8 +38,18 @@ model:
 
 variants:
   default:
+    precision: bf16
+    label: "BF16 (Ascend A3)"
+    vram_minimum_gb: 64
+    supported_hardware: [ascend_910c]
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
+        docker_serve_command: "vllm serve"
+    description: "Official BF16 checkpoint; the default, CI-verifiable configuration. No quantization flag is added."
+  w8a8:
     precision: int8
-    label: "W8A8 (Ascend A3)"
+    label: "W8A8 (optional)"
     vram_minimum_gb: 32
     supported_hardware: [ascend_910c]
     hardware_overrides:
@@ -49,16 +59,7 @@ variants:
     extra_args:
       - "--quantization"
       - "ascend"
-    description: "W8A8 weights produced from the official BF16 checkpoint with msmodelslim; point the model id at the local quantized directory."
-  bf16:
-    precision: bf16
-    vram_minimum_gb: 64
-    supported_hardware: [ascend_910c]
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler"
-        docker_serve_command: "vllm serve"
-    description: "Official BF16 checkpoint; no quantization flag is added."
+    description: "Optional W8A8 weights produced locally from the official BF16 checkpoint with msmodelslim; point the model id at the quantized directory."
 
 compatible_strategies:
   - single_node_tp
@@ -108,25 +109,25 @@ presets:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_flashcomm1": false, "weight_nz_mode": 2}'
+      - '{"enable_flashcomm1": false}'
       - "--gpu-memory-utilization"
       - "0.95"
     runbook: |
       Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
-      (4 of 16 chips, TP4) and locally quantized W8A8 weights.
+      (4 of 16 chips, TP4) and the official BF16 checkpoint.
 
       - 200/200 requests completed at 1 request per second.
-      - Output throughput **126.71 tok/s**.
-      - Mean TTFT **187.63 ms**, mean TPOT **17.85 ms**.
+      - Output throughput **126.89 tok/s**.
+      - Mean TTFT **168.74 ms**, mean TPOT **15.92 ms**.
 
   a3_high_throughput:
-    label: "High Throughput (TP1)"
+    label: "High Throughput (TP2)"
     hardware: ascend_910c
     strategy: single_node_tp
     variants: [default]
     workload: "200 input / 512 output tokens, concurrency 32"
-    description: "Single-chip deployment without expert parallelism; maximizes concurrent request processing."
-    tp: 1
+    description: "Two-chip tensor-parallel deployment without expert parallelism; keeps the official BF16 weights resident while maximizing concurrent request processing."
+    tp: 2
     args:
       - "--max-num-seqs"
       - "100"
@@ -141,16 +142,16 @@ presets:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"weight_nz_mode": 2}'
+      - '{"enable_flashcomm1": false}'
       - "--gpu-memory-utilization"
       - "0.95"
     runbook: |
       Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
-      (1 of 16 chips, TP1) and locally quantized W8A8 weights.
+      (2 of 16 chips, TP2) and the official BF16 checkpoint.
 
       - 200/200 requests completed at concurrency 32.
-      - Output throughput **906.42 tok/s**.
-      - Mean TTFT **278.16 ms**, mean TPOT **32.26 ms**.
+      - Output throughput **960.72 tok/s**.
+      - Mean TTFT **293.05 ms**, mean TPOT **30.60 ms**.
 
   a3_long_context:
     label: "Long Context (TP4, 128K)"
@@ -175,7 +176,7 @@ presets:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"enable_flashcomm1": false, "weight_nz_mode": 2}'
+      - '{"enable_flashcomm1": false}'
       - "--gpu-memory-utilization"
       - "0.95"
       - "--hf-overrides"
@@ -184,10 +185,11 @@ presets:
       VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
     runbook: |
       Measured on one Atlas 800I A3 with `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`
-      (4 of 16 chips, TP4) and locally quantized W8A8 weights.
+      (4 of 16 chips, TP4) and the official BF16 checkpoint.
 
-      - A 70025-token prompt returned the correct answer (`Fox`) in 6.16 s.
-      - No multi-request throughput run was performed for this context length.
+      - The 8192-in / 256-out benchmark completed 20/20 requests at **201.30 tok/s**,
+        mean TTFT **864.92 ms**, mean TPOT **16.54 ms**.
+      - A 70025-token prompt returned the correct answer (`fox`) in 5.93 s.
       - `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` is required because the checkpoint declares
         65536 positions while the preset requests 131072.
 
@@ -206,22 +208,22 @@ guide: |
   format and re-validates it end to end on the v0.30.0 A3 image. All results below were
   collected on one Atlas 800I A3 node with
   `quay.io/ascend/vllm-ascend:v0.30.0-a3-openeuler`. The node exposes 16 chips; the
-  presets use one chip (TP1) or four chips (TP4).
+  presets use two chips (TP2) or four chips (TP4).
 
   ## Validated presets
 
   | Preset | Chips | Workload | Requests | Output tok/s | Mean TTFT | Mean TPOT |
   | --- | --- | --- | --- | --- | --- | --- |
-  | High Throughput (TP1) | 1 | 200 in / 512 out, concurrency 32 | 200/200 | 906.42 | 278.16 ms | 32.26 ms |
-  | Low Latency (TP4) | 4 | 200 in / 128 out, 1 request/s | 200/200 | 126.71 | 187.63 ms | 17.85 ms |
-  | Long Context (TP4) | 4 | 70025-token prompt | 1/1 | not measured | not measured | not measured |
+  | High Throughput (TP2) | 2 | 200 in / 512 out, concurrency 32 | 200/200 | 960.72 | 293.05 ms | 30.60 ms |
+  | Low Latency (TP4) | 4 | 200 in / 128 out, 1 request/s | 200/200 | 126.89 | 168.74 ms | 15.92 ms |
+  | Long Context (TP4) | 4 | 8192 in / 256 out, concurrency 4 | 20/20 | 201.30 | 864.92 ms | 16.54 ms |
 
-  The long-context preset returned the correct answer in 6.16 s. These numbers are
+  The long-context preset also returned the correct answer to a 70025-token prompt in 5.93 s. These numbers are
   reproducibility measurements on the stated image, not an official performance baseline.
 
   ## Accuracy
 
-  EvalScope 1.15.0, 100 samples per dataset, W8A8, TP1 service:
+  EvalScope 1.15.0, 100 samples per dataset, optional W8A8 reference, TP1 service. The default BF16 configuration was validated functionally and for performance; its accuracy was not re-measured in this cycle:
 
   | Dataset | Metric | Score |
   | --- | --- | --- |
@@ -240,9 +242,9 @@ guide: |
   described in the historical quantization guide: BF16 embeddings, BF16 Q/K norms and MoE
   gates, static W8A8 attention projections, and dynamic W8A8 expert projections.
 
-  The W8A8 variant therefore requires a local quantized directory. Point the generated
-  command's model id at that directory; the canonical Hugging Face id in the builder is
-  the BF16 download. The BF16 variant runs as generated.
+  All presets therefore load the public official BF16 checkpoint by default and run as
+  generated. The optional W8A8 variant requires a local quantized directory; point its
+  model id at that directory, and keep the canonical Hugging Face id as the BF16 download.
 
   The optional Eagle3 draft model is not part of the default weights. Download it with
   `modelscope download --model AngelSlim/Qwen3-a3B_eagle3` and enable the opt-in
@@ -251,7 +253,8 @@ guide: |
   ## Limitations
 
   - The optional Eagle3 draft model from the tutorial is exposed as an opt-in `spec_decoding` feature. It was functionally validated on Atlas 800I A3 at TP1 (4/4 HTTP 200 responses, no ERROR/Traceback in the logs); it is not enabled in the default presets or performance baselines. Replace `your_eagle3_model_path` with the local draft-model directory before enabling it.
-  - Only the W8A8 variant was benchmarked and evaluated. BF16 numbers are not claimed.
+  - All three presets are benchmarked with the official BF16 checkpoint. Accuracy numbers
+    remain an optional W8A8 reference; BF16 accuracy was not re-measured.
   - BBH accuracy was not completed in this validation run.
   - Multi-node and PD-separated topologies are out of scope for this recipe.
 
