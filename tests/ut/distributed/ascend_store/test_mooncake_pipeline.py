@@ -91,7 +91,11 @@ class TestMooncakePipeline(unittest.TestCase):
                 cache_block_size=cache_block_size,
                 extra_config={"cache_prefix": cache_prefix},
                 speculative_config=SimpleNamespace(
-                    method="dspark", num_speculative_tokens=3, use_eagle=lambda: True, compute_hash=lambda: "dspark"
+                    method="dspark",
+                    num_speculative_tokens=3,
+                    use_eagle=lambda: True,
+                    compute_hash=lambda: "dspark",
+                    compile_factors=lambda: {"method": "dspark", "num_speculative_tokens": 3},
                 )
                 if draft
                 else None,
