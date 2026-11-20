@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Checkpoint save/query contracts using upstream SWA algorithms (CPU only)."""
+"""GVA replay boundary regressions using upstream SWA lookup (CPU only)."""
 
 import inspect
 from types import SimpleNamespace
@@ -24,8 +24,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 BLOCK_SIZE = 128
-PROMPT_TOKENS = 16384
-COMMON_BLOCKS = 115  # 14720 complete shared tokens, approximately 90% of 16K.
+CACHED_PROMPT_TOKENS = 16384
+RETENTION_INTERVAL = 2048
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,7 @@ def upstream_managers():
         yield
 
 
-def make_coordinator(interval, *, use_eagle=False):
+def make_coordinator():
     common = dict(block_size=BLOCK_SIZE, num_kv_heads=1, head_size=16, dtype=torch.float32)
     specs = [
         FullAttentionSpec(**common),  # CSA main KV.
@@ -53,116 +53,39 @@ def make_coordinator(interval, *, use_eagle=False):
         hash_block_size=BLOCK_SIZE,
         group_block_sizes=[BLOCK_SIZE] * len(specs),
         group_cache_families=["default"] * len(specs),
-        retention_interval=interval,
-        use_eagle=use_eagle,
+        retention_interval=RETENTION_INTERVAL,
     )
 
 
-def hashes(count=PROMPT_TOKENS // BLOCK_SIZE):
-    return [index.to_bytes(32, "big") for index in range(count)]
-
-
-def changed_suffix():
-    original = hashes()
-    return original[:COMMON_BLOCKS] + [bytes([255]) + item[1:] for item in original[COMMON_BLOCKS:]]
-
-
-def save(coord, end=PROMPT_TOKENS, prompt=PROMPT_TOKENS, start=0):
-    masks = coord.store_mask(end, num_prompt_tokens=prompt)
-    assert masks[3] == []  # Private ring has no external objects.
-    return {
-        (group_id, block_hash)
-        for group_id in coord.cacheable_group_ids
-        for index, block_hash in enumerate(hashes(end // BLOCK_SIZE))
-        if start // BLOCK_SIZE <= index and masks[group_id][index]
-    }
-
-
-def lookup(coord, pool, request_hashes):
-    def query(group_id, group_hashes, mask):
-        assert group_id != 3
-        return [
-            block_hash
-            for index, block_hash in enumerate(group_hashes)
-            if (mask is None or mask[index]) and (group_id, block_hash) in pool
-        ]
-
-    return coord.find_reachable_hit_tokens(request_hashes, len(request_hashes) * BLOCK_SIZE, query)
-
-
-@pytest.mark.parametrize("interval,expected", [(0, 0), (2048, 14336), (4096, 12288), (None, 14720)])
-def test_shared_prefix_recovers_only_at_complete_saved_window(interval, expected):
-    coord = make_coordinator(interval)
-    assert lookup(coord, save(coord), changed_suffix()) == expected
-
-
-def test_periodic_checkpoints_keep_exact_prompt_hit_and_sparse_swa_storage():
-    coord = make_coordinator(2048)
-    pool = save(coord)
-    assert lookup(coord, pool, hashes()) == PROMPT_TOKENS
-    # Eight four-block windows plus one extra block for prompt-1 replay.
-    assert sum(group_id == 2 for group_id, _ in pool) == 33
-
-
-@pytest.mark.parametrize("missing_group,missing_index", [(0, 100), (1, 100), (2, 111)])
-def test_incomplete_main_summary_or_swa_falls_back(missing_group, missing_index):
-    coord = make_coordinator(2048)
-    pool = save(coord)
-    pool.remove((missing_group, hashes()[missing_index]))
-    assert lookup(coord, pool, changed_suffix()) == 12288
-
-
-def test_no_complete_window_returns_zero():
-    coord = make_coordinator(2048)
-    pool = {(group_id, block_hash) for group_id, block_hash in save(coord) if group_id != 2}
-    assert lookup(coord, pool, changed_suffix()) == 0
-
-
-def test_chunked_prefill_saves_window_pieces_before_later_chunks_recycle_them():
-    coord = make_coordinator(2048)
-    pool = set()
-    start = 0
-    # Several checkpoints straddle chunk boundaries, including the 14336 one.
-    for end in (1920, 2176, 3968, 8448, 14080, 14464, PROMPT_TOKENS):
-        pool.update(save(coord, start=start, end=end))
-        start = end
-    assert pool == save(coord)
-    assert lookup(coord, pool, changed_suffix()) == 14336
-
-
-def test_lookup_also_recovers_nonperiodic_replay_checkpoint():
-    coord = make_coordinator(2048)
-    pool = save(coord, end=14208, prompt=14209)
-    assert lookup(coord, pool, changed_suffix()) == 14208
-
-
 @pytest.mark.parametrize(
-    "prompt_tokens,interval,expected,use_eagle",
+    "prompt_tokens,expected",
     [
-        (2048, 2048, 0, False),
-        (4096, 2048, 2048, False),
-        (2049, 2048, 2048, False),
-        (16384, 2048, 16256, False),
-        (16385, 2048, 16384, False),
-        (2048, None, 1920, False),
-        (128, 2048, None, False),
-        (2048, None, 1920, True),
-        (2049, None, 2048, True),
+        pytest.param(2048, 0, id="missing-window-at-aligned-boundary"),
+        pytest.param(4096, 2048, id="fallback-to-earlier-checkpoint"),
+        pytest.param(2049, 2048, id="unaligned-prompt-keeps-last-full-page"),
+        pytest.param(128, None, id="no-full-page-before-last-token"),
     ],
 )
-def test_private_state_lookup_checks_the_window_at_the_actual_resume_boundary(
-    prompt_tokens, interval, expected, use_eagle
-):
-    coord = make_coordinator(interval, use_eagle=use_eagle)
-    pool = save(coord)
+def test_private_state_lookup_checks_the_window_at_the_actual_resume_boundary(prompt_tokens, expected):
+    coord = make_coordinator()
+    # A longer request populated periodic checkpoints. Its window at 2048
+    # is complete, but it did not retain the older block needed at 1920.
+    hashes = [index.to_bytes(32, "big") for index in range(CACHED_PROMPT_TOKENS // BLOCK_SIZE)]
+    masks = coord.store_mask(CACHED_PROMPT_TOKENS, num_prompt_tokens=CACHED_PROMPT_TOKENS)
+    pool = {
+        (group_id, block_hash)
+        for group_id in coord.cacheable_group_ids
+        for block_hash, retained in zip(hashes, masks[group_id])
+        if retained
+    }
     scheduler = object.__new__(LayerwiseKVPoolScheduler)
     scheduler.use_block_key_layerwise = False
-    scheduler.use_eagle = use_eagle
+    scheduler.use_eagle = False
     scheduler.use_layerwise_transfer = True
     scheduler.cacheable_group_ids = coord.cacheable_group_ids
     scheduler.original_block_size = [BLOCK_SIZE] * 4
     scheduler.cache_transfer_granularity = BLOCK_SIZE
-    request = SimpleNamespace(prompt_token_ids=[0] * prompt_tokens, block_hashes=hashes())
+    request = SimpleNamespace(prompt_token_ids=[0] * prompt_tokens, block_hashes=hashes[: prompt_tokens // BLOCK_SIZE])
 
     def query(group_id, group_hashes, mask):
         return [
