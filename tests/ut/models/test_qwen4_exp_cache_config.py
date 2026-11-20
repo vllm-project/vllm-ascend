@@ -480,6 +480,52 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert compressed.is_contiguous()
 
 
+def test_qsa_raw_cache_view_preserves_padding_between_blocks(monkeypatch) -> None:
+    groups = _groups()
+    raw_group = groups[1]
+    narrow_layer, *wide_layers = raw_group.layer_names
+    # A BF16 key can be followed by three int64 MRoPE positions per row.
+    groups[1:2] = [
+        KVCacheGroupSpec([narrow_layer], replace(raw_group.kv_cache_spec, head_size=128)),
+        KVCacheGroupSpec(wide_layers, replace(raw_group.kv_cache_spec, head_size=140)),
+    ]
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            ),
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
+    assert layout is not None
+
+    narrow_view = caches[narrow_layer]
+    wide_view = caches[wide_layers[0]]
+    assert narrow_view.shape == (3, 8, 1, 128)
+    assert wide_view.shape == (3, 8, 1, 140)
+    region = layout.region("r4")
+    assert region.block_stride == 2240
+    assert narrow_view[1].data_ptr() - narrow_view[0].data_ptr() == region.block_stride
+    assert wide_view[1].data_ptr() - wide_view[0].data_ptr() == region.block_stride
+
+    backing = raw[narrow_layer]
+    owner = layout.owner(narrow_layer)
+    slot_start = owner.slot * layout.slot_backing_size + region.offset
+    second_page = backing.narrow(0, slot_start + region.block_stride, region.page_size_bytes)
+    second_page = second_page.view(narrow_view.dtype)
+    second_page.fill_(-1)
+    narrow_view[1].fill_(7)
+    valid_elements = narrow_view[1].numel()
+    assert torch.all(second_page[:valid_elements] == 7)
+    assert torch.all(second_page[valid_elements:] == -1)
+    assert torch.count_nonzero(narrow_view[0]) == 0
+    assert torch.count_nonzero(narrow_view[2]) == 0
+
+
 def test_qsa_source_sets_must_match() -> None:
     groups = _groups()
     groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
