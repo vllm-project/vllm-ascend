@@ -3,12 +3,27 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
-from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
+from vllm_ascend.ops.triton.vision_qkv_rope_pad import _get_num_cores, vision_qkv_rope_pad
 
 TOKEN_COUNTS = [1, 4, 41, 257, 8160]
 NUM_HEADS = 8
 HEAD_DIM = 72
 PADDED_DIM = 128
+
+
+@pytest.mark.parametrize(
+    "tiles, vector_cores, mode, expected",
+    [
+        (5, 48, "dynamic", 5),
+        (90, 48, "dynamic", 48),
+        (5, 48, "fixed", 48),
+        (5, 48, "bucket", 6),
+        (41, 48, "bucket", 48),
+        (7, 40, "bucket", 8),
+    ],
+)
+def test_vision_qkv_rope_pad_grid_uses_device_cores(tiles, vector_cores, mode, expected):
+    assert _get_num_cores(tiles, vector_cores, mode) == expected
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
