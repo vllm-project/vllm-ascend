@@ -81,14 +81,13 @@ def _assert_close(
 
 
 def _build_cos_sin_cache(max_pos: int, pairs: int, theta: float, device):
-    """Production-layout cache: [max_pos, 2*pairs] -> chunk -> two views with
-    stride(0) == 2*pairs, as built from cos_sin_cache.chunk(2, -1)."""
+    """Production [cos | sin] cache; callers may chunk it for references."""
     idx = torch.arange(0, 2 * pairs, 2, device=device, dtype=torch.float32)
     inv_freq = 1.0 / (theta ** (idx / (2 * pairs)))
     pos = torch.arange(max_pos, device=device, dtype=torch.float32)
     freqs = torch.outer(pos, inv_freq)
     cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1).to(torch.bfloat16)
-    return cache.chunk(2, dim=-1)
+    return cache
 
 
 def _reference_indexer_norm_rope(
@@ -164,7 +163,8 @@ def test_fused_indexer_norm_rope_accuracy(num_tokens: int, num_q_heads: int, num
     k_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     k_bias = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     positions = torch.randint(0, max_pos, (num_tokens,), device=device, dtype=torch.int32)
-    cos, sin = _build_cos_sin_cache(max_pos, ROTARY_DIM // 2, THETA, device)
+    cos_sin_cache = _build_cos_sin_cache(max_pos, ROTARY_DIM // 2, THETA, device)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
 
     index_q, index_k, index_z = x_cat.split([q_len, k_len, k_len], dim=-1)
     # Verify the inputs are views from a single tensor, not contiguous copies.
@@ -200,8 +200,7 @@ def test_fused_indexer_norm_rope_accuracy(num_tokens: int, num_q_heads: int, num
         index_z,
         q_weight,
         k_weight,
-        cos,
-        sin,
+        cos_sin_cache,
         positions,
         q_norm_bias=None,
         k_norm_bias=k_bias,
@@ -245,7 +244,8 @@ def test_fused_indexer_norm_rope_pos0_is_identity():
     k_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     k_bias = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     positions = torch.zeros(num_tokens, device=device, dtype=torch.int32)
-    cos, sin = _build_cos_sin_cache(8, ROTARY_DIM // 2, THETA, device)
+    cos_sin_cache = _build_cos_sin_cache(8, ROTARY_DIM // 2, THETA, device)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
 
     index_q, index_k, index_z = x_cat.split([q_len, k_len, k_len], dim=-1)
 
@@ -272,8 +272,7 @@ def test_fused_indexer_norm_rope_pos0_is_identity():
         index_z,
         q_weight,
         k_weight,
-        cos,
-        sin,
+        cos_sin_cache,
         positions,
         q_norm_bias=None,
         k_norm_bias=k_bias,
@@ -309,7 +308,8 @@ def test_fused_indexer_norm_rope_empty_input():
     q_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     k_weight = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
     k_bias = torch.randn(HEAD_DIM, device=device, dtype=torch.bfloat16)
-    cos, sin = _build_cos_sin_cache(8, ROTARY_DIM // 2, THETA, device)
+    cos_sin_cache = _build_cos_sin_cache(8, ROTARY_DIM // 2, THETA, device)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
     positions = torch.empty((0,), device=device, dtype=torch.int32)
 
     q_out, k_out, z_out = fused_indexer_qkz_norm_rope(
@@ -318,8 +318,7 @@ def test_fused_indexer_norm_rope_empty_input():
         index_z,
         q_weight,
         k_weight,
-        cos,
-        sin,
+        cos_sin_cache,
         positions,
         q_norm_bias=None,
         k_norm_bias=k_bias,

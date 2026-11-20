@@ -43,9 +43,9 @@
     - NeoX RoPE over the first `rotary_dim` dims = `rotary_dim // 2` pairs
       (pair layout: dims `i` and `i + rotary_dim // 2`):
       `out1 = y1*cos - y2*sin`, `out2 = y1*sin + y2*cos`; angles are read
-      from the caller-provided cos/sin cache halves
-      (`cos_sin_cache.chunk(2, -1)`, row width `rotary_dim // 2`), rows
-      gathered by `positions`. The normed values are rounded to the input
+      from a single caller-provided `[cos | sin]` cache (last dimension
+      `rotary_dim`), rows gathered by `positions`; the sin half is
+      addressed as `cos + rotary_dim // 2`. The normed values are rounded to the input
       dtype (bf16) before rotation, rotated in fp32 (matches the eager
       path's dtype handoffs).
     - Stores round through the input precision first (bf16 -> output
@@ -82,8 +82,7 @@
 | `index_z` | Input | Indexer Z values, `[tokens, num_k_heads * head_dim]` | bf16 | ND; may be a strided view |
 | `q_norm_weight` | Input | Per-head RMSNorm scale for Q, `[head_dim]` | bf16 | ND (1-D) |
 | `k_norm_weight` | Input | Per-head LayerNorm scale for K, `[head_dim]` | bf16 | ND (1-D) |
-| `cos` | Input | First half of the indexer `cos_sin_cache` (`chunk(2, -1)`) | bf16 | ND 2-D `[max_pos, rotary_dim//2]` |
-| `sin` | Input | Second half of the cache; must share `cos`'s row stride | bf16 | ND 2-D |
+| `cos_sin_cache` | Input | Single `[cos | sin]` cache for the indexer RoPE (last dim = `rotary_dim`); row stride passed to the kernel | bf16 | ND 2-D `[max_pos, rotary_dim]` |
 | `positions` | Input | Absolute position of each token | int32 / int64 | ND (1-D) |
 | `q_norm_bias` | Input | Optional Q norm bias (None in production) | bf16 / None | ND (1-D) |
 | `k_norm_bias` | Input | LayerNorm bias for K | bf16 | ND (1-D) |
@@ -107,9 +106,8 @@
 - `index_q/k/z` must share the same token count; `index_q` width must equal
   `num_q_heads * head_dim`, `index_k`/`index_z` widths `num_k_heads *
   head_dim` (validated with loud errors).
-- `cos` and `sin` must be the two halves of one cache (same row stride);
-  each row must hold at least `rotary_dim // 2` elements; `positions` must
-  index valid rows.
+- `cos_sin_cache` must use the `[cos | sin]` layout with last dimension
+  exactly `rotary_dim`; `positions` must index valid rows.
 - `rotary_dim <= head_dim`.
 - Specialization / recompilation profile: compile-time specialization
   comes from the `constexpr` head counts and flags (required: head chunking
@@ -142,7 +140,7 @@
       of the strided split views and a final bf16 index_q that the scoring
       entry re-quantizes); the fused kernel reads the views in place and
       folds the fp8 quantization into the store.
-    - RoPE angles are always read from the caller's cos/sin cache halves;
+    - RoPE angles are always read from one caller-provided `[cos | sin]` cache;
       per-layer `rope_theta` (`1e7` for the DSA indexer) is the caller's
       responsibility when building the cache.
     - Exposed as a registered custom op

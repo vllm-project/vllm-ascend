@@ -338,17 +338,10 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
         # index_q to e4m3 at the store, which the fused indexer scoring
         # consumes directly. Active for the production partial-RoPE geometry
         # only (0 < sparse_indexer_rope_dim < proxy_dim).
-        indexer_rope_dim = int(sparse_config.sparse_indexer_rope_dim)
+        indexer_rope_dim = int(self.sparse_indexer_rotary_emb.rotary_dim)
         self.use_fused_indexer_norm_rope = (
-            indexer_rope_dim > 0 and indexer_rope_dim < proxy_dim
+            0 < indexer_rope_dim < proxy_dim and indexer_rope_dim % 2 == 0
         )
-        if self.use_fused_indexer_norm_rope:
-            self._indexer_rotary_dim = indexer_rope_dim
-            self._indexer_zero_centered = zero_centered
-            indexer_rotary_cache = self.sparse_indexer_rotary_emb.cos_sin_cache
-            self._indexer_rope_cos, self._indexer_rope_sin = (
-                indexer_rotary_cache.chunk(2, dim=-1)
-            )
 
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
@@ -472,17 +465,16 @@ class AscendStep5DSAAttention(nn.Module, AttentionLayerBase):
                 index_z,
                 self.sparse_indexer_q_norm.weight,
                 self.sparse_indexer_k_norm.weight,
-                self._indexer_rope_cos,
-                self._indexer_rope_sin,
+                self.sparse_indexer_rotary_emb.cos_sin_cache,
                 positions,
                 q_norm_bias=None,
                 k_norm_bias=self.sparse_indexer_k_norm.bias,
                 head_dim=proxy_dim,
                 num_q_heads=num_index_q_heads,
                 num_k_heads=num_index_k_heads,
-                rotary_dim=self._indexer_rotary_dim,
+                rotary_dim=self.sparse_indexer_rotary_emb.rotary_dim,
                 eps=self.sparse_indexer_q_norm.variance_epsilon,
-                q_norm_weight_bias=1.0 if self._indexer_zero_centered else 0.0,
+                q_norm_weight_bias=1.0 if self.sparse_indexer_q_norm.zero_centered else 0.0,
                 k_norm_weight_bias=0.0,
                 subtract_mean_q=False,
                 subtract_mean_k=True,

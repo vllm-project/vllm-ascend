@@ -19,7 +19,7 @@ Numerical contract:
   scale, optional bias), same rounding/rotation contract.
 - RoPE: NeoX pairs over the first ``rotary_dim`` dims = ``rotary_dim // 2``
   pairs (pair layout: dims i and i + rotary_dim // 2), angles read from the
-  caller-provided cos/sin cache halves (``cos_sin_cache.chunk(2, -1)``),
+  a single caller-provided ``[cos | sin]`` cache (``cos_sin_cache``),
   rows indexed by ``positions``.
 - index_q is stored as float8_e4m3fn: its only consumer (the fused indexer
   scoring, ``indexer_score_topk``) wants fp8, so the quantization rides
@@ -215,8 +215,7 @@ def _norm_rope_tile_npu_chunk(
 def _norm_rope_tile_npu(
     x_ptr,
     out_ptr,
-    cos_ptr,
-    sin_ptr,
+    cos_sin_cache_ptr,
     positions_ptr,
     token_idx,
     token_start,
@@ -256,13 +255,13 @@ def _norm_rope_tile_npu(
 
     position = tl.load(positions_ptr + token_idx, mask=token_ok, other=0).to(tl.int32)
     cos_t = tl.load(
-        cos_ptr + position[:, None] * stride_cos + half[None, :],
+        cos_sin_cache_ptr + position[:, None] * stride_cos + half[None, :],
         mask=token_ok[:, None] & half_ok[None, :],
         other=0.0,
     ).to(tl.float32)
     extension.compile_hint(cos_t, "mayDiscretememaccess")
     sin_t = tl.load(
-        sin_ptr + position[:, None] * stride_cos + half[None, :],
+        cos_sin_cache_ptr + rotary_dim + position[:, None] * stride_cos + half[None, :],
         mask=token_ok[:, None] & half_ok[None, :],
         other=0.0,
     ).to(tl.float32)
@@ -311,8 +310,7 @@ def _indexer_qkz_norm_rope_kernel(
     q_bias_ptr,
     k_weight_ptr,
     k_bias_ptr,
-    cos_ptr,
-    sin_ptr,
+    cos_sin_cache_ptr,
     positions_ptr,
     tokens,
     stride_x_q,
@@ -369,7 +367,7 @@ def _indexer_qkz_norm_rope_kernel(
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_Q)
         token_ok = token_idx < num_q_tokens
         _norm_rope_tile_npu(
-            x_q_ptr, out_q_ptr, cos_ptr, sin_ptr, positions_ptr,
+            x_q_ptr, out_q_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
             stride_x_q, stride_out_q, stride_cos, 0,
             w_all_q, w_real_q, w_imag_q, b_all_q, b_real_q, b_imag_q, eps, weight_bias_q,
@@ -398,7 +396,7 @@ def _indexer_qkz_norm_rope_kernel(
         token_idx = token_start + tl.arange(0, ROWS_PER_PROGRAM_KZ)
         token_ok = token_idx < num_k_tokens
         _norm_rope_tile_npu(
-            x_k_ptr, out_k_ptr, cos_ptr, sin_ptr, positions_ptr,
+            x_k_ptr, out_k_ptr, cos_sin_cache_ptr, positions_ptr,
             token_idx, token_start, token_ok,
             stride_x_k, stride_out_k, stride_cos, 0,
             w_all_k, w_real_k, w_imag_k, b_all_k, b_real_k, b_imag_k, eps, weight_bias_k,
@@ -434,8 +432,7 @@ def _fused_indexer_qkz_norm_rope_impl(
     index_z: torch.Tensor,
     q_norm_weight: torch.Tensor,
     k_norm_weight: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
     q_norm_bias: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
@@ -458,6 +455,13 @@ def _fused_indexer_qkz_norm_rope_impl(
     # unchanged made the kernel treat 32 dims as 32 pairs -- imag landed on
     # dims 32-63 and cache reads ran past the 16-wide row into the next
     # position's angles. Convert dims -> pairs here.
+    if rotary_dim % 2 != 0:
+        raise ValueError(f"rotary_dim must be even, got {rotary_dim}")
+    if cos_sin_cache.shape[-1] != rotary_dim:
+        raise ValueError(
+            "cos_sin_cache must be laid out as [cos | sin] with last "
+            f"dimension {rotary_dim}, got shape {tuple(cos_sin_cache.shape)}"
+        )
     rotary_pairs = rotary_dim // 2
 
     tokens = index_q.shape[0]
@@ -505,8 +509,7 @@ def _fused_indexer_qkz_norm_rope_impl(
         q_norm_bias if q_norm_bias is not None else q_norm_weight,
         k_norm_weight,
         k_norm_bias if k_norm_bias is not None else k_norm_weight,
-        cos,
-        sin,
+        cos_sin_cache,
         positions,
         tokens,
         index_q.stride(0),
@@ -514,7 +517,7 @@ def _fused_indexer_qkz_norm_rope_impl(
         index_z.stride(0),
         out_q.stride(0),
         out_k.stride(0),
-        cos.stride(0),
+        cos_sin_cache.stride(0),
         eps,
         q_norm_weight_bias,
         k_norm_weight_bias,
@@ -544,8 +547,7 @@ def _fused_indexer_qkz_norm_rope_fake(
     index_z: torch.Tensor,
     q_norm_weight: torch.Tensor,
     k_norm_weight: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
     q_norm_bias: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
@@ -579,8 +581,7 @@ def fused_indexer_qkz_norm_rope(
     index_z: torch.Tensor,
     q_norm_weight: torch.Tensor,
     k_norm_weight: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
     positions: torch.Tensor,
     q_norm_bias: torch.Tensor | None = None,
     k_norm_bias: torch.Tensor | None = None,
@@ -603,12 +604,12 @@ def fused_indexer_qkz_norm_rope(
     optional bias; Z: passthrough). Inputs may be strided views (the
     ``split_indexer`` slices of the packed qkv+indexer GEMM output) -- the
     kernel reads them in place through their row strides. RoPE angles come
-    from the cos/sin cache halves (``cos_sin_cache.chunk(2, -1)``), rows
-    indexed by ``positions``; ``rotary_dim`` is the rotated dim count and
-    is converted to NeoX pairs internally. Returns ``(index_q e4m3,
-    index_k bf16, index_z bf16)``: the fp8 quantization of index_q rides
-    along with the norm+rope store (its only consumer, the fused indexer
-    scoring, wants fp8).
+    from a single caller-provided ``[cos | sin]`` cache
+    (``cos_sin_cache``), rows indexed by ``positions``; ``rotary_dim`` is
+    the rotated dim count and is converted to NeoX pairs internally.
+    Returns ``(index_q e4m3, index_k bf16, index_z bf16)``: the fp8
+    quantization of index_q rides along with the norm+rope store (its only
+    consumer, the fused indexer scoring, wants fp8).
     """
     return torch.ops.vllm.ascend_step5_fused_indexer_norm_rope(
         index_q,
@@ -616,8 +617,7 @@ def fused_indexer_qkz_norm_rope(
         index_z,
         q_norm_weight,
         k_norm_weight,
-        cos,
-        sin,
+        cos_sin_cache,
         positions,
         q_norm_bias,
         k_norm_bias,
