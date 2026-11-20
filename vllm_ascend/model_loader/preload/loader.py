@@ -3,12 +3,16 @@
 
 import gc
 import itertools
+import socket
+import struct
 import sys
 from contextlib import contextmanager
 
+import psutil
 import torch
 from torch.utils.hooks import RemovableHandle
 from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.model_loader.weight_cache import utils as weight_cache_utils
 from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
 from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheState
 
@@ -112,6 +116,22 @@ class AscendIpcModelLoader(IpcModelLoader):
     it. A replacement daemon may allocate a second copy of the cached weights.
     """
 
+    preload_daemon_process: psutil.Process | None = None
+    _capture_daemon_process = False
+
+    def _connect(self, timeout: float) -> socket.socket:
+        conn = super()._connect(timeout)
+        if self._capture_daemon_process and hasattr(socket, "SO_PEERCRED"):
+            # Identify the process on the same connection that supplies the
+            # startup charge. A later connection can reach a replacement.
+            try:
+                credentials = struct.Struct("3i")
+                pid, _, _ = credentials.unpack(conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, credentials.size))
+                self.preload_daemon_process = psutil.Process(pid) if pid > 0 else None
+            except (OSError, psutil.Error):
+                self.preload_daemon_process = None
+        return conn
+
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
         validate_preload_config(vllm_config, mode=self.mode)
         if self.mode == "copy":
@@ -120,7 +140,12 @@ class AscendIpcModelLoader(IpcModelLoader):
             # remove a confirmed producer release from the profiling delta.
             self.resident_cache_memory = self._daemon_memory()
             return 0
-        return super().get_external_weight_memory(vllm_config)
+        self.preload_daemon_process = None
+        self._capture_daemon_process = self.fallback
+        try:
+            return super().get_external_weight_memory(vllm_config)
+        finally:
+            self._capture_daemon_process = False
 
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> torch.nn.Module:
         validate_preload_config(vllm_config, mode=self.mode)
@@ -140,7 +165,12 @@ class AscendIpcModelLoader(IpcModelLoader):
         # tracebacks and model cycles can be reclaimed before disk allocation.
         gc.collect()
         torch.accelerator.empty_cache()
-        return super()._fallback_load(vllm_config, model_config, prefix)
+        model = super()._fallback_load(vllm_config, model_config, prefix)
+        # TODO: Remove this marker once the minimum supported vLLM release
+        # includes vllm-project/vllm#63488, which records the fallback upstream.
+        if self.mode == "zero_copy" and not hasattr(weight_cache_utils, "ExternalWeightCharges"):
+            model._ascend_preload_disk_fallback = True
+        return model
 
     def _send_release(self) -> None:
         if self.mode == "copy":

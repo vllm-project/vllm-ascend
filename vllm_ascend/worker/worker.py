@@ -26,6 +26,7 @@ from types import NoneType
 from typing import Any
 from unittest.mock import patch
 
+import psutil
 import torch
 import torch.nn as nn
 import torch_npu
@@ -80,6 +81,13 @@ from vllm.v1.worker.startup_plan import (
 from vllm.v1.worker.utils import request_memory
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
+
+# TODO: Import ExternalWeightCharges directly and remove its None checks once
+# the minimum supported vLLM release includes vllm-project/vllm#63488.
+try:
+    from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
+except ImportError:
+    ExternalWeightCharges = None
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
@@ -552,7 +560,12 @@ class NPUWorker(WorkerBase):
         # but must not be allocated or charged again by this worker.
         loader = get_model_loader(self.load_config)
         query_external_memory = getattr(loader, "get_external_weight_memory", None)
-        external_weight_memory = query_external_memory(self.vllm_config) if query_external_memory is not None else 0
+        charges = ExternalWeightCharges() if ExternalWeightCharges is not None else None
+        with charges.track() if charges is not None else nullcontext():
+            external_weight_memory = query_external_memory(self.vllm_config) if query_external_memory is not None else 0
+        self._external_weight_charges = charges
+        self._preload_external_weight_memory = external_weight_memory
+        self._preload_daemon_process = getattr(loader, "preload_daemon_process", None)
         self._preload_copy_cache_memory = getattr(loader, "resident_cache_memory", 0)
         self.init_snapshot = MemorySnapshot(device=device)
         if external_weight_memory:
@@ -722,6 +735,11 @@ class NPUWorker(WorkerBase):
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
+        preload_disk_fallback = getattr(self, "_preload_disk_fallback", False)
+        if preload_disk_fallback:
+            # A device-wide drop can include releases that the worker cannot
+            # attribute. Never let a negative overhead increase the KV budget.
+            profile_result.non_torch_increase = max(0, profile_result.non_torch_increase)
         if self.vllm_config.attention_config.hisparse_config is None:
             profile_result.non_kv_cache_memory = (
                 profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
@@ -746,6 +764,8 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        if preload_disk_fallback:
+            self.available_kv_cache_memory_bytes = min(self.available_kv_cache_memory_bytes, free_gpu_memory)
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -982,8 +1002,26 @@ class NPUWorker(WorkerBase):
         else:
             empty_cache_context = nullcontext()
 
-        with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
+        charges = getattr(self, "_external_weight_charges", None)
+        with (
+            context,
+            empty_cache_context,
+            set_current_vllm_config(self.vllm_config),
+            charges.track() if charges is not None else nullcontext(),
+        ):
             self.model_runner.load_model()
+
+        if external_weight_memory := getattr(self, "_preload_external_weight_memory", 0):
+            if charges is not None:
+                fallback_bytes = charges.fallback_bytes
+            else:
+                # TODO: Remove this branch and the loader's fallback marker once
+                # the minimum supported vLLM release includes vllm-project/vllm#63488.
+                disk_fallback = self.get_model().__dict__.pop("_ascend_preload_disk_fallback", False)
+                fallback_bytes = external_weight_memory if disk_fallback else 0
+            if fallback_bytes:
+                self._preload_disk_fallback = True
+                self._reconcile_preload_fallback(min(fallback_bytes, external_weight_memory), external_weight_memory)
 
         if copy_cache_memory := getattr(self, "_preload_copy_cache_memory", 0):
             model = self.model_runner.get_model()
@@ -1010,6 +1048,34 @@ class NPUWorker(WorkerBase):
                 self.device,
                 self.model_runner.get_model(),
             )
+
+    def _reconcile_preload_fallback(self, fallback_bytes: int, external_weight_memory: int) -> None:
+        producer = self._preload_daemon_process
+        if producer is None:
+            return
+        try:
+            if producer.is_running() and producer.status() != psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            return
+
+        # Rebase from the observed device drop, excluding the worker's own
+        # allocator reservations. This can include producer runtime memory
+        # beyond its weight charge, or less if other IPC imports keep it alive.
+        after_disk_load = MemorySnapshot(device=self.device)
+        correction = self.init_snapshot.non_torch_memory - after_disk_load.non_torch_memory
+        if correction <= 0:
+            return
+
+        snapshot = copy.copy(self.init_snapshot)
+        snapshot.free_memory += correction
+        snapshot.cuda_memory -= correction
+        snapshot.non_torch_memory -= correction
+        remaining_charge = external_weight_memory - min(fallback_bytes, correction)
+        self.requested_memory = request_memory(snapshot, self.cache_config, remaining_charge)
+        self.init_snapshot = snapshot
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.

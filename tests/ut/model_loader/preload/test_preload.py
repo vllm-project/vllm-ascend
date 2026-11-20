@@ -700,6 +700,136 @@ def test_copy_release_is_not_counted_as_negative_engine_memory(monkeypatch, resi
     assert instance.init_snapshot.free_memory == 1000 + correction
 
 
+@pytest.mark.parametrize("use_upstream_tracker", [False, True])
+@pytest.mark.parametrize(
+    "failure,producer_status,observed_release,correction",
+    [
+        ("unavailable", "exited", 300, 300),
+        ("unavailable", "exited", 500, 500),
+        ("unavailable", "zombie", 80, 80),
+        ("unavailable", "exited", 0, 0),
+        ("mismatch", "running", 100, 0),
+        ("mismatch", None, 100, 0),
+    ],
+)
+def test_zero_copy_fallback_reconciles_only_released_memory(
+    valid_config, monkeypatch, use_upstream_tracker, failure, producer_status, observed_release, correction
+):
+    from contextlib import contextmanager, nullcontext
+
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader, utils
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        CacheConfigMismatchError,
+        WeightCacheUnavailableError,
+    )
+
+    from vllm_ascend.worker import worker
+
+    external_bytes = 300
+    socket_path = "/tmp/ascend-preload-test.sock"
+    if use_upstream_tracker and worker.ExternalWeightCharges is None:
+        pytest.skip("Installed vLLM lacks ExternalWeightCharges")
+    charges = worker.ExternalWeightCharges() if use_upstream_tracker else None
+    if charges is not None:
+        with charges.track():
+            utils.record_external_weight_charge(socket_path, False, external_bytes)
+    else:
+        monkeypatch.delattr(utils, "ExternalWeightCharges", raising=False)
+
+    loader = _loader()
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(loader, "_resolve_socket_path", lambda: socket_path)
+    error = WeightCacheUnavailableError if failure == "unavailable" else CacheConfigMismatchError
+    monkeypatch.setattr(loader, "_fetch_entries", Mock(side_effect=error(failure)))
+
+    def load_model():
+        loaded = loader.load_model(valid_config, valid_config.model_config)
+        assert ("_ascend_preload_disk_fallback" in loaded.__dict__) is not use_upstream_tracker
+
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.npu, "memory_stats", lambda _: {"allocated_bytes.all.peak": 135})
+
+    model = torch.nn.Module()
+    private_weights = 120
+    runtime_memory = 10
+    after_disk_load = SimpleNamespace(non_torch_memory=800)
+
+    def disk_load(*args):
+        # No release at fallback entry. HBM changes while loading from disk.
+        after_disk_load.non_torch_memory -= observed_release
+        return model
+
+    monkeypatch.setattr(ipc_loader.IpcModelLoader, "_fallback_load", disk_load)
+    sample = Mock(return_value=after_disk_load)
+    monkeypatch.setattr(worker, "MemorySnapshot", sample)
+    # A second RPC would time out, which upstream's fallback wrapper reports
+    # as zero external bytes. Reconciliation should not make that RPC.
+    probe = Mock(return_value=SimpleNamespace(get_external_weight_memory=Mock(return_value=0)))
+    monkeypatch.setattr(worker, "get_model_loader", probe)
+
+    @contextmanager
+    def profile(snapshot, weights_memory):
+        yield SimpleNamespace(
+            before_profile=SimpleNamespace(torch_peak=private_weights),
+            after_profile=SimpleNamespace(free_memory=200 + observed_release - private_weights - runtime_memory),
+            non_torch_increase=after_disk_load.non_torch_memory + runtime_memory - snapshot.non_torch_memory,
+            weights_memory=weights_memory,
+        )
+
+    instance = worker.NPUWorker.__new__(worker.NPUWorker)
+    instance.device = torch.device("cpu")
+    valid_config.device_config = SimpleNamespace(device=instance.device)
+    valid_config.weight_transfer_config = None
+    valid_config.attention_config = SimpleNamespace(hisparse_config=None)
+    valid_config.kv_transfer_config = None
+    valid_config.cache_config.kv_cache_memory_bytes = None
+    valid_config.cache_config.gpu_memory_utilization = 0.45
+    instance.vllm_config = valid_config
+    instance.parallel_config = valid_config.parallel_config
+    instance.cache_config = valid_config.cache_config
+    instance.model_runner = SimpleNamespace(
+        load_model=load_model,
+        get_model=lambda: model,
+        profile_run=Mock(),
+        model_memory_usage=private_weights,
+    )
+    instance._preload_external_weight_memory = external_bytes
+    instance._external_weight_charges = charges
+    instance._preload_daemon_process = None
+    if producer_status is not None:
+        instance._preload_daemon_process = Mock(
+            is_running=Mock(return_value=producer_status != "exited"), status=Mock(return_value=producer_status)
+        )
+    instance.init_snapshot = SimpleNamespace(
+        free_memory=200, total_memory=1000, cuda_memory=800, non_torch_memory=800, device_=instance.device
+    )
+    instance.requested_memory = 150
+    instance._scale_kv_cache_memory_for_multi_group = lambda size: size
+    instance._apply_kv_offload_decode_memory_constraints = lambda size: size
+    instance._kvpp_cache_allocation_plan = None
+    monkeypatch.setattr(worker, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(worker, "memory_profiling", profile)
+
+    instance.load_model()
+    kv_bytes = instance.determine_available_memory()
+
+    assert instance.init_snapshot.free_memory == 200 + correction
+    assert instance.init_snapshot.cuda_memory == 800 - correction
+    assert instance.init_snapshot.non_torch_memory == 800 - correction
+    assert instance.requested_memory == 150 + min(external_bytes, correction)
+    assert instance.non_torch_memory == max(0, runtime_memory - observed_release + correction)
+    assert kv_bytes == instance.requested_memory - private_weights - 15 - instance.non_torch_memory
+    assert "_ascend_preload_disk_fallback" not in model.__dict__
+    probe.assert_not_called()
+    if producer_status in ("exited", "zombie"):
+        sample.assert_called_once_with(device=instance.device)
+    else:
+        sample.assert_not_called()
+    if charges is not None:
+        assert charges.fallback_bytes == external_bytes
+
+
 def test_daemon_copy_release_collects_cycles_and_hooks_before_acknowledging(monkeypatch):
     from torch.utils.hooks import RemovableHandle
 
