@@ -1703,6 +1703,17 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
+#   2. `vllm.v1.worker.gpu.model_states.interface.ModelState.gather_mm_embeddings`
+#    Why:
+#       An idle PCP rank can retain a zero-token request inside an image span.
+#    How:
+#       Return empty media embeddings and a mask for an idle PCP rank so it
+#       can continue to the shared padded token embedding exchange.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/64435
+#    Future Plan:
+#       Remove the wrapper once the paired vLLM includes the upstream guard.
+#
 # ** 28. File: worker/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
