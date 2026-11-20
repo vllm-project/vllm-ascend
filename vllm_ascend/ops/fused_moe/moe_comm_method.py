@@ -573,9 +573,25 @@ class FusedMC2CommImpl(MoECommMethod):
             )
             # Mixed quantization: declare the shared weight dtype explicitly,
             # otherwise the operator inherits the routed weight type for the
-            # shared descriptors and resolves the wrong shared GMM mode.
-            shared_weight_type = getattr(shared_fusion, "weight_type", None)
-            if shared_weight_type is not None and shared_weight_type != weight_type:
+            # shared descriptors and resolves the wrong shared GMM mode. Pick
+            # the coarse descriptor family from the ACTUAL shared weight dtype
+            # instead of the fine-grained quant_out_dtype, which can disagree
+            # with the tensor dtype (e.g. W4A8 packed as int8 bytes).
+            shared_tensors = weights.shared_w1
+            shared_first = (
+                shared_tensors[0] if isinstance(shared_tensors, (list, tuple)) else shared_tensors
+            )
+            shared_dtype = getattr(shared_first, "dtype", None)
+            if shared_dtype == torch.int8:
+                # int8 descriptor family: always INT8, even when the routed
+                # path is W4A8/packed-int4 or an MXFP type.
+                shared_weight_type = moe_utils._get_cann_mega_moe_quant_settings(QuantType.W8A8)[2]
+            elif shared_dtype in (torch.float8_e4m3fn, torch.uint8):
+                # fp8 / packed-fp4 family: inherit the routed descriptor.
+                shared_weight_type = weight_type
+            else:
+                shared_weight_type = getattr(shared_fusion, "weight_type", None)
+            if shared_weight_type is not None:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
         # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /

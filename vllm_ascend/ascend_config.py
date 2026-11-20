@@ -1146,10 +1146,14 @@ class AscendConfig:
             return
 
         hardware_profile = get_current_hardware_profile()
-        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+        supports_fp_fusion = hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION)
+        supports_int_fusion = hardware_profile.supports(
+            HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT
+        )
+        if not (supports_fp_fusion or supports_int_fusion):
             raise NotImplementedError(
-                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
-                "the current hardware profile does not support it. "
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on "
+                "A5 (MXFP) or A3 (INT8); the current hardware profile does not support it. "
                 "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
