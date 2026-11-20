@@ -3708,6 +3708,40 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertIsNone(tracker.add(reports[0]))
         self.assertIs(tracker.add(reports[1]), reports[0].event)
 
+    def test_tp_mismatch_reports_lookup_hits_without_sync_or_put(self):
+        worker = self._make_strided_worker()
+        worker.enable_kv_events = True
+        worker.m_store = MagicMock()
+        worker.m_store.exists.side_effect = lambda keys: [1] * len(keys)
+        worker.token_database.set_group_buffers({0: [0]}, {0: [16]}, {0: [16]})
+        thread = KVCacheStoreSendingThread(
+            worker.m_store,
+            worker.token_database,
+            block_size=4,
+            tp_rank=0,
+            enable_kv_event=True,
+            required_store_keys=worker._required_cpu_event_keys,
+        )
+        worker.kv_send_thread = thread
+        request = ReqMeta(
+            req_id="lookup-only",
+            token_len_chunk=4,
+            block_ids=[5],
+            block_hashes=[b"h0"],
+            token_ids=list(range(4)),
+            original_block_size=4,
+            current_event=MagicMock(),
+        )
+        thread.add_stored_request(request)
+        self.assertTrue(worker._store_kv_tp_mismatch(request))
+        request.current_event.synchronize.assert_not_called()
+        worker.m_store.put.assert_not_called()
+        reports = thread.get_kv_events()
+        self.assertEqual(len(reports), 1)
+        self.assertFalse(reports[0].newly_stored)
+        self.assertEqual(len(reports[0].completed_keys), 2)
+        self.assertIsNone(CPUBlockEventTracker().add(reports[0]))
+
     def test_store_kv_tp_mismatch_events_follow_missing_blocks(self):
         worker = self._make_strided_worker()
         worker.m_store = MagicMock()
