@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 from vllm_ascend.ops.linear import AscendReplicatedLinear
+from vllm_ascend.ops.moe_stream_events import wait_eager_boundary
 
 
 class AscendGateLinear(GateLinear):
@@ -97,7 +98,9 @@ class AscendGateLinear(GateLinear):
             and self.out_dtype == torch.float32
             and self.bias is None
         ):
+            wait_eager_boundary()
             output = torch.mm(x, self.weight.t(), out_dtype=torch.float32)
+            wait_eager_boundary()
             return output if not self.return_bias else (output, None)
         # Tier 5: cast x to the weight dtype, compute, cast the output to
         # out_dtype (upstream fallback semantics; out_dtype is always set

@@ -16,6 +16,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
+from vllm_ascend.ops.moe_stream_events import wait_eager_boundary
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -139,6 +141,7 @@ def chunk_gated_delta_rule_fwd(
             keep_meta = None
         w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
         u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
+        wait_eager_boundary()
         h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h_vllm(
             k_ascendc,
             w_ascendc,
@@ -154,6 +157,7 @@ def chunk_gated_delta_rule_fwd(
             use_exp2=False,
             transpose_state_layout=False,
         )
+        wait_eager_boundary()
         if keep_meta is not None:
             # Scatter the compacted final_state back to the original [N, H, K, V]
             # layout the PCP state recursion expects; empty segments keep their
