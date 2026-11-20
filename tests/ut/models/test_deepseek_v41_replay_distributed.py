@@ -144,7 +144,7 @@ def _distributed_replay_worker(rank, init_method):
                 context = ReplayPCPContext(global_batch, torch.arange(8).reshape(1, -1), batch.positions)
                 state.prepare(
                     replay_mod.DecoderReplayInputs(
-                        batch, (), torch.arange(8).reshape(1, -1), [], torch.zeros(1, dtype=torch.int32), context
+                        batch, (), torch.arange(8).reshape(1, -1), [], torch.zeros(1, dtype=torch.int32), [], context
                     ),
                     CUDAGraphMode.NONE,
                 )

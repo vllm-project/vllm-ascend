@@ -3,10 +3,10 @@ from collections.abc import Sequence
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.core.kv_cache_layers import CacheGroup
 from vllm_ascend.models.step5.sparse_attention import AscendStep5CSATailRing, AscendStep5SparseSummaryCacheLayer
 from vllm_ascend.utils import vllm_version_is
 
@@ -18,7 +18,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
-    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    kv_cache_groups: Sequence[CacheGroup] | None = None,
     layer_kv_caches: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """
@@ -66,7 +66,7 @@ def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
     num_attn_module: int = 1,
-    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    kv_cache_groups: Sequence[CacheGroup] | None = None,
 ) -> None:
     """Ascend binding for vLLM main (#53781).
 

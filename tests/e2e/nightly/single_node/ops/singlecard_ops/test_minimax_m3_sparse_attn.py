@@ -96,8 +96,7 @@ PRODUCTION_LONG_PREFILL_QUERY_LEN = 64
 
 
 def _make_prepared_gbsa_builder(kv_dtype):
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
+    from tests.kv_cache_groups import full_attention_spec_type
     from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3SparseMetadataBuilder
 
     config = SimpleNamespace(
@@ -111,7 +110,7 @@ def _make_prepared_gbsa_builder(kv_dtype):
         speculative_config=SimpleNamespace(num_speculative_tokens=15, parallel_drafting=False),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, tensor_parallel_size=1),
     )
-    spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
+    spec = full_attention_spec_type(block_size=128, num_kv_heads=1, head_size=128, dtype=kv_dtype)
     return AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer.attn"], config, torch.device(DEVICE))
 
 

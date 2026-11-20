@@ -4,25 +4,21 @@
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_layers import CacheGroup, cache_layouts, make_cache_group
 from vllm_ascend.utils import vllm_version_is
-
-# vLLM main moved this helper to kv_cache_planning after v0.32.0.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import create_kv_cache_group_specs
-else:
-    from vllm.v1.core.kv_cache_planning import create_kv_cache_group_specs
-
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
+
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 def make_kimi_cache_groups(
@@ -31,7 +27,8 @@ def make_kimi_cache_groups(
     *,
     recurrent_group_size: int,
     uniform_recurrent: bool,
-) -> list[KVCacheGroupSpec] | None:
+    configs=None,
+) -> list[CacheGroup] | None:
     """Share full-history ownership and balance recurrent groups by slot budget.
 
     Callers validate roles and geometry, and supply specs in layer order with
@@ -42,27 +39,24 @@ def make_kimi_cache_groups(
     K3 retains per-layer recurrent specs for its shared-tuple allocation;
     K3.1 keeps native merged Mamba specs for its paired-page allocation.
     """
-    full_history = UniformTypeKVCacheSpecs.from_specs(full_history_specs)
+    full_history = make_cache_group(configs, full_history_specs)
     if full_history is None:
         return None
-    groups = [KVCacheGroupSpec(list(full_history_specs), full_history)]
+    groups = [full_history]
     names = list(recurrent_specs)
     count = cdiv(len(names), recurrent_group_size)
-    recurrent_layers = [names[i::count] for i in range(count)]
-    if uniform_recurrent:
-        for layer_names in recurrent_layers:
-            group_specs = {name: recurrent_specs[name] for name in layer_names}
-            uniform = UniformTypeKVCacheSpecs.from_specs(group_specs)
-            assert uniform is not None
-            groups.append(KVCacheGroupSpec(layer_names, uniform))
-    elif recurrent_layers:
-        groups.extend(create_kv_cache_group_specs(recurrent_specs, recurrent_layers))
+    for i in range(count):
+        members = {name: recurrent_specs[name] for name in names[i::count]}
+        group = make_cache_group(configs, members, uniform=uniform_recurrent)
+        if group is None:
+            return None
+        groups.append(group)
     return groups
 
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec] | None:
+) -> list[CacheGroup] | None:
     """Build topology-independent Kimi K3 DSpark scheduler groups.
 
     Target and causal draft attention layers require the same full-sequence
@@ -77,15 +71,25 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     relation. An unrecognized or incompatible signature falls back to vLLM's
     generic hybrid grouping.
     """
+    configs = kv_cache_spec
+    kv_cache_spec = cache_layouts(configs)
+
+    def full_history(name, spec):
+        return (
+            issubclass(configs[name].manager_cls, FullAttentionManager)
+            if not vllm_version_is("0.33.0")
+            else isinstance(spec, FullAttentionSpec)
+        )
+
     target_attention_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and full_history(name, spec)
     }
     draft_attention_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and full_history(name, spec)
     }
     mamba_specs = {
         name: spec
@@ -126,6 +130,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
         mamba_specs,
         recurrent_group_size=len(mixed_attention_specs),
         uniform_recurrent=True,
+        configs=configs,
     )
     if groups is None:
         return None
@@ -137,3 +142,10 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
         [len(group.layer_names) for group in groups[1:]],
     )
     return groups
+
+
+def _uses_causal_draft_attention(config) -> bool:
+    dflash_config = getattr(config, "dflash_config", None)
+    if isinstance(dflash_config, dict) and "causal" in dflash_config:
+        return bool(dflash_config["causal"])
+    return bool(getattr(config, "full_attention_causal", False))

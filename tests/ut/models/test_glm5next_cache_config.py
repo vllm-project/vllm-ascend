@@ -8,27 +8,50 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import AttentionConfig
-from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager, SlidingWindowManager
+
+from tests.kv_cache_groups import full_attention_spec_type
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_max_blocks
+from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
-    get_glm5_next_kv_cache_groups,
     get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
+from vllm_ascend.models.glm5next.cache_config import (
+    get_glm5_next_kv_cache_groups as build_groups,
+)
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+
+def get_glm5_next_kv_cache_groups(config, layouts, *, speculative_blocks=0):
+    if not vllm_version_is("0.33.0"):
+        configs = {}
+        for name, spec in layouts.items():
+            if isinstance(spec, AscendIndexerKPoolTailSpec):
+                configs[name] = KpoolTailManager.layer_config(spec)
+            elif isinstance(spec, MambaSpec):
+                configs[name] = MambaManager.layer_config(spec, num_speculative_blocks=speculative_blocks)
+            elif type(spec) is full_attention_spec_type:
+                configs[name] = SlidingWindowManager.layer_config(spec, sliding_window=16)
+            else:
+                configs[name] = FullAttentionManager.layer_config(spec)
+        return build_groups(config, configs)
+    return build_groups(config, layouts)
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -44,10 +67,12 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
     config = make_config()
     config.attention_config = SimpleNamespace(hisparse_config=None)
     specs = {
-        name: replace(spec, num_speculative_blocks=speculative_blocks) if isinstance(spec, MambaSpec) else spec
+        name: replace(spec, num_speculative_blocks=speculative_blocks)
+        if vllm_version_is("0.33.0") and isinstance(spec, MambaSpec)
+        else spec
         for name, spec in make_specs(pool).items()
     }
-    groups = get_glm5_next_kv_cache_groups(config, specs)
+    groups = get_glm5_next_kv_cache_groups(config, specs, speculative_blocks=speculative_blocks)
     physical = get_glm5_next_kv_cache_config(config, groups, get_glm5_next_pool_bytes_per_block(groups))
     assert len({tensor.size for tensor in physical.kv_cache_tensors}) == 2
     expected = sum(tensor.size for tensor in physical.kv_cache_tensors)
@@ -59,10 +84,17 @@ def test_platform_builder_accounts_for_both_glm_page_classes(pool, speculative_b
 
 def test_platform_builder_preserves_default_non_glm_accounting():
     pytest.importorskip("vllm.v1.core.kv_cache_planning")
-    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+    from vllm.utils.import_utils import resolve_obj_by_qualname
 
-    groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
-    groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
+    from vllm_ascend.platform import NPUPlatform
+
+    AscendKVCacheConfigBuilder = resolve_obj_by_qualname(NPUPlatform.get_kv_cache_config_builder_cls(make_config()))
+    layout = replace(make_specs()["model.layers.3.attn"], model_version=None)
+    groups = [
+        CacheGroup.from_layers({"attn": FullAttentionManager.layer_config(layout)})
+        if not vllm_version_is("0.33.0")
+        else CacheGroup(["attn"], layout)
+    ]
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
 
 
@@ -120,7 +152,7 @@ def make_specs(pool: int = 16):
         "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
             ring_capacity=pool,
-            sliding_window=pool,
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": pool}),
             compress_ratio=pool,
             num_kv_heads=1,
             head_size=128,
@@ -141,7 +173,8 @@ def make_specs(pool: int = 16):
 @pytest.fixture(autouse=True)
 def register_cache_specs():
     # Match production: vLLM registers built-in specs before the Ascend hook.
-    register_all_kvcache_specs(None)
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
 
 
 @pytest.mark.parametrize("pool", [4, 16])
@@ -192,11 +225,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
-    required_blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
+    required_blocks = sum(group_max_blocks(group, config) for group in groups)
     assert get_glm5_next_pool_bytes_per_block(groups) == bytes_per_block
     assert get_glm5_next_max_memory_usage(config, groups) == required_blocks * bytes_per_block
 
@@ -287,13 +316,20 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     config = make_config()
     groups = get_glm5_next_kv_cache_groups(config, make_specs())
     local_mamba_name = groups[2].layer_names[0]
-    projected_groups = [
-        KVCacheGroupSpec(
-            [local_mamba_name] if group is groups[2] else [],
-            group.kv_cache_spec,
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
+
+        projected_groups = _project_kv_cache_groups_to_worker(
+            groups, {local_mamba_name: MambaManager.layer_config(groups[2].kv_cache_specs[local_mamba_name])}
         )
-        for group in groups
-    ]
+    else:
+        projected_groups = [
+            CacheGroup(
+                [local_mamba_name] if group is groups[2] else [],
+                group.kv_cache_spec,
+            )
+            for group in groups
+        ]
 
     layout = _get_glm5_next_cache_layout(projected_groups)
     assert layout is not None
@@ -322,12 +358,13 @@ def test_sliding_window_draft_caches_use_independent_physical_tensors():
     for layer_idx in range(10, 14):
         name = f"model.layers.{layer_idx}.self_attn.attn"
         draft_names.append(name)
-        specs[name] = SlidingWindowSpec(
+        cls = full_attention_spec_type if not vllm_version_is("0.33.0") else SlidingWindowSpec
+        specs[name] = cls(
             block_size=16,
             num_kv_heads=1,
             head_size=8,
             dtype=torch.bfloat16,
-            sliding_window=16,
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         )
 
     groups = get_glm5_next_kv_cache_groups(config, specs)
@@ -385,7 +422,10 @@ def test_worker_preserves_glm5_next_physical_pool_budget(monkeypatch, use_sparse
     worker = NPUWorker.__new__(NPUWorker)
     worker.vllm_config = config
     worker.model_config = config.model_config
-    worker.get_kv_cache_spec = lambda: specs
+    if not vllm_version_is("0.33.0"):
+        worker.get_kv_cache_layer_configs = lambda: specs
+    else:
+        worker.get_kv_cache_spec = lambda: specs
     worker.model_runner = SimpleNamespace(
         use_sparse=use_sparse,
         use_compress=False,

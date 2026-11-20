@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
@@ -232,7 +233,7 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer_name = "model.layers.0.self_attn"
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=2,
         num_kv_heads=1,
         head_size=3,
@@ -240,7 +241,7 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
     )
     kv_cache_config = SimpleNamespace(
         num_blocks=4,
-        kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
+        kv_cache_groups=[cache_group([layer_name], spec)],
         kv_cache_tensors=[],
         # The connector offloads the groups vLLM selects, not all of them.
         prefix_cacheable_group_ids=(0,),
@@ -287,7 +288,7 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
     )
     kv_cache_config = SimpleNamespace(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[cache_group([layer_name], spec)],
         kv_cache_tensors=[],
         # The connector offloads the groups vLLM selects, not all of them.
         prefix_cacheable_group_ids=(0,),

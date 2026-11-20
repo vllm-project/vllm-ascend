@@ -37,7 +37,7 @@ from vllm.model_executor.offloader.base import set_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -74,7 +74,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
+from vllm_ascend.core.kv_cache_layers import cache_layouts, get_cache_requirements, with_cache_layouts
 from vllm_ascend.distributed.expert_transfer import expert_offload_utils as expert_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -411,9 +412,18 @@ class NPUModelRunner(GPUModelRunner):
         self._finalize_dump_data()
         return output
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        kv_cache_spec = super().get_kv_cache_spec()
+    if not vllm_version_is("0.33.0"):
 
+        def get_kv_cache_layer_configs(self):
+            configs = super().get_kv_cache_layer_configs()
+            specs = self._resident_cache_layouts(cache_layouts(configs))
+            return with_cache_layouts(configs, specs)
+    else:
+
+        def get_kv_cache_spec(self):
+            return self._resident_cache_layouts(super().get_kv_cache_spec())
+
+    def _resident_cache_layouts(self, kv_cache_spec):
         return apply_dspark_resident_kv_specs(
             kv_cache_spec,
             self.vllm_config,
@@ -530,7 +540,7 @@ class NPUModelRunner(GPUModelRunner):
             self.model_state._offload_draft_attn_groups = (
                 [] if resident_draft_names else getattr(self.speculator, "attn_groups", [])
             )
-        if any(is_circular_kv_cache_spec(group.kv_cache_spec) for group in self.kv_cache_config.kv_cache_groups):
+        if any(is_circular_cache_group(group) for group in self.kv_cache_config.kv_cache_groups):
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
             for module in self.model.modules():
@@ -841,7 +851,11 @@ class NPUModelRunner(GPUModelRunner):
         """
         sparse_cfg = self.ascend_config.sparse_kv_offload_config
         if sparse_cfg.enabled:
-            allocate_kv_offload_topk_profile_buffers(self.get_kv_cache_spec(), self.vllm_config, sparse_cfg)
+            allocate_kv_offload_topk_profile_buffers(
+                cache_layouts(get_cache_requirements(self)),
+                self.vllm_config,
+                sparse_cfg,
+            )
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens

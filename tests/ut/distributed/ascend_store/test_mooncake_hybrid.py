@@ -13,16 +13,11 @@ from numpy.typing import NDArray
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, mamba_requirement, window_requirement
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     attention_transfer_window,
@@ -39,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
+from vllm_ascend.utils import vllm_version_is
 
 
 class MemoryRangeStore:
@@ -129,40 +125,49 @@ class TestMooncakeHybrid(unittest.TestCase):
         pcp_rank=0,
     ):
         groups = [
-            KVCacheGroupSpec(
+            cache_group(
                 ["model.layers.0.kv", "model.layers.2.kv"],
-                FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
             ),
-            KVCacheGroupSpec(
+            cache_group(
                 ["model.layers.1.c4", "model.layers.2.c4", "model.layers.3.c4"],
-                FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
+                full_attention_spec_type(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
             ),
-            KVCacheGroupSpec(
+            cache_group(
                 ["model.layers.0.state", "model.layers.3.state"],
-                SlidingWindowSpec(block_size=16, sliding_window=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                window_requirement(block_size=16, sliding_window=16, num_kv_heads=1, head_size=1, dtype="uint8"),
             ),
         ]
         if extra_entry:
-            groups[1].layer_names.append("model.layers.2.c4_indexer")
+            groups[1] = cache_group(
+                [*groups[1].layer_names, "model.layers.2.c4_indexer"], group_distinct_specs(groups[1])[0]
+            )
         if private_tail:
-            groups[2].kv_cache_spec = MambaSpec(
-                block_size=16,
-                shapes=((4,), (4,)),
-                dtypes=("uint8", "uint8"),
-                mamba_cache_mode="align",
-                num_speculative_blocks=3,
+            groups[2] = cache_group(
+                groups[2].layer_names,
+                mamba_requirement(
+                    block_size=16,
+                    shapes=((4,), (4,)),
+                    dtypes=("uint8", "uint8"),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=3,
+                ),
             )
 
             # A private ring's capacity is unrelated to token/hash pages.
             # Wrap it like the per-layer specs supplied to real workers.
-            class PrivateTailSpec(FullAttentionSpec):
+            class PrivateTailSpec(full_attention_spec_type):
                 @property
                 def prefix_cacheable(self):
                     return False
 
             name = "model.layers.2.indexer.tail_cache"
             tail = PrivateTailSpec(block_size=7, num_kv_heads=1, head_size=1, dtype="uint8")
-            groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
+            if not vllm_version_is("0.33.0"):
+                from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+
+                tail = CircularBufferManager.layer_config(tail)
+            groups.append(cache_group([name], {name: tail}))
         config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.BaseKVPoolWorker._build_cache_coordinator",
@@ -398,35 +403,42 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_layout_fingerprint_covers_group_membership_and_page_size(self):
         config = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                cache_group(
                     ["model.layers.0.kv"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
             ]
         )
         original = hybrid_layout_id(config)
         self.assertEqual(original, hybrid_layout_id(config))
-        config.kv_cache_groups[0].layer_names.append("model.layers.1.kv")
+        config.kv_cache_groups[0] = cache_group(
+            [*config.kv_cache_groups[0].layer_names, "model.layers.1.kv"],
+            group_distinct_specs(config.kv_cache_groups[0])[0],
+        )
         self.assertNotEqual(original, hybrid_layout_id(config))
-        config.kv_cache_groups[0].layer_names.pop()
-        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=1, dtype="float16"
+        config.kv_cache_groups[0] = cache_group(
+            config.kv_cache_groups[0].layer_names[:-1], group_distinct_specs(config.kv_cache_groups[0])[0]
+        )
+        config.kv_cache_groups[0] = cache_group(
+            config.kv_cache_groups[0].layer_names,
+            full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="float16"),
         )
         self.assertEqual(original, hybrid_layout_id(config))
-        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
-            block_size=32, num_kv_heads=1, head_size=1, dtype="float16"
+        config.kv_cache_groups[0] = cache_group(
+            config.kv_cache_groups[0].layer_names,
+            full_attention_spec_type(block_size=32, num_kv_heads=1, head_size=1, dtype="float16"),
         )
         self.assertNotEqual(original, hybrid_layout_id(config))
 
     def test_layout_fingerprint_normalizes_uniform_wrapper(self):
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
+        spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
         layer_names = ["model.layers.0.kv", "model.layers.1.kv"]
-        scheduler_config = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)])
+        scheduler_config = SimpleNamespace(kv_cache_groups=[cache_group(layer_names, spec)])
         worker_config = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                cache_group(
                     layer_names,
-                    UniformTypeKVCacheSpecs.from_specs({name: spec for name in layer_names}),
+                    {name: spec for name in layer_names},
                 )
             ]
         )
@@ -638,13 +650,13 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_shared_coordinator_requires_reachable_state_in_all_groups(self):
         group_config = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                cache_group(
                     ["model.layers.0.kv"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
-                KVCacheGroupSpec(
+                cache_group(
                     ["model.layers.1.state"],
-                    SlidingWindowSpec(
+                    window_requirement(
                         block_size=16,
                         sliding_window=16,
                         num_kv_heads=1,
@@ -661,7 +673,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"),
             patch.object(mooncake_backend.MooncakeBackend, "create_scheduler_client"),
             patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+                "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
                 side_effect=lambda spec: (
                     scheduler_tests._SparseSWAHitManager
                     if getattr(spec, "sliding_window", None) is not None

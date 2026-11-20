@@ -14,6 +14,8 @@ from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
 
+from tests.kv_cache_groups import cache_group, mamba_requirement
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
@@ -78,7 +80,8 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler.dcp_size = 1
     scheduler.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     scheduler.group_block_size = [16]
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    scheduler.kv_cache_groups = [cache_group(["full"], make_full_spec())]
+    scheduler.group_unique_specs = [list(group_distinct_specs(g)) for g in scheduler.kv_cache_groups]
     scheduler.engine_id = "engine-p"
     scheduler.side_channel_host = "10.0.0.10"
     scheduler.side_channel_port = 6000
@@ -429,7 +432,17 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
+    state = make_mamba_spec()
+    scheduler.kv_cache_groups = [
+        cache_group(["full"], make_full_spec()),
+        cache_group(
+            ["state"],
+            mamba_requirement(
+                block_size=state.block_size, shapes=state.shapes, dtypes=state.dtypes, num_speculative_blocks=2
+            ),
+        ),
+    ]
+    scheduler.group_unique_specs = [list(group_distinct_specs(g)) for g in scheduler.kv_cache_groups]
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -714,17 +727,17 @@ class _StopLoop(BaseException):
 def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> None:
     scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
     scheduler.vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    scheduler.group_unique_specs = [[make_full_spec()]]
+    scheduler.kv_cache_groups = [cache_group(["full"], make_full_spec())]
     assert scheduler._needs_prefill_token_truncation() is False
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = [2]
     assert scheduler._needs_prefill_token_truncation() is True
 
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.kv_cache_groups.append(cache_group(["state"], make_mamba_spec()))
     assert scheduler._needs_prefill_token_truncation() is True
 
-    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    scheduler.kv_cache_groups[1] = cache_group(["ring"], make_circular_spec())
     assert scheduler._needs_prefill_token_truncation() is False
 
 

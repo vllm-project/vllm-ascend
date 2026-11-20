@@ -13,8 +13,10 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
+from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type, window_requirement
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -29,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     group_concurrent_contiguous,
 )
+from vllm_ascend.utils import vllm_version_is
 
 from .helpers import (
     make_circular_spec,
@@ -72,6 +75,9 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     thread.request_queue = queue.Queue()
     for name, value in overrides.items():
         setattr(thread, name, value)
+    thread.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[cache_group([str(i)], spec) for i, spec in enumerate(thread.kv_cache_specs)]
+    )
     return thread
 
 
@@ -183,7 +189,7 @@ def test_pcp_dcp_selects_one_complete_replica_group() -> None:
         request_id="request",
         remote_tp_rank_groups=[[0, 1, 2, 3]],
         remote_dcp_size=2,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_full_spec()),
         local_block_size=16,
         remote_block_size=16,
         local_group_block_ids=[10, 11],
@@ -215,7 +221,7 @@ def test_pcp2_tp4_full_dcp_block_order_matches_vllm_rank_order() -> None:
             request_id="request",
             remote_tp_rank_groups=[list(range(8))],
             remote_dcp_size=8,
-            spec_index=0,
+            cache_group=cache_group(["layer"], make_full_spec()),
             local_block_size=16,
             remote_block_size=16,
             local_group_block_ids=[10],
@@ -392,7 +398,7 @@ def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica(
         request_id="request",
         remote_tp_rank_groups=[[2, 3]],
         remote_dcp_size=1,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_full_spec()),
         local_block_size=16,
         remote_block_size=16,
         local_group_block_ids=[10, 11],
@@ -429,7 +435,7 @@ def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
         request_id="request",
         remote_tp_rank_groups=[[0]],
         remote_dcp_size=remote_scale,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_sfa_indexer_spec(replication_size=2)),
         local_block_size=32,
         remote_block_size=remote_block_size,
         local_group_block_ids=[10, 11],
@@ -460,7 +466,7 @@ def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
         request_id="request",
         remote_tp_rank_groups=[list(range(8))],
         remote_dcp_size=8,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_sfa_indexer_spec(replication_size=1)),
         local_block_size=16,
         remote_block_size=16,
         local_group_block_ids=[10],
@@ -488,7 +494,7 @@ def test_dcp8_sharded_indexer_pd_uses_interleave_not_kernel_multiplier(rank, com
         request_id="request",
         remote_tp_rank_groups=[[0]],
         remote_dcp_size=1,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_sfa_indexer_spec(block_size=1536, replication_size=1)),
         local_block_size=1536,
         remote_block_size=1536,
         local_group_block_ids=[10, 11],
@@ -664,7 +670,12 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
         "request",
         [[0]],
         1,
-        0,
+        cache_group(
+            ["layer"],
+            window_requirement(
+                block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16, sliding_window=64, dcp_sharded=False
+            ),
+        ),
         16,
         16,
         [10, 11],
@@ -691,7 +702,7 @@ def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCach
         "request",
         [[0, 1, 2, 3]],
         4,
-        0,
+        cache_group(["layer"], ring_requirement(spec) if type(spec) is ring_spec_type else spec),
         16,
         16,
         [10],
@@ -719,7 +730,7 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
             "request",
             [[0]],
             1,
-            0,
+            cache_group(["layer"], ring_requirement(spec) if type(spec) is ring_spec_type else spec),
             16,
             16,
             [10, 11],
@@ -740,7 +751,7 @@ def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
             "request",
             [[0]],
             1,
-            0,
+            cache_group(["layer"], ring_requirement(spec) if type(spec) is ring_spec_type else spec),
             16,
             16,
             [10],
@@ -765,12 +776,18 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
     num_speculative_tokens, num_speculative_blocks, local_blocks, checkpoint
 ) -> None:
     thread = make_thread(num_speculative_tokens=num_speculative_tokens)
+    state = make_mamba_spec()
+    requirement = (
+        MambaManager.layer_config(state, num_speculative_blocks=num_speculative_blocks)
+        if not vllm_version_is("0.33.0")
+        else replace(state, num_speculative_blocks=num_speculative_blocks)
+    )
 
     result = thread._compute_group_block_ids(
         "request",
         [[0]],
         1,
-        0,
+        cache_group(["layer"], requirement),
         16,
         16,
         local_blocks,
@@ -781,7 +798,7 @@ def test_compute_mamba_state_selects_pre_speculative_local_block(
         0,
         1,
         1,
-        replace(make_mamba_spec(), num_speculative_blocks=num_speculative_blocks),
+        state if not vllm_version_is("0.33.0") else requirement,
         0,
         remote_interleave_size=16,
     )
@@ -796,7 +813,7 @@ def test_compute_dcp_blocks_maps_local_shards_to_remote_dcp_ranks() -> None:
         "request",
         [[0, 1, 2, 3]],
         4,
-        0,
+        cache_group(["layer"], make_full_spec()),
         16,
         16,
         [10, 11],
@@ -822,7 +839,7 @@ def test_compute_dcp_blocks_supports_different_logical_block_sizes() -> None:
         "request",
         [[5]],
         1,
-        0,
+        cache_group(["layer"], make_full_spec()),
         16,
         32,
         [10, 11],
@@ -850,7 +867,7 @@ def test_hybrid_dcp_mapping_uses_token_interleave_before_scheduler_pages(rank, c
         "request",
         [[3]],
         1,
-        0,
+        cache_group(["layer"], make_full_spec()),
         101376,
         50688,
         [10],
@@ -1504,6 +1521,9 @@ def test_circular_address_generation_transfers_whole_page_with_independent_strid
         block_strides=[[256]],
         block_lens=[[128]],
     )
+    thread.kv_cache_config.kv_cache_groups = [
+        cache_group(["layer"], ring_requirement(spec) if type(spec) is ring_spec_type else spec)
+    ]
     remote = make_pp_metadata(
         block_strides=[[512]],
         block_lens=[[128]],
@@ -1685,7 +1705,7 @@ def test_compute_same_block_size_dcp_matrix(
         "request",
         [candidate_ranks],
         remote_dcp_size,
-        0,
+        cache_group(["layer"], make_full_spec()),
         16,
         16,
         [10, 11],
@@ -1711,7 +1731,7 @@ def test_compute_dcp_stops_when_remote_prompt_has_fewer_blocks() -> None:
         "request",
         [[0]],
         1,
-        0,
+        cache_group(["layer"], make_full_spec()),
         16,
         16,
         [10, 11],
@@ -2013,6 +2033,11 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
 
     circular_thread = make_thread(tp_size=4, tp_rank=2, pcp_size=2, dcp_size=4)
     for circular_spec in (make_circular_spec(), make_kpool_tail_spec()):
+        circular_thread.kv_cache_config.kv_cache_groups = [
+            cache_group(
+                ["layer"], ring_requirement(circular_spec) if type(circular_spec) is ring_spec_type else circular_spec
+            )
+        ]
         assert circular_thread._get_layer_remote_tp_rank_groups(
             0,
             0,
@@ -2079,7 +2104,7 @@ def test_compute_block_ids_across_equal_block_size_dcp_matrix(
         request_id="request",
         remote_tp_rank_groups=[candidate_ranks],
         remote_dcp_size=remote_dcp_size,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_full_spec()),
         local_block_size=16,
         remote_block_size=16,
         local_group_block_ids=local_blocks,
@@ -2170,7 +2195,7 @@ def test_compute_block_ids_across_unequal_block_size_dcp_matrix(
         request_id="request",
         remote_tp_rank_groups=[candidate_ranks],
         remote_dcp_size=remote_dcp_size,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_full_spec(local_block_size)),
         local_block_size=local_block_size,
         remote_block_size=remote_block_size,
         local_group_block_ids=local_blocks,
@@ -2197,7 +2222,23 @@ def test_replicated_mamba_selects_one_complete_producer_replica(local_tp: int, r
     groups = thread._get_layer_remote_tp_rank_groups(0, 0, spec, make_pp_metadata(), remote_pcp, remote_tp, 1)
     assert groups == [list(range(remote_pcp * remote_tp))]
     transfers = thread._compute_group_block_ids(
-        "request", groups, 1, 0, 16, 16, [2], [2], [3], 15, 15, 0, 1, 1, spec, 1, remote_interleave_size=1
+        "request",
+        groups,
+        1,
+        cache_group(["layer"], spec),
+        16,
+        16,
+        [2],
+        [2],
+        [3],
+        15,
+        15,
+        0,
+        1,
+        1,
+        spec,
+        1,
+        remote_interleave_size=1,
     )
     assert transfers == [(1, [2], [3])]
 
@@ -2264,7 +2305,7 @@ def test_interleaved_dcp_rejects_invalid_alignment(interleave, message) -> None:
     with pytest.raises(ValueError, match=message):
         thread._compute_group_block_ids(
             request_id="request",
-            spec_index=0,
+            cache_group=cache_group(["layer"], make_full_spec(block_size=512)),
             spec=make_full_spec(block_size=512),
             local_group_block_ids=[],
             remote_dcp_size=1,
@@ -2291,7 +2332,7 @@ def test_interleaved_dcp_does_not_copy_a_fully_cached_partial_block() -> None:
     assert (
         thread._compute_group_block_ids(
             request_id="request",
-            spec_index=0,
+            cache_group=cache_group(["layer"], make_full_spec(block_size=512)),
             spec=make_full_spec(block_size=512),
             local_group_block_ids=[],
             remote_dcp_size=1,
@@ -2326,7 +2367,7 @@ def test_interleaved_dcp_crosses_local_pages_using_full_block_table(computed, lo
         request_id="request",
         remote_tp_rank_groups=[[0]],
         remote_dcp_size=1,
-        spec_index=0,
+        cache_group=cache_group(["layer"], make_full_spec(block_size=512)),
         local_block_size=512,
         remote_block_size=256,
         local_group_block_ids=[17] if computed else [10, 17],
@@ -2375,7 +2416,7 @@ def test_dcp_mapping_uses_each_peers_interleave(
             request_id="request",
             remote_tp_rank_groups=rank_groups,
             remote_dcp_size=remote_dcp,
-            spec_index=0,
+            cache_group=cache_group(["layer"], make_full_spec(block_size=local_page)),
             local_block_size=local_page,
             remote_block_size=remote_page,
             local_group_block_ids=[],
@@ -2432,7 +2473,7 @@ def test_dcp_mapping_rejects_invalid_remote_interleave(interleave, message) -> N
             "request",
             [[0, 1]],
             2,
-            0,
+            cache_group(["layer"], make_full_spec(block_size=512)),
             512,
             512,
             [10],
@@ -2459,7 +2500,7 @@ def test_dcp_mapping_rejects_incomplete_block_tables(missing_side) -> None:
             "request",
             [[0, 1]],
             2,
-            0,
+            cache_group(["layer"], make_full_spec(block_size=512)),
             512,
             512,
             [10],

@@ -46,22 +46,26 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
+
+from vllm_ascend.core.kv_cache_layers import (
+    CacheGroup,
+    cache_layouts,
+    group_layer_specs,
+    group_max_blocks,
+    make_cache_group,
+)
+from vllm_ascend.utils import vllm_version_is
 
 _STEP5_RING_SUFFIX = ".csa_tail_ring"
 _STEP5_SUMMARY_SUFFIX = ".sparse_summary_cache"
 _STEP5_AUX_SUFFIXES = (_STEP5_RING_SUFFIX, _STEP5_SUMMARY_SUFFIX)
 
 
-def _layer_specs(group: KVCacheGroupSpec) -> list[tuple[str, KVCacheSpec]]:
-    group_spec = group.kv_cache_spec
-    if isinstance(group_spec, UniformTypeKVCacheSpecs):
-        return list(group_spec.kv_cache_specs.items())
-    return [(name, group_spec) for name in group.layer_names]
+def _layer_specs(group: CacheGroup) -> list[tuple[str, KVCacheSpec]]:
+    return list(group_layer_specs(group).items())
 
 
 def _page_alignment(spec: KVCacheSpec) -> int:
@@ -82,15 +86,15 @@ def is_step5_kv_cache_spec(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return any(name.endswith(_STEP5_AUX_SUFFIXES) for name in kv_cache_spec)
 
 
-def is_step5_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+def is_step5_groups(kv_cache_groups: list[CacheGroup]) -> bool:
     return any(name.endswith(_STEP5_AUX_SUFFIXES) for group in kv_cache_groups for name in group.layer_names)
 
 
 def get_step5_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
-    orig_get_kv_cache_groups: Callable[[VllmConfig, dict[str, KVCacheSpec]], list[KVCacheGroupSpec]],
-) -> list[KVCacheGroupSpec] | None:
+    orig_get_kv_cache_groups: Callable[[VllmConfig, dict[str, KVCacheSpec]], list[CacheGroup]],
+) -> list[CacheGroup] | None:
     """Group the main layers upstream, then fold in the auxiliary layers.
 
     Removing the tail-ring and summary specs before upstream grouping keeps
@@ -134,31 +138,38 @@ def get_step5_kv_cache_groups(
             else:
                 unmerged[name] = spec
         for idx, extras in per_group_extras.items():
-            member = dict(_layer_specs(groups[idx]))
-            member.update(extras)
-            uniform = UniformTypeKVCacheSpecs.from_specs(member)
-            if uniform is None:
-                # Mixed draft/target geometry upstream refused to merge:
-                # keep the old isolated-group behaviour for these layers.
+            group = groups[idx]
+            members = {**group_layer_specs(group), **cache_layouts(extras)}
+            if not vllm_version_is("0.33.0"):
+                from vllm.v1.kv_cache_interface import KVCacheLayerConfig
+
+                configs = {
+                    name: KVCacheLayerConfig(group.manager_config, spec)
+                    for name, spec in group_layer_specs(group).items()
+                }
+                configs.update(extras)
+            else:
+                configs = members
+            merged = make_cache_group(configs, members)
+            if merged is None:
                 unmerged.update(extras)
             else:
-                groups[idx] = KVCacheGroupSpec(list(member.keys()), uniform)
+                groups[idx] = merged
 
     ring_specs = {name: spec for name, spec in kv_cache_spec.items() if name.endswith(_STEP5_RING_SUFFIX)}
     for aux_specs in (unmerged, ring_specs):
         if not aux_specs:
             continue
-        uniform = UniformTypeKVCacheSpecs.from_specs(aux_specs)
-        if uniform is None:
-            # Mixed draft/target auxiliary geometry: fall back to one group
-            # per layer so each keeps its own page.
-            groups.extend(KVCacheGroupSpec([name], spec) for name, spec in aux_specs.items())
+        layouts = cache_layouts(aux_specs)
+        group = make_cache_group(aux_specs, layouts)
+        if group is None:
+            groups.extend(make_cache_group(aux_specs, {name: spec}, uniform=False) for name, spec in layouts.items())
         else:
-            groups.append(KVCacheGroupSpec(list(aux_specs.keys()), uniform))
+            groups.append(group)
     return groups
 
 
-def _step5_group_width(group: KVCacheGroupSpec) -> int:
+def _step5_group_width(group: CacheGroup) -> int:
     """Bytes one block id spans across this group's layers.
 
     Layers inside one group share the block id simultaneously, so their
@@ -167,7 +178,7 @@ def _step5_group_width(group: KVCacheGroupSpec) -> int:
     return sum(_padded_page(spec) for _, spec in _layer_specs(group))
 
 
-def _step5_envelope(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _step5_envelope(kv_cache_groups: list[CacheGroup]) -> int:
     """Per-id width of the single aliased backing: the widest group.
 
     Every group draws ids from the one exclusive pool, so each group's
@@ -179,7 +190,7 @@ def _step5_envelope(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
 
 
 def get_step5_pool_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[CacheGroup],
 ) -> int:
     """Physical bytes one scheduler block occupies in the aliased backing."""
     envelope = _step5_envelope(kv_cache_groups)
@@ -194,7 +205,7 @@ def get_step5_pool_bytes_per_block(
 
 def get_step5_max_memory_usage(
     vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[CacheGroup],
 ) -> int:
     """Per-request worst-case KV memory under the single aliased backing.
 
@@ -204,28 +215,22 @@ def get_step5_max_memory_usage(
     holds one bucket, full attention grows to max_model_len) times the
     envelope width.
     """
-    from vllm.utils.math_utils import cdiv
 
     envelope = _step5_envelope(kv_cache_groups)
     total_pages = 0
     for group in kv_cache_groups:
         if getattr(group, "host_resident", False):
             continue
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            total_pages += spec.max_memory_usage_pages(vllm_config)
-        else:
-            total_pages += cdiv(
-                spec.max_memory_usage_bytes(vllm_config),
-                spec.page_size_bytes,
-            )
+        total_pages += group_max_blocks(group, vllm_config)
     return total_pages * envelope
 
 
 def get_step5_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    kv_cache_groups: list[CacheGroup],
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
     """Like upstream ``get_kv_cache_config_from_groups`` for layer-outer
     layouts, but every tensor aliases one envelope-sized backing (the
@@ -233,8 +238,9 @@ def get_step5_kv_cache_config_from_groups(
     """
     envelope = _step5_envelope(kv_cache_groups)
     pool_bytes_per_block = envelope
-    num_blocks = available_memory // pool_bytes_per_block
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // pool_bytes_per_block)
 
     page_sizes = {spec.page_size_bytes for group in kv_cache_groups for _, spec in _layer_specs(group)}
     group_widths = [_step5_group_width(group) for group in kv_cache_groups]

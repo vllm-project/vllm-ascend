@@ -10,22 +10,26 @@ from vllm.config import VllmConfig
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
-    declared_kwarg,
+    make_sliding_mla_spec,
+)
+from vllm_ascend.core.kv_cache_layers import (
+    CacheGroup,
+    cache_layouts,
+    group_distinct_specs,
+    group_layer_specs,
+    make_cache_group,
 )
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
+from vllm_ascend.utils import vllm_version_is
 
 STATE_RING_ROWS = 32
 
@@ -50,17 +54,16 @@ def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtyp
         head_size += (head_size // 32) * torch.bfloat16.itemsize
         dtype = torch.uint8
         cache_dtype = "a5_mxfp8_bf16_scale"
-    return AscendSlidingWindowMLASpec(
+    fields = dict(
         block_size=block_size,
         num_kv_heads=1,
         head_size=head_size,
         dtype=dtype,
-        sliding_window=window_size,
         cache_dtype_str=cache_dtype,
         model_version="deepseek_v41",
         alignment=None,
-        **declared_kwarg(AscendSlidingWindowMLASpec, "bounded_replay", bounded_replay),
     )
+    return make_sliding_mla_spec(sliding_window=window_size, bounded_replay=bounded_replay, **fields)
 
 
 def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
@@ -133,13 +136,11 @@ def is_deepseek_v41_cache(specs_or_groups):
     if isinstance(specs_or_groups, dict):
         specs = list(specs_or_groups.values())
     else:
-        specs = []
-        for item in specs_or_groups:
-            spec = getattr(item, "kv_cache_spec", item)
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                specs.extend(spec.kv_cache_specs.values())
-            else:
-                specs.append(spec)
+        specs = [
+            spec
+            for item in specs_or_groups
+            for spec in (group_distinct_specs(item) if isinstance(item, CacheGroup) else (item,))
+        ]
     return any(getattr(spec, "model_version", None) == "deepseek_v41" for spec in specs)
 
 
@@ -154,8 +155,8 @@ def _draft_layer_number(name):
 def get_layer_tuples(specs):
     """Return DSV4-style ordered layer tuples and their physical page sizes."""
     mla = {name for name, spec in specs.items() if isinstance(spec, AscendMLAAttentionSpec)}
-    state = sorted((name for name, spec in specs.items() if isinstance(spec, CircularBufferSpec)), key=_layer_number)
-    swa = {name for name, spec in specs.items() if isinstance(spec, AscendSlidingWindowMLASpec)}
+    state = sorted((name for name in specs if name.endswith(".state_cache")), key=_layer_number)
+    swa = {name for name in specs if name.endswith(".swa_cache")}
 
     full = sorted((name for name in mla if name.endswith(".long_kv_cache")), key=_layer_number)
     target_swa = sorted((name for name in swa if ".mtp." not in f".{name}"), key=_layer_number)
@@ -191,10 +192,10 @@ def get_layer_tuples(specs):
     return page_sizes, layer_tuples
 
 
-def group_cache_specs(specs):
+def _group_layouts(specs):
     """Merge full-context resources and pad layer tuples without mutating inputs."""
-    if specs and all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs.values()):
-        return [UniformTypeKVCacheSpecs.from_specs({name: spec}) for name, spec in specs.items()]
+    if specs and all(name.endswith(".swa_cache") for name in specs):
+        return [{name: spec} for name, spec in specs.items()]
     page_sizes, layer_tuples = get_layer_tuples(specs)
     padded = {}
     for page_size, layer_tuple in zip(page_sizes, layer_tuples):
@@ -213,49 +214,54 @@ def group_cache_specs(specs):
         padded.update((name, replace(specs[name], page_size_padded=page_size)) for name in aliases)
 
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]
-    state_names = [name for name, spec in padded.items() if isinstance(spec, CircularBufferSpec)]
+    state_names = [name for name in padded if name.endswith(".state_cache")]
     groups = [
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in mla_names}),
-        UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in state_names}),
+        {name: padded[name] for name in mla_names},
+        {name: padded[name] for name in state_names},
     ]
 
     # Transpose the physical tuples. Each scheduler SWA group takes one layer
     # from every tuple, so its members use distinct slots at the same block ID.
     swa_columns = [
-        [
-            name
-            for name in layer_tuple
-            if isinstance(padded[name], AscendSlidingWindowMLASpec) and ".mtp." not in f".{name}"
-        ]
+        [name for name in layer_tuple if name.endswith(".swa_cache") and ".mtp." not in f".{name}"]
         for layer_tuple in layer_tuples
     ]
     for names in zip(*swa_columns):
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in names}))
+        groups.append({name: padded[name] for name in names})
 
     draft_names = [
         name
         for layer_tuple in layer_tuples
         for name in layer_tuple
-        if isinstance(padded[name], AscendSlidingWindowMLASpec) and ".mtp." in f".{name}"
+        if name.endswith(".swa_cache") and ".mtp." in f".{name}"
     ]
     if draft_names:
-        groups.append(UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in draft_names}))
+        groups.append({name: padded[name] for name in draft_names})
     return groups
 
 
-def make_cache_groups(grouped_specs):
-    return [KVCacheGroupSpec(layer_names=list(s.kv_cache_specs), kv_cache_spec=s) for s in grouped_specs]
+def group_layer_configs(configs):
+    groups = []
+    for layouts in _group_layouts(cache_layouts(configs)):
+        group = make_cache_group(configs, layouts)
+        if group is None:
+            raise ValueError(f"V4.1 cache layers have incompatible block-table policies: {list(layouts)}")
+        groups.append(group)
+    return groups
+
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    def group_cache_specs(specs):
+        return [UniformTypeKVCacheSpecs.from_specs(members) for members in _group_layouts(specs)]
+
+    def make_cache_groups(grouped_specs):
+        return [CacheGroup(list(s.kv_cache_specs), s) for s in grouped_specs]
 
 
 def _specs_from_groups(groups):
-    specs = {}
-    for group in groups:
-        for name in group.layer_names:
-            group_spec = group.kv_cache_spec
-            specs[name] = (
-                group_spec.kv_cache_specs[name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
-            )
-    return specs
+    return {name: spec for group in groups for name, spec in group_layer_specs(group).items()}
 
 
 def get_deepseek_v41_pool_bytes_per_block(groups):
@@ -265,14 +271,17 @@ def get_deepseek_v41_pool_bytes_per_block(groups):
 
 def get_deepseek_v41_kv_cache_config(
     vllm_config: VllmConfig,
-    groups: list[KVCacheGroupSpec],
-    available_memory: int,
+    groups: list[CacheGroup],
+    available_memory: int | None = None,
+    *,
+    num_blocks: int | None = None,
 ) -> KVCacheConfig:
     """Place resource pages in layer slots within one shared backing pool."""
     specs = _specs_from_groups(groups)
     page_sizes, layer_tuples = get_layer_tuples(specs)
-    capacity = max(available_memory // sum(page_sizes), 0)
-    num_blocks = may_override_num_blocks(vllm_config, capacity)
+    if num_blocks is None:
+        assert available_memory is not None
+        num_blocks = may_override_num_blocks(vllm_config, max(available_memory // sum(page_sizes), 0))
     backing_size = num_blocks * sum(page_sizes)
     tensors: list[KVCacheTensor] = []
     slot_offset = 0

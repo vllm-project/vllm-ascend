@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 from torch import Tensor
-from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from tests.kv_cache_groups import cache_group
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )
@@ -146,6 +146,10 @@ class TestSparseKVOffloadOwnerReset(unittest.TestCase):
 
 
 class _FakeKVCacheSpec:
+    @property
+    def spec(self):
+        return self
+
     def __init__(
         self,
         *,
@@ -328,7 +332,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         kv_cache_config = SimpleNamespace(
             num_blocks=200,
             kv_cache_groups=[
-                SimpleNamespace(
+                cache_group(
                     layer_names=[name],
                     kv_cache_spec=spec,
                 )
@@ -343,16 +347,13 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
 
     def test_cpu_pool_size_supports_uniform_specs(self):
         specs, _, alignment_reserve = _make_memory_plan_inputs()
-        uniform_specs = UniformTypeKVCacheSpecs(
-            block_size=128,
-            kv_cache_specs=specs,
-        )
+
         kv_cache_config = SimpleNamespace(
             num_blocks=200,
             kv_cache_groups=[
-                SimpleNamespace(
+                cache_group(
                     layer_names=list(specs),
-                    kv_cache_spec=uniform_specs,
+                    kv_cache_spec=specs,
                 )
             ],
         )
@@ -367,7 +368,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         kv_cache_config = SimpleNamespace(
             num_blocks=200,
             kv_cache_groups=[
-                SimpleNamespace(
+                cache_group(
                     layer_names=["device.0"],
                     kv_cache_spec=specs["device.0"],
                 )
@@ -385,7 +386,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         )
         kv_cache_config = SimpleNamespace(
             num_blocks=200,
-            kv_cache_groups=[SimpleNamespace(layer_names=["host.0"], kv_cache_spec=spec)],
+            kv_cache_groups=[cache_group(["host.0"], spec)],
         )
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(

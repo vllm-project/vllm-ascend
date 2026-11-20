@@ -14,6 +14,7 @@ import torch
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs
 from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
@@ -83,9 +84,7 @@ def resident_mla_context_group_ids(groups: Sequence[Any]) -> tuple[int, ...]:
     """
     result = []
     for group_id, group in enumerate(groups):
-        spec = group.kv_cache_spec
-        layer_specs = getattr(spec, "kv_cache_specs", None)
-        specs = layer_specs.values() if layer_specs is not None else (spec,)
+        specs = group_distinct_specs(group)
         if any(isinstance(item, AscendMLAAttentionSpec) and not item.store_on_host for item in specs):
             result.append(group_id)
     return tuple(result)

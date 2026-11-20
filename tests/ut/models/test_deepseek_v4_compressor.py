@@ -180,9 +180,16 @@ class TestCompressorStateCache:
             cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         )
 
-        spec = cache.get_kv_cache_spec(vllm_config)
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.33.0"):
+            requirement = cache.get_kv_cache_config(vllm_config)
+            spec = requirement.spec
+            policy = requirement.manager_config.params
+        else:
+            spec = policy = cache.get_kv_cache_spec(vllm_config)
 
         assert spec.block_size == 8
         assert spec.head_size == state_dim
-        assert spec.sliding_window == 64
+        assert policy.sliding_window == 64
         assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][padding_index]

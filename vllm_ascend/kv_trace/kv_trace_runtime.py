@@ -13,10 +13,12 @@ from typing import Any
 
 import torch
 
+from vllm_ascend.core.kv_cache_layers import group_block_size, group_layer_specs, group_manager, group_params
 from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 from vllm_ascend.kv_trace.kv_trace_connector import record_output, record_plan
 from vllm_ascend.kv_trace.kv_trace_plan import AccessPlan, PlanSnapshotter, audit_access_plan
 from vllm_ascend.kv_trace.kv_trace_state import KVCacheState
+from vllm_ascend.utils import vllm_version_is
 
 _MAX_REPORT_KEYS = 1024
 
@@ -118,16 +120,18 @@ class KVTraceRuntime:
         )
         sizes = {}
         for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
-            spec = group.kv_cache_spec
-            sizes[group_id] = spec.block_size
-            for name in group.layer_names:
+            sizes[group_id] = group_block_size(group)
+            for name, layer_spec in group_layer_specs(group).items():
                 self.layer_groups[name] = group_id
-                layer_spec = getattr(spec, "kv_cache_specs", {}).get(name, spec)
                 append = (
                     hasattr(layer_spec, "head_size")
-                    and getattr(layer_spec, "sliding_window", None) is None
+                    and getattr(group_params(group), "sliding_window", None) is None
                     and getattr(layer_spec, "compress_ratio", 1) == 1
-                    and type(layer_spec).__name__ != "CircularBufferSpec"
+                    and (
+                        group_manager(group).uses_slot_mapping
+                        if not vllm_version_is("0.33.0")
+                        else type(layer_spec).__name__ != "CircularBufferSpec"
+                    )
                 )
                 if not append:
                     raise ValueError(f"KV Trace: unadapted cache validity rules: {type(layer_spec).__name__}")

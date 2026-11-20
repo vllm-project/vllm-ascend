@@ -95,6 +95,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
 
+    if not vllm_version_is("0.33.0"):
+        _mamba_spec: MambaSpec | None = None
+
+        def _get_mamba_group_info(self, kv_cache_config):
+            if self._mamba_spec is None:
+                groups = get_mamba_groups(kv_cache_config)
+                self._mamba_group_ids = mamba_utils.get_mamba_group_ids(groups)
+                self._mamba_spec = next(iter(groups))
+            return self._mamba_group_ids, self._mamba_spec
+
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
         flattened (layer, state-type) metadata arrays of

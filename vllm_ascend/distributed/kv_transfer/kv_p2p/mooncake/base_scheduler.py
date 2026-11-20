@@ -19,8 +19,6 @@ from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from zmq.constants import SocketOption, SocketType
@@ -30,7 +28,13 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
+from vllm_ascend.core.kv_cache_layers import (
+    group_block_size,
+    group_distinct_specs,
+    group_has_sliding_window,
+    group_params,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -413,7 +417,7 @@ class MooncakeBaseConnectorScheduler:
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
-        self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
+        self.group_block_size = [group_block_size(group) for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
         self.need_truncate = self._needs_prefill_token_truncation()
         self._logged_mamba_allocation = False
@@ -435,7 +439,7 @@ class MooncakeBaseConnectorScheduler:
                     self.engine_id,
                     request_id,
                     group_id,
-                    spec.num_speculative_blocks,
+                    group_params(self.kv_cache_groups[group_id]).num_speculative_blocks,
                     len(block_ids),
                     block_ids,
                     spec.page_size_bytes,
@@ -450,27 +454,16 @@ class MooncakeBaseConnectorScheduler:
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         compress_ratios = getattr(hf_config, "compress_ratios", None)
         uses_compressed_cache = isinstance(compress_ratios, (list, tuple, dict))
-        has_state_group = any(
-            isinstance(spec, MambaSpec) for group_specs in self.group_unique_specs for spec in group_specs
-        )
-        has_sliding_window_group = any(
-            isinstance(spec, SlidingWindowSpec) for group_specs in self.group_unique_specs for spec in group_specs
-        )
         # D replays the final prompt token. P must retain SWA pages for that
         # same position rather than retire them for the next token's window.
-        return uses_compressed_cache or has_state_group or has_sliding_window_group
+        return uses_compressed_cache or any(
+            group_has_sliding_window(group) or any(isinstance(spec, MambaSpec) for spec in group_distinct_specs(group))
+            for group in self.kv_cache_groups
+        )
 
     @staticmethod
     def _get_group_unique_specs(group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
-
-        specs = []
-        for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
-            if layer_spec not in specs:
-                specs.append(layer_spec)
-        return specs
+        return list(group_distinct_specs(group))
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return prompt blocks while retaining evicted-block padding.
@@ -485,21 +478,21 @@ class MooncakeBaseConnectorScheduler:
         assert len(block_ids) == len(self.group_unique_specs), "Number of KV cache groups must match"
 
         transfer_block_ids: list[list[int]] = []
-        for blocks, block_size, group_specs in zip(
-            block_ids,
-            self.group_block_size,
-            self.group_unique_specs,
+        for group_id, (blocks, block_size, group_specs) in enumerate(
+            zip(
+                block_ids,
+                self.group_block_size,
+                self.group_unique_specs,
+            )
         ):
-            if all(is_circular_kv_cache_spec(spec) for spec in group_specs):
+            if is_circular_cache_group(self.kv_cache_groups[group_id]):
                 # Circular caches own one request-lifetime ring block. It is
                 # state, not a prompt-aligned attention-block sequence.
                 transfer_block_ids.append(blocks)
             elif any(isinstance(spec, MambaSpec) for spec in group_specs):
                 # RecoverSSM stores its whole verify window in one state page,
                 # so draft tokens do not imply extra checkpoint blocks.
-                num_speculative_blocks = max(
-                    spec.num_speculative_blocks for spec in group_specs if isinstance(spec, MambaSpec)
-                )
+                num_speculative_blocks = group_params(self.kv_cache_groups[group_id]).num_speculative_blocks
                 transfer_block_ids.append(blocks[:-num_speculative_blocks] if num_speculative_blocks else blocks)
             else:
                 cp_size = max(1, self.dcp_size) if any(spec.dcp_sharded for spec in group_specs) else 1

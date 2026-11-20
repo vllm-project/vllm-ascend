@@ -21,14 +21,11 @@ from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, supports_component_major_mla_pd
+from vllm_ascend.core.kv_cache_layers import MLA_LAYOUT_TYPES
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.ops.triton.attention_update import prepare_attention_update
@@ -83,9 +80,7 @@ def supports_strided_mla_cache(
     Attention post-load hooks see upstream MLA specs before the runners add
     Ascend layout metadata, so inspect the geometry and layer markers directly.
     """
-    if not isinstance(attn_module, MLAAttention) or not isinstance(
-        kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-    ):
+    if not isinstance(attn_module, MLAAttention) or not isinstance(kv_cache_spec, MLA_LAYOUT_TYPES):
         return False
     if (
         get_kv_cache_compression_ratio(kv_cache_spec) != 1
@@ -305,7 +300,7 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
     return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
 
 
-def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
+def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: AttentionSpec) -> bool:
     """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
@@ -717,6 +712,7 @@ def _select_seq_lens(
     kv_cache_spec: AttentionSpec | None,
     speculative_config: SpeculativeConfig | None,
     vllm_config: VllmConfig,
+    is_cross_attention: bool = False,
 ) -> torch.Tensor:
     """Choose the seq_lens tensor carried by the built attention metadata.
 
@@ -739,7 +735,11 @@ def _select_seq_lens(
     else:
         seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
-    if isinstance(kv_cache_spec, CrossAttentionSpec):
+    if vllm_version_is("0.33.0"):
+        from vllm.v1.kv_cache_interface import CrossAttentionSpec
+
+        is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
+    if is_cross_attention:
         seq_lens = common_attn_metadata.seq_lens
     if speculative_config is not None:
         # vLLM #63373 moved this capability off the deprecated legacy field.

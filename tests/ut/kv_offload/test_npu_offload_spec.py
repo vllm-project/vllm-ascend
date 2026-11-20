@@ -11,12 +11,12 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu as cpu_npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu as npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
@@ -275,7 +275,7 @@ def test_upstream_compatible_layout_uses_upstream_canonicalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer_name = "model.layers.0.self_attn"
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=2,
         num_kv_heads=1,
         head_size=3,
@@ -284,7 +284,7 @@ def test_upstream_compatible_layout_uses_upstream_canonicalization(
     worker, _ = _make_layout_worker(
         SimpleNamespace(
             num_blocks=4,
-            kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+            kv_cache_groups=[cache_group([layer_name], spec)],
             kv_cache_tensors=[],
             # The connector offloads the groups vLLM selects, not all of them.
             prefix_cacheable_group_ids=(0,),
@@ -313,7 +313,7 @@ def test_split_attention_cache_is_zero_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer_name = "model.layers.0.self_attn"
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=2,
         num_kv_heads=1,
         head_size=3,
@@ -322,7 +322,7 @@ def test_split_attention_cache_is_zero_copy(
     worker, captured = _make_layout_worker(
         SimpleNamespace(
             num_blocks=4,
-            kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
+            kv_cache_groups=[cache_group([layer_name], spec)],
             kv_cache_tensors=[],
             # The connector offloads the groups vLLM selects, not all of them.
             prefix_cacheable_group_ids=(0,),

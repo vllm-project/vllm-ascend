@@ -10,8 +10,8 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.config import CUDAGraphMode
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
+from tests.kv_cache_groups import cache_group, ring_requirement, ring_spec_type
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41StateMetadataBuilder
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num, compressor_from_projected
@@ -37,7 +37,7 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
         ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, tensor_parallel_size=1),
     )
-    spec = CircularBufferSpec(block_size=STATE_RING_ROWS, num_kv_heads=1, head_size=2 * width, dtype=torch.float32)
+    spec = ring_spec_type(block_size=STATE_RING_ROWS, num_kv_heads=1, head_size=2 * width, dtype=torch.float32)
     name = "model.layers.2.self_attn.compressor.state_cache"
     builder = AscendDSAV41StateMetadataBuilder(spec, [name], config, device)
     # Static source RoPE is a model-loading fixture; no model forward is mocked.
@@ -45,7 +45,7 @@ def test_v41_runner_full_graph_replays_variable_budgets(monkeypatch, max_query_l
     assert builder._c2_source_cos.shape[-1] == rope.shape[-1]
     builder._c2_full_source_rope = (rope, rope)
     groups: Any = [[SimpleNamespace(layer_names=[name], get_metadata_builder=lambda _: builder)]]
-    cache_config: Any = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)])
+    cache_config: Any = SimpleNamespace(kv_cache_groups=[cache_group([name], ring_requirement(spec))])
     runner_state: Any = default.AscendModelState.__new__(default.AscendModelState)
     runner_state.vllm_config = config
     runner_state.model_config = SimpleNamespace(max_model_len=1024)

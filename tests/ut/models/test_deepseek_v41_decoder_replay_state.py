@@ -11,10 +11,12 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, ring_requirement, ring_spec_type
 from vllm_ascend.attention.utils import uses_pcp_sharded_layout
 from vllm_ascend.models.deepseek_v41 import decoder_replay_state as replay_mod
 from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
 from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
@@ -44,7 +46,7 @@ def inputs(*, dummy=False):
         seq_lens_np=np.array([1, 6, 6], dtype=np.int32),
         is_dummy=dummy,
     )
-    return replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 13), [], torch.zeros(3, dtype=torch.int32))
+    return replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 13), [], torch.zeros(3, dtype=torch.int32), [])
 
 
 def test_gather_uses_current_kernel_argument_order(state, monkeypatch):
@@ -59,7 +61,7 @@ def test_gather_uses_current_kernel_argument_order(state, monkeypatch):
     slots = torch.empty((1, 3), dtype=torch.int64)
     encoder_start = torch.zeros(1, dtype=torch.int32)
     replay_mod.DecoderReplayState._gather(
-        state, replay_mod.DecoderReplayInputs(batch, (), slots, [], encoder_start), warmup=True
+        state, replay_mod.DecoderReplayInputs(batch, (), slots, [], encoder_start, []), warmup=True
     )
 
     args = gather.call_args.args
@@ -180,6 +182,7 @@ def test_pcp_decoder_replay_keeps_only_original_tail_owners(state, local_end, ex
         torch.empty(1, 8),
         [],
         torch.zeros(1, dtype=torch.int32),
+        [],
         SimpleNamespace(global_batch=global_batch),
     )
     kept_lens, padded, replay_start = state._pcp_kept_lengths(replay_inputs)
@@ -203,6 +206,7 @@ def test_pcp_decoder_replay_keeps_prompt_logprob_rows(state):
         torch.empty(1, 8),
         [],
         torch.zeros(1, dtype=torch.int32),
+        [],
         SimpleNamespace(global_batch=global_batch),
     )
     assert state._pcp_kept_lengths(replay_inputs) is None
@@ -214,7 +218,6 @@ def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
             assert get_current_vllm_config() is state.config
             return object
 
-    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
     state.slots = None
     group = SimpleNamespace(kv_cache_spec=object(), backend=Backend())
     replay_inputs = inputs()
@@ -224,6 +227,11 @@ def test_lazy_decoder_replay_builder_uses_current_config(state, monkeypatch):
         replay_inputs.slot_mappings,
         [[group]],
         replay_inputs.encoder_replay_start,
+        [
+            cache_group(
+                ["attention"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+            )
+        ],
     )
     state.prepare(replay_inputs, CUDAGraphMode.FULL)
     state._gather.assert_called_once()
@@ -240,16 +248,28 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
             prepared()
 
     monkeypatch.setattr(replay_mod, "AscendDSAV41MetadataBuilder", Builder)
-    monkeypatch.setattr(replay_mod, "is_circular_kv_cache_spec", lambda spec: False)
     state.slots = None
-    group = SimpleNamespace(
-        kv_cache_spec=object(),
-        layer_names=["decoder.swa_cache"],
-        backend=SimpleNamespace(get_builder_cls=lambda: Builder),
+    spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    ring = (
+        spec
+        if not vllm_version_is("0.33.0")
+        else ring_spec_type(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
     )
-    replay_inputs = replay_mod.DecoderReplayInputs(inputs().batch, (), torch.empty(1, 13), [[group]], torch.zeros(3))
+    group = SimpleNamespace(
+        kv_cache_spec=spec, layer_names=["decoder.attention"], backend=SimpleNamespace(get_builder_cls=lambda: Builder)
+    )
+    ring_backend = Mock()
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        inputs().batch,
+        (),
+        torch.empty(2, 13),
+        [[group], [SimpleNamespace(kv_cache_spec=ring, backend=ring_backend)]],
+        torch.zeros(3),
+        [cache_group(group.layer_names, spec), cache_group(["decoder.state"], ring_requirement(ring))],
+    )
     state._initialize(replay_inputs)
     prepared.assert_called_once_with()
+    ring_backend.get_builder_cls.assert_not_called()
 
 
 @pytest.mark.parametrize("world", [1, 2, 16])
@@ -299,7 +319,7 @@ def test_replay_metadata_preserves_pcp_layout_contract(
         is_prefilling_np=np.array([True]),
     )
     replay_inputs = replay_mod.DecoderReplayInputs(
-        batch, (torch.zeros(1, 1), torch.zeros(1, 1)), state.slots, [], torch.zeros(1)
+        batch, (torch.zeros(1, 1), torch.zeros(1, 1)), state.slots, [], torch.zeros(1), []
     )
     result = replay_mod.DecoderReplayState._build_metadata(state, replay_inputs, offsets)
     assert result["decoder.swa_cache"] is metadata
@@ -382,7 +402,7 @@ def test_untrimmed_pcp_rank_keeps_collective_width(synchronized_dp, monkeypatch,
         )
     )
     state.prepare(
-        replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 8), [], torch.zeros(1), context),
+        replay_mod.DecoderReplayInputs(batch, (), torch.empty(1, 8), [], torch.zeros(1), [], context),
         CUDAGraphMode.NONE,
     )
     assert state.dp_tokens.tolist() == [4, 2]
@@ -396,7 +416,7 @@ def test_untrimmed_pcp_rank_keeps_collective_width(synchronized_dp, monkeypatch,
 def test_dummy_pcp_does_not_need_ownership_indices(synchronized_dp):
     source = inputs(dummy=True)
     source = replay_mod.DecoderReplayInputs(
-        source.batch, (), source.slot_mappings, [], source.encoder_replay_start, SimpleNamespace()
+        source.batch, (), source.slot_mappings, [], source.encoder_replay_start, [], SimpleNamespace()
     )
     synchronized_dp.prepare(source, CUDAGraphMode.NONE)
     assert synchronized_dp.dp_tokens.tolist() == [16, 2]
@@ -424,6 +444,7 @@ def test_compacted_pcp_rank_uses_padded_dp_count(synchronized_dp, monkeypatch, a
         source.slot_mappings,
         [],
         source.encoder_replay_start,
+        [],
         SimpleNamespace(global_batch=source.batch),
     )
     monkeypatch.setattr(

@@ -8,7 +8,7 @@ from vllm.forward_context import set_forward_context
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tests.e2e.pull_request.one_card.attention_utils import (
     BatchSpec,
@@ -86,7 +86,7 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     layer_names: list[str],
     vllm_config,
     device: torch.device,

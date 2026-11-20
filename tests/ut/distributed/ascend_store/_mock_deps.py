@@ -505,15 +505,16 @@ if _MOCK_VLLM_DEPS and "vllm_ascend._build_info" not in sys.modules:
     _build_info.__device_type__ = "A2"  # type: ignore[attr-defined]
     sys.modules["vllm_ascend._build_info"] = _build_info
 
-_distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
-_distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
-_distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
-    return_value=0
-)
-_distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # type: ignore[attr-defined]
-    return_value=1
-)
-sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
+if _MOCK_VLLM_DEPS:
+    _distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
+    _distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
+    _distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
+        return_value=0
+    )
+    _distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # type: ignore[attr-defined]
+        return_value=1
+    )
+    sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
 
 # mooncake_backend imports get_global_rank from the real
 # vllm_ascend.distributed.parallel_state, whose import chain pulls in vllm.
@@ -546,52 +547,53 @@ if _MOCK_VLLM_DEPS:
     sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
     sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
-_kv_pool_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.kv_pool",
-    os.path.join(_kv_transfer_real_path, "kv_pool"),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
+if _MOCK_VLLM_DEPS:
+    _kv_pool_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.kv_pool",
+        os.path.join(_kv_transfer_real_path, "kv_pool"),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
 
-_ascend_store_real_path = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "..",
-    "vllm_ascend",
-    "distributed",
-    "kv_transfer",
-    "kv_pool",
-    "ascend_store",
-)
-_ascend_store_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store",
-    os.path.abspath(_ascend_store_real_path),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"] = _ascend_store_pkg
+    _ascend_store_real_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "..",
+        "..",
+        "vllm_ascend",
+        "distributed",
+        "kv_transfer",
+        "kv_pool",
+        "ascend_store",
+    )
+    _ascend_store_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store",
+        os.path.abspath(_ascend_store_real_path),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"] = _ascend_store_pkg
 
-_backend_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend",
-    os.path.join(os.path.abspath(_ascend_store_real_path), "backend"),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
+    _backend_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend",
+        os.path.join(os.path.abspath(_ascend_store_real_path), "backend"),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
-# Execute the real backend/__init__.py inside the stub package so that
-# backend_map always stays in sync with the source of truth. The stub
-# package shadows the real package for these tests; without this, any
-# ``from ...backend import backend_map`` in the real modules would fail
-# with ImportError under the stub. (Submodules such as
-# backend.memcache_backend resolve through the stub package's __path__ and
-# need no special casing.)
-# Scheduler tests mock create_scheduler_client on real backend classes;
-# worker tests patch pool_worker.importlib locally. Do NOT install fake
-# backend modules in sys.modules or globally wrap import_module here:
-# test_backend.py imports the real backend classes and also relies on
-# ``mock.patch`` (which itself calls importlib.import_module) resolving
-# those real modules.
-_backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # type: ignore[attr-defined]
-with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
-    exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
+    # Execute the real backend/__init__.py inside the stub package so that
+    # backend_map always stays in sync with the source of truth. The stub
+    # package shadows the real package for these tests; without this, any
+    # ``from ...backend import backend_map`` in the real modules would fail
+    # with ImportError under the stub. (Submodules such as
+    # backend.memcache_backend resolve through the stub package's __path__ and
+    # need no special casing.)
+    # Scheduler tests mock create_scheduler_client on real backend classes;
+    # worker tests patch pool_worker.importlib locally. Do NOT install fake
+    # backend modules in sys.modules or globally wrap import_module here:
+    # test_backend.py imports the real backend classes and also relies on
+    # ``mock.patch`` (which itself calls importlib.import_module) resolving
+    # those real modules.
+    _backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # type: ignore[attr-defined]
+    with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
+        exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()

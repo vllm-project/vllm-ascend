@@ -11,26 +11,23 @@ from vllm.v1.core.block_pool import BlockPool
 
 # vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
 # the v0.33.0 lane still ships it in `kv_cache_utils`.
-from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager,
-    register_all_kvcache_specs,
-)
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, MLAAttentionSpec
 from vllm.v1.request import Request
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, layer_config, mamba_requirement
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -41,7 +38,8 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.fixture(autouse=True)
 def _init_hash_seed():
-    register_all_kvcache_specs(None)
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
     init_none_hash(sha256)
 
 
@@ -77,7 +75,7 @@ def _make_full_manager(
         hash_block_size=physical_block_size,
     )
     manager = FullAttentionManager(
-        spec,
+        cache_group(["layer"], spec) if not vllm_version_is("0.33.0") else spec,
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -94,6 +92,11 @@ def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
         dtypes=(torch.float32,),
     )
 
+    if not vllm_version_is("0.33.0"):
+        from vllm.v1.core.kv_cache_planning import can_share_block_table
+
+        assert not can_share_block_table({"mla": layer_config(mla_spec), "mamba": layer_config(mamba_spec)})
+        return
     assert not is_kv_cache_spec_uniform(
         {
             "mla": mla_spec,
@@ -117,13 +120,15 @@ def test_compressed_spec_separates_logical_and_storage_blocks(
     assert isinstance(manager, FullAttentionManager)
 
     config = SimpleNamespace(
+        max_in_flight_tokens=logical_block_size * 3,
         model_config=SimpleNamespace(max_model_len=logical_block_size * 3),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
     )
-    assert spec.max_memory_usage_bytes(config) == spec.page_size_bytes * 3
+    requirement = layer_config(spec) if not vllm_version_is("0.33.0") else spec
+    assert requirement.max_memory_usage_bytes(config) == spec.page_size_bytes * 3
 
     request_id = f"p{physical_block_size}-c{compress_ratio}"
     expected_blocks = {
@@ -187,7 +192,11 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
         block_pool=block_pool,
-        kv_cache_spec=spec,
+        **(
+            {"manager_config": FullAttentionManager.config(), "block_size": spec.block_size}
+            if not vllm_version_is("0.33.0")
+            else {"kv_cache_spec": spec}
+        ),
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
@@ -227,7 +236,11 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         max_length=logical_block_size,
         kv_cache_group_ids=[0],
         block_pool=block_pool,
-        kv_cache_spec=spec,
+        **(
+            {"manager_config": FullAttentionManager.config(), "block_size": spec.block_size}
+            if not vllm_version_is("0.33.0")
+            else {"kv_cache_spec": spec}
+        ),
         drop_eagle_block=False,
         alignment_tokens=logical_block_size,
     )
@@ -254,7 +267,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         model_version="deepseek_v4",
         **ratio_kwargs,
     )
-    full_spec = FullAttentionSpec(
+    full_spec = full_attention_spec_type(
         block_size=physical_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -265,8 +278,8 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             num_blocks=16,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(["compressed"], compressed_spec),
-                KVCacheGroupSpec(["full"], full_spec),
+                cache_group(["compressed"], compressed_spec),
+                cache_group(["full"], full_spec),
             ],
         ),
         max_model_len=logical_block_size,
@@ -317,27 +330,27 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
             num_blocks=32,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                cache_group(
                     ["full_a"],
-                    FullAttentionSpec(
+                    full_attention_spec_type(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                cache_group(
                     ["full_b"],
-                    FullAttentionSpec(
+                    full_attention_spec_type(
                         block_size=2 * block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                cache_group(
                     ["mamba"],
-                    MambaSpec(
+                    mamba_requirement(
                         block_size=block_size,
                         shapes=((1,),),
                         dtypes=(torch.float32,),

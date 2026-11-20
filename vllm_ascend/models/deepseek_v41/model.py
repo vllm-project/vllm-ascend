@@ -602,6 +602,13 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
     """Ascend SWA cache registered with the V4.1 allocator."""
 
+    def get_kv_cache_config(self, vllm_config):
+        from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+        return SlidingWindowManager.layer_config(
+            self.spec, sliding_window=self.window_size, bounded_replay=self.bounded_replay
+        )
+
     def __init__(self, head_dim, window_size, dtype, prefix, cache_config, bounded_replay=False):
         block_size = cache_config.block_size
         spec = make_swa_cache_spec(
@@ -613,6 +620,7 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
             bounded_replay=bounded_replay,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
+        self.bounded_replay = bounded_replay
         self.head_dim = head_dim
         self.window_size = window_size
         self.dtype = dtype

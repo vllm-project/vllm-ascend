@@ -39,7 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     register_backend,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -63,6 +63,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.utils import vllm_version_is
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -249,6 +250,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if not vllm_version_is("0.33.0"):
+            layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+            self.is_cross_attention = getattr(layer, "attn_type", None) == AttentionType.ENCODER_DECODER
+        else:
+            from vllm.v1.kv_cache_interface import CrossAttentionSpec
+
+            self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_size > 1
@@ -319,13 +327,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         seq_lens = _select_seq_lens(
             common_attn_metadata,
             kv_cache_spec=self.kv_cache_spec,
+            is_cross_attention=self.is_cross_attention,
             speculative_config=self.speculative_config,
             vllm_config=self.vllm_config,
         )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
-        if isinstance(self.kv_cache_spec, CrossAttentionSpec):
+        if self.is_cross_attention:
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
 
         attn_state = common_attn_metadata.attn_state

@@ -14,44 +14,60 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager,
-    SlidingWindowManager,
-    register_all_kvcache_specs,
-)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
-from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
-from vllm_ascend.core.kv_cache_interface import (
-    AscendCircularBufferSpec,
-    AscendIndexerKPoolTailSpec,
-    AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
-    register_ascend_kv_cache_specs,
+if vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm.v1.core import kv_cache_planning
+
+from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups as group_kimi
+
+if vllm_version_is("0.33.0"):
+    import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
+from tests.kv_cache_groups import cache_group, layer_config, mamba_requirement, ring_requirement
+
+if not vllm_version_is("0.33.0"):
+    from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
+else:
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+from tests.kv_cache_groups import ascend_ring_spec_type, window_mla_spec_type
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+
+if vllm_version_is("0.33.0"):
+    from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from tests.kv_cache_groups import full_attention_spec_type
+from vllm_ascend.core.kv_cache_layers import (
+    group_block_size,
+    group_distinct_specs,
+    group_layer_specs,
+    group_prefix_cacheable,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_annotate_eagle_groups,
-    _get_kimi_k3_dspark_mixed_kv_cache_groups,
-    _get_kv_cache_config_deepseek_v4_main,
-    group_and_unify_kv_cache_specs,
-)
+
+if vllm_version_is("0.33.0"):
+    from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+        _ascend_annotate_eagle_groups,
+        _get_kv_cache_config_deepseek_v4_main,
+        group_and_unify_kv_cache_specs,
+    )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 # vLLM #60043 removed the leftover `mamba_cache_mode="all"` path and now asserts
@@ -59,12 +75,35 @@ from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 _MAMBA_CACHING_MODE = "align"
 
 
+def _get_kimi_k3_dspark_mixed_kv_cache_groups(specs):
+    return group_kimi({n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs)
+
+
+def _window_requirement(*, sliding_window, bounded_replay=False, **fields):
+    if not vllm_version_is("0.33.0"):
+        return SlidingWindowManager.layer_config(
+            window_mla_spec_type(**fields), sliding_window=sliding_window, bounded_replay=bounded_replay
+        )
+    return window_mla_spec_type(sliding_window=sliding_window, bounded_replay=bounded_replay, **fields)
+
+
+def width(group, config, tokens):
+    return (group if not vllm_version_is("0.33.0") else group.kv_cache_spec).max_num_blocks_per_req(config, tokens)
+
+
+def lookup_params(requirement):
+    if not vllm_version_is("0.33.0"):
+        return dict(manager_config=requirement.manager_config, block_size=requirement.spec.block_size)
+    return dict(kv_cache_spec=requirement)
+
+
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
     specs = [
-        FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=16, dtype=torch.bfloat16),
-        AscendSlidingWindowMLASpec(
+        full_attention_spec_type(block_size=32, num_kv_heads=1, head_size=16, dtype=torch.bfloat16),
+        _window_requirement(
             block_size=32,
             num_kv_heads=1,
             head_size=544,
@@ -74,12 +113,15 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
             model_version="deepseek_v41",
             alignment=None,
         ),
-        AscendCircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
+        ring_requirement(
+            ascend_ring_spec_type(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32),
+            zero_new_blocks=True,
+        ),
     ]
     cfg = KVCacheConfig(
         num_blocks=9,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec([f"group{i}"], spec) for i, spec in enumerate(specs)],
+        kv_cache_groups=[cache_group([f"group{i}"], spec) for i, spec in enumerate(specs)],
     )
     assert cfg.needs_kv_cache_zeroing
     coordinator = get_kv_cache_coordinator(
@@ -109,9 +151,10 @@ def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
 @pytest.mark.parametrize("group_count", [1, 2])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, wrapped):
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
-    spec = AscendSlidingWindowMLASpec(
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
+    spec = _window_requirement(
         block_size=16,
         num_kv_heads=1,
         head_size=8,
@@ -123,8 +166,8 @@ def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, w
     groups = []
     for index in range(group_count):
         name = f"swa_{index}"
-        group_spec = UniformTypeKVCacheSpecs.from_specs({name: spec}) if wrapped else spec
-        groups.append(KVCacheGroupSpec([name], group_spec))
+        group_spec = {name: spec} if wrapped else spec
+        groups.append(cache_group([name], group_spec))
     cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
     coordinator = get_kv_cache_coordinator(
         cfg,
@@ -141,26 +184,28 @@ def test_swa_only_replay_keeps_private_blocks_without_prefix_hits(group_count, w
     coordinator.free("request")
     assert coordinator.block_pool.get_num_free_blocks() == free_blocks
     assert coordinator.find_longest_cache_hit([b"a" * 32], 16) == (tuple([] for _ in groups), 0, 0)
-    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
+    if vllm_version_is("0.33.0"):
+        assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped for group in cfg.kv_cache_groups)
 
 
 @pytest.mark.parametrize("with_private_tail", [False, True])
 def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_tail):
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
-    full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
-    groups = [KVCacheGroupSpec(["full"], full)]
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
+    full = full_attention_spec_type(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    groups = [cache_group(["full"], full)]
     if with_private_tail:
         tail = AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=9,
-            sliding_window=4,
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=8,
             dtype=torch.float32,
         )
-        groups.append(KVCacheGroupSpec(["tail"], UniformTypeKVCacheSpecs.from_specs({"tail": tail})))
+        groups.append(cache_group(["tail"], {"tail": tail}))
     cfg = KVCacheConfig(num_blocks=32, kv_cache_tensors=[], kv_cache_groups=groups)
     scheduler_size, hash_size = resolve_kv_cache_block_sizes(
         cfg,
@@ -214,23 +259,24 @@ def test_disabled_prefix_cache_preserves_private_tail_allocation(with_private_ta
 def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrapped, scheduler_size, ring_capacity):
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
-    full = FullAttentionSpec(block_size=scheduler_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
+    full = full_attention_spec_type(block_size=scheduler_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     tail = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=ring_capacity,
-        sliding_window=4,
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float32,
     )
-    group_tail = UniformTypeKVCacheSpecs.from_specs({"tail": tail}) if wrapped else tail
+    group_tail = {"tail": tail} if wrapped else tail
     cfg = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["tail"], group_tail)],
+        kv_cache_groups=[cache_group(["full"], full), cache_group(["tail"], group_tail)],
     )
     resolved_scheduler_size, hash_size = resolve_kv_cache_block_sizes(
         cfg, _make_vllm_config(enable_prefix_caching=True, dcp=1, prefix_match_unit=16)
@@ -279,24 +325,25 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
 
 @pytest.mark.parametrize("dcp", [1, 2])
 def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp):
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
-    full = FullAttentionSpec(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
+    full = full_attention_spec_type(block_size=4480, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
     tail = AscendIndexerKPoolTailSpec(
         block_size=4,
         ring_capacity=9,
-        sliding_window=4,
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
         compress_ratio=4,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float32,
     )
-    mamba = MambaSpec(block_size=4480, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+    mamba = mamba_requirement(block_size=4480, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
     cfg = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([name], spec) for name, spec in (("full", full), ("tail", tail), ("mamba", mamba))
+            cache_group([name], spec) for name, spec in (("full", full), ("tail", tail), ("mamba", mamba))
         ],
     )
     scheduler_size, hash_size = resolve_kv_cache_block_sizes(
@@ -319,16 +366,17 @@ def test_glm_speculative_tail_preserves_main_and_mamba_scheduler_boundaries(dcp)
 
 
 def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
     specs = [
-        FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=8, dtype=torch.bfloat16),
-        MambaSpec(block_size=64, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
-        SlidingWindowMLASpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=16),
+        full_attention_spec_type(block_size=32, num_kv_heads=1, head_size=8, dtype=torch.bfloat16),
+        mamba_requirement(block_size=64, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align"),
+        _window_requirement(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=16),
         AscendIndexerKPoolTailSpec(
             block_size=4,
             ring_capacity=4,
-            sliding_window=4,
+            **({} if not vllm_version_is("0.33.0") else {"sliding_window": 4}),
             compress_ratio=4,
             num_kv_heads=1,
             head_size=8,
@@ -338,7 +386,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     cfg = KVCacheConfig(
         num_blocks=64,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec([str(index)], spec) for index, spec in enumerate(specs)],
+        kv_cache_groups=[cache_group([str(index)], spec) for index, spec in enumerate(specs)],
     )
     coordinator = AscendHybridKVCacheCoordinator(
         cfg,
@@ -375,7 +423,7 @@ def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
         max_length=16,
         kv_cache_group_ids=[2],
         block_pool=coordinator.block_pool,
-        kv_cache_spec=specs[2],
+        **lookup_params(specs[2]),
         drop_eagle_block=False,
         alignment_tokens=16,
         dcp_world_size=1,
@@ -394,13 +442,13 @@ def _make_hybrid_kv_cache_config(
     full_block_size: int = 16,
     mamba_block_size: int = 16,
 ) -> KVCacheConfig:
-    full_spec = FullAttentionSpec(
+    full_spec = full_attention_spec_type(
         block_size=full_block_size,
         num_kv_heads=8,
         head_size=64,
         dtype=torch.float16,
     )
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_requirement(
         block_size=mamba_block_size,
         shapes=((1,),),
         dtypes=(torch.float32,),
@@ -410,11 +458,13 @@ def _make_hybrid_kv_cache_config(
         num_blocks=10,
         kv_cache_tensors=[
             _make_kv_cache_tensor(full_spec.page_size_bytes * 10, ["attn"]),
-            _make_kv_cache_tensor(mamba_spec.page_size_bytes * 10, ["mamba"]),
+            _make_kv_cache_tensor(
+                (mamba_spec.spec if not vllm_version_is("0.33.0") else mamba_spec).page_size_bytes * 10, ["mamba"]
+            ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+            cache_group(layer_names=["attn"], kv_cache_spec=full_spec),
+            cache_group(layer_names=["mamba"], kv_cache_spec=mamba_spec),
         ],
     )
 
@@ -446,10 +496,10 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             dtype=torch.bfloat16,
             page_size_padded=page_size,
             cache_dtype_str="auto",
-            non_causal_multi_token_decode=True,
+            **({} if not vllm_version_is("0.33.0") else {"non_causal_multi_token_decode": True}),
         )
     else:
-        draft_attention_spec = FullAttentionSpec(
+        draft_attention_spec = full_attention_spec_type(
             block_size=block_size,
             num_kv_heads=1,
             head_size=64,
@@ -458,7 +508,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
         )
         if draft_replication_size > 1:
             draft_attention_spec = replace(draft_attention_spec, dcp_sharded=False)
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_requirement(
         block_size=mamba_block_size or block_size,
         shapes=((10, 2304), (6, 128, 128)),
         dtypes=(torch.bfloat16, torch.float32),
@@ -499,8 +549,8 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         **_ratio_kwargs(128),
         model_version="deepseek_v4",
     )
-    c4_group_spec = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
-    c128_group_spec = UniformTypeKVCacheSpecs.from_specs({"c128_attn": c128_spec})
+    c4_group_spec = {"c4_attn": c4_spec}
+    c128_group_spec = {"c128_attn": c128_spec}
     assert c4_group_spec is not None
     assert c128_group_spec is not None
     return KVCacheConfig(
@@ -510,8 +560,8 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
             _make_kv_cache_tensor(c128_spec.page_size_bytes * 10, ["c128_attn"]),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["c4_attn"], kv_cache_spec=c4_group_spec),
-            KVCacheGroupSpec(layer_names=["c128_attn"], kv_cache_spec=c128_group_spec),
+            cache_group(layer_names=["c4_attn"], kv_cache_spec=c4_group_spec),
+            cache_group(layer_names=["c128_attn"], kv_cache_spec=c128_group_spec),
         ],
     )
 
@@ -555,21 +605,23 @@ def test_dcp1_hybrid_hash_unit_divides_every_group(prefix_match_unit, expected_h
     config.cache_config.prefix_match_unit = prefix_match_unit
     cache = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(
-                kv_cache_spec=FullAttentionSpec(
+            cache_group(
+                ["state"],
+                kv_cache_spec=full_attention_spec_type(
                     block_size=128,
                     num_kv_heads=1,
                     head_size=64,
                     dtype=torch.bfloat16,
-                )
+                ),
             ),
-            SimpleNamespace(
-                kv_cache_spec=MambaSpec(
+            cache_group(
+                ["state"],
+                kv_cache_spec=mamba_requirement(
                     block_size=3072,
                     shapes=((1,),),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
-                )
+                ),
             ),
         ],
     )
@@ -595,6 +647,7 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
     assert spec.page_size_bytes == expected_page_size
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     spec = AscendMLAAttentionSpec(
         block_size=512,
@@ -637,7 +690,12 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=64)
     mamba_group = kv_cache_config.kv_cache_groups[1]
     kv_cache_config.kv_cache_groups[1] = replace(
-        mamba_group, kv_cache_spec=replace(mamba_group.kv_cache_spec, mamba_cache_mode=mamba_cache_mode)
+        mamba_group,
+        **(
+            {"manager_config": mamba_group.manager_config.replace_params(mamba_cache_mode=mamba_cache_mode)}
+            if not vllm_version_is("0.33.0")
+            else {"kv_cache_spec": replace(mamba_group.kv_cache_spec, mamba_cache_mode=mamba_cache_mode)}
+        ),
     )
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
@@ -687,7 +745,7 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     state_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
         ring_capacity=16,
-        sliding_window=16,
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         compress_ratio=16,
         num_kv_heads=1,
         head_size=256,
@@ -695,15 +753,15 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
         model_version="glm5_next",
         cache_role="indexer_tail",
     )
-    full_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.main": main_spec, "layer.indexer": indexer_spec})
-    state_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.state": state_spec})
-    mamba_spec = MambaSpec(
+    full_group_spec = {"layer.main": main_spec, "layer.indexer": indexer_spec}
+    state_group_spec = {"layer.state": state_spec}
+    mamba_spec = mamba_requirement(
         block_size=full_block_size,
         shapes=((1,),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
-    mamba_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.mamba": mamba_spec})
+    mamba_group_spec = {"layer.mamba": mamba_spec}
     assert full_group_spec is not None
     assert state_group_spec is not None
     assert mamba_group_spec is not None
@@ -712,22 +770,22 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            cache_group(
                 layer_names=["layer.main", "layer.indexer"],
                 kv_cache_spec=full_group_spec,
             ),
-            KVCacheGroupSpec(
+            cache_group(
                 layer_names=["layer.state"],
                 kv_cache_spec=state_group_spec,
             ),
-            KVCacheGroupSpec(
+            cache_group(
                 layer_names=["layer.mamba"],
                 kv_cache_spec=mamba_group_spec,
             ),
         ],
     )
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
-    scheduler_full_spec = scheduler_config.kv_cache_groups[0].kv_cache_spec
+    scheduler_full_spec = group_distinct_specs(scheduler_config.kv_cache_groups[0])[0]
     assert isinstance(scheduler_full_spec, MLAAttentionSpec)
     assert scheduler_full_spec.head_size == main_spec.head_size
     ratio_field = "tokens_per_state"
@@ -741,12 +799,18 @@ def test_glm5_next_hashes_exclude_private_tail_after_engine_min_block_update(
     )
     # Match EngineCore: the global block size becomes the smallest unwrapped
     # scheduler group size. The private tail must not limit prefix hashing.
-    vllm_config.cache_config.block_size = min(
-        group.kv_cache_spec.block_size for group in scheduler_config.kv_cache_groups
-    )
+    vllm_config.cache_config.block_size = min(group_block_size(group) for group in scheduler_config.kv_cache_groups)
     assert vllm_config.cache_config.block_size == 16
     assert state_spec.block_size == state_spec.compress_ratio == 16
-    assert not state_spec.prefix_cacheable
+    assert not group_prefix_cacheable(cache_group(["state"], state_spec))
+    if (
+        not vllm_version_is("0.33.0")
+        and prefix_match_unit is not None
+        and prefix_match_unit < indexer_spec.tokens_per_state
+    ):
+        with pytest.raises(ValueError, match="per-state compression"):
+            resolve_kv_cache_block_sizes(scheduler_config, vllm_config)
+        vllm_config.cache_config.prefix_match_unit = expected_hash_block_size = indexer_spec.tokens_per_state
     scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
         scheduler_config,
         vllm_config,
@@ -781,7 +845,7 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     tail_spec = AscendIndexerKPoolTailSpec(
         block_size=16,
         ring_capacity=16,
-        sliding_window=16,
+        **({} if not vllm_version_is("0.33.0") else {"sliding_window": 16}),
         compress_ratio=16,
         num_kv_heads=1,
         head_size=256,
@@ -793,8 +857,8 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["layer.full"], kv_cache_spec=full_spec),
-            KVCacheGroupSpec(layer_names=["layer.tail"], kv_cache_spec=tail_spec),
+            cache_group(layer_names=["layer.full"], kv_cache_spec=full_spec),
+            cache_group(layer_names=["layer.tail"], kv_cache_spec=tail_spec),
         ],
     )
     vllm_config = _make_vllm_config(
@@ -806,11 +870,12 @@ def test_glm5_next_single_cacheable_group_ignores_private_tail_block_size() -> N
     # Match EngineCore: the tail participates in the global minimum before
     # resolve excludes request-private groups from prefix hashing.
     assert vllm_config.cache_config.block_size == tail_spec.block_size
-    assert not tail_spec.prefix_cacheable
+    assert not group_prefix_cacheable(cache_group(["tail"], tail_spec))
 
     assert resolve_kv_cache_block_sizes(kv_cache_config, vllm_config) == (384, 384)
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
     c128_spec = MLAAttentionSpec(
         block_size=128 * 128,
@@ -828,7 +893,7 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         **_ratio_kwargs(4),
         model_version="deepseek_v4",
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = _window_requirement(
         block_size=128,
         num_kv_heads=1,
         head_size=128,
@@ -870,18 +935,19 @@ def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_u
 
     assert groups is not None
     assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
-    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
-    mixed_specs = groups[0].kv_cache_spec.kv_cache_specs
+    if vllm_version_is("0.33.0"):
+        assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
+    mixed_specs = group_layer_specs(groups[0])
     expected_mla_count = 29 if draft_uses_mla else 24
     assert sum(isinstance(spec, MLAAttentionSpec) for spec in mixed_specs.values()) == expected_mla_count
-    assert all(isinstance(spec, FullAttentionSpec) for spec in mixed_specs.values())
+    assert all(isinstance(spec, full_attention_spec_type) for spec in mixed_specs.values())
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("group_kind", ["empty", "attention", "mamba", "mixed"])
 def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
-    attention = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
-    mamba = MambaSpec(block_size=16, shapes=((2, 3),), dtypes=(torch.float32,))
+    attention = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    mamba = mamba_requirement(block_size=16, shapes=((2, 3),), dtypes=(torch.float32,))
     groups = []
     for kind, spec in (("attention", attention), ("mamba", mamba)):
         if group_kind not in (kind, "mixed"):
@@ -889,10 +955,14 @@ def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
         specs = {f"{kind}.0": spec}
         if kind == "mamba":
             # Homogeneous Mamba groups may contain different per-layer layouts.
-            specs[f"{kind}.1"] = replace(mamba, shapes=((3, 2),))
-        group_spec = UniformTypeKVCacheSpecs.from_specs(specs) if wrapped else spec
+            specs[f"{kind}.1"] = (
+                replace(mamba, spec=replace(mamba.spec, shapes=((3, 2),)))
+                if not vllm_version_is("0.33.0")
+                else replace(mamba, shapes=((3, 2),))
+            )
+        group_spec = specs if wrapped else spec
         assert group_spec is not None
-        groups.append(KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec))
+        groups.append(cache_group(layer_names=list(specs), kv_cache_spec=group_spec))
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
 
     assert KVCacheConfig.has_mamba_layers.fget.__module__ == "vllm.v1.kv_cache_interface"
@@ -906,32 +976,35 @@ def test_native_mamba_detection_and_zeroing(wrapped, group_kind) -> None:
 def test_native_uniform_width_preserves_mamba_speculative_slots(dcp, num_speculative_blocks, cache_mode) -> None:
     config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
     config.cache_config.mamba_cache_mode = cache_mode
-    spec = MambaSpec(
+    spec = mamba_requirement(
         block_size=16,
         shapes=((2, 3),),
         dtypes=(torch.float32,),
         num_speculative_blocks=num_speculative_blocks,
         mamba_cache_mode=cache_mode,
     )
-    wrapped = UniformTypeKVCacheSpecs.from_specs({"mamba.0": spec, "mamba.1": replace(spec, shapes=((3, 2),))})
-    assert wrapped is not None
-    assert UniformTypeKVCacheSpecs.max_num_blocks_per_req.__module__ == "vllm.v1.kv_cache_interface"
+    second = (
+        replace(spec, spec=replace(spec.spec, shapes=((3, 2),)))
+        if not vllm_version_is("0.33.0")
+        else replace(spec, shapes=((3, 2),))
+    )
+    group = cache_group(["mamba.0", "mamba.1"], {"mamba.0": spec, "mamba.1": second})
     expected = (5 if cache_mode == "align" else 1) + num_speculative_blocks
-    assert wrapped.max_num_blocks_per_req(config, 65) == spec.max_num_blocks_per_req(config, 65) == expected
+    assert width(group, config, 65) == expected
 
 
 @pytest.mark.parametrize("dcp", [1, 4])
 def test_native_uniform_attention_width_uses_dcp(dcp) -> None:
     config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp)
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
-    wrapped = UniformTypeKVCacheSpecs.from_specs({"attention.0": spec, "attention.1": spec})
-    assert wrapped is not None
-    assert wrapped.max_num_blocks_per_req(config, 65) == math.ceil(65 / (16 * dcp))
+    spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float32)
+    group = cache_group(["attention.0", "attention.1"], {"attention.0": spec, "attention.1": spec})
+    assert width(group, config, 65) == math.ceil(65 / (16 * dcp))
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_native_uniform_width_rejects_inconsistent_inner_widths() -> None:
     config = _make_vllm_config(enable_prefix_caching=True, dcp=2)
-    spec = MambaSpec(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
+    spec = mamba_requirement(block_size=16, shapes=((1,),), dtypes=(torch.float32,))
     # Bypass from_specs to exercise the native assertion on malformed groups.
     wrapped = UniformTypeKVCacheSpecs(
         block_size=16,
@@ -954,17 +1027,14 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
 
     assert worker_config.has_mamba_layers
     assert worker_config.needs_kv_cache_zeroing
-    worker_mamba_widths = {
-        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len) for group in groups[1:]
-    }
+    worker_mamba_widths = {width(group, vllm_config, max_model_len) for group in groups[1:]}
     assert worker_mamba_widths == {354}
 
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
-    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
-    assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    assert isinstance(group_distinct_specs(scheduler_config.kv_cache_groups[0])[0], MLAAttentionSpec)
+    assert all(isinstance(group_distinct_specs(group)[0], MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
     scheduler_mamba_widths = {
-        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
-        for group in scheduler_config.kv_cache_groups[1:]
+        width(group, vllm_config, max_model_len) for group in scheduler_config.kv_cache_groups[1:]
     }
     assert scheduler_mamba_widths == worker_mamba_widths
     assert scheduler_config.needs_kv_cache_zeroing
@@ -976,16 +1046,22 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     page_size = 488448
     expected_num_blocks = 100
     available_memory = page_size * 29 * expected_num_blocks
-    monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
-        lambda _config, num_blocks: num_blocks,
-    )
+    if not vllm_version_is("0.33.0"):
+        from vllm_ascend.models.deepseek_v4.cache_config import _place_deepseek_v4_cache
 
-    num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
-        SimpleNamespace(),
-        groups,
-        available_memory,
-    )
+        num_blocks = expected_num_blocks
+        tensors = _place_deepseek_v4_cache(groups, num_blocks)
+    else:
+        monkeypatch.setattr(
+            "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+            lambda _config, num_blocks: num_blocks,
+        )
+
+        num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
+            SimpleNamespace(),
+            groups,
+            available_memory,
+        )
 
     assert num_blocks == expected_num_blocks
     assert len(tensors) == 4
@@ -1002,11 +1078,13 @@ def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
     page_size = 940032
     specs = _make_kimi_k3_dspark_kv_cache_specs(block_size=768, page_size=page_size)
     for name, spec in list(specs.items()):
-        if isinstance(spec, MambaSpec):
-            specs[name] = replace(
-                spec,
+        layout = spec.spec if not vllm_version_is("0.33.0") and hasattr(spec, "manager_config") else spec
+        if isinstance(layout, MambaSpec):
+            specs[name] = mamba_requirement(
                 block_size=200000,
                 shapes=((6, 4608), (12, 128, 128)),
+                dtypes=layout.dtypes,
+                page_size_padded=layout.page_size_padded,
                 mamba_cache_mode="none",
                 num_speculative_blocks=3,
             )
@@ -1015,10 +1093,10 @@ def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
     assert groups is not None
     assert [len(g.layer_names) for g in groups] == [29, 23, 23, 23]
-    assert [g.kv_cache_spec.block_size for g in groups] == [768, 200000, 200000, 200000]
+    assert [group_block_size(g) for g in groups] == [768, 200000, 200000, 200000]
     config = _make_vllm_config(enable_prefix_caching=False, dcp=1, block_size=768)
     config.cache_config.mamba_cache_mode = "none"
-    assert {g.kv_cache_spec.max_num_blocks_per_req(config, 200000) for g in groups[1:]} == {4}
+    assert {width(g, config, 200000) for g in groups[1:]} == {4}
 
 
 def test_kimi_k3_mixed_attention_still_requires_same_block_size() -> None:
@@ -1074,6 +1152,7 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
     assert hash_block_size == 512
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
@@ -1118,6 +1197,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert needed_memory == expected_memory
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     groups = kv_cache_config.kv_cache_groups
@@ -1151,6 +1231,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
@@ -1177,7 +1258,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     )
     assert group_spec is not None
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        cache_group(
             layer_names=["small_attn", "large_attn", "mtp_attn"],
             kv_cache_spec=group_spec,
         )
@@ -1233,7 +1314,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     ("spec_factory", "dcp", "enable_caching", "expected"),
     [
         pytest.param(
-            lambda: FullAttentionSpec(
+            lambda: full_attention_spec_type(
                 block_size=16,
                 num_kv_heads=8,
                 head_size=64,
@@ -1245,7 +1326,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
             id="full-attention-scales-with-dcp",
         ),
         pytest.param(
-            lambda: MambaSpec(
+            lambda: mamba_requirement(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1257,7 +1338,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
             id="mamba-keeps-physical-block-size-with-prefix-caching",
         ),
         pytest.param(
-            lambda: FullAttentionSpec(
+            lambda: full_attention_spec_type(
                 block_size=16,
                 num_kv_heads=8,
                 head_size=64,
@@ -1281,7 +1362,11 @@ def test_get_effective_block_size(
         enable_caching=enable_caching,
     )
 
-    assert coordinator._get_effective_block_size(spec_factory()) == expected
+    spec = spec_factory()
+    assert (
+        coordinator._get_effective_block_size(cache_group(["layer"], spec) if not vllm_version_is("0.33.0") else spec)
+        == expected
+    )
 
 
 def test_get_kv_cache_coordinator_delegates_single_group(monkeypatch) -> None:
@@ -1430,28 +1515,29 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
-    target_spec = FullAttentionSpec(
+    target_spec = full_attention_spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
     )
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_requirement(
         block_size=16,
         shapes=((2, 4),),
         dtypes=(torch.float32,),
     )
     groups = [
-        KVCacheGroupSpec(
+        cache_group(
             ["model.layers.0.self_attn.attn"],
             target_spec,
         ),
-        KVCacheGroupSpec(
+        cache_group(
             ["model.layers.48.self_attn.attn"],
             target_spec,
         ),
-        KVCacheGroupSpec(
+        cache_group(
             ["model.layers.1.linear_attn"],
             mamba_spec,
         ),
@@ -1487,18 +1573,19 @@ def test_qwen4_exp_annotates_only_actual_mtp_group() -> None:
         ("qwen4_exp_text", ["Qwen4ExpMTP"]),
     ],
 )
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_mtp_text_config_fallback_annotation(
     text_model_type,
     text_architectures,
 ) -> None:
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
     )
     groups = [
-        KVCacheGroupSpec(["mtp.layers.48.self_attn.attn"], spec),
+        cache_group(["mtp.layers.48.self_attn.attn"], spec),
     ]
     speculative_config = SimpleNamespace(
         use_eagle_block_drop=lambda: True,
@@ -1525,14 +1612,15 @@ def test_qwen4_exp_mtp_text_config_fallback_annotation(
     assert groups[0].is_eagle_group is True
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
     )
-    groups = [KVCacheGroupSpec(["model.layers.48.self_attn.attn"], spec)]
+    groups = [cache_group(["model.layers.48.self_attn.attn"], spec)]
     speculative_config = SimpleNamespace(
         use_eagle_block_drop=lambda: True,
         draft_model_config=SimpleNamespace(
@@ -1557,14 +1645,15 @@ def test_non_qwen_mtp_does_not_use_positional_annotation() -> None:
     assert groups[0].is_eagle_group is False
 
 
+@pytest.mark.skipif(not vllm_version_is("0.33.0"), reason="Exercises release-only spec or planner hooks.")
 def test_qwen4_exp_mtp_missing_draft_group_fails_fast() -> None:
-    spec = FullAttentionSpec(
+    spec = full_attention_spec_type(
         block_size=16,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.bfloat16,
     )
-    groups = [KVCacheGroupSpec(["model.layers.47.self_attn.attn"], spec)]
+    groups = [cache_group(["model.layers.47.self_attn.attn"], spec)]
     speculative_config = SimpleNamespace(
         use_eagle_block_drop=lambda: True,
         draft_model_config=SimpleNamespace(
@@ -1596,14 +1685,14 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     base_config = _make_deepseek_v4_kv_cache_config()
     # Reuse the c128 spec object so the two c128 groups compare equal and merge
     # into one attention group in verify_and_split.
-    c128_group_spec = base_config.kv_cache_groups[1].kv_cache_spec
+    c128_group_spec = group_distinct_specs(base_config.kv_cache_groups[1])[0]
     kv_cache_config = KVCacheConfig(
         num_blocks=base_config.num_blocks,
         kv_cache_tensors=base_config.kv_cache_tensors,
         kv_cache_groups=[
             base_config.kv_cache_groups[0],  # c4   -> gid 0 (distinct spec)
             base_config.kv_cache_groups[1],  # c128 -> gid 1
-            KVCacheGroupSpec(layer_names=["c128_attn_mtp"], kv_cache_spec=c128_group_spec),  # gid 2
+            cache_group(layer_names=["c128_attn_mtp"], kv_cache_spec=c128_group_spec),  # gid 2
         ],
     )
 
@@ -1642,7 +1731,7 @@ def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
 
 @pytest.mark.parametrize("dcp,pcp", [(1, 1), (2, 1), (2, 4)])
 def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching(dcp, pcp) -> None:
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_requirement(
         block_size=16,
         shapes=((1,),),
         dtypes=(torch.float32,),
@@ -1657,25 +1746,29 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching(dcp, p
     )
 
     manager_kwargs = dict(
-        kv_cache_spec=mamba_spec,
+        **(
+            {"kv_cache_group": cache_group(["state"], mamba_spec)}
+            if not vllm_version_is("0.33.0")
+            else {"kv_cache_spec": mamba_spec}
+        ),
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=1,
         dcp_world_size=dcp,
         pcp_world_size=pcp,
     )
-    manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
+    manager_kwargs["scheduler_block_size"] = group_block_size(cache_group(["state"], mamba_spec))
     manager = AscendMambaManager(**manager_kwargs)
 
     assert AscendMambaManager.__init__ is AscendMambaManager.__base__.__init__
     assert manager.dcp_world_size == manager.pcp_world_size == 1
-    assert manager.block_size == mamba_spec.block_size
+    assert manager.block_size == manager_kwargs["scheduler_block_size"]
     assert manager.get_num_blocks_to_allocate("prefill", 16, [], 0, 0, 16, prefill_end=16) == 1
 
 
 def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
     """Mamba states are replicated, unlike DCP-sharded attention KV cache."""
-    mamba_spec = MambaSpec(
+    mamba_spec = mamba_requirement(
         block_size=16,
         shapes=((1,),),
         dtypes=(torch.float32,),
@@ -1696,7 +1789,7 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
             max_length=0,
             kv_cache_group_ids=[1],
             block_pool=MagicMock(),
-            kv_cache_spec=mamba_spec,
+            **lookup_params(mamba_spec),
             alignment_tokens=16,
             dcp_world_size=8,
             pcp_world_size=1,
@@ -1717,7 +1810,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     ``lcm_block_size`` (e.g. 4096), which is large enough that only the tail
     blocks within each segment need caching.
     """
-    spec = SlidingWindowMLASpec(
+    spec = _window_requirement(
         block_size=32,  # Ascend SWA block_size (--block-size 32)
         num_kv_heads=1,
         head_size=512,
@@ -1731,7 +1824,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         start_block=0,
         end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
         alignment_tokens=alignment_tokens,
-        kv_cache_spec=spec,
+        **lookup_params(spec),
         use_eagle=False,
         retention_interval=None,
     )
@@ -1756,8 +1849,13 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
 def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
-    groups = kv_cache_utils_patch._kv_cache_planning._get_kv_cache_groups_uniform_page_size(specs)
-    assert any(not g.kv_cache_spec.dcp_sharded and isinstance(g.kv_cache_spec, FullAttentionSpec) for g in groups)
+    groups = kv_cache_planning._get_kv_cache_groups_uniform_page_size(
+        {n: layer_config(s) for n, s in specs.items()} if not vllm_version_is("0.33.0") else specs
+    )
+    assert any(
+        not group_distinct_specs(g)[0].dcp_sharded and isinstance(group_distinct_specs(g)[0], full_attention_spec_type)
+        for g in groups
+    )
     config = _make_vllm_config(enable_prefix_caching=True, dcp=dcp, block_size=384)
     cache = KVCacheConfig(num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups)
     scheduler, hashed = resolve_kv_cache_block_sizes(cache, config)
@@ -1767,7 +1865,7 @@ def test_native_replicated_draft_owns_separate_group_and_block_span(dcp):
     coordinator.dcp_world_size = dcp
     coordinator.enable_caching = True
     for group in groups:
-        spec = group.kv_cache_spec
+        spec = group if not vllm_version_is("0.33.0") else group.kv_cache_spec
         assert coordinator._get_effective_block_size(spec) == spec.block_size * (dcp if spec.dcp_sharded else 1)
 
 
@@ -1778,7 +1876,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     from vllm.config import CacheConfig
 
     target = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    draft = FullAttentionSpec(
+    draft = full_attention_spec_type(
         block_size=4,
         num_kv_heads=1,
         head_size=16,
@@ -1786,7 +1884,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
         page_size_padded=target.page_size_bytes,
         dcp_sharded=False,
     )
-    state = MambaSpec(
+    state = mamba_requirement(
         block_size=4,
         shapes=((1,),),
         dtypes=(torch.float32,),
@@ -1794,9 +1892,9 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
         mamba_cache_mode="align",
     )
     groups = [
-        KVCacheGroupSpec(["target"], target),
-        KVCacheGroupSpec(["draft"], draft),
-        KVCacheGroupSpec(["state"], state),
+        cache_group(["target"], target),
+        cache_group(["draft"], draft),
+        cache_group(["state"], state),
     ]
     config = SimpleNamespace(
         cache_config=CacheConfig(block_size=4, num_gpu_blocks_override=num_blocks_override),
@@ -1805,12 +1903,21 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     config.cache_config.kv_cache_layout = layout
-    bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
+    builder = AscendKVCacheConfigBuilder()
+    bytes_per_block = (
+        builder._get_pool_bytes_per_block(config, groups)
+        if not vllm_version_is("0.33.0")
+        else kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
+    )
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
     assert _pool_bytes_per_block_from_builder(AscendKVCacheConfigBuilder(), config, groups) == bytes_per_block
     budget = 11 * bytes_per_block + bytes_per_block // 2
-    planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
     expected_blocks = 11 if num_blocks_override is None else num_blocks_override
+    planned = (
+        builder.get_kv_cache_config_from_groups(config, groups, expected_blocks)
+        if not vllm_version_is("0.33.0")
+        else kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
+    )
     assert planned.num_blocks == expected_blocks
     assert planned.kv_cache_groups is groups
     assert {tensor.size for tensor in planned.kv_cache_tensors} == {expected_blocks * bytes_per_block}
@@ -1826,5 +1933,9 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     assert not backing[: expected_blocks * target.page_size_bytes].any()
     assert backing[draft_start:draft_end].eq(91).all()
     # Rank re-planning must retain exactly the agreed block count.
-    replanned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
+    replanned = (
+        builder.get_kv_cache_config_from_groups(config, groups, num_blocks_override or 7)
+        if not vllm_version_is("0.33.0")
+        else kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, 7 * bytes_per_block)
+    )
     assert replanned.num_blocks == (7 if num_blocks_override is None else num_blocks_override)

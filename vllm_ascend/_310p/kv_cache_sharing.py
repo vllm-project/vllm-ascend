@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    MambaSpec,
+)
+
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
 
 
 def get_310p_shared_cache_slots(kv_cache_groups, layout) -> dict[str, int]:
@@ -19,11 +24,7 @@ def get_310p_shared_cache_slots(kv_cache_groups, layout) -> dict[str, int]:
             return {}
         has_attention = False
         has_mamba = False
-        for slot, layer_name in enumerate(group.layer_names):
-            group_spec = group.kv_cache_spec
-            spec = (
-                group_spec.kv_cache_specs[layer_name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
-            )
+        for slot, (layer_name, spec) in enumerate(group_layer_specs(group).items()):
             page_sizes.add(spec.page_size_bytes)
             if isinstance(spec, AttentionSpec):
                 has_attention = True

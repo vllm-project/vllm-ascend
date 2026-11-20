@@ -43,10 +43,16 @@ def load_class(filename, name, methods, dependencies=None):
     cls.body = [node for node in cls.body if not isinstance(node, ast.FunctionDef) or node.name in methods]
     scope = dict(
         globals(),
+        MLA_LAYOUT_TYPES=(MLAAttentionSpec, SlidingWindowMLASpec),
+        AttentionSpec=(FullAttentionSpec, SlidingWindowSpec),
+        FullAttentionManager=FullAttentionSpec,
+        CircularBufferManager=type("CircularBufferManager", (), {}),
+        SlidingWindowManager=SlidingWindowSpec,
+        group_manager=lambda group: group.manager_cls,
         math=math,
         prod=math.prod,
         dataclass=dataclass,
-        is_circular_kv_cache_spec=lambda spec: False,
+        is_circular_cache_group=lambda group: False,
         cdiv=lambda a, b: -(-a // b),
     )
     scope.update(dependencies or {})
@@ -103,6 +109,7 @@ def worker():
         "pull_worker.py",
         "MooncakePullRecvingThread",
         {
+            "_is_circular_layer",
             "_get_attention_dcp_sizes",
             "_get_layer_remote_tp_rank_groups",
             "_infer_total_num_kv_heads",
@@ -114,6 +121,8 @@ def worker():
         },
     )
     worker = cls()
+    worker.group_indices = [0]
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(manager_cls=FullAttentionSpec)])
     worker.tp_size = 4
     worker.tp_rank = 0
     worker.pcp_size = 1
@@ -132,7 +141,7 @@ def test_layout_uses_independent_endpoint_flags(worker, spec_type, heads, local_
     spec = spec_type(dcp_sharded=local_sharded)
     worker.block_shapes = [[(heads, 16, 4)]]
     remote = SimpleNamespace(dcp_sharded=[remote_sharded], block_shapes=[[(heads, 16, 4)]])
-    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4) == (
+    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4, False) == (
         2 if local_sharded else 1,
         4 if remote_sharded else 1,
     )
@@ -155,12 +164,12 @@ def test_routing_and_block_mapping_follow_layout(
     remote = SimpleNamespace(dcp_sharded=[remote_sharded], block_shapes=[[(remote_heads, 16, 4)]])
     groups = worker._get_layer_remote_tp_rank_groups(0, 0, spec, remote, 1, 4, 2)
     assert groups == expected
-    local_size, remote_size = worker._get_attention_dcp_sizes(spec, 0, remote, 2)
+    local_size, remote_size = worker._get_attention_dcp_sizes(spec, 0, remote, 2, False)
     result = worker._compute_group_block_ids(
         "request",
         groups,
         remote_size,
-        0,
+        SimpleNamespace(manager_cls=FullAttentionSpec),
         16,
         16,
         [10, 11],
@@ -189,6 +198,7 @@ def test_scheduler_prompt_blocks_follow_layout(sharded, expected):
     cls = load_class("base_scheduler.py", "MooncakeBaseConnectorScheduler", {"_get_transfer_block_ids"})
     scheduler = cls()
     scheduler.dcp_size = 2
+    scheduler.kv_cache_groups = [SimpleNamespace(manager_cls=FullAttentionSpec)]
     scheduler.group_unique_specs = [[FullAttentionSpec(dcp_sharded=sharded)]]
     scheduler.group_block_size = [16]
     assert scheduler._get_transfer_block_ids(([0, 1, 2, 3, 4],), 64) == (expected,)
@@ -226,7 +236,7 @@ def test_indexer_replication_uses_explicit_metadata(worker, local_replicas, remo
         indexer_replication_sizes=[remote_replicas],
         block_size_scales=[[remote_scale]],
     )
-    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4) == (
+    assert worker._get_attention_dcp_sizes(spec, 0, remote, 4, False) == (
         1 if local_replicas > 1 else 2,
         1 if remote_replicas > 1 else 4,
     )

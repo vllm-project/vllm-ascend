@@ -24,11 +24,12 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
@@ -158,8 +159,9 @@ def create_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"], FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16)
+            cache_group(
+                ["layer"],
+                full_attention_spec_type(block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16),
             )
         ],
     )

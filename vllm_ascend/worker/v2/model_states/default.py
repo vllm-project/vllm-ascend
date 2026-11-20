@@ -29,7 +29,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -165,13 +165,16 @@ class AscendModelState(DefaultModelState):
         )
         self._decoder_replay_source_slot_mappings = torch.empty_like(self._decoder_replay_slot_mappings)
         self._decoder_replay_builders.clear()
+        from vllm_ascend.core.kv_cache_interface import is_circular_cache_group
+
         for group_id, groups in enumerate(attn_groups):
+            if is_circular_cache_group(kv_cache_config.kv_cache_groups[group_id]):
+                continue
             for group in groups:
-                if not isinstance(group.kv_cache_spec, CircularBufferSpec):
-                    builder_cls = group.backend.get_builder_cls()
-                    if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
-                        builder = builder_cls(group.kv_cache_spec, group.layer_names, self.vllm_config, self.device)
-                        self._decoder_replay_builders.append((group_id, group.layer_names, builder))
+                builder_cls = group.backend.get_builder_cls()
+                if issubclass(builder_cls, AscendDSAV41MetadataBuilder):
+                    builder = builder_cls(group.kv_cache_spec, group.layer_names, self.vllm_config, self.device)
+                    self._decoder_replay_builders.append((group_id, group.layer_names, builder))
         from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 
         gather_replay_batch(

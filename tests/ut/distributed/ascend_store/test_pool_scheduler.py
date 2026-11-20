@@ -25,20 +25,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 from zmq.constants import RCVTIMEO, REP
 from zmq.error import ZMQError
 from zmq.sugar.context import Context
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from tests.kv_cache_groups import (
+    cache_group,
+    full_attention_spec_type,
+    layer_config,
+    mamba_requirement,
+    window_requirement,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import backend_map, get_backend_class
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     KVPoolScheduler,
     LookupKeyClient,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -185,14 +186,18 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
 ):
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
-    from vllm_ascend.patch.platform import patch_kv_cache_utils
+    from vllm_ascend.core.kv_cache_layers import configure_cache_transfer
 
     target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
     # Ownership comes from is_draft, independently of the attention mask.
-    target = replace(target, non_causal_multi_token_decode=non_causal)
+    target = (
+        layer_config(target)
+        if not vllm_version_is("0.33.0")
+        else replace(target, non_causal_multi_token_decode=non_causal)
+    )
     draft = replace(target, is_draft=True)
     layer_specs = {"draft": draft, "target": target} if draft_first else {"target": target, "draft": draft}
-    mixed = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
+    mixed = layer_specs
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
         speculative_config=SimpleNamespace(method="dspark"),
@@ -202,25 +207,33 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         num_blocks=4,
         hisparse_host_num_blocks=0,
         kv_cache_groups=[
-            KVCacheGroupSpec([], draft, is_eagle_group=True),
-            KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
-            KVCacheGroupSpec(["target-only"], target),
-            KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
+            cache_group([], draft, is_eagle_group=True),
+            cache_group([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
+            cache_group(["target-only"], target),
+            cache_group([], {"draft": draft}),
         ],
     )
     original_groups = copy.deepcopy(kv_config.kv_cache_groups)
-    with (
-        patch.object(patch_kv_cache_utils, "is_deepseek_v41_cache", return_value=False),
-        patch.object(patch_kv_cache_utils, "_get_glm5_next_cache_layout", return_value=None),
-        patch.object(patch_kv_cache_utils, "_is_deepseek_v4_groups", return_value=False),
-        patch.object(patch_kv_cache_utils, "_orig_get_kv_cache_config_from_groups", return_value=kv_config),
-    ):
-        result = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(config, kv_config.kv_cache_groups, 0)
+    if not vllm_version_is("0.33.0"):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids
+
+        global_groups = [
+            cache_group(["draft-only"], draft),
+            cache_group(list(layer_specs), mixed),
+            cache_group(["target-only"], target),
+            cache_group(["other-draft"], draft),
+        ]
+        config.dspark_draft_only_group_ids = draft_only_group_ids(global_groups, {"draft", "draft-only", "other-draft"})
+    configure_cache_transfer(config, kv_config)
+    result = kv_config
     assert result.dspark_draft_only_group_ids == (0, 3)
     scheduler_config = generate_scheduler_kv_cache_config([result])
     assert scheduler_config.dspark_draft_only_group_ids == (0, 3)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
-    assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
+    if not vllm_version_is("0.33.0"):
+        assert scheduler_config.kv_cache_groups[1] == original_groups[1]
+    else:
+        assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
     assert result.kv_cache_groups == original_groups
 
     # Feed the preserved ownership to its real consumer. A mixed group must
@@ -277,15 +290,15 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
 def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_blocks):
     config = make_config(extra_config={"backend": "mooncake"})
     groups = [
-        KVCacheGroupSpec(
-            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        cache_group(
+            ["layer.0"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
         )
     ]
     if num_speculative_blocks is not None:
         groups.append(
-            KVCacheGroupSpec(
+            cache_group(
                 ["layer.1"],
-                MambaSpec(
+                mamba_requirement(
                     shapes=((4,),),
                     dtypes=(torch.float32,),
                     block_size=16,
@@ -403,26 +416,24 @@ class TestKVPoolScheduler(unittest.TestCase):
         blocks but not the speculative tail of the mamba block table.
         """
         # Cover the UniformType wrapper path handled by _infer_mamba_groups.
-        wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs(
-            {
-                "layer.1": MambaSpec(
-                    shapes=((4,),),
-                    dtypes=(torch.float32,),
-                    block_size=16,
-                    mamba_cache_mode="align",
-                    num_speculative_blocks=3,
-                )
-            }
-        )
+        wrapped_mamba_spec = {
+            "layer.1": mamba_requirement(
+                shapes=((4,),),
+                dtypes=(torch.float32,),
+                block_size=16,
+                mamba_cache_mode="align",
+                num_speculative_blocks=3,
+            )
+        }
         assert wrapped_mamba_spec is not None
         hybrid_groups = [
-            KVCacheGroupSpec(
-                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            cache_group(
+                ["layer.0"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
             ),
-            KVCacheGroupSpec(["layer.1"], wrapped_mamba_spec),
-            KVCacheGroupSpec(
+            cache_group(["layer.1"], wrapped_mamba_spec),
+            cache_group(
                 ["layer.2"],
-                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+                mamba_requirement(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
             ),
         ]
         config = self._make_config(extra_config={"backend": "memcache"})
@@ -450,9 +461,9 @@ class TestKVPoolScheduler(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_swa_group_selected_for_save_retention(self, mock_client_cls):
         groups = [
-            KVCacheGroupSpec(
+            cache_group(
                 ["layer.0"],
-                SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
+                window_requirement(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
             )
         ]
         scheduler = KVPoolScheduler(
@@ -467,12 +478,12 @@ class TestKVPoolScheduler(unittest.TestCase):
     def test_noncacheable_swa_group_is_not_retained(self, mock_cacheable_groups, mock_client_cls):
         mock_cacheable_groups.return_value = [0]
         groups = [
-            KVCacheGroupSpec(
-                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            cache_group(
+                ["layer.0"], full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
             ),
-            KVCacheGroupSpec(
+            cache_group(
                 ["layer.1"],
-                SlidingWindowSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
+                window_requirement(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=32),
             ),
         ]
         scheduler = KVPoolScheduler(
@@ -1855,7 +1866,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
     def setUp(self):
         patcher = patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            "vllm_ascend.core.kv_cache_layers._release_manager_for_spec",
             side_effect=self._manager_for_spec,
         )
         patcher.start()
@@ -1870,13 +1881,13 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
     def _make_coordinator(self):
         return AscendStoreCoordinator(
             [
-                KVCacheGroupSpec(
+                cache_group(
                     ["layer.0"],
-                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                    full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
                 ),
-                KVCacheGroupSpec(
+                cache_group(
                     ["layer.1"],
-                    SlidingWindowSpec(
+                    window_requirement(
                         block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=16
                     ),
                 ),

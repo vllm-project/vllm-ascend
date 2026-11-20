@@ -47,20 +47,24 @@ from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
-    AscendSlidingWindowMLASpec,
+)
+from vllm_ascend.core.kv_cache_layers import (
+    group_block_size,
+    group_distinct_specs,
+    group_layer_specs,
+    group_manager,
+    group_params,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -1813,36 +1817,20 @@ class MooncakeConnectorScheduler:
         compress_ratios = getattr(hf_config, "compress_ratios", None)
         return isinstance(compress_ratios, (list, tuple, dict))
 
+    @staticmethod
+    def _get_group_unique_specs(group):
+        return list(group_distinct_specs(group))
+
     def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
-        specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
-        is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
-        sliding_window = 0
-        compress_ratio = 1
-        for spec in specs:
-            if isinstance(spec, SlidingWindowSpec):
-                sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
-
+        specs = group_distinct_specs(group)
+        window = getattr(group_params(group), "sliding_window", 0)
+        scale = 1 if window else max((getattr(spec, "compress_ratio", 1) for spec in specs), default=1)
         return GroupTransferInfo(
-            tokens_per_block=block_size * max(1, int(compress_ratio)),
-            blocks_per_window=cdiv(sliding_window, block_size) + 1 if sliding_window else 0,
-            is_state_group=is_state_group,
-            dcp_sharded=first_spec.dcp_sharded,
+            tokens_per_block=group_block_size(group) * max(1, scale),
+            blocks_per_window=cdiv(window, group_block_size(group)) + 1 if window else 0,
+            is_state_group=any(isinstance(spec, MambaSpec) for spec in group_distinct_specs(group)),
+            dcp_sharded=specs[0].dcp_sharded,
         )
-
-    def _get_group_unique_specs(self, group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
-
-        specs = []
-        for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
-            if layer_spec not in specs:
-                specs.append(layer_spec)
-        return specs
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return blocks that contain prompt KV, dropping MTP extra blocks.
@@ -2194,16 +2182,7 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.num_blocks: int = kv_cache_config.num_blocks
         self.kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] = {}
-        _is_fullattn_group = []
-        for g in self.kv_cache_config.kv_cache_groups:
-            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
-                is_fullattn_spec = []
-                for layer_name in g.layer_names:
-                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
-                    is_fullattn_spec.append(isinstance(layer_spec, FullAttentionSpec))
-                _is_fullattn_group.append(all(is_fullattn_spec))
-            else:
-                _is_fullattn_group.append(isinstance(g.kv_cache_spec, FullAttentionSpec))
+        _is_fullattn_group = [group_manager(group) is FullAttentionManager for group in kv_cache_config.kv_cache_groups]
         self.use_hybrid = (
             not self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and not all(_is_fullattn_group)
@@ -2281,8 +2260,8 @@ class MooncakeConnectorWorker:
     @staticmethod
     def _serialize_kv_group_spec(
         group_spec: Any,
+        kv_cache_spec: Any,
         layer_names: list[str] | None = None,
-        kv_cache_spec: Any | None = None,
         kv_cache_group_id: int | None = None,
         total_num_kv_heads: int | None = None,
     ) -> dict[str, Any]:
@@ -2303,11 +2282,7 @@ class MooncakeConnectorWorker:
 
         if layer_names is None:
             layer_names = list(group_spec.layer_names)
-        if kv_cache_spec is None:
-            kv_cache_spec = group_spec.kv_cache_spec
         spec = kv_cache_spec
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            spec = {layer_name: kv_cache_spec.kv_cache_specs[layer_name] for layer_name in layer_names}
         serialized_kv_cache_spec = to_msgpackable(spec)
         if not isinstance(serialized_kv_cache_spec, dict):
             serialized_kv_cache_spec = {"repr": serialized_kv_cache_spec}
@@ -2317,6 +2292,9 @@ class MooncakeConnectorWorker:
             serialized_kv_cache_spec["num_key_value_heads"] = num_key_value_heads
         if total_num_kv_heads is not None:
             serialized_kv_cache_spec["total_num_kv_heads"] = total_num_kv_heads
+        window = getattr(group_params(group_spec), "sliding_window", 0)
+        if window:
+            serialized_kv_cache_spec["sliding_window"] = window
 
         serialized = {
             "layer_names": layer_names,
@@ -2349,16 +2327,9 @@ class MooncakeConnectorWorker:
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
         """Return the real per-layer specs retained by the KV cache config."""
-        layer_specs: dict[str, Any] = {}
-        for group in kv_cache_config.kv_cache_groups:
-            group_kv_spec = group.kv_cache_spec
-            if isinstance(group_kv_spec, UniformTypeKVCacheSpecs):
-                for layer_name in group.layer_names:
-                    layer_specs[layer_name] = group_kv_spec.kv_cache_specs[layer_name]
-                continue
-            for layer_name in group.layer_names:
-                layer_specs[layer_name] = group_kv_spec
-        return layer_specs
+        return {
+            name: spec for group in kv_cache_config.kv_cache_groups for name, spec in group_layer_specs(group).items()
+        }
 
     @staticmethod
     def _get_spec_num_key_value_heads(spec: Any) -> int | None:
@@ -2395,7 +2366,7 @@ class MooncakeConnectorWorker:
         # grouping, but remains a distinct key-only transfer layout.
         if isinstance(spec, AscendSFAIndexerCacheSpec):
             return 1
-        if isinstance(spec, (MLAAttentionSpec, AscendSlidingWindowMLASpec)):
+        if isinstance(spec, MLAAttentionSpec):
             return 1
         local_num_kv_heads = self._get_spec_num_key_value_heads(spec)
         if local_num_kv_heads is None:
@@ -2496,10 +2467,7 @@ class MooncakeConnectorWorker:
         return [kv_cache_tuple]
 
     def _get_layer_spec(self, layer_name: str) -> Any:
-        layer_spec = self._layer_specs[layer_name]
-        if isinstance(layer_spec, UniformTypeKVCacheSpecs):
-            layer_spec = layer_spec.kv_cache_specs[layer_name]
-        return layer_spec
+        return self._layer_specs[layer_name]
 
     @staticmethod
     def _recover_aligned_kv_tensor_base(

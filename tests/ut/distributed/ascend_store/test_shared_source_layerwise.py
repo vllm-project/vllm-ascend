@@ -16,8 +16,8 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 # isort: split
 import numpy as np
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type
 from tests.ut.distributed.ascend_store import test_pool_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
@@ -126,9 +126,9 @@ def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sourc
         groups.append([f"model.layers.{layer}.attn.swa_cache" for layer in range(num_layers)])
     if draft:
         groups.append(["model.mtp.layers.0.attn.kv_cache"])
-    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
+    spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.uint8)
     cache_config = SimpleNamespace(
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=group, kv_cache_spec=spec) for group in groups],
+        kv_cache_groups=[cache_group(layer_names=group, kv_cache_spec=spec) for group in groups],
         dspark_draft_layer_names=set(groups[-1]) if draft else set(),
         num_blocks=4,
         prefix_cache_retention_interval=0,

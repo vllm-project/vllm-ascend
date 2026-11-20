@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
@@ -277,6 +278,11 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def get_kv_cache_config(self, vllm_config: VllmConfig):
+        spec = self.get_kv_cache_spec(vllm_config)
+        return FullAttentionManager.layer_config(spec)
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return AscendSFAIndexerCacheSpec(
             block_size=vllm_config.cache_config.block_size,

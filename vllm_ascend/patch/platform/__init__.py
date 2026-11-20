@@ -19,7 +19,10 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
-import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
@@ -91,10 +94,8 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #       Remove this patch when upstream's generic KV-cache layout supports the
 #       Ascend GLM-Next cache topology.
 #
-#       On both supported versions, Ascend grouping and pool accounting live
-#       in AscendKVCacheConfigBuilder, which the platform selects through
-#       NPUPlatform.get_kv_cache_config_builder_cls. Its default materialization
-#       delegates to the patched planning functions in this file.
+#       The v0.33.0 config builder uses these patched planning functions.
+#       The #61452 builder uses the upstream layer-config planning API.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

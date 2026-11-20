@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
 
+from tests.kv_cache_groups import cache_group
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -44,7 +45,7 @@ def test_layerwise_plan_shares_each_physical_slot(reuse, indexer_c8):
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)
+            cache_group(layer_names=names, kv_cache_spec=spec)
             for names, spec in ((main_names, main_spec), (indexer_names, indexer_spec))
         ],
     )

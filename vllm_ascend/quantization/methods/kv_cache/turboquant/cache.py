@@ -15,11 +15,17 @@ from vllm.utils.torch_utils import get_dtype_size
 # Both supported versions expose planning helpers in kv_cache_planning.
 from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
 )
+
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs, group_max_blocks
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import KVCacheGroup
+else:
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
 from . import SLOT_BYTES, TURBOQUANT_CACHE_DTYPE
 
@@ -37,12 +43,8 @@ def uses_turboquant_groups(groups):
     return any(
         getattr(spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
         for group in groups
-        if group is not None and getattr(group, "kv_cache_spec", None) is not None
-        for spec in (
-            group.kv_cache_spec.kv_cache_specs.values()
-            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-            else (group.kv_cache_spec,)
-        )
+        if group is not None and (not vllm_version_is("0.33.0") or getattr(group, "kv_cache_spec", None) is not None)
+        for spec in group_distinct_specs(group)
     )
 
 
@@ -79,6 +81,34 @@ def group_specs(grouped_specs):
     return groups
 
 
+def group_layers(grouped_layers):
+    largest_page = max(config.spec.page_size_bytes for group in grouped_layers for config in group.values())
+    c4_group_bytes = [
+        sum(config.spec.page_size_bytes for config in group.values())
+        for group in grouped_layers
+        if any(
+            getattr(config.spec, "cache_dtype_str", None) == TURBOQUANT_CACHE_DTYPE
+            and config.spec.head_size == SLOT_BYTES
+            for config in group.values()
+        )
+    ]
+    budget = round_up(max(c4_group_bytes, default=largest_page), largest_page)
+    groups = []
+    for layers in grouped_layers:
+        chunk = {}
+        used = 0
+        for name, config in layers.items():
+            size = config.spec.page_size_bytes
+            if chunk and used + size > budget:
+                groups.append(KVCacheGroup.from_layers(chunk))
+                chunk, used = {}, 0
+            chunk[name] = config
+            used += size
+        if chunk:
+            groups.append(KVCacheGroup.from_layers(chunk))
+    return groups
+
+
 def _alignment(spec):
     alignment = get_dtype_size(spec.dtype)
     if getattr(spec, "scale_dim", 0):
@@ -91,7 +121,7 @@ def _alignment(spec):
 
 
 def packed_layout(groups):
-    specs = {name: spec for group in groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
+    specs = {name: spec for group in groups for name, spec in group_layer_specs(group).items()}
     page_alignment = math.lcm(PHYSICAL_STRIDE_ALIGNMENT, *(_alignment(spec) for spec in specs.values()))
     # A block ID belongs to one group at a time. Overlay complete groups
     # with a common stride to avoid fragmentation between small-page bins.
@@ -113,14 +143,15 @@ def pool_bytes_per_block(groups):
 
 
 def max_memory_usage(vllm_config, groups):
-    request_blocks = sum(group.kv_cache_spec.max_memory_usage_pages(vllm_config) for group in groups)
+    request_blocks = sum(group_max_blocks(group, vllm_config) for group in groups)
     return pool_bytes_per_block(groups) * request_blocks
 
 
-def cache_config(vllm_config, groups, available_memory):
+def cache_config(vllm_config, groups, available_memory=None, *, num_blocks=None):
     layout = packed_layout(groups)
     page_bytes = sum(size for size, _ in layout)
-    num_blocks = may_override_num_blocks(vllm_config, available_memory // page_bytes)
+    if num_blocks is None:
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // page_bytes)
     logger.info(
         "DeepSeek V4 TurboQuant KV: C4 slot=%d bytes, pool bytes/block=%d, groups=%d, blocks=%d",
         SLOT_BYTES,

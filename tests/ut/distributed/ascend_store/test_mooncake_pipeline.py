@@ -16,10 +16,12 @@ from numpy.typing import NDArray
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
+
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
 from tests.ut.distributed.ascend_store.test_mooncake_hybrid import MemoryRangeStore, cpu_cache
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+from vllm_ascend.core.kv_cache_layers import group_distinct_specs, group_layer_specs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise as protocol
@@ -28,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestMooncakePipeline(unittest.TestCase):
@@ -53,26 +56,39 @@ class TestMooncakePipeline(unittest.TestCase):
         # layer that is not part of get_num_layers().
         layers = list(range(3)) if stage == 0 else list(range(3, 7 + int(draft)))
         names = [f"model.layers.{layer}.kv" for layer in layers]
-        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
-        groups = [KVCacheGroupSpec(names, spec)]
+        spec = full_attention_spec_type(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
+        groups = [cache_group(names, spec)]
         if hybrid:
             groups = [
-                KVCacheGroupSpec([name for layer, name in zip(layers, names) if layer in (0, 2, 3, 6, 7)], spec),
-                KVCacheGroupSpec(
+                cache_group([name for layer, name in zip(layers, names) if layer in (0, 2, 3, 6, 7)], spec),
+                cache_group(
                     [f"model.layers.{layer}.c4" for layer in layers if layer in (1, 2, 4, 5, 6, 7)]
                     + (["model.layers.6.c4_indexer"] if stage else []),
-                    FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    full_attention_spec_type(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
-                KVCacheGroupSpec(
+                cache_group(
                     [f"model.layers.{layer}.state" for layer in layers if layer in (0, 2, 3, 6, 7)],
-                    SlidingWindowSpec(block_size=16, sliding_window=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                    window_requirement(block_size=16, sliding_window=16, num_kv_heads=1, head_size=1, dtype="uint8"),
                 ),
             ]
         if empty_tail:
             # The final layer owns only unreachable SWA state in this step.
-            groups[0].layer_names = ["model.layers.3.kv", "model.layers.5.kv"]
-            groups[1].layer_names = ["model.layers.4.c4", "model.layers.5.c4"]
-            groups[2].layer_names = ["model.layers.6.state"]
+            if not vllm_version_is("0.33.0"):
+                groups[0].kv_cache_specs = dict.fromkeys(
+                    ["model.layers.3.kv", "model.layers.5.kv"], group_distinct_specs(groups[0])[0]
+                )
+            else:
+                groups[0].layer_names = ["model.layers.3.kv", "model.layers.5.kv"]
+            if not vllm_version_is("0.33.0"):
+                groups[1].kv_cache_specs = dict.fromkeys(
+                    ["model.layers.4.c4", "model.layers.5.c4"], group_distinct_specs(groups[1])[0]
+                )
+            else:
+                groups[1].layer_names = ["model.layers.4.c4", "model.layers.5.c4"]
+            if not vllm_version_is("0.33.0"):
+                groups[2].kv_cache_specs = dict.fromkeys(["model.layers.6.state"], group_distinct_specs(groups[2])[0])
+            else:
+                groups[2].layer_names = ["model.layers.6.state"]
         config = SimpleNamespace(num_blocks=10, kv_cache_groups=groups)
         with patch.object(BaseKVPoolWorker, "_build_cache_coordinator", return_value=None):
             worker = make_worker(
@@ -391,14 +407,7 @@ class TestMooncakePipeline(unittest.TestCase):
         config.model_config.get_layers_start_end_indices.side_effect = lambda p: ((0, 4), (4, 7))[p.rank // 2]
         self.assertNotEqual(original, protocol.layerwise_topology_namespace(config))
         groups = worker.kv_cache_config.kv_cache_groups
-        wrapped = SimpleNamespace(
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    g.layer_names, UniformTypeKVCacheSpecs.from_specs({name: g.kv_cache_spec for name in g.layer_names})
-                )
-                for g in groups
-            ]
-        )
+        wrapped = SimpleNamespace(kv_cache_groups=[cache_group(g.layer_names, group_layer_specs(g)) for g in groups])
         self.assertEqual(
             protocol.hybrid_layout_id(worker.kv_cache_config, 2, namespace=original),
             protocol.hybrid_layout_id(wrapped, 2, namespace=original),
@@ -410,7 +419,7 @@ class TestMooncakePipeline(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no KV cache group"):
             worker._groups_for_layerwise_transfer(0)
         group = copy(worker.kv_cache_config.kv_cache_groups[0])
-        group.layer_names = []
+        group = cache_group([], group_distinct_specs(group)[0])
         with self.assertRaisesRegex(ValueError, "empty groups"):
             protocol.validate_pp_groups(SimpleNamespace(kv_cache_groups=[group]), worker.vllm_config.parallel_config)
         config = SimpleNamespace(

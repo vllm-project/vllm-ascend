@@ -4,7 +4,6 @@ import inspect
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache, partial
-from importlib import import_module
 from typing import Any, cast
 from weakref import proxy
 
@@ -12,22 +11,20 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_layers import CacheGroup, group_distinct_specs, group_manager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
     infer_cacheable_group_ids,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _CACHE_MISSING = object()
-_MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 _REACHABLE_MASK_CACHE_SIZE = 32
 
 # kwargs every reachable_block_mask implementation must accept. Used when the
@@ -113,7 +110,7 @@ class AscendStoreCoordinator:
 
     def __init__(
         self,
-        kv_cache_groups: list[KVCacheGroupSpec],
+        kv_cache_groups: list[CacheGroup],
         scheduler_block_size: int,
         hash_block_size: int,
         group_block_sizes: list[int],
@@ -158,15 +155,19 @@ class AscendStoreCoordinator:
         self.group_effective_specs: list[KVCacheSpec] = []
 
         for group_id, group in enumerate(self.kv_cache_groups):
-            spec = _unwrap_spec(group.kv_cache_spec)
+            spec = group_distinct_specs(group)[0]
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
             if group_id not in self.cacheable_group_ids:
                 continue
-            manager_cls = _get_manager_class(spec)
+            manager_cls = group_manager(group, required=True)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
-                if existing_spec == effective_spec:
+                same_policy = (
+                    vllm_version_is("0.33.0")
+                    or group.manager_config == self.kv_cache_groups[group_ids[0]].manager_config
+                )
+                if existing_spec == effective_spec and same_policy:
                     assert manager_cls is existing_cls, "Expected same manager class for identical KV cache specs."
                     group_ids.append(group_id)
                     break
@@ -175,7 +176,7 @@ class AscendStoreCoordinator:
 
         self.attention_groups = sorted(
             attention_groups,
-            key=lambda item: not isinstance(item[0], FullAttentionSpec),
+            key=lambda item: not issubclass(item[2], FullAttentionManager),
         )
         self.eagle_attn_group_indices: set[int] = {
             index
@@ -244,13 +245,13 @@ class AscendStoreCoordinator:
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
                 continue
-            manager_cls = _get_manager_class(_unwrap_spec(self.kv_cache_groups[group_id].kv_cache_spec))
+            manager_cls = group_manager(self.kv_cache_groups[group_id], required=True)
             mask = _reachable_block_mask(
                 manager_cls,
                 start_block=0,
                 end_block=num_chunks,
                 alignment_tokens=self.lcm_block_size,
-                kv_cache_spec=spec,
+                **self._policy_arguments(group_id, spec),
                 use_eagle=group_id in self.eagle_reachable_group_ids,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
@@ -331,6 +332,14 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
+    def _policy_arguments(self, group_id, effective_spec):
+        if not vllm_version_is("0.33.0"):
+            return {
+                "manager_config": self.kv_cache_groups[group_id].manager_config,
+                "block_size": self.group_effective_block_sizes[group_id],
+            }
+        return {"kv_cache_spec": effective_spec}
+
     def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes
         # when resolving each group's block-size view.
@@ -354,7 +363,7 @@ class AscendStoreCoordinator:
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
-                kv_cache_spec=spec,
+                **self._policy_arguments(group_ids[0], spec),
                 drop_eagle_block=0 in eagle_indices,
                 alignment_tokens=spec.block_size,
             )
@@ -366,8 +375,8 @@ class AscendStoreCoordinator:
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * len(self.kv_cache_groups)
         hit_length_by_group: list[int] = [0] * len(self.kv_cache_groups)
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0][0], FullAttentionSpec
+        is_simple_hybrid = len(self.attention_groups) == 2 and issubclass(
+            self.attention_groups[0][2], FullAttentionManager
         )
         eagle_verified: set[int] = set()
 
@@ -377,7 +386,7 @@ class AscendStoreCoordinator:
             for index, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
                 first_group_id = group_ids[0]
                 cached = hit_blocks_by_group[first_group_id]
-                if isinstance(spec, FullAttentionSpec) and cached is not None:
+                if issubclass(manager_cls, FullAttentionManager) and cached is not None:
                     curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
@@ -392,7 +401,7 @@ class AscendStoreCoordinator:
                     max_length=max_group_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
-                    kv_cache_spec=spec,
+                    **self._policy_arguments(group_ids[0], spec),
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
@@ -411,8 +420,8 @@ class AscendStoreCoordinator:
             if is_simple_hybrid:
                 break
 
-        spec0, group_ids0, _ = self.attention_groups[0]
-        if isinstance(spec0, FullAttentionSpec):
+        spec0, group_ids0, first_manager = self.attention_groups[0]
+        if issubclass(first_manager, FullAttentionManager):
             num_blocks = cdiv(hit_length, spec0.block_size)
             for group_id in group_ids0:
                 full_blocks = hit_blocks_by_group[group_id]
@@ -426,12 +435,6 @@ class AscendStoreCoordinator:
         )
 
 
-def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
-    return spec
-
-
 def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpec:
     if spec.block_size == block_size:
         return spec
@@ -439,46 +442,6 @@ def _copy_spec_with_block_size(spec: KVCacheSpec, block_size: int) -> KVCacheSpe
     if copy_with_new_block_size is not None:
         return copy_with_new_block_size(block_size)
     return replace(spec, block_size=block_size)
-
-
-def _get_manager_class_cache() -> dict[str, Any]:
-    cache = getattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(_get_manager_class, _MANAGER_CLASS_CACHE_ATTR, cache)
-    return cast(dict[str, Any], cache)
-
-
-def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
-    cache = _get_manager_class_cache()
-    registry = cache.get("registry", _CACHE_MISSING)
-    if registry is _CACHE_MISSING:
-        try:
-            registry_module = import_module("vllm.v1.kv_cache_spec_registry")
-            registry = getattr(registry_module, "KVCacheSpecRegistry", None)
-        except ImportError:
-            registry = None
-        cache["registry"] = registry
-
-    if registry is not None:
-        manager_cls = registry.get_manager_class(spec)
-        if manager_cls is not None:
-            return manager_cls
-
-    spec_manager_map = cache.get("spec_manager_map", _CACHE_MISSING)
-    if spec_manager_map is _CACHE_MISSING:
-        try:
-            manager_module = import_module("vllm.v1.core.single_type_kv_cache_manager")
-            spec_manager_map = vars(manager_module)["spec_manager_map"]
-        except Exception as exc:
-            raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-        cache["spec_manager_map"] = spec_manager_map
-
-    try:
-        manager_cls = spec_manager_map[type(spec)]
-    except Exception as exc:
-        raise AssertionError(f"No manager registered for KVCacheSpec {type(spec)}") from exc
-    return manager_cls
 
 
 def _find_longest_cache_hit(

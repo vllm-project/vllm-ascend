@@ -49,6 +49,7 @@ for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
 
+from tests.kv_cache_groups import cache_group, full_attention_spec_type  # noqa: E402
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
@@ -64,13 +65,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     ReqMeta,
     SendReqInfo,
     SendTask,
-    UniformTypeKVCacheSpecs,
     ensure_zmq_recv,
     ensure_zmq_send,
     group_concurrent_contiguous,
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Restore the mocked modules so other test files still work correctly.
 # For keys that our real import loaded, overwrite with the saved mock.
@@ -98,12 +99,14 @@ def _make_layer_metadata(**overrides):
     return LayerMetadata(**defaults)
 
 
+def _dense_group(names, block_size=16):
+    return cache_group(
+        names, full_attention_spec_type(block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    )
+
+
 def _make_mock_kv_cache_config(block_size=16):
-    kv_cache_spec = MagicMock()
-    kv_cache_spec.block_size = block_size
-    group_spec = MagicMock()
-    group_spec.kv_cache_spec = kv_cache_spec
-    group_spec.layer_names = ["layer0"]
+    group_spec = _dense_group(["layer0"], block_size)
     kv_cache_config = MagicMock()
     kv_cache_config.kv_cache_groups = [group_spec]
     return kv_cache_config
@@ -151,7 +154,6 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.vllm_config.speculative_config = None
 
         self.kv_cache_config = _make_mock_kv_cache_config()
-        self.kv_cache_specs = [MagicMock(block_size=16)]
 
         self.key = torch.zeros((4, 8), dtype=torch.float32)
         self.value = torch.zeros((4, 8), dtype=torch.float32)
@@ -159,7 +161,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             engine=self.engine,
             vllm_config=self.vllm_config,
             kv_cache_config=self.kv_cache_config,
-            kv_cache_specs=self.kv_cache_specs,
+            kv_cache_groups=self.kv_cache_config.kv_cache_groups,
             attn_resharding_group_idx=set(),
             total_layers=3,
             ready_event=self.ready_event,
@@ -254,13 +256,12 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         vllm_config.speculative_config = None
 
         kv_cache_config = _make_mock_kv_cache_config()
-        kv_cache_specs = [MagicMock(block_size=16)]
 
         thread = KVCacheSendingLayerThread(
             engine=self.engine,
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
-            kv_cache_specs=kv_cache_specs,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
             attn_resharding_group_idx=set(),
             total_layers=2,
             ready_event=self.ready_event,
@@ -360,7 +361,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                 block_size_scale=[1, 1],
             ),
         }
-        self.thread.kv_cache_specs = [MagicMock(block_size=16)]
+        self.thread.kv_cache_groups = [_dense_group(list(self.thread.layer_metadata), 16)]
         req_meta = self.req_meta_base
         req_meta.local_block_ids = [[5, 6]]
         req_meta.remote_block_ids = [[10, 11]]
@@ -425,6 +426,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
             }
 
         self.thread.layer_metadata = make_metadata(sources)
+        self.thread.kv_cache_groups = [_dense_group(list(sources))]
         self.thread.enable_c8_quant = True
         self.thread.enable_kv_quant = True
         req_meta = self.req_meta_base
@@ -479,7 +481,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
                 block_len=[32],
             ),
         }
-        self.thread.kv_cache_specs = [MagicMock(block_size=16)]
+        self.thread.kv_cache_groups = [_dense_group(list(self.thread.layer_metadata), 16)]
         req_meta = self.req_meta_base
         req_meta.local_block_ids = [[5, 6]]
         req_meta.remote_block_ids = [[10, 11]]
@@ -839,12 +841,7 @@ class MockVllmConfig:
 
 class MockKVCacheConfig:
     def __init__(self, block_size=16):
-        kv_cache_spec = MagicMock()
-        kv_cache_spec.block_size = block_size
-        group_spec = MagicMock()
-        group_spec.kv_cache_spec = kv_cache_spec
-        group_spec.layer_names = ["encoder.layer.0"]
-        self.kv_cache_groups = [group_spec]
+        self.kv_cache_groups = [_dense_group(["encoder.layer.0"], block_size)]
         self.kv_cache_tensors = []
         self.num_blocks = 10
 
@@ -1352,7 +1349,7 @@ def _make_worker_for_cache_write_event_test():
     worker.enable_c8_quant = False
     worker.enable_kv_quant = False
     worker.sparse_sfa_c8_layers = set()
-    worker.kv_cache_specs = [MagicMock()]
+    worker.kv_cache_groups = [_dense_group(["layer0"])]
     worker.kv_send_layer_thread = MagicMock()
     worker.update_decoder_info = MagicMock(side_effect=lambda _req_id, req_meta: req_meta)
     worker._mark_layer_reuse_pending = MagicMock()
@@ -1672,10 +1669,9 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
     def _make_packed_sfa_worker(self, *, c8=True):
         layer_name = "model.layers.0.self_attn.attn"
-        group = MagicMock()
-        group.kv_cache_spec = UniformTypeKVCacheSpecs(
-            block_size=16,
-            kv_cache_specs={
+        group = cache_group(
+            [layer_name],
+            {
                 layer_name: AscendMLAAttentionSpec(
                     block_size=16,
                     num_kv_heads=1,
@@ -1686,7 +1682,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 )
             },
         )
-        group.layer_names = [layer_name]
         kv_cache_config = MagicMock()
         kv_cache_config.kv_cache_groups = [group]
         kv_cache_config.kv_cache_tensors = []
@@ -1703,8 +1698,13 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 worker.enable_c8_quant = worker.enable_kv_quant = True
                 indexer_name = "model.layers.0.self_attn.indexer.k_cache"
                 group = worker.kv_cache_config.kv_cache_groups[0]
-                group.layer_names.append(indexer_name)
-                group.kv_cache_spec.kv_cache_specs[indexer_name] = MagicMock()
+                if not vllm_version_is("0.33.0"):
+                    group.kv_cache_specs[indexer_name] = full_attention_spec_type(
+                        block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+                    )
+                else:
+                    group.layer_names.append(indexer_name)
+                    group.kv_cache_spec.kv_cache_specs[indexer_name] = MagicMock()
                 caches: dict[str, tuple[MagicMock, ...]] = {}
                 # Register indexer first to check it never selects quant staging.
                 for name, count in ((indexer_name, 2), (layer_name, 1)):
@@ -1747,7 +1747,11 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker, layer_name = self._make_packed_sfa_worker()
         spec = C8Spec(block_size=16, num_kv_heads=1, head_size=656, dtype=torch.float8_e4m3fn)
         self.assertFalse(hasattr(spec, "uses_packed_sfa_main_cache"))
-        worker.kv_cache_specs[0].kv_cache_specs[layer_name] = spec
+        group = worker.kv_cache_groups[0]
+        if not vllm_version_is("0.33.0"):
+            group.kv_cache_specs[layer_name] = spec
+        else:
+            group.kv_cache_spec.kv_cache_specs[layer_name] = spec
         cache = MagicMock()
         cache.shape = (10, 16, 1, 656)
         cache.data_ptr.return_value = 0x1000

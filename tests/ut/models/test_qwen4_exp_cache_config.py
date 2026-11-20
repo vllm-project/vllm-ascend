@@ -8,16 +8,27 @@ from vllm.config import KVTransferConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
     HiddenStateCacheSpec,
-    KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
+from tests.kv_cache_groups import (
+    cache_group,
+    full_attention_spec_type,
+    layer_config,
+    mamba_requirement,
+    ring_requirement,
+    ring_spec_type,
+)
+from vllm_ascend.core.kv_cache_layers import (
+    CacheGroup,
+    cache_layouts,
+    group_distinct_specs,
+    group_layer_specs,
+    group_max_blocks,
+)
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -31,29 +42,37 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
     make_slab_view,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_max_memory_usage_bytes_from_groups,
-)
-from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.core.kv_cache_planning import _max_memory_usage_bytes_from_groups
+
+    from vllm_ascend.core.kv_cache_layer_config_builder import AscendKVCacheConfigBuilder
+
+    def _ascend_max_memory_usage_bytes_from_groups(builder, config, groups):
+        return _max_memory_usage_bytes_from_groups(AscendKVCacheConfigBuilder(), config, groups)
+else:
+    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
+    from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_max_memory_usage_bytes_from_groups
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
-def _groups() -> list[KVCacheGroupSpec]:
+def _groups() -> list[CacheGroup]:
     # Match vLLM alignment: 256 tokens cover the full 33KiB GDN page.
     sources = [
         "model.layers.11.self_attn",
         "model.layers.47.self_attn",
         "model.mtp.layers.48.self_attn",
     ]
-    main = FullAttentionSpec(
+    main = full_attention_spec_type(
         block_size=256,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
         dtype=torch.bfloat16,
     )
-    raw = CircularBufferSpec(
+    raw = ring_spec_type(
         block_size=8,
         num_kv_heads=1,
         head_size=32,
@@ -87,39 +106,39 @@ def _groups() -> list[KVCacheGroupSpec]:
     raw_sources = [sources[2], sources[0], sources[1]]
     compressed_sources = [sources[1], sources[2], sources[0]]
     return [
-        KVCacheGroupSpec(
+        cache_group(
             [f"{source}.attn" for source in sources],
             main,
         ),
-        KVCacheGroupSpec(
+        cache_group(
             [f"{source}.indexer.raw_key_cache" for source in raw_sources],
-            raw,
+            ring_requirement(raw),
         ),
-        KVCacheGroupSpec(
+        cache_group(
             [f"{source}.indexer.compressed_key_cache" for source in compressed_sources],
             compressed,
         ),
-        KVCacheGroupSpec(
+        cache_group(
             [
                 "model.layers.0.linear_attn",
                 "model.layers.1.linear_attn",
             ],
             gdn,
         ),
-        KVCacheGroupSpec(["model.ple"], ple),
-        KVCacheGroupSpec(["model.cache_only_layers.0"], hidden),
+        cache_group(["model.ple"], ple),
+        cache_group(["model.cache_only_layers.0"], hidden),
     ]
 
 
 def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
-    main = FullAttentionSpec(
+    main = full_attention_spec_type(
         block_size=256,
         num_kv_heads=1,
         head_size=64,
         head_size_v=64,
         dtype=torch.bfloat16,
     )
-    raw = CircularBufferSpec(
+    raw = ring_spec_type(
         block_size=8,
         num_kv_heads=1,
         head_size=32,
@@ -133,14 +152,14 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
         dtype=torch.bfloat16,
         tokens_per_state=4,
     )
-    gdn = MambaSpec(
+    gdn = mamba_requirement(
         block_size=128,
         shapes=((64, 4), (128, 128)),
         dtypes=(torch.bfloat16, torch.bfloat16),
         mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
-    ple = MambaSpec(
+    ple = mamba_requirement(
         block_size=128,
         shapes=((128, 5),),
         dtypes=(torch.bfloat16,),
@@ -161,7 +180,11 @@ def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
             specs[f"model.layers.{index}.linear_attn"] = gdn
     specs["model.ple"] = ple
     assert len(specs) == 76
-    return specs
+    return (
+        {n: ring_requirement(s) if n.endswith(".raw_key_cache") else layer_config(s) for n, s in specs.items()}
+        if not vllm_version_is("0.33.0")
+        else specs
+    )
 
 
 def test_block_packed_states_have_disjoint_components_and_aligned_kv_pages() -> None:
@@ -362,7 +385,7 @@ def _allocate_mrv2_kv_cache(
         groups = [
             SimpleNamespace(
                 kv_cache_group_id=i,
-                kv_cache_spec=group.kv_cache_spec,
+                kv_cache_spec=group_distinct_specs(group)[0],
                 layer_names=group.layer_names,
                 backend=backend,
             )
@@ -482,7 +505,9 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
 
 def test_qsa_source_sets_must_match() -> None:
     groups = _groups()
-    groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
+    names = groups[1].layer_names.copy()
+    names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"
+    groups[1] = cache_group(names, group_distinct_specs(groups[1])[0])
     try:
         build_qwen4_kv_cache_layout(groups, num_blocks=2)
     except ValueError as error:
@@ -494,14 +519,14 @@ def test_qsa_source_sets_must_match() -> None:
 def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
     specs = _ungrouped_qwen_specs()
     groups = [
-        KVCacheGroupSpec(
+        cache_group(
             [name],
             spec,
             is_eagle_group=name.startswith("model.layers.51.self_attn"),
         )
         for name, spec in specs.items()
     ]
-    owners = _prepare_qsa_composite_groups(specs)
+    owners = _prepare_qsa_composite_groups(cache_layouts(specs))
     assert owners is not None
     merged = _merge_qsa_composite_groups(
         groups,
@@ -516,8 +541,8 @@ def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
     assert len(composite[0].layer_names) == 26
     assert sum(name.endswith(".attn") for name in composite[0].layer_names) == 13
     assert sum(name.endswith(".indexer.compressed_key_cache") for name in composite[0].layer_names) == 13
-    first_composite_spec = next(iter(composite[0].kv_cache_spec.kv_cache_specs.values()))
-    assert isinstance(first_composite_spec, FullAttentionSpec)
+    first_composite_spec = next(iter(group_layer_specs(composite[0]).values()))
+    assert isinstance(first_composite_spec, full_attention_spec_type)
     assert not isinstance(first_composite_spec, MLAAttentionSpec)
     assert composite[0].is_eagle_group
     assert len(raw) == 1
@@ -527,15 +552,16 @@ def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
 
 def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
     specs = _ungrouped_qwen_specs()
-    owners = _prepare_qsa_composite_groups(specs)
+    owners = _prepare_qsa_composite_groups(cache_layouts(specs))
     assert owners is not None
     groups = _merge_qsa_composite_groups(
-        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        [cache_group([name], spec) for name, spec in specs.items()],
         specs,
         *owners,
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -549,11 +575,7 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
         vllm_config,
         groups,
     )
-    required_blocks = sum(
-        (group.kv_cache_spec.max_memory_usage_bytes(vllm_config) + group.kv_cache_spec.page_size_bytes - 1)
-        // group.kv_cache_spec.page_size_bytes
-        for group in groups
-    )
+    required_blocks = sum(group_max_blocks(group, vllm_config) for group in groups)
     planned = get_qwen4_exp_kv_cache_config(
         vllm_config,
         groups,
@@ -576,15 +598,16 @@ def test_qwen4_cache_admission_matches_shared_planner_allocation() -> None:
 def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     """36 GDN layers use three block tables over 13 shared slots."""
     specs = _ungrouped_qwen_specs()
-    owners = _prepare_qsa_composite_groups(specs)
+    owners = _prepare_qsa_composite_groups(cache_layouts(specs))
     assert owners is not None
     groups = _merge_qsa_composite_groups(
-        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        [cache_group([name], spec) for name, spec in specs.items()],
         specs,
         *owners,
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=135168, hf_config=SimpleNamespace(model_type="qwen4_exp")),
+        attention_config=SimpleNamespace(hisparse_config=None),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
@@ -595,16 +618,11 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
     )
 
     def is_gdn_group(group) -> bool:
-        spec = group.kv_cache_spec
-        members = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else [spec]
+        members = group_layer_specs(group).values()
         return all(isinstance(member, MambaSpec) and len(member.shapes) == 2 for member in members)
 
     def required_blocks(group_list) -> int:
-        return sum(
-            (g.kv_cache_spec.max_memory_usage_bytes(vllm_config) + g.kv_cache_spec.page_size_bytes - 1)
-            // g.kv_cache_spec.page_size_bytes
-            for g in group_list
-        )
+        return sum(group_max_blocks(g, vllm_config) for g in group_list)
 
     gdn_groups = [g for g in groups if is_gdn_group(g)]
     assert len(gdn_groups) == 36
@@ -621,7 +639,11 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
         [f"model.layers.{index}.linear_attn" for index in range(offset, 48, 4)] for offset in range(3)
     ]
     # PLE (single-shape MambaSpec) keeps its own group.
-    ple_groups = [g for g in merged if isinstance(g.kv_cache_spec, MambaSpec) and len(g.kv_cache_spec.shapes) == 1]
+    ple_groups = [
+        g
+        for g in merged
+        if isinstance(group_distinct_specs(g)[0], MambaSpec) and len(group_distinct_specs(g)[0].shapes) == 1
+    ]
     assert len(ple_groups) == 1
     assert len(merged) == len(groups) - 33
 
@@ -694,10 +716,15 @@ def test_mamba_state_groups_merge_shares_one_block_table(monkeypatch) -> None:
 def test_state_group_packing_preserves_draft_and_state_lifetime_boundaries():
     spec = next(spec for name, spec in _ungrouped_qwen_specs().items() if name.endswith("linear_attn"))
     groups = [
-        KVCacheGroupSpec(["target.0"], spec),
-        KVCacheGroupSpec(["draft.0"], spec, is_eagle_group=True),
-        KVCacheGroupSpec(["checkpoint.0"], replace(spec, num_prefill_checkpoint_blocks=1)),
-        KVCacheGroupSpec(["target.1"], spec),
+        cache_group(["target.0"], spec),
+        cache_group(["draft.0"], spec, is_eagle_group=True),
+        cache_group(
+            ["checkpoint.0"],
+            replace(spec, manager_config=spec.manager_config.replace_params(num_prefill_checkpoint_blocks=1))
+            if not vllm_version_is("0.33.0")
+            else replace(spec, num_prefill_checkpoint_blocks=1),
+        ),
+        cache_group(["target.1"], spec),
     ]
     packed = _merge_mamba_state_groups(groups, 13)
     assert [group.layer_names for group in packed] == [
@@ -756,8 +783,8 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
 
 def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatch) -> None:
     groups = _groups()
-    groups[4] = KVCacheGroupSpec(
-        ["model.ple"], replace(groups[4].kv_cache_spec, shapes=((20001,),), page_size_padded=65536)
+    groups[4] = cache_group(
+        ["model.ple"], replace(group_distinct_specs(groups[4])[0], shapes=((20001,),), page_size_padded=65536)
     )
     config = get_qwen4_exp_kv_cache_config(
         SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=3, prefix_cache_retention_interval=None)),
@@ -786,7 +813,7 @@ def test_large_ple_uses_one_dense_bank_without_expanding_shared_slots(monkeypatc
 
 def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
     specs = _ungrouped_qwen_specs()
-    original_groups = [KVCacheGroupSpec([name], spec) for name, spec in specs.items()]
+    original_groups = [cache_group([name], spec) for name, spec in specs.items()]
     calls = []
 
     def upstream(config, input_specs):
@@ -810,7 +837,6 @@ def test_public_qwen4_grouping_and_pool_charge_match_physical_backing() -> None:
 
 def test_platform_builder_uses_qwen_pool_accounting() -> None:
     pytest.importorskip("vllm.v1.core.kv_cache_planning")
-    from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 
     groups = _groups()
     expected = get_qwen4_exp_pool_bytes_per_block(groups)
@@ -842,11 +868,11 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         QSAIndexerBackend = qsa_module.QSAIndexerBackend
 
     groups = [
-        KVCacheGroupSpec(
+        cache_group(
             group.layer_names,
-            group.kv_cache_spec
-            if isinstance(group.kv_cache_spec, CircularBufferSpec)
-            else replace(group.kv_cache_spec, block_size=manager_block_size),
+            ring_requirement(group_distinct_specs(group)[0])
+            if group.layer_names[0].endswith(".raw_key_cache")
+            else replace(group_distinct_specs(group)[0], block_size=manager_block_size),
         )
         for group in _groups()
     ]
@@ -873,16 +899,21 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         use_v2_model_runner=True,
     )
     compressed_group = groups[2]
-    spec = compressed_group.kv_cache_spec
+    spec = group_distinct_specs(compressed_group)[0]
     backend = QSAIndexerBackend
     monkeypatch.setattr(attn_utils_v2, "get_current_vllm_config", lambda: runtime_config)
     monkeypatch.setattr(attn_utils_v2, "enable_sfa", lambda _: False)
     raw = attn_utils_v2._allocate_kv_cache(config, {}, torch.device("cpu"))
-    attn_groups = [AttentionGroup(backend, g.layer_names, g.kv_cache_spec, i) for i, g in enumerate(groups)]
+    attn_groups = [AttentionGroup(backend, g.layer_names, group_distinct_specs(g)[0], i) for i, g in enumerate(groups)]
     caches = attn_utils_v2._reshape_kv_cache_v2(attn_groups, raw, "auto", [128] * len(groups), {}, config)
     # Exercise the actual MRV2 factory, which rewrites the builder spec.
     group = attn_groups[2]
-    group.create_metadata_builders(runtime_config, torch.device("cpu"), kernel_block_size=128)
+    group.create_metadata_builders(
+        runtime_config,
+        torch.device("cpu"),
+        kernel_block_size=128,
+        **({"kv_cache_group": compressed_group} if not vllm_version_is("0.33.0") else {}),
+    )
     builder = group.get_metadata_builder(0)
     name = compressed_group.layer_names[0]
     layer = qsa.qsa_indexer.QSACompressedKeyCache(
@@ -956,15 +987,15 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
 
 def test_whole_page_sharing_uses_one_tp4_page_for_qsa_or_complete_gdn():
     groups = _groups()
-    groups[0] = KVCacheGroupSpec(
+    groups[0] = cache_group(
         groups[0].layer_names,
-        replace(groups[0].kv_cache_spec, block_size=896, num_kv_heads=2, head_size=128, head_size_v=128),
+        replace(group_distinct_specs(groups[0])[0], block_size=896, num_kv_heads=2, head_size=128, head_size_v=128),
     )
-    groups[2] = KVCacheGroupSpec(groups[2].layer_names, replace(groups[2].kv_cache_spec, block_size=896))
-    groups[3] = KVCacheGroupSpec(
+    groups[2] = cache_group(groups[2].layer_names, replace(group_distinct_specs(groups[2])[0], block_size=896))
+    groups[3] = cache_group(
         groups[3].layer_names,
         replace(
-            groups[3].kv_cache_spec,
+            group_distinct_specs(groups[3])[0],
             block_size=896,
             shapes=((6, 2560), (12, 128, 128)),
             dtypes=(torch.bfloat16, torch.float32),

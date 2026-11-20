@@ -9,8 +9,6 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -18,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from tests.kv_cache_groups import cache_group
 from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
 from vllm_ascend.attention.sfa_hisparse import (
     AscendHiSparseImpl,
@@ -39,6 +38,7 @@ from vllm_ascend.hisparse.c8 import (
     pack_c8_components,
 )
 from vllm_ascend.ops.triton import sfa_indexer_store
+from vllm_ascend.utils import vllm_version_is
 
 pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm_ascend.hisparse.backend import AscendHiSparseBackend  # noqa: E402
@@ -289,11 +289,16 @@ def indexer_spec():
 
 
 @pytest.mark.parametrize("role", [SparseCacheRole.SPARSE, SparseCacheRole.INDEXER])
-def test_indexer_spec_merge_retains_core_cache_role(indexer_spec, role):
+def test_indexer_grouping_retains_core_cache_role(indexer_spec, role):
     spec = replace(indexer_spec, cache_role=role)
-    merged = AscendSFAIndexerCacheSpec.merge([spec, spec])
-    assert merged.cache_role is role
-    assert merged.block_stride_alignment == spec.block_stride_alignment
+    if vllm_version_is("0.33.0"):
+        layouts = [AscendSFAIndexerCacheSpec.merge([spec, spec])]
+    else:
+        group = cache_group(["first", "second"], spec)
+        layouts = list(group.kv_cache_specs.values())
+    for layout in layouts:
+        assert layout.cache_role is role
+        assert layout.block_stride_alignment == spec.block_stride_alignment
 
 
 @pytest.mark.parametrize("blocks,stride", [(1, 1), (3, 2), (5, 3)])
@@ -332,11 +337,18 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
             cache_sparse_li_c8=True,
         )
         packed_row_bytes = 656
-        specs.update(
-            indexer=indexer_spec,
-            resident=HiSparseResidentSpec(block_size=128, page_size=128 * 656, block_stride_alignment=128),
-            hot=HiSparseHotSpec(block_size=128, page_size=128 * 656, blocks_per_request=1, block_stride_alignment=128),
-        )
+        fields = dict(block_size=128, page_size=128 * 656, block_stride_alignment=128)
+        if vllm_version_is("0.33.0"):
+            from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+
+            resident = HiSparseResidentSpec(**fields)
+            hot = HiSparseHotSpec(**fields, blocks_per_request=1)
+        else:
+            from vllm.v1.kv_cache_interface import HiSparseHotPageSpec, HiSparsePageSpec
+
+            resident = HiSparsePageSpec(**fields)
+            hot = HiSparseHotPageSpec(**fields)
+        specs.update(indexer=indexer_spec, resident=resident, hot=hot)
     result = align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
     assert result["source"] is source
     assert specs["indexer"] is indexer_spec and indexer_spec.block_stride_alignment == 3
@@ -359,7 +371,7 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
 @pytest.mark.parametrize("field", ["scale_dim", "cache_sparse_li_c8", "cache_sparse_li_c4"])
 def test_unsupported_indexer_formats_are_rejected_before_pool_binding(indexer_spec, field):
     spec = replace(indexer_spec, **{field: 1})
-    config = NS(kv_cache_groups=[NS(layer_names=["indexer"], kv_cache_spec=spec)])
+    config = NS(kv_cache_groups=[cache_group(["indexer"], spec)])
     with pytest.raises(ValueError, match="C4|C8|scales"):
         AscendHiSparseBackend().validate_kv_cache_config(config)
 

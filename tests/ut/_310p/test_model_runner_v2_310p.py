@@ -13,6 +13,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.sampling_params import SamplingParams
 
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
+from tests.kv_cache_groups import cache_group, full_attention_spec_type, window_requirement
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.model_state import (
@@ -22,8 +23,10 @@ from vllm_ascend._310p.worker.v2.model_state import (
 from vllm_ascend._310p.worker.v2.rejection_sampler import RejectionSampler310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -251,31 +254,62 @@ def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:
     runner.device = torch.device("cpu")
     runner.vllm_config = object()
     restored = object()
-    linear_layer = SimpleNamespace(get_kv_cache_spec=lambda _cfg: restored)
+    method = "get_kv_cache_layer_configs" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
+    layer_method = "get_kv_cache_config" if not vllm_version_is("0.33.0") else "get_kv_cache_spec"
+    linear_layer = SimpleNamespace(**{layer_method: lambda _cfg: restored})
     runner.compilation_config = SimpleNamespace(
         static_forward_context={
             "model.layers.0.self_attn": object(),
             "model.layers.1.linear_attn": linear_layer,
-            "model.layers.2.linear_attn": SimpleNamespace(get_kv_cache_spec=lambda _cfg: None),
+            "model.layers.2.linear_attn": SimpleNamespace(**{layer_method: lambda _cfg: None}),
         }
     )
 
     with patch.object(
         NPUModelRunner,
-        "get_kv_cache_spec",
+        method,
         return_value={"model.layers.0.self_attn": object()},
     ):
-        specs = runner.get_kv_cache_spec()
+        specs = getattr(runner, method)()
 
     assert "model.layers.1.linear_attn" in specs
     assert specs["model.layers.1.linear_attn"] is restored
     assert "model.layers.2.linear_attn" not in specs
 
 
+def test_zeroing_a_full_attention_block_preserves_sliding_cache():
+    fields = dict(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16)
+    groups = [
+        cache_group(["full"], full_attention_spec_type(**fields)),
+        cache_group(["window"], window_requirement(sliding_window=32, **fields)),
+    ]
+    storage = {name: SimpleNamespace(kv_cache=(torch.ones(3, 8), torch.ones(3, 8))) for name in ("full", "window")}
+    runner = SimpleNamespace(
+        device=torch.device("cpu"),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        attn_groups=[
+            [SimpleNamespace(kv_cache_spec=group_layer_specs(group)[name], kv_cache_group_id=i, layer_names=[name])]
+            for i, (group, name) in enumerate(zip(groups, storage))
+        ],
+        kernel_block_sizes=[16, 16],
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context=storage),
+        _needs_kv_cache_zeroing_310p=lambda _: True,
+    )
+    NPUModelRunner310V2._init_kv_zero_meta(runner)
+    runner.kv_block_zeroer.zero_block_ids([1])
+    for tensor in storage["full"].kv_cache:
+        assert not tensor[1].any()
+        assert tensor[[0, 2]].all()
+    for tensor in storage["window"].kv_cache:
+        assert tensor.all()
+
+
 def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     """Qwen3.5 hybrid Mamba/GDN state must stay ND (not FRACTAL_NZ)."""
 
     class FakeMambaSpec:
+        dcp_sharded = False
         block_size = 1
         page_size_bytes = 80
         shapes = [(4, 8), (2, 4)]
@@ -285,7 +319,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     layer_name = "model.layers.1.linear_attn"
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_groups=[cache_group(kv_cache_spec=spec, layer_names=[layer_name])],
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
@@ -314,6 +348,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
 
 def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     class FakeMambaSpec:
+        dcp_sharded = False
         block_size = 1
         page_size_bytes = 80
         shapes = [(4, 8), (2, 4)]
@@ -327,7 +362,7 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[
-            SimpleNamespace(
+            cache_group(
                 kv_cache_spec=spec,
                 layer_names=layer_names,
             )
@@ -1214,6 +1249,7 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     class FakeAttentionSpec:
+        dcp_sharded = True
         block_size = 128
         storage_block_size = 128
         page_size_bytes = 4096
@@ -1231,7 +1267,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     spec = FakeAttentionSpec()
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
+        kv_cache_groups=[cache_group(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
@@ -1267,6 +1303,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
 
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
+        dcp_sharded = True
         block_size = 128
         storage_block_size = 128
         page_size_bytes = 128 * 2 * (128 + 128) * 2
@@ -1301,7 +1338,7 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[
-            SimpleNamespace(
+            cache_group(
                 kv_cache_spec=spec,
                 layer_names=layer_names,
             )
@@ -1435,21 +1472,16 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
             self.block_size = block_size
             self.head_size = head_size
 
-    class FakeUniformTypeKVCacheSpecs:
-        def __init__(self, specs):
-            self.kv_cache_specs = dict(enumerate(specs))
-
     specs = [FakeAttentionSpec(b, h) for b, h in zip(block_sizes, head_sizes)]
-    group_spec = specs[0] if len(specs) == 1 else FakeUniformTypeKVCacheSpecs(specs)
     runner = object.__new__(NPUModelRunner310V2)
     runner.kernel_block_sizes = [128]
     runner.attn_groups = [
         [SimpleNamespace(backend=SimpleNamespace(get_supported_kernel_block_sizes=lambda: [128, 64]))]
     ]
-    config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=group_spec)])
+    config = SimpleNamespace(kv_cache_groups=[object()])
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
-        patch.object(model_runner_module, "UniformTypeKVCacheSpecs", FakeUniformTypeKVCacheSpecs),
+        patch.object(model_runner_module, "group_distinct_specs", return_value=specs),
     ):
         runner._adjust_kernel_block_sizes(config)
     assert runner.kernel_block_sizes == [expected_kernel_size]
@@ -1458,6 +1490,7 @@ def test_adjust_kernel_block_sizes_respects_physical_blocks(block_sizes, head_si
 
 def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
     class FakeAttentionSpec:
+        dcp_sharded = True
         block_size = 96
         head_size = 128
 
@@ -1469,6 +1502,7 @@ def test_adjust_kernel_block_sizes_rejects_incompatible_physical_blocks():
     config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=FakeAttentionSpec())])
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        patch.object(model_runner_module, "group_distinct_specs", return_value=[FakeAttentionSpec()]),
         pytest.raises(NotImplementedError, match="divides every attention cache block size"),
     ):
         runner._adjust_kernel_block_sizes(config)

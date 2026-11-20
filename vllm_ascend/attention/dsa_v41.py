@@ -27,7 +27,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, FullAttentionManager
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
@@ -38,10 +39,10 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.core.kv_cache_layers import MLA_LAYOUT_TYPES
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
@@ -53,6 +54,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
     oproj_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -867,10 +869,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # Allocate both decode and prefill owners before graph capture.
         self._build_query_metadata = build_query_metadata
         self._build_compressor_metadata = build_compressor_metadata
-        if isinstance(kv_cache_spec, CircularBufferSpec):
+        if layer_names and all(name.endswith(".state_cache") for name in layer_names):
             self._cache_kind = "compressor_state"
-        elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
-            self._cache_kind = "swa"
         elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             # make_folded_index_cache_spec packs eight index rows into one:
             # 8 * (128 / 2 FP4 bytes + 128 / 32 scale bytes) = 544 bytes.
@@ -880,6 +880,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._cache_kind = "index_k_folded"
             else:
                 self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
+        elif isinstance(kv_cache_spec, MLA_LAYOUT_TYPES):
+            self._cache_kind = "swa"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
         self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
@@ -887,7 +889,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         self._window_size = window_size
-        if self._cache_kind == "swa":
+        if self._cache_kind == "swa" and vllm_version_is("0.33.0"):
             # Replay padding and query masking must use the same fixed window.
             spec_window = int(kv_cache_spec.sliding_window)
             assert spec_window == window_size, (
@@ -1925,9 +1927,10 @@ class DeepseekV41FoldedIndexBackend(_DeepseekV41RoleBackend):
 class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
     supports_dcp = False
 
-    def __init__(self, vllm_config, prefix, spec):
+    def __init__(self, vllm_config, prefix, spec, *, manager_cls=FullAttentionManager):
         super().__init__()
         self.prefix = prefix
+        self.manager_cls = manager_cls
         self.spec = spec
         self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.empty(0)
         context = vllm_config.compilation_config.static_forward_context
@@ -1937,17 +1940,18 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         """Bind a single cache view or a tuple of component views."""
         self.kv_cache = kv_cache
 
+    def get_kv_cache_config(self, vllm_config):
+        return self.manager_cls.layer_config(self.spec)
+
+    # Deprecated upstream API, retained for vLLM v0.33.0.
     def get_kv_cache_spec(self, vllm_config):
         return self.spec
 
     def get_attn_backend(self):
         spec = self.spec
 
-        if isinstance(spec, CircularBufferSpec):
+        if issubclass(self.manager_cls, CircularBufferManager):
             return DeepseekV41StateBackend
-
-        if isinstance(spec, AscendSlidingWindowMLASpec):
-            return DeepseekV41SWABackend
 
         if isinstance(spec, AscendMLAAttentionSpec):
             if spec.tokens_per_state == 8 and spec.head_size == 544:
@@ -1955,4 +1959,6 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
             if spec.scale_dim:
                 return DeepseekV41IndexerBackend
             return DeepseekV41AttentionBackend
+        if isinstance(spec, MLA_LAYOUT_TYPES):
+            return DeepseekV41SWABackend
         raise TypeError(f"Unsupported V4.1 cache spec: {type(spec).__name__}")

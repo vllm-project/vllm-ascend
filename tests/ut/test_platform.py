@@ -591,8 +591,9 @@ class TestNPUPlatform(TestBase):
         _validate_draft_decode_context_parallel_config(config)
 
     def test_get_kv_cache_config_builder_cls(self):
+        module = "kv_cache_layer_config_builder" if not vllm_version_is("0.33.0") else "kv_cache_config_builder"
         assert NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config()) == (
-            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+            f"vllm_ascend.core.{module}.AscendKVCacheConfigBuilder"
         )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)

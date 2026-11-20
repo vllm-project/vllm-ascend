@@ -26,6 +26,7 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.core.kv_cache_layers import group_block_size
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     resident_mla_context_group_ids,
@@ -90,7 +91,7 @@ class SFAPDRD2HProducerScheduler:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.engine_id = engine_id
-        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.block_size = [group_block_size(group_spec) for group_spec in kv_cache_config.kv_cache_groups]
         self._reqs_need_send_layerwise: dict[str, _SendReqInfo] = {}
 
     @staticmethod
@@ -249,7 +250,7 @@ class SFAPDRD2HScheduler:
 
         if kv_cache_config is None:
             raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
-        self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
+        self.block_size = [group_block_size(group_spec) for group_spec in kv_cache_config.kv_cache_groups]
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
         self._dspark_context_groups = self._find_dspark_context_groups()
         self._dspark_context_requests: dict[str, tuple[DSparkContextDescriptor, dict[int, tuple[int, ...]]]] = {}

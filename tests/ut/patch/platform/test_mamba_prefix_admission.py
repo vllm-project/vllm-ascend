@@ -5,26 +5,37 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import KVCacheConfig
+
+from tests.kv_cache_groups import cache_group, mamba_requirement
+
+if vllm_version_is("0.33.0"):
+    from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+from tests.kv_cache_groups import full_attention_spec_type
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
 def make_coordinator():
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
     specs = [
-        FullAttentionSpec(block_size=b, num_kv_heads=1, head_size=8, dtype=torch.bfloat16) for b in (251904, 50688)
+        full_attention_spec_type(block_size=b, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+        for b in (251904, 50688)
     ] + [
-        MambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align") for _ in range(3)
+        mamba_requirement(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        for _ in range(3)
     ]
     config = KVCacheConfig(
         num_blocks=12,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec([str(i)], spec) for i, spec in enumerate(specs)],
+        kv_cache_groups=[cache_group([str(i)], spec) for i, spec in enumerate(specs)],
     )
     return AscendHybridKVCacheCoordinator(
         config,
@@ -105,15 +116,17 @@ def test_external_extension_of_partial_local_hit_keeps_extra_reservation():
 
 
 def test_dcp8_prefix_reuses_checkpoint_and_copies_partial_attention_tail():
-    register_all_kvcache_specs(None)
-    register_ascend_kv_cache_specs()
-    specs = [FullAttentionSpec(block_size=1536, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)] + [
-        MambaSpec(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align") for _ in range(3)
+    if vllm_version_is("0.33.0"):
+        register_all_kvcache_specs(None)
+        register_ascend_kv_cache_specs()
+    specs = [full_attention_spec_type(block_size=1536, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)] + [
+        mamba_requirement(block_size=1536, shapes=((1,),), dtypes=(torch.float32,), mamba_cache_mode="align")
+        for _ in range(3)
     ]
     config = KVCacheConfig(
         num_blocks=64,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec([str(i)], spec) for i, spec in enumerate(specs)],
+        kv_cache_groups=[cache_group([str(i)], spec) for i, spec in enumerate(specs)],
     )
     coordinator = AscendHybridKVCacheCoordinator(
         config,

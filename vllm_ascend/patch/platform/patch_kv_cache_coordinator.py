@@ -13,7 +13,6 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     KVCacheCoordinator,
-    SpecGroup,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -22,19 +21,64 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
     MambaManager,
-    get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_layers import group_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.v1.core.kv_cache_coordinator import SpecGroup
+    from vllm.v1.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+else:
+    from vllm.v1.core.single_type_kv_cache_manager import create_single_type_manager
+    from vllm.v1.kv_cache_interface import prefix_lookup_groups
+
+
+def _policy(group):
+    if vllm_version_is("0.33.0"):
+        return _manager_spec(group.kv_cache_spec)
+    return group
+
+
+def _is_full(policy):
+    if vllm_version_is("0.33.0"):
+        return isinstance(policy, FullAttentionSpec)
+    return issubclass(policy.manager_cls, FullAttentionManager) and policy.prefix_cacheable
+
+
+def _is_mamba(policy):
+    if vllm_version_is("0.33.0"):
+        return isinstance(policy, MambaSpec)
+    return issubclass(policy.manager_cls, MambaManager)
+
+
+def _is_align(group):
+    if vllm_version_is("0.33.0"):
+        spec = group.kv_cache_spec
+        return isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align"
+    return _is_mamba(group) and group.manager_config.params.mamba_cache_mode == "align"
+
+
+def _lookup_args(policy):
+    if vllm_version_is("0.33.0"):
+        return dict(kv_cache_spec=policy)
+    return dict(manager_config=policy.manager_config, block_size=policy.block_size)
+
+
+def _create_manager(group, **kwargs):
+    if vllm_version_is("0.33.0"):
+        return get_manager_for_kv_cache_spec(kv_cache_spec=_policy(group), **kwargs)
+    return create_single_type_manager(group, **kwargs)
+
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -82,7 +126,10 @@ def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
 
 
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
-    return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    return any(
+        _is_deepseek_v4_kv_cache_spec(group if not vllm_version_is("0.33.0") else group.kv_cache_spec)
+        for group in kv_cache_config.kv_cache_groups
+    )
 
 
 def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
@@ -91,6 +138,12 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def _lookup_policy(coordinator, lookup):
+    if not vllm_version_is("0.33.0"):
+        return coordinator.kv_cache_config.kv_cache_groups[lookup.group_ids[0]]
+    return lookup.spec
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -168,11 +221,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # model has no mamba layers), and flagging mamba groups truncates
         # cached state writes, collapsing hybrid prefix-cache hits to 0.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = {
-                i
-                for i, g in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(g.kv_cache_spec, FullAttentionSpec)
-            }
+            self.eagle_group_ids = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if _is_full(_policy(g))}
         # vLLM main (#61589) reads this base-class attribute in cache_blocks();
         # lookahead hashes clear the drop while keeping the groups flagged.
         self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
@@ -180,14 +229,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
         extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
         self.single_type_managers = tuple(
-            get_manager_for_kv_cache_spec(
-                kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
+            _create_manager(
+                kv_cache_group,
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=(
-                    1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
-                ),
+                dcp_world_size=(1 if _is_mamba(_policy(kv_cache_group)) else dcp_world_size),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
@@ -199,29 +246,30 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # The actual block size usually equals hash_block_size, but in cases where
         # different KV cache groups have different block sizes, the actual block size
         # can be a multiple of hash_block_size.
+        if not vllm_version_is("0.33.0"):
+            self.group_block_sizes = tuple(mgr.block_size for mgr in self.single_type_managers)
         self.hash_block_size = hash_block_size
         if enable_caching:
             # The GLM kpool tail spec uses block_size=index_kpool and opts
             # out of prefix caching, so it is not bound by the MLA hash
             # block size.
             assert all(
-                self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                self._get_effective_block_size(_policy(g)) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
-                if is_prefix_cacheable(g.kv_cache_spec)
+                if group_prefix_cacheable(g)
             ), "block_size must be divisible by hash_block_size"
         self.enable_partial_hash_hits = allow_partial_hash_hits and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
+            _is_align(g)
             and (
-                g.kv_cache_spec.block_size > hash_block_size
-                or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+                _policy(g).block_size > hash_block_size
+                or (dcp_world_size > 1 and _policy(g).block_size == hash_block_size)
             )
             for g in kv_cache_config.kv_cache_groups
         )
         if self.enable_partial_hash_hits:
             self.enable_partial_hash_hits = all(
-                not is_prefix_cacheable(g.kv_cache_spec)
-                or getattr(manager, "block_size", self._get_effective_block_size(g.kv_cache_spec)) == hash_block_size
+                not group_prefix_cacheable(g)
+                or getattr(manager, "block_size", self._get_effective_block_size(_policy(g))) == hash_block_size
                 or getattr(manager, "supports_fine_grained_hash_lookup", False)
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
             )
@@ -271,7 +319,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
-        if isinstance(kv_cache_spec, MambaSpec):
+        if _is_mamba(kv_cache_spec):
             return block_size
         if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
@@ -282,49 +330,66 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         Groups KV cache groups by their spec type for efficient batch processing
         during cache hit lookup.
         """
-        self.attention_groups: list[SpecGroup] = []
-        self.tail_pool_alignment = 1
-        for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            if not is_prefix_cacheable(g.kv_cache_spec):
-                specs = (
-                    g.kv_cache_spec.kv_cache_specs.values()
-                    if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
-                    else (g.kv_cache_spec,)
+        if not vllm_version_is("0.33.0"):
+            groups = self.kv_cache_config.kv_cache_groups
+            self.attention_groups = [
+                lookup._replace(use_eagle=any(gid in self.eagle_group_ids for gid in lookup.group_ids))
+                for lookup in prefix_lookup_groups(groups)
+            ]
+            self.tail_pool_alignment = lcm(
+                *(
+                    getattr(spec, "compress_ratio", 1)
+                    for group in groups
+                    if not group.prefix_cacheable
+                    for spec in group.distinct_specs
                 )
-                # A new tail has no raw history at a prefix hit. Resume only
-                # at whole-pool boundaries, including fine-grained Mamba hits.
-                for tail_spec in specs:
-                    self.tail_pool_alignment = lcm(self.tail_pool_alignment, getattr(tail_spec, "compress_ratio", 1))
-                continue
-            manager_cls = self.single_type_managers[i].__class__
-            spec = _manager_spec(g.kv_cache_spec)
-            use_eagle = i in self.eagle_group_ids
+            )
+        else:
+            self.attention_groups: list[SpecGroup] = []
+            self.tail_pool_alignment = 1
+            for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+                if not group_prefix_cacheable(g):
+                    specs = (
+                        g.kv_cache_spec.kv_cache_specs.values()
+                        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+                        else (g.kv_cache_spec,)
+                    )
+                    # A new tail has no raw history at a prefix hit. Resume only
+                    # at whole-pool boundaries, including fine-grained Mamba hits.
+                    for tail_spec in specs:
+                        self.tail_pool_alignment = lcm(
+                            self.tail_pool_alignment, getattr(tail_spec, "compress_ratio", 1)
+                        )
+                    continue
+                manager_cls = self.single_type_managers[i].__class__
+                spec = _manager_spec(g.kv_cache_spec)
+                use_eagle = i in self.eagle_group_ids
 
-            # Try to find an existing group with the same spec
-            for idx, group in enumerate(self.attention_groups):
-                if group.spec == spec:
-                    assert manager_cls is group.manager_cls, "Expected same manager class for identical KV cache specs."
-                    group.group_ids.append(i)
-                    if use_eagle and not group.use_eagle:
-                        self.attention_groups[idx] = group._replace(use_eagle=True)
-                    break
-            else:
-                self.attention_groups.append(SpecGroup(spec, [i], manager_cls, use_eagle))
+                # Try to find an existing group with the same spec
+                for idx, group in enumerate(self.attention_groups):
+                    if group.spec == spec:
+                        assert manager_cls is group.manager_cls, (
+                            "Expected same manager class for identical KV cache specs."
+                        )
+                        group.group_ids.append(i)
+                        if use_eagle and not group.use_eagle:
+                            self.attention_groups[idx] = group._replace(use_eagle=True)
+                        break
+                else:
+                    self.attention_groups.append(SpecGroup(spec, [i], manager_cls, use_eagle))
 
         assert self.attention_groups, "Prefix caching requires at least one cacheable KV cache group."
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
-        self.attention_groups.sort(key=lambda group: not isinstance(group.spec, FullAttentionSpec))
+        self.attention_groups.sort(key=lambda group: not _is_full(_lookup_policy(self, group)))
 
         # Dense reference group for per-group lookups (None when the model
         # has no full-attention layers): full attention is downward-closed,
         # so any group reporting a longer per-group hit implies the union of
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
-        self.full_attention_group_id: int | None = (
-            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
-        )
+        self.full_attention_group_id: int | None = first.group_ids[0] if _is_full(_lookup_policy(self, first)) else None
 
         # Propagate the eagle bit to every manager in an eagle-containing
         # attention group, mirroring upstream
@@ -355,7 +420,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
         # NOTE: use 16k as the alignment tokens for model with compress ratio
-        block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
+        block_sizes = [self._get_effective_block_size(_lookup_policy(self, group)) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
     def find_longest_cache_hit(
@@ -392,9 +457,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists.
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec
-        )
+        is_simple_hybrid = len(self.attention_groups) == 2 and _is_full(_lookup_policy(self, self.attention_groups[0]))
 
         # Attention-group indices whose EAGLE drop is verified at the current
         # ``curr_hit_length``. Each eagle group applies the drop at most once
@@ -403,16 +466,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         while True:
             curr_hit_length = hit_length
-            for idx, (
-                spec,
-                group_ids,
-                manager_cls,
-                use_eagle,
-            ) in enumerate(self.attention_groups):
+            for idx, lookup in enumerate(self.attention_groups):
+                spec = _lookup_policy(self, lookup)
+                group_ids, manager_cls, use_eagle = lookup.group_ids, lookup.manager_cls, lookup.use_eagle
                 group_block_size = self._get_effective_block_size(spec)
                 first_group_id = group_ids[0]
                 cached_blocks = hit_blocks_by_group[first_group_id]
-                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
+                if _is_full(spec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
@@ -422,7 +482,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 drop_eagle_block = use_eagle and idx not in eagle_verified and not self.skips_eagle_block_drop
 
                 _max_length = curr_hit_length
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                if drop_eagle_block and not _is_mamba(spec):
                     # Eagle needs to match one more block and then pop the last.
                     eagle_margin = (
                         self.hash_block_size
@@ -437,7 +497,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
-                    kv_cache_spec=spec,
+                    **_lookup_args(spec),
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
                     dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
@@ -467,11 +527,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # C128. Truncate both groups with their own effective block sizes
         # so neither group keeps prefix-cache blocks beyond final hit_length.
         for group in self.attention_groups:
-            if not isinstance(group.spec, FullAttentionSpec):
+            if not _is_full(_lookup_policy(self, group)):
                 continue
             num_blocks = cdiv(
                 hit_length,
-                self._get_effective_block_size(group.spec),
+                self._get_effective_block_size(_lookup_policy(self, group)),
             )
             for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
@@ -493,13 +553,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
-        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+        for lookup in self.attention_groups:
+            spec = _lookup_policy(self, lookup)
+            group_ids, manager_cls, use_eagle = lookup.group_ids, lookup.manager_cls, lookup.use_eagle
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
-                kv_cache_spec=spec,
+                **_lookup_args(spec),
                 drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
@@ -550,7 +612,10 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
-    if any(group.role == KVCacheGroupRole.HISPARSE_SOURCE for group in kv_cache_config.kv_cache_groups):
+    if any(
+        (group.host_resident if not vllm_version_is("0.33.0") else group.role == KVCacheGroupRole.HISPARSE_SOURCE)
+        for group in kv_cache_config.kv_cache_groups
+    ):
         # Core owns HiSparse admission, HMA roles, eviction and prefix state.
         # Remove this bypass when the Ascend coordinator factory patch retires.
         return _orig_get_kv_cache_coordinator(
@@ -558,13 +623,13 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         )
     # Private state blocks are excluded by the block-size resolver. Keep
     # their independent manager geometry when prefix caching is disabled too.
-    num_cacheable_groups = sum(is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    num_cacheable_groups = sum(group_prefix_cacheable(group) for group in kv_cache_config.kv_cache_groups)
     has_private_groups = 0 < num_cacheable_groups < len(kv_cache_config.kv_cache_groups)
     if num_cacheable_groups and (_is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups):
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if num_cacheable_groups == 0 or len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        if num_cacheable_groups == 0:
+        if num_cacheable_groups == 0 and vllm_version_is("0.33.0"):
             # Upstream's no-prefix coordinator expects scheduler specs rather
             # than the planner's uniform wrappers. Preserve the caller's config.
             kv_cache_config = copy(kv_cache_config)

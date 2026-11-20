@@ -8,14 +8,22 @@ from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_layers import group_layer_specs
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.kv_cache_interface import HiSparsePageSpec
+
+    HISPARSE_PAGES = (HiSparsePageSpec,)
+else:
+    from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
+
+    HISPARSE_PAGES = (HiSparseResidentSpec, HiSparseHotSpec)
 
 
 def align_hisparse_indexer_specs(
@@ -43,7 +51,7 @@ def align_hisparse_indexer_specs(
                 alignment = math.lcm(alignment, spec.head_size, torch.float32.itemsize)
             else:
                 alignment = math.lcm(alignment, spec.page_size_bytes)
-        elif packed_row_bytes is not None and isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
+        elif packed_row_bytes is not None and isinstance(spec, HISPARSE_PAGES):
             # Core derives these synthetic specs without the source row alignment.
             # Declare it before shared-slab sizing, never round runtime addresses.
             alignment = math.lcm(alignment, packed_row_bytes)
@@ -59,10 +67,7 @@ def get_hisparse_indexer_specs(
     """Collect the Ascend indexer specs keyed by layer."""
     indexer_specs = {}
     for group in kv_cache_config.kv_cache_groups:
-        for name in group.layer_names:
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = spec.kv_cache_specs[name]
+        for name, spec in group_layer_specs(group).items():
             if isinstance(spec, AscendSFAIndexerCacheSpec):
                 indexer_specs[name] = spec
 

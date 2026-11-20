@@ -18,8 +18,9 @@ from collections.abc import Iterable
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
+
+from vllm_ascend.core.kv_cache_layers import full_attention_spec_type
 
 
 class AscendKVBlockZeroer310(KVBlockZeroer):
@@ -49,7 +50,7 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, full_attention_spec_type()):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue

@@ -128,6 +128,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:
+        if not vllm_version_is("0.33.0"):
+            return "vllm_ascend.core.kv_cache_layer_config_builder.AscendKVCacheConfigBuilder"
         return "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
 
     @property
@@ -213,11 +215,13 @@ class NPUPlatform(Platform):
     def set_device(cls, device: torch.device):
         torch.npu.set_device(device)
 
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+    if hasattr(Platform, "register_custom_kv_cache_specs"):
 
-        register_ascend_kv_cache_specs()
+        @classmethod
+        def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+            from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+            register_ascend_kv_cache_specs()
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
