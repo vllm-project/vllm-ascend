@@ -365,6 +365,24 @@ def test_hybrid_qwen_target_uses_fa3_with_dflash2(qwen_dflash2_fa3, architecture
     assert r.select("dflash_head") == "AscendFlashAttentionBackend"
 
 
+@pytest.mark.parametrize(
+    "method,draft,expected_backend",
+    [
+        ("dflash", "DFlash2DraftModel", "AscendFlashAttentionBackend"),
+        ("dspark", "DSparkMiniMaxDraftModel", "AscendAttentionBackend"),
+    ],
+)
+def test_fa3_matches_resolved_target_when_hf_lists_multiple_architectures(
+    qwen_dflash2_fa3, method, draft, expected_backend
+):
+    r = qwen_dflash2_fa3
+    r.target.hf_config.architectures = [r.target.architecture, "MiniMaxM3SparseForCausalLM"]
+    r.spec.method = method
+    r.draft.architectures = [draft]
+
+    assert r.select(f"{method}_head") == expected_backend
+
+
 @pytest.mark.parametrize("speculation", ["disabled", "missing_draft", "mtp"])
 def test_hybrid_qwen_target_requires_fa3_draft(qwen_dflash2_fa3, speculation):
     r = qwen_dflash2_fa3
