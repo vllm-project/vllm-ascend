@@ -1264,7 +1264,7 @@ def test_k3_unified_allocator_preserves_runtime_views(
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
     monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: True)
 
-    legacy_result = {}
+    legacy_result: dict[str, torch.Tensor] = {}
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", lambda *args, **kwargs: legacy_result)
     monkeypatch.setattr(attn_utils, "_reshape_kv_cache_v2", lambda **kwargs: legacy_result)
     caches = attn_utils.allocate_kv_cache_main(
