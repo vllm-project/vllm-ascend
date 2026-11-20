@@ -83,18 +83,31 @@ def create_kv_pool_worker(
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
-    def __init__(self, num_workers: int) -> None:
+    def __init__(self, num_workers: int, allow_single_writer: bool = False) -> None:
         self._aggregator = KVEventAggregator(num_workers)
+        self.allow_single_writer = allow_single_writer
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         self._aggregator.add_events(events)
 
     def aggregate(self) -> "AscendStoreKVEvents":
-        """Retain the unique union, including blocks saved by only one writer."""
-        events = list(dict.fromkeys(self._aggregator.get_all_events()))
+        """Use union for complete-block writers, intersection for partitions."""
+        events = (
+            list(dict.fromkeys(self._aggregator.get_all_events()))
+            if self.allow_single_writer
+            else self._aggregator.get_common_events()
+        )
         self._aggregator.clear_events()
         self._aggregator.add_events(events)
         self._aggregator.reset_workers()
+        return self
+
+    def merge(self, other: "KVConnectorKVEvents") -> "AscendStoreKVEvents":
+        # An unknown or partitioned input must never opt into union.
+        self.allow_single_writer = self.allow_single_writer and (
+            isinstance(other, AscendStoreKVEvents) and other.allow_single_writer
+        )
+        self.add_events(other.get_all_events())
         return self
 
     def increment_workers(self, count: int = 1) -> None:
@@ -299,6 +312,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._kv_cache_events is None:
             self._kv_cache_events = kv_cache_events
         else:
+            self._kv_cache_events.allow_single_writer &= kv_cache_events.allow_single_writer
             self._kv_cache_events.add_events(kv_cache_events.get_all_events())
             self._kv_cache_events.increment_workers(kv_cache_events.get_number_of_workers())
 
@@ -490,10 +504,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
-        if not events:
+        allow_single_writer = self.connector_worker.allow_single_writer_kv_events is True
+        # Partitioned writers must contribute even an empty batch, otherwise
+        # a failed/missing shard is absent from the intersection's worker count.
+        if not events and (allow_single_writer or self.connector_worker.enable_kv_events is not True):
             return None
 
-        ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
+        ascend_store_kv_events = AscendStoreKVEvents(num_workers=1, allow_single_writer=allow_single_writer)
         ascend_store_kv_events.add_events(events)
         return ascend_store_kv_events
 
