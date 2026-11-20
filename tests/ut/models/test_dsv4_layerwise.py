@@ -338,11 +338,12 @@ def test_push_from_rotating_a5_to_resident_peer_preserves_indexer_bytes(model, c
     )
 
     def write(session, sources, destinations, lengths):
-        expected = [
-            (source[2].data_ptr(), target[4].data_ptr(), source[2].nbytes)
-            for source, target in zip(src, dst, strict=True)
-        ]
-        assert list(zip(sources, destinations, lengths, strict=True)) == expected
+        # The Push worker coalesces the contiguous data and scale segments.
+        assert src[1][2].data_ptr() == src[0][2].data_ptr() + src[0][2].nbytes
+        assert dst[1][4].data_ptr() == dst[0][4].data_ptr() + dst[0][4].nbytes
+        assert sources == [src[0][2].data_ptr()]
+        assert destinations == [dst[0][4].data_ptr()]
+        assert lengths == [sum(component[2].nbytes for component in src)]
         for address, destination, length in zip(sources, destinations, lengths, strict=True):
             ctypes.memmove(destination, address, length)
         return 0

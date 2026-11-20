@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_sch
 def make_scheduler(batch_limit=0):
     scheduler = object.__new__(LayerwiseKVPoolScheduler)
     scheduler.use_layerwise_transfer = True
+    scheduler.kv_cache_config = SimpleNamespace(dsv4_cache_format="dsv4")
     scheduler.grouped_block_size = [16, 32]
     scheduler.layerwise_max_transfer_blocks = batch_limit
     scheduler.store_scheduler = SimpleNamespace(batch_is_readable=Mock())

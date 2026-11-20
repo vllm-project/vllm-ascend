@@ -78,14 +78,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
-    def _has_rotating_dsv4_cache(self) -> bool:
+    def _uses_dsv4_layerwise_pool(self) -> bool:
         return (
-            self.layerwise_offload
+            self.use_layerwise_transfer
             and getattr(getattr(self, "kv_cache_config", None), "dsv4_cache_format", None) is not None
         )
 
     def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
-        if self._has_rotating_dsv4_cache() and (entry := self._unfinished_requests.get(request_tracker.req_id)):
+        if (
+            self.layerwise_offload
+            and self._uses_dsv4_layerwise_pool()
+            and (entry := self._unfinished_requests.get(request_tracker.req_id))
+        ):
             # Speculative verifier rows do not identify saveable input KV.
             request_tracker.token_len = min(request_tracker.token_len, len(entry[0].all_token_ids))
         return super()._build_req_meta(request_tracker, *args, **kwargs)
@@ -137,7 +141,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             if self.use_eagle:
                 final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
                 token_len = min(token_len, final_block_start)
-            elif self._has_rotating_dsv4_cache() and len(self.cacheable_group_ids) != len(self.original_block_size):
+            elif (
+                self.layerwise_offload
+                and self._uses_dsv4_layerwise_pool()
+                and len(self.cacheable_group_ids) != len(self.original_block_size)
+            ):
                 # Probe the checkpoint used to resume, before the block
                 # containing the prompt token that must be replayed.
                 token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
@@ -207,7 +215,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
             hbm_hit_tokens=num_computed_tokens,
-            batch_query=query_groups if self.use_layerwise_transfer else None,
+            batch_query=query_groups if self._uses_dsv4_layerwise_pool() else None,
         )
 
     def _query_contiguous_group_hits(

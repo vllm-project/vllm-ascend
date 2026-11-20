@@ -17,6 +17,7 @@ from vllm_ascend.models.deepseek_v4.cache_transfer import select_window_pages
 def test_dsv4_prefix_lookup_probes_resumable_boundary_without_speculation(rotating, expected):
     scheduler = object.__new__(LayerwiseKVPoolScheduler)
     scheduler.layerwise_offload = rotating
+    scheduler.use_layerwise_transfer = True
     scheduler.kv_cache_config = SimpleNamespace(dsv4_cache_format="dsv4")
     scheduler.use_eagle = False
     scheduler.cache_transfer_granularity = 4096
@@ -34,6 +35,7 @@ def test_dsv4_prefix_lookup_probes_resumable_boundary_without_speculation(rotati
 def test_dsv4_save_metadata_stops_before_verifier_only_rows(monkeypatch, rotating, expected):
     scheduler = object.__new__(LayerwiseKVPoolScheduler)
     scheduler.layerwise_offload = rotating
+    scheduler.use_layerwise_transfer = True
     scheduler.kv_cache_config = SimpleNamespace(dsv4_cache_format="dsv4")
     scheduler._unfinished_requests = {"request": (SimpleNamespace(all_token_ids=list(range(65))),)}
     monkeypatch.setattr(BaseKVPoolScheduler, "_build_req_meta", lambda self, tracker: tracker.token_len)
