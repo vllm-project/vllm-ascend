@@ -32,16 +32,31 @@ class TestDynamicMxQuantScaleAlg(TestBase):
         )
 
     @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
-    def test_uses_one_only_for_minimax_m3_on_a5(self, mock_profile):
+    def test_uses_ceil_for_supported_models_on_a5(self, mock_profile):
         minimax_config = self._config("MiniMaxM3SparseForCausalLM")
+        qwen35_moe_config = self._config("Qwen3_5MoeForConditionalGeneration")
+        qwen35_dense_config = self._config("Qwen3_5ForConditionalGeneration")
         other_config = self._config("DeepseekV3ForCausalLM")
 
         mock_profile.return_value = get_hardware_profile(AscendDeviceType.A5)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 1)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_moe_config), 1)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_dense_config), 1)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(other_config), 0)
 
         mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 0)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_moe_config), 0)
+
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_uses_ceil_for_qwen3_5_text_model_types_on_a5(self, _mock_profile):
+        for model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
+            with self.subTest(model_type=model_type):
+                config = self._config(None, model_type=model_type)
+                self.assertEqual(get_dynamic_mx_quant_scale_alg(config), 1)
 
     @patch(
         "vllm_ascend.quantization.utils.get_current_hardware_profile",
