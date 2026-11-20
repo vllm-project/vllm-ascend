@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from torch import nn
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from vllm_ascend.models import quarot_utils
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
@@ -18,7 +18,7 @@ def draft_model():
     model_cls = kimi_k3_dspark.AscendK3DSparkForCausalLM
     model = model_cls.__new__(model_cls)
     nn.Module.__init__(model)
-    model.config = SimpleNamespace(vocab_size=4, hidden_size=2)
+    model.config = SimpleNamespace(vocab_size=4, hidden_size=2, enable_confidence_head=False)
     model.draft_model_config = SimpleNamespace(dtype=torch.float32)
     model.model = nn.Module()
     model.model.context_proj = nn.Linear(2, 2, bias=False)
@@ -148,8 +148,11 @@ def test_failed_head_load_preserves_model_state(draft, monkeypatch, existing_hea
 
 
 @pytest.mark.parametrize("owns_embed_tokens", [False, True])
+@pytest.mark.parametrize("confidence_enabled", [False, True])
 @pytest.mark.parametrize("head_position", ["absent", "first", "last"])
-def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatch, owns_embed_tokens, head_position):
+def test_real_loader_preserves_head_embedding_and_confidence_policy(
+    draft_model, monkeypatch, owns_embed_tokens, confidence_enabled, head_position
+):
     model = draft_model
     # Exercise the real mapper and recursive loader with small CPU modules.
     monkeypatch.setattr(kimi_k3_dspark, "AutoWeightsLoader", AutoWeightsLoader)
@@ -160,6 +163,12 @@ def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatc
     )
     model._owns_embed_tokens = owns_embed_tokens
     model.model.embed_tokens = nn.Embedding(4, 2)
+    model.config.enable_confidence_head = confidence_enabled
+    if confidence_enabled:
+        model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_substr={"confidence_head": "confidence_head"}
+        )
+        model.model.confidence_head = nn.Linear(2, 1, bias=True)
     embedding_before = model.model.embed_tokens.weight.detach().clone()
     original_mapper = model.hf_to_vllm_mapper
     projection = torch.arange(4, dtype=torch.float32).reshape(2, 2)
@@ -168,7 +177,7 @@ def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatc
     weights = [
         ("context_proj.weight", projection),
         ("embed_tokens.weight", embedding),
-        ("confidence_head.weight", torch.ones(1)),
+        ("confidence_head.weight", torch.ones(1, 2)),
     ]
     has_head = head_position != "absent"
     if has_head:
@@ -179,6 +188,8 @@ def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatc
     expected_loaded = {"model.context_proj.weight"}
     if owns_embed_tokens:
         expected_loaded.add("model.embed_tokens.weight")
+    if confidence_enabled:
+        expected_loaded.add("model.confidence_head.weight")
     if has_head:
         expected_loaded.add("lm_head.weight")
         torch.testing.assert_close(model.lm_head.weight, checkpoint_head)
@@ -192,6 +203,7 @@ def test_real_loader_preserves_head_and_embedding_policy(draft_model, monkeypatc
     assert model.hf_to_vllm_mapper is original_mapper
     assert original_mapper._map_name("embed_tokens.weight") is None
     assert original_mapper._map_name("lm_head.weight") is None
+    assert (original_mapper._map_name("confidence_head.weight") is not None) is confidence_enabled
 
 
 @pytest.mark.parametrize("lmhead_tp", [False, True])

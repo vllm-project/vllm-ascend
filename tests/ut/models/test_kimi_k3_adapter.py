@@ -932,6 +932,72 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
 
 
+def test_k3_dspark_confidence_head_is_constructed_from_config(monkeypatch):
+    config = SimpleNamespace(
+        vocab_size=8,
+        draft_vocab_size=8,
+        hidden_size=5,
+        target_hidden_size=6,
+        num_target_layers=1,
+        num_hidden_layers=0,
+        markov_rank=2,
+        rms_norm_eps=1e-6,
+        enable_confidence_head=True,
+        confidence_head_with_markov=True,
+    )
+    seen = {}
+
+    def make_confidence_head(input_dim, *, prefix, bias, with_markov):
+        seen.update(input_dim=input_dim, prefix=prefix, bias=bias, with_markov=with_markov)
+        return nn.Linear(input_dim, 1, bias=bias)
+
+    monkeypatch.setattr(kimi_k3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(kimi_k3_dspark, "get_draft_quant_config", lambda _config: None)
+    monkeypatch.setattr(
+        kimi_k3_dspark,
+        "ColumnParallelLinear",
+        lambda input_size, output_size, **kwargs: nn.Linear(input_size, output_size, bias=False),
+    )
+    monkeypatch.setattr(kimi_k3_dspark, "RMSNorm", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(kimi_k3_dspark, "DSparkMarkovHead", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(kimi_k3_dspark, "DSparkConfidenceHead", make_confidence_head)
+
+    model = AscendK3DSparkModel(
+        vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=config)),
+            cache_config=SimpleNamespace(),
+        ),
+        start_layer_id=0,
+        prefix="model",
+    )
+
+    assert isinstance(model.confidence_head, nn.Linear)
+    assert seen == {"input_dim": 7, "prefix": "model.confidence_head", "bias": True, "with_markov": True}
+
+
+def test_k3_dspark_confidence_mapper_and_compute_confidence(monkeypatch):
+    config = SimpleNamespace(enable_confidence_head=True, draft_vocab_size=4)
+    monkeypatch.setattr(kimi_k3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(kimi_k3_dspark, "AscendK3DSparkModel", lambda **kwargs: nn.Module())
+    monkeypatch.setattr(kimi_k3_dspark, "LogitsProcessor", lambda *args, **kwargs: nn.Identity())
+    model = AscendK3DSparkForCausalLM(
+        vllm_config=SimpleNamespace(
+            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=config)),
+            model_config=SimpleNamespace(get_num_layers=lambda _parallel_config: 0),
+            parallel_config=SimpleNamespace(),
+        )
+    )
+    assert model.hf_to_vllm_mapper._map_name("confidence_head.weight") == "model.confidence_head.weight"
+
+    class ConfidenceHead(nn.Module):
+        def forward(self, head_hidden, markov_embed):
+            return head_hidden[..., :1] + markov_embed[..., :1]
+
+    model.model.confidence_head = ConfidenceHead()
+    confidence = model.compute_confidence(torch.tensor([[1.0]]), torch.tensor([[2.0]]))
+    torch.testing.assert_close(confidence, torch.sigmoid(torch.tensor([[3.0]])))
+
+
 def test_kimi_lm_initializes_specialized_decode(monkeypatch):
     from vllm.models.kimi_k3.amd.specialized_decode import runtime
 

@@ -40,6 +40,9 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
+from vllm.v1.attention.backend import (
+    max_decode_query_len,
+)
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -380,13 +383,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
     @classmethod
     def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec) -> int | None:
-        # Only adaptive verification advertises variable-length graph replay.
-        # Long fixed queries can share the strided recurrent kernel while
-        # retaining uniform graph dispatch.
-        spec_config = vllm_config.speculative_config
-        if spec_config is None or not spec_config.enable_adaptive_verification:
-            return None
-        return 1 + spec_config.num_speculative_tokens
+        # Adaptive verification replays decode requests with independently
+        # admitted draft lengths. The Ascend MLA path supports up to the full
+        # scheduled verification width, including the target token.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,

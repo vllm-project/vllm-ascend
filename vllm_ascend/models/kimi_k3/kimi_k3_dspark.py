@@ -19,9 +19,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
@@ -206,6 +207,16 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(self.config, "enable_confidence_head", False):
+            with_markov = bool(getattr(self.config, "confidence_head_with_markov", False))
+            input_dim = self.config.hidden_size + (self.config.markov_rank if with_markov else 0)
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                with_markov=with_markov,
+            )
 
     @torch.inference_mode()
     def precompute_and_store_context_kv(
@@ -279,6 +290,13 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         assert self.draft_model_config is not None
         self.config = self.draft_model_config.hf_config
+        if getattr(self.config, "enable_confidence_head", False):
+            # The upstream mapper drops this training head by default. K3
+            # adaptive verification consumes it at runtime, so retain it when
+            # the draft config asks the model to construct the head.
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_substr={"confidence_head": "confidence_head"}
+            )
         target_layer_num = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model = AscendK3DSparkModel(
             vllm_config=vllm_config,
@@ -321,6 +339,11 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
     def get_draft_attn_causal(self) -> list[bool]:
         causal = _uses_causal_draft_attention(self.config)
         return [causal] * len(self.model.layers)
+
+    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        """Return per-position acceptance probabilities for adaptive verification."""
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def load_weights(
         self,
