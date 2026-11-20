@@ -750,11 +750,8 @@ class NPUPlatform(Platform):
         apply_v2_model_runner_config_patch()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
-
-        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         additional_config = vllm_config.additional_config or {}
@@ -874,7 +871,6 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            sync_v2_extra_kwargs,
             use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
@@ -889,7 +885,6 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-        sync_v2_extra_kwargs(vllm_config)
         # V2's forward context carries the additional fields (is_draft_model,
         # prefetch flags, ...) consumed by the FIA/MoE graph paths.
         dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)

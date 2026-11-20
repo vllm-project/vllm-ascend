@@ -190,12 +190,10 @@ class NPUWorker(GPUWorker):
         # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
         # Ascend V2 model runner overrides so the worker resolves the same
         # runner version as the engine. Idempotent.
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
         apply_v2_model_runner_config_patch()
-        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
