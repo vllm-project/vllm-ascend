@@ -1,115 +1,115 @@
-core,pipe,interval,start_us,end_us,duration_us,annotation
-core0.cubecore,MTE2,0,5.344242572784424,12.08545446395874,6.741211891174316,load S
-core0.cubecore,MTE2,1,13.764242172241211,15.324848175048828,1.5606060028076172,load S
-core0.cubecore,MTE2,2,17.266666412353516,18.827272415161133,1.5606060028076172,load S
-core0.cubecore,MTE2,3,20.562423706054688,22.059393405914307,1.4969696998596191,load S
-core0.cubecore,MTE2,4,24.045454025268555,25.59212064743042,1.5466666221618652,load S
-core0.cubecore,MTE2,5,27.411514282226562,29.003029465675354,1.5915151834487915,load S
-core0.cubecore,MTE2,6,30.930908203125,32.62727189064026,1.6963636875152588,load S
-core0.cubecore,MTE2,7,34.33636474609375,35.90787994861603,1.5715152025222778,load S
-core0.cubecore,MTE1,0,12.24666690826416,12.441212356090546,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,1,13.035758018493652,13.139394380152225,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,2,13.656363487243652,13.760605908930302,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,3,15.749091148376465,15.94363659620285,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,4,16.53818130493164,16.641817666590214,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,5,17.158788681030273,17.263031102716923,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,6,19.044849395751953,19.23939484357834,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,7,19.833938598632812,19.937574960291386,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,8,20.454545974731445,20.558788396418095,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,9,22.52787971496582,22.722425162792206,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,10,23.31696891784668,23.420605279505253,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,11,23.937576293945312,24.041818715631962,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,12,25.893939971923828,26.088485419750214,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,13,26.68303108215332,26.786667443811893,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,14,27.30363655090332,27.40787897258997,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,15,29.413333892822266,29.60787934064865,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,16,30.202425003051758,30.30606136471033,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,17,30.823030471801758,30.927272893488407,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,18,32.81878662109375,33.013332068920135,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,19,33.607879638671875,33.71151600033045,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,20,34.228485107421875,34.332727529108524,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,21,36.59636306762695,36.79090851545334,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,22,37.38545608520508,37.48909244686365,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,23,38.00606155395508,38.11030397564173,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,24,39.744850158691406,39.93939560651779,0.1945454478263855,L1 → L0
-core0.cubecore,MTE1,25,40.533939361572266,40.63757572323084,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,26,41.154544830322266,41.258787252008915,0.10424242168664932,L1 → L0
-core0.cubecore,MTE1,27,42.13575744628906,42.239393807947636,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,28,42.395755767822266,42.49939212948084,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,29,43.01636505126953,43.120001412928104,0.10363636165857315,L1 → L0
-core0.cubecore,MTE1,30,43.63697052001953,43.740606881678104,0.10363636165857315,L1 → L0
-core0.cubecore,CUBE,0,12.356969833374023,14.918787956237793,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,1,15.859394073486328,18.421212196350098,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,2,19.1551513671875,21.71696949005127,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,3,22.638181686401367,25.199999809265137,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,4,26.004241943359375,28.566060066223145,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,5,29.523635864257812,32.08545398712158,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,6,32.92909240722656,35.49091053009033,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,7,36.7066650390625,39.26848316192627,2.5618181228637695,[K*; Q*] Sᵀ
-core0.cubecore,CUBE,8,39.85515213012695,44.899394512176514,5.0442423820495605,[K*; Q*] Sᵀ
-core0.cubecore,FIXP,0,14.896363258361816,15.015757195651531,0.11939393728971481,L0C → UB
-core0.cubecore,FIXP,1,18.398788452148438,18.52787935733795,0.12909090518951416,L0C → UB
-core0.cubecore,FIXP,2,21.69454574584961,21.80181847512722,0.10727272927761078,L0C → UB
-core0.cubecore,FIXP,3,25.177576065063477,25.30181849002838,0.12424242496490479,L0C → UB
-core0.cubecore,FIXP,4,28.543636322021484,28.650909051299095,0.10727272927761078,L0C → UB
-core0.cubecore,FIXP,5,32.06303024291992,32.19636358320713,0.13333334028720856,L0C → UB
-core0.cubecore,FIXP,6,35.468482971191406,35.65090721845627,0.18242424726486206,L0C → UB
-core0.cubecore,FIXP,7,39.24605941772461,39.36424123495817,0.11818181723356247,L0C → UB
-core0.cubecore,FIXP,8,42.39454650878906,42.50181923806667,0.10727272927761078,L0C → UB
-core0.cubecore,FIXP,9,44.87696838378906,44.98424111306667,0.10727272927761078,L0C → UB
-core0.veccore0,MTE2,0,4.601818084716797,5.117575645446777,0.5157575607299805,load → UB
-core0.veccore0,MTE2,1,5.785454750061035,6.516969919204712,0.7315151691436768,load → UB
-core0.veccore0,MTE2,2,6.68363618850708,7.341211974620819,0.657575786113739,load → UB
-core0.veccore0,MTE2,3,7.773939609527588,10.110303163528442,2.3363635540008545,load → UB
-core0.veccore0,MTE2,4,12.130303382873535,14.598788261413574,2.468484878540039,load → UB
-core0.veccore0,MTE2,5,15.63272762298584,17.898182153701782,2.2654545307159424,load → UB
-core0.veccore0,MTE2,6,18.92909049987793,21.379393577575684,2.450303077697754,load → UB
-core0.veccore0,MTE2,7,22.413333892822266,24.70848536491394,2.295151472091675,load → UB
-core0.veccore0,MTE2,8,25.73939323425293,28.252726554870605,2.513333320617676,load → UB
-core0.veccore0,MTE2,9,29.286666870117188,31.673333644866943,2.386666774749756,load → UB
-core0.veccore0,MTE2,10,32.70424270629883,35.445454835891724,2.7412121295928955,load → UB
-core0.veccore0,MTE2,11,36.479393005371094,38.5987868309021,2.119393825531006,load → UB
-core0.veccore0,MTE2,12,39.629695892333984,41.44666564464569,1.8169697523117065,load → UB
-core0.veccore0,VECTOR,0,7.3448486328125,8.589091062545776,1.2442424297332764,"SiLU(conv₄(Q,K,V))"
-core0.veccore0,VECTOR,1,10.11393928527832,12.17575740814209,2.0618181228637695,"conv / prep(K*,Q*)"
-core0.veccore0,VECTOR,2,14.602424621582031,15.678182244300842,1.075757622718811,VF
-core0.veccore0,VECTOR,3,15.718788146972656,16.67939418554306,0.960606038570404,VF
-core0.veccore0,VECTOR,4,17.901817321777344,18.974544644355774,1.0727273225784302,VF
-core0.veccore0,VECTOR,5,19.978788375854492,20.802424728870392,0.8236363530158997,VF
-core0.veccore0,VECTOR,6,21.38302993774414,22.45878756046295,1.075757622718811,VF
-core0.veccore0,VECTOR,7,23.448484420776367,24.272120773792267,0.8236363530158997,VF
-core0.veccore0,VECTOR,8,24.712121963500977,25.784849286079407,1.0727273225784302,VF
-core0.veccore0,VECTOR,9,26.716970443725586,27.540606796741486,0.8236363530158997,VF
-core0.veccore0,VECTOR,10,28.256362915039062,29.332120537757874,1.075757622718811,VF
-core0.veccore0,VECTOR,11,30.603635787963867,31.427272140979767,0.8236363530158997,VF
-core0.veccore0,VECTOR,12,31.676969528198242,32.74969685077667,1.0727273225784302,VF
-core0.veccore0,VECTOR,13,33.87636184692383,34.69999819993973,0.8236363530158997,VF
-core0.veccore0,VECTOR,14,35.44908905029297,36.52484667301178,1.075757622718811,VF
-core0.veccore0,VECTOR,15,37.533939361572266,38.357575714588165,0.8236363530158997,VF
-core0.veccore0,VECTOR,16,38.60242462158203,39.67515194416046,1.0727273225784302,VF
-core0.veccore0,VECTOR,17,40.52424240112305,41.34787875413895,0.8236363530158997,VF
-core0.veccore0,VECTOR,18,41.45030212402344,42.06060516834259,0.6103030443191528,VF
-core0.veccore0,VECTOR,19,43.02302932739258,43.84666568040848,0.8236363530158997,VF
-core0.veccore0,VECTOR,20,44.99333190917969,45.81696826219559,0.8236363530158997,corr + gated RMS
-core0.veccore0,MTE3,0,7.3466668128967285,7.820000141859055,0.47333332896232605,store hist
-core0.veccore0,MTE3,1,10.115757942199707,11.111515522003174,0.9957575798034668,UB xfer
-core0.veccore0,MTE3,2,12.180000305175781,12.462424546480179,0.2824242413043976,UB xfer
-core0.veccore0,MTE3,3,14.604242324829102,15.13999992609024,0.5357576012611389,UB xfer
-core0.veccore0,MTE3,4,15.682424545288086,15.934545755386353,0.2521212100982666,UB xfer
-core0.veccore0,MTE3,5,17.903636932373047,18.4303035736084,0.5266666412353516,UB xfer
-core0.veccore0,MTE3,6,18.978788375854492,19.965455055236816,0.9866666793823242,UB xfer
-core0.veccore0,MTE3,7,21.38484764099121,21.929090082645416,0.5442424416542053,UB xfer
-core0.veccore0,MTE3,8,22.463029861450195,23.4399995803833,0.9769697189331055,UB xfer
-core0.veccore0,MTE3,9,24.713939666748047,25.24181842803955,0.5278787612915039,UB xfer
-core0.veccore0,MTE3,10,25.789091110229492,26.708485066890717,0.9193939566612244,UB xfer
-core0.veccore0,MTE3,11,28.258182525634766,28.774546146392822,0.5163636207580566,UB xfer
-core0.veccore0,MTE3,12,29.336362838745117,30.59515070915222,1.2587878704071045,UB xfer
-core0.veccore0,MTE3,13,31.678787231445312,32.221817553043365,0.543030321598053,UB xfer
-core0.veccore0,MTE3,14,32.75394058227539,33.86121332645416,1.107272744178772,UB xfer
-core0.veccore0,MTE3,15,35.45090866088867,36.00121170282364,0.550303041934967,UB xfer
-core0.veccore0,MTE3,16,36.529090881347656,37.5254545211792,0.996363639831543,UB xfer
-core0.veccore0,MTE3,17,38.604244232177734,39.104244232177734,0.5,UB xfer
-core0.veccore0,MTE3,18,39.67939376831055,40.515757381916046,0.8363636136054993,UB xfer
-core0.veccore0,MTE3,19,42.064849853515625,43.0109104514122,0.9460605978965759,UB xfer
-core0.veccore0,MTE3,20,43.85091018676758,44.89515256881714,1.0442423820495605,UB xfer
-core0.veccore0,MTE3,21,45.82121276855469,47.260000705718994,1.4387879371643066,UB xfer
+core,pipe,interval,start_us,end_us,duration_us,operation,interpretation
+core0.cubecore,MTE2,0,5.344242572784424,12.08545446395874,6.741211891174316,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,1,13.764242172241211,15.324848175048828,1.5606060028076172,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,2,17.266666412353516,18.827272415161133,1.5606060028076172,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,3,20.562423706054688,22.059393405914307,1.4969696998596191,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,4,24.045454025268555,25.59212064743042,1.5466666221618652,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,5,27.411514282226562,29.003029465675354,1.5915151834487915,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,6,30.930908203125,32.62727189064026,1.6963636875152588,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE2,7,34.33636474609375,35.90787994861603,1.5715152025222778,load S,State-page tile(s) from GM to L1
+core0.cubecore,MTE1,0,12.24666690826416,12.441212356090546,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,1,13.035758018493652,13.139394380152225,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,2,13.656363487243652,13.760605908930302,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,3,15.749091148376465,15.94363659620285,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,4,16.53818130493164,16.641817666590214,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,5,17.158788681030273,17.263031102716923,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,6,19.044849395751953,19.23939484357834,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,7,19.833938598632812,19.937574960291386,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,8,20.454545974731445,20.558788396418095,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,9,22.52787971496582,22.722425162792206,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,10,23.31696891784668,23.420605279505253,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,11,23.937576293945312,24.041818715631962,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,12,25.893939971923828,26.088485419750214,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,13,26.68303108215332,26.786667443811893,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,14,27.30363655090332,27.40787897258997,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,15,29.413333892822266,29.60787934064865,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,16,30.202425003051758,30.30606136471033,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,17,30.823030471801758,30.927272893488407,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,18,32.81878662109375,33.013332068920135,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,19,33.607879638671875,33.71151600033045,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,20,34.228485107421875,34.332727529108524,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,21,36.59636306762695,36.79090851545334,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,22,37.38545608520508,37.48909244686365,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,23,38.00606155395508,38.11030397564173,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,24,39.744850158691406,39.93939560651779,0.1945454478263855,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,25,40.533939361572266,40.63757572323084,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,26,41.154544830322266,41.258787252008915,0.10424242168664932,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,27,42.13575744628906,42.239393807947636,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,28,42.395755767822266,42.49939212948084,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,29,43.01636505126953,43.120001412928104,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,MTE1,30,43.63697052001953,43.740606881678104,0.10363636165857315,load QK* / S tile,L1 to L0A/L0B. The interval does not identify individual operand loads.
+core0.cubecore,CUBE,0,12.356969833374023,14.918787956237793,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,1,15.859394073486328,18.421212196350098,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,2,19.1551513671875,21.71696949005127,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,3,22.638181686401367,25.199999809265137,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,4,26.004241943359375,28.566060066223145,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,5,29.523635864257812,32.08545398712158,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,6,32.92909240722656,35.49091053009033,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,7,36.7066650390625,39.26848316192627,2.5618181228637695,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,CUBE,8,39.85515213012695,44.899394512176514,5.0442423820495605,[K*; Q*] × Sᵀ,Packed key/query projection against the transposed checkpoint
+core0.cubecore,FIXP,0,14.896363258361816,15.015757195651531,0.11939393728971481,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,1,18.398788452148438,18.52787935733795,0.12909090518951416,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,2,21.69454574584961,21.80181847512722,0.10727272927761078,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,3,25.177576065063477,25.30181849002838,0.12424242496490479,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,4,28.543636322021484,28.650909051299095,0.10727272927761078,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,5,32.06303024291992,32.19636358320713,0.13333334028720856,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,6,35.468482971191406,35.65090721845627,0.18242424726486206,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,7,39.24605941772461,39.36424123495817,0.11818181723356247,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,8,42.39454650878906,42.50181923806667,0.10727272927761078,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.cubecore,FIXP,9,44.87696838378906,44.98424111306667,0.10727272927761078,"send Pk, Pq",State-projection tiles from L0C to vector UB
+core0.veccore0,MTE2,0,4.601818084716797,5.117575645446777,0.5157575607299805,"load w, …",Begins with the RMS scale. Other loads sharing this interval are unresolved.
+core0.veccore0,MTE2,1,5.785454750061035,6.516969919204712,0.7315151691436768,"load ∈ {Q,K,V, hist,Wconv}",Pre-convolution operand group; the split of tensors between these intervals is unresolved.
+core0.veccore0,MTE2,2,6.68363618850708,7.341211974620819,0.657575786113739,"load ∈ {Q,K,V, hist,Wconv}",Pre-convolution operand group; the split of tensors between these intervals is unresolved.
+core0.veccore0,MTE2,3,7.773939609527588,10.110303163528442,2.3363635540008545,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,4,12.130303382873535,14.598788261413574,2.468484878540039,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,5,15.63272762298584,17.898182153701782,2.2654545307159424,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,6,18.92909049987793,21.379393577575684,2.450303077697754,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,7,22.413333892822266,24.70848536491394,2.295151472091675,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,8,25.73939323425293,28.252726554870605,2.513333320617676,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,9,29.286666870117188,31.673333644866943,2.386666774749756,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,10,32.70424270629883,35.445454835891724,2.7412121295928955,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,11,36.479393005371094,38.5987868309021,2.119393825531006,"load ∈ {Q,K,V,hist,Wconv, f,g,β,A,dt}",Adjacent requests overlap; the trace cannot split this input-load group by tensor.
+core0.veccore0,MTE2,12,39.629695892333984,41.44666564464569,1.8169697523117065,"load ∈ {f,g,β,A,dt}",Remaining gate and update inputs before the last prefix preparation; individual transfers are unresolved.
+core0.veccore0,VECTOR,0,7.3448486328125,8.589091062545776,1.2442424297332764,"SiLU(conv₄(Q,K,V))",Four-tap causal convolution followed by SiLU
+core0.veccore0,VECTOR,1,10.11393928527832,12.17575740814209,2.0618181228637695,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,2,14.602424621582031,15.678182244300842,1.075757622718811,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,3,15.718788146972656,16.67939418554306,0.960606038570404,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,4,17.901817321777344,18.974544644355774,1.0727273225784302,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,5,19.978788375854492,20.802424728870392,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,6,21.38302993774414,22.45878756046295,1.075757622718811,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,7,23.448484420776367,24.272120773792267,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,8,24.712121963500977,25.784849286079407,1.0727273225784302,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,9,26.716970443725586,27.540606796741486,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,10,28.256362915039062,29.332120537757874,1.075757622718811,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,11,30.603635787963867,31.427272140979767,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,12,31.676969528198242,32.74969685077667,1.0727273225784302,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,13,33.87636184692383,34.69999819993973,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,14,35.44908905029297,36.52484667301178,1.075757622718811,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,15,37.533939361572266,38.357575714588165,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,16,38.60242462158203,39.67515194416046,1.0727273225784302,"SiLU(conv₄(Q,K,V)) norm(K′,Q′) ⊙ p; b = sigmoid(β)","Convolution and preceding request's gate/prefix preparation, inferred from compiled issue order and MTE3 handoff."
+core0.veccore0,VECTOR,17,40.52424240112305,41.34787875413895,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,18,41.45030212402344,42.06060516834259,0.6103030443191528,"norm(K′,Q′) ⊙ p b = sigmoid(β)",Final request's gate/prefix preparation and packing
+core0.veccore0,VECTOR,19,43.02302932739258,43.84666568040848,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,VECTOR,20,44.99333190917969,45.81696826219559,0.8236363530158997,c = b·(v′−v̂) y = RMSNorm(z) ⊙ sigmoid(g),Six serial token corrections. z includes the projected query and the weighted corrections.
+core0.veccore0,MTE3,0,7.3466668128967285,7.820000141859055,0.47333332896232605,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,1,10.115757942199707,11.111515522003174,0.9957575798034668,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,2,12.180000305175781,12.462424546480179,0.2824242413043976,"send K*,Q*; store KG",UB to L1 handoff and key/gate rollback storage in this phase
+core0.veccore0,MTE3,3,14.604242324829102,15.13999992609024,0.5357576012611389,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,4,15.682424545288086,15.934545755386353,0.2521212100982666,"send K*,Q*; store KG",UB to L1 handoff and key/gate rollback storage in this phase
+core0.veccore0,MTE3,5,17.903636932373047,18.4303035736084,0.5266666412353516,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,6,18.978788375854492,19.965455055236816,0.9866666793823242,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,7,21.38484764099121,21.929090082645416,0.5442424416542053,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,8,22.463029861450195,23.4399995803833,0.9769697189331055,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,9,24.713939666748047,25.24181842803955,0.5278787612915039,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,10,25.789091110229492,26.708485066890717,0.9193939566612244,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,11,28.258182525634766,28.774546146392822,0.5163636207580566,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,12,29.336362838745117,30.59515070915222,1.2587878704071045,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,13,31.678787231445312,32.221817553043365,0.543030321598053,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,14,32.75394058227539,33.86121332645416,1.107272744178772,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,15,35.45090866088867,36.00121170282364,0.550303041934967,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,16,36.529090881347656,37.5254545211792,0.996363639831543,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,17,38.604244232177734,39.104244232177734,0.5,store hist,Write the shifted convolution input window to its cache page
+core0.veccore0,MTE3,18,39.67939376831055,40.515757381916046,0.8363636136054993,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,19,42.064849853515625,43.0109104514122,0.9460605978965759,"send / store ∈ {K*,Q*,KG,y,c}",Mixed transfer interval: packed operands to L1 or rollback/output tensors to GM. Membership is not exact.
+core0.veccore0,MTE3,20,43.85091018676758,44.89515256881714,1.0442423820495605,"store ∈ {y,c}",Drain phase: BF16 head output and FP32 corrections. Individual transfers are unresolved.
+core0.veccore0,MTE3,21,45.82121276855469,47.260000705718994,1.4387879371643066,"store ∈ {y,c}",Drain phase: BF16 head output and FP32 corrections. Individual transfers are unresolved.
