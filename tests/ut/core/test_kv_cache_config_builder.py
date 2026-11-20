@@ -4,7 +4,7 @@
 """Dispatch contract of ``AscendKVCacheConfigBuilder``.
 
 Locks the grouping precedence (GLM-Next, Qwen4-Exp MTP, Ascend shared-tuple
-layouts, Kimi-K3 DSpark, then vLLM's generic grouping) and the TurboQuant pool
+layouts, Kimi-K3 DSpark, then vLLM's model-owned or default grouping) and the TurboQuant pool
 accounting, all of which now live in the builder rather than in a monkey patch.
 """
 
@@ -20,10 +20,12 @@ pytest.importorskip(
 
 import torch
 from vllm.config import KVTransferConfig
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -128,6 +130,19 @@ def test_generic_uniform_spec_falls_back_to_default_grouping():
     assert set(result[0].layer_names) == {"layer.a", "layer.b"}
 
 
+def test_sfa_hisparse_grouping_reaches_core(monkeypatch):
+    runtime = make_runtime()
+    runtime.model_config.hf_config.model_type = "deepseek_v32"
+    runtime.attention_config.hisparse_config = object()
+    specs = generic_specs()
+    groups = [KVCacheGroupSpec(["layer.a"], specs["layer.a"], role=KVCacheGroupRole.HISPARSE_SOURCE)]
+    hisparse_grouping = Mock(return_value=groups)
+    monkeypatch.setattr(kv_cache_planning, "get_hisparse_kv_cache_groups", hisparse_grouping)
+
+    assert AscendKVCacheConfigBuilder().get_kv_cache_groups(runtime, specs) is groups
+    hisparse_grouping.assert_called_once_with(runtime, specs)
+
+
 def test_layerwise_offload_budget_uses_one_block_backing(monkeypatch):
     runtime = make_runtime()
     runtime.cache_config = SimpleNamespace(
@@ -162,7 +177,7 @@ def test_glm_next_layout_takes_precedence_over_ascend_grouping(monkeypatch):
     ascend_mock = Mock()
     monkeypatch.setattr(builder_module, "is_glm5_next_cache_spec", lambda spec: True)
     monkeypatch.setattr(builder_module, "get_glm5_next_kv_cache_groups", glm_mock)
-    monkeypatch.setattr(builder_module, "group_and_unify_kv_cache_specs", ascend_mock)
+    monkeypatch.setattr(builder_module.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", ascend_mock)
     assert AscendKVCacheConfigBuilder().get_kv_cache_groups(make_runtime(), generic_specs()) is sentinel
     ascend_mock.assert_not_called()
 

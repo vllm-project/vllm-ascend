@@ -210,7 +210,6 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     upstream = Mock(return_value=[])
     monkeypatch.setattr(kv_cache_config_builder, "paired_sfa_cache_groups", paired)
     monkeypatch.setattr(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
-    monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
     monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
     monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 

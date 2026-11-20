@@ -11,8 +11,8 @@ into physical tuple slots that are shared across page-size buckets, with
 MTP/draft layers occupying trailing slots of their own.
 
 Ascend selects ``AscendKVCacheConfigBuilder`` on both the vLLM main pin and
-v0.33.0. The builder uses this layout for grouping and pool accounting.
-The builder uses the same layout for pool sizing and tensor descriptors.
+v0.33.0. The model owns grouping and the builder uses the resulting groups
+for pool sizing and tensor descriptors.
 
 This module intentionally does not touch Kimi-K3's cache planning: Kimi-K3
 uses its own mixed-group layout (``vllm_ascend.models.kimi_k3``) and never
@@ -23,9 +23,14 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_planning import _approximate_gcd, get_uniform_page_size
+from vllm.v1.core.kv_cache_planning import (
+    _approximate_gcd,
+    get_kv_cache_groups,
+    get_uniform_page_size,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -38,6 +43,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,17 @@ def group_and_unify_kv_cache_specs(
         swa_uniform_specs.append(uniform_spec)
 
     return [*mla_uniform_specs, *swa_uniform_specs]
+
+
+def get_deepseek_v4_kv_cache_groups(
+    vllm_config: "VllmConfig",
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+    if grouped_specs is None or len(grouped_specs) < 2:
+        # Uniform or partial specs still use Core's default grouping.
+        return get_kv_cache_groups(vllm_config, kv_cache_spec)
+    return _get_kv_cache_groups_uniform_groups(grouped_specs)
 
 
 def _get_kv_cache_groups_uniform_groups(

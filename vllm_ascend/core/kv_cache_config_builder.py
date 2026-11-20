@@ -45,13 +45,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.models.deepseek_v4.cache_config import (
-    _get_kv_cache_groups_uniform_groups,
     deepseek_v4_pool_bytes_per_block,
     get_deepseek_v4_cache_layout,
     materialize_deepseek_v4_tensors,
-)
-from vllm_ascend.models.deepseek_v4.cache_config import (
-    group_and_unify_kv_cache_specs as group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.models.deepseek_v4.cache_config import (
     is_deepseek_v4_groups as _is_deepseek_v4_groups,
@@ -103,9 +99,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: Kimi-K3.1, GLM-Next, Qwen4-Exp MTP, then DSV4.1 /
-        mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
-        then vLLM's generic grouping.
+        Precedence: Kimi-K3.1, Step5, GLM-Next, Qwen4-Exp MTP, DeepSeek V4.1,
+        Kimi-K3 DSpark, then vLLM's model-owned or default grouping.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
@@ -126,12 +121,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))
-
-        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
-        if grouped_specs is not None and len(grouped_specs) >= 2:
-            # A uniform spec is not a mixed-page-size layout; grouping it here
-            # would drop the C128 bucket the shared-tuple layout depends on.
-            return _get_kv_cache_groups_uniform_groups(grouped_specs)
 
         kimi_k3_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
         if kimi_k3_groups is not None:

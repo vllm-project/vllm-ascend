@@ -15,9 +15,11 @@ latent vector.
 """
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.model_executor.models.interfaces import supports_kv_cache_grouping
 from vllm.v1.core import kv_cache_planning
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -33,12 +35,12 @@ from vllm_ascend.core.kv_cache_config_builder import (
 )
 from vllm_ascend.models.deepseek_v4.cache_config import (
     DeepseekV4CacheLayout,
-    _get_kv_cache_groups_uniform_groups,
     deepseek_v4_pool_bytes_per_block,
     get_deepseek_v4_cache_layout,
-    group_and_unify_kv_cache_specs,
     is_deepseek_v4_groups,
 )
+from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v4.vl_model import AscendDeepseekV4ForConditionalGeneration
 
 # dtype itemsize used throughout: torch.float16 -> 2 bytes.
 _DTYPE = torch.float16
@@ -332,10 +334,46 @@ def test_layout_rejects_mtp_layers_with_different_physical_page_sizes():
         get_deepseek_v4_cache_layout(groups)
 
 
-# --- padded physical pages (full group_and_unify -> uniform_groups pipeline) --
+@pytest.fixture(params=[AscendDeepseekV4ForCausalLM, AscendDeepseekV4ForConditionalGeneration])
+def grouping_config(request):
+    model_cls = request.param
+    model_config = SimpleNamespace(
+        architectures=[model_cls.__name__],
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+        registry=SimpleNamespace(resolve_model_cls=Mock(return_value=(model_cls, model_cls.__name__))),
+        supports_kv_cache_grouping=supports_kv_cache_grouping(model_cls),
+    )
+    assert model_config.supports_kv_cache_grouping
+    return SimpleNamespace(
+        model_config=model_config,
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
 
 
-def test_padded_physical_pages_align_swa_bucket_to_full_mla_bucket():
+def test_model_hook_falls_back_for_uniform_swa_specs(grouping_config):
+    specs = {"swa.0": _swa_spec(block_size=16, head_size=4, sliding_window=32)}
+
+    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(grouping_config, specs)
+
+    assert groups == kv_cache_planning.get_kv_cache_groups(grouping_config, specs)
+    grouping_config.model_config.registry.resolve_model_cls.assert_called_once()
+
+
+def test_model_hook_rejects_hisparse(grouping_config):
+    grouping_config.attention_config.hisparse_config = object()
+    specs = {"c4.attn": _mla_spec(block_size=16, head_size=4)}
+
+    with pytest.raises(ValueError, match="cannot be combined with HiSparse"):
+        AscendKVCacheConfigBuilder().get_kv_cache_groups(grouping_config, specs)
+
+    grouping_config.model_config.registry.resolve_model_cls.assert_not_called()
+
+
+# --- padded physical pages through the model grouping hook ---
+
+
+def test_padded_physical_pages_align_swa_bucket_to_full_mla_bucket(grouping_config):
     # Full-MLA group ("C4"): block_size=16, two page-size buckets.
     c4_small = _mla_spec(block_size=16, head_size=2)  # page 16*2*2=64
     c4_large = _mla_spec(block_size=16, head_size=4)  # page 16*4*2=128
@@ -357,11 +395,13 @@ def test_padded_physical_pages_align_swa_bucket_to_full_mla_bucket():
         "c128.attn": c128_attn,
         "swa.0": swa,
     }
-    grouped_specs = group_and_unify_kv_cache_specs(specs)
-    assert grouped_specs is not None
-    assert [g.block_size for g in grouped_specs[:2]] == [16, 64]
+    groups = AscendKVCacheConfigBuilder().get_kv_cache_groups(grouping_config, specs)
 
-    groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    grouping_config.model_config.registry.resolve_model_cls.assert_called_once_with(
+        grouping_config.model_config.architectures, grouping_config.model_config
+    )
+    assert [group.kv_cache_spec.block_size for group in groups[:2]] == [16, 64]
+    assert [group.layer_names for group in groups[:2]] == [["c4.indexer", "c4.attn"], ["c128.attn"]]
 
     # The SWA layer's spec was padded in place to the nearest larger
     # full-MLA bucket (128), not its own unpadded size (96).
