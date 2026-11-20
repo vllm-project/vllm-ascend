@@ -1,9 +1,9 @@
 # GLM-5.3 A3 16K combined Nightly
 
-This is a **hardware calibration candidate**, not a validated replacement for
-run43574755884. One full-checkpoint deployment on four A3 hosts (16 logical
-NPUs each) runs P, PD E2E, the Decode20ms profile, and GPQA once.
-The previous concurrency16 throughput baselines are deliberately removed.
+One full-checkpoint deployment on four A3 hosts (16 logical NPUs each) runs
+P, PD E2E, the Decode20ms profile, and GPQA once. The 16K workload passed in
+run44659395560. Throughput gates use the measurements below, not the previous
+concurrency16 baselines. Decode20ms has a provisional single-sample baseline.
 
 ## Serving and capture budgets
 
@@ -57,9 +57,10 @@ Check raw token lengths; the dataset name is a nominal16K profile.
 | PD E2E | 160 | 40 | 1024 | 1.8 | 80/40 |
 | Decode20ms | 320 | 80 | 1024 | 0 | 64/32 |
 
-Rate0 means no configured rate limit. These are historical RP3 search seeds,
-not new measured capacity points. Historical concurrency80 averaged20.2ms,
-so it does not establish compliance with a20ms ceiling.
+Rate0 means no configured rate limit. These loads originated from RP3 search
+seeds; they are validated workload points, not a maximum-capacity search.
+Run44659395560 averaged18.5ms TPOT at Decode concurrency80 (P90:20.6ms).
+The automated20ms gate applies to mean TPOT, not P90.
 
 P and PD warm up, reset P prefix cache, then run formally. Decode uses
 `vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8` directly.
@@ -94,11 +95,30 @@ not restart servers or change graphs. Inspect AISBench internal warmups too.
    input_throughput_threshold for P; use output baseline/threshold for PD/D.
    Never put input throughput in the runner's output baseline field.
 
-Throughput baseline/threshold fields are absent during calibration, so a
-passing candidate is **not a throughput regression pass**. Current runner
-supports mean TPOT ceilings (20ms PD/D20); the4s TTFT target requires
-raw-result review and is not an automated gate. GPQA retains its accuracy gate.
-No startup/runtime estimate is promised before measuring this larger graph.
+## Measured throughput baselines (2026-11-20)
+
+| Formal phase | Nov 19 | Nov 20 | Baseline | Threshold |
+| --- | ---: | ---: | ---: | ---: |
+| P input token/s | 39802.5547 | 39643.0557 | 39643.0557 | 0.95 |
+| PD output token/s | 1546.4292 | 1554.8294 | 1546.4292 | 0.95 |
+| D20 output token/s | Not executed | 3787.2478 | 3787.2478 | 0.95 |
+
+Sources: [Nov 19 model job](https://github.com/vllm-project/vllm-ascend/actions/runs/44440873203/job/135285671057)
+and [Nov 20 model job](https://github.com/vllm-project/vllm-ascend/actions/runs/44659395560/job/136034231445).
+P and PD use the lower of two successful formal phases with the same serving
+configuration, load and cache reset preparation. Nov 19's overall job failed
+later while preparing the Decode dataset; it is not a complete passing run.
+Its P28/28 and PD160/160 phases completed with zero failed requests.
+Nov 20 completed P28/28, PD160/160 and D320/320 with zero failed requests,
+and GPQA89.90%. D50 removal and the D dataset fix do not change preceding P/PD.
+
+D20 explicitly uses a provisional single valid sample at the owner's request;
+it does not satisfy the two-sample calibration rule yet. Replace it with the
+lower of two valid comparable samples once a second result is available.
+Warmups have no throughput gates. The4s mean TTFT target still requires raw
+result review; PD/D20 retain their20ms mean TPOT ceilings, and GPQA retains
+its86.92% accuracy floor. These measurements do not establish device-only
+Decode performance or100% cache hits.
 
 ## Dispatch and checks
 
@@ -114,5 +134,5 @@ bash format.sh ci
 ```
 
 CPU checks cover topology resolution, cache boundaries, sparse graph budget
-coverage, both Decode profiles and Nightly matrix dispatch. NPU startup,
-performance, cache hits and GPQA must be revalidated for this configuration.
+coverage, the Decode20ms profile and Nightly matrix dispatch. Future NPU runs
+check throughput against these baselines; cache-hit claims need separate evidence.

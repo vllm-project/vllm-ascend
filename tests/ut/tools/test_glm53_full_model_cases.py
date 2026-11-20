@@ -278,7 +278,7 @@ class FullModelConfigTests(unittest.TestCase):
             self.assertEqual(ready.call_args.kwargs["timeout"], 14400)
             self.assertEqual(stopped.call_args.kwargs["timeout"], 21600)
 
-    def test_decode_profiles_and_uncalibrated_gates(self):
+    def test_decode_profiles_and_throughput_gates(self):
         config = yaml.safe_load(next(CONFIG_DIR.glob("*.yaml")).read_text(encoding="utf-8"))
         benches = config["benchmarks"]
         for latency, clients, requests in ((20, 80, 320),):
@@ -288,10 +288,20 @@ class FullModelConfigTests(unittest.TestCase):
             self.assertEqual(case["tpot_threshold"], latency)
             self.assertEqual(benches[name + "_warmup"]["batch_size"], 32)
             self.assertEqual(benches[name + "_warmup"]["num_prompts"], 64)
-        for case in benches.values():
+        prefill = benches["prefill_perf_16k"]
+        self.assertGreater(prefill["input_throughput_baseline"], 0)
+        self.assertEqual(prefill["input_throughput_threshold"], 0.95)
+        self.assertNotIn("baseline", prefill)  # Input throughput must not gate output throughput.
+        self.assertNotIn("threshold", prefill)
+        for name in ("pd_perf_16k", "decode_perf_16k_20ms"):
+            self.assertGreater(benches[name]["baseline"], 0)
+            self.assertEqual(benches[name]["threshold"], 0.95)
+        for name, case in benches.items():
             if case["case_type"] == "performance":
-                self.assertNotIn("baseline", case)
-                self.assertNotIn("threshold", case)
+                if name.endswith("_warmup"):
+                    self.assertNotIn("baseline", case)
+                    self.assertNotIn("threshold", case)
+                    self.assertNotIn("input_throughput_threshold", case)
                 self.assertTrue(
                     "in16384" in case.get("dataset_path", "")
                     or case.get("dataset_path_local") == "/tmp/glm53_decode_prefix100"
