@@ -3,11 +3,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import subprocess
+import sys
 
 import pytest
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
 import vllm_ascend.distributed.ec_transfer as ec_registration
+
+
+def test_tiering_package_import_does_not_load_local_cache_implementation():
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "import vllm_ascend.distributed.ec_transfer.ec_connector.tiering; "
+            "assert not any(name.startswith("
+            "'vllm_ascend.distributed.ec_transfer.ec_connector.tiering.'"
+            ") for name in sys.modules)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.fixture
@@ -61,3 +80,46 @@ def test_nested_import_error_is_not_swallowed(monkeypatch, isolated_registry):
     monkeypatch.setattr(ec_registration.importlib, "import_module", broken_upstream)
     with pytest.raises(ModuleNotFoundError, match="unexpected_nested_dependency"):
         ec_registration.register_connector()
+
+
+def test_tiering_registration_is_lazy_and_repeatable(monkeypatch, isolated_registry):
+    imported = []
+    real_import = importlib.import_module
+
+    def track_import(name, package=None):
+        imported.append(name)
+        return real_import(name, package)
+
+    monkeypatch.setattr(ec_registration.importlib, "import_module", track_import)
+    ec_registration.register_connector()
+    ec_registration.register_connector()
+    assert not any("tiering" in name or "worker" in name for name in imported)
+    assert not any("mooncake.engine" in name for name in imported)
+
+    connector_cls = isolated_registry["ECTieringConnector"]()
+    assert connector_cls.__name__ == "AscendECTieringConnector"
+    assert connector_cls.__module__.endswith("tiering.connector")
+
+
+def test_missing_upstream_tiering_preserves_other_registrations(isolated_registry):
+    isolated_registry.pop("ECTieringConnector", None)
+    ec_registration.register_connector()
+    assert "ECTieringConnector" not in isolated_registry
+    assert isolated_registry["ECCPUConnector"]().__name__ == "AscendECCPUConnector"
+    # Loading the Mooncake class would import optional runtime dependencies.
+    assert "ECMooncakeConnector" in isolated_registry
+
+
+def test_tiering_nested_dependency_error_propagates_on_load(monkeypatch, isolated_registry):
+    ec_registration.register_connector()
+    module = "vllm_ascend.distributed.ec_transfer.ec_connector.tiering.connector"
+    real_import = importlib.import_module
+
+    def broken_import(name, package=None):
+        if name == module:
+            raise ModuleNotFoundError("missing nested tiering dependency", name="nested_tiering_dependency")
+        return real_import(name, package)
+
+    monkeypatch.setattr(ec_registration.importlib, "import_module", broken_import)
+    with pytest.raises(ModuleNotFoundError, match="missing nested tiering dependency"):
+        isolated_registry["ECTieringConnector"]()

@@ -43,9 +43,24 @@ def _replace_mooncake_connector() -> None:
     )
 
 
+def _replace_tiering_connector() -> None:
+    if "ECTieringConnector" not in ECConnectorFactory._registry:
+        return
+
+    # Older vLLM versions do not provide tiering. Keep registration lazy so
+    # importing plugins starts neither filesystem threads nor device workers.
+    ECConnectorFactory._registry.pop("ECTieringConnector")
+    ECConnectorFactory.register_connector(
+        "ECTieringConnector",
+        "vllm_ascend.distributed.ec_transfer.ec_connector.tiering.connector",
+        "AscendECTieringConnector",
+    )
+
+
 def register_connector() -> None:
     """Register available Ascend encoder-cache transfer adaptations."""
 
     if not _replace_cpu_connector():
         return
     _replace_mooncake_connector()
+    _replace_tiering_connector()
