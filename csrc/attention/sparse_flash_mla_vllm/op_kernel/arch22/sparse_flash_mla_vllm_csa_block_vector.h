@@ -67,6 +67,11 @@ public:
     __aicore__ inline void RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, LocalTensor<T> src1Ub,
                                    uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount);
     // ================================Vector0==========================================
+    template <bool USE_PHYSICAL_CACHE>
+    __aicore__ inline void ProcessVec0LImpl(const RunInfo &runInfo, int64_t s2GmStartOffset, int64_t s2GmLimit);
+    __aicore__ inline bool PrepareVec0AddressCache(int64_t topkGmBaseOffset, const RunInfo &runInfo);
+    __aicore__ inline void CopyInKvFromPhysicalCache(int64_t &mte2Size, int64_t mte3Size,
+                                                  int64_t mergeMte3Idx, int64_t cacheIdx0, int64_t cacheIdx1);
     __aicore__ inline int64_t GetKeyGmOffset(int64_t realS2Idx, const RunInfo &runInfo, int64_t s2IdLimit);
     __aicore__ inline void GetRealS2Idx(int64_t s2GmOffset, int64_t &realS2Idx, int64_t topkGmBaseOffset,
                                         const RunInfo &runInfo);
@@ -122,6 +127,7 @@ private:
     static constexpr SMLA_LAYOUT LAYOUT_T = SMLAT::layout;
     static constexpr SMLA_LAYOUT KV_LAYOUT_T = SMLAT::kvLayout;
     static constexpr bool HEAD_RATIO_ONE = SMLAT::headRatioOne;
+    static constexpr bool IS_VEC_S2PHYADDR = SMLAT::isVecS2PhyAddr;
 
     static constexpr uint64_t MERGE_CACHE_GM_BUF_NUM = 3;
     static constexpr uint64_t SYNC_INPUT_BUF1_FLAG = 2;
@@ -138,6 +144,9 @@ private:
     static constexpr uint32_t BASE_BLOCK_MAX_ELEMENT_NUM = ConstInfo::BUFFER_SIZE_BYTE_32K / sizeof(T); // 32768/4=8096
     static constexpr uint32_t BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(T);                               // 32/4=8
     static constexpr uint32_t MAX_N1_SIZE = 128U;
+    static constexpr uint32_t V0_CACHE_MAX_BLOCK_NUM = 1024U;
+    static constexpr uint32_t V0_CACHE_MAX_TOPK_NUM = 512U;
+    static constexpr uint32_t V0_CACHE_TOPK_PER_AIV = V0_CACHE_MAX_TOPK_NUM / 2U;
     static constexpr T SOFTMAX_MIN_NUM = -2e38;
     static constexpr SINKS_T R0 = 1.0f;
 
@@ -180,6 +189,7 @@ private:
 
     TBuf<> sinksBuff;     // 1K
     TBuf<> sinksBrcbBuff; // 12K
+    TBuf<> v0PhysicalCacheBuff;
 
     TBuf<> softmaxMaxBuff;        // PRE_LOAD_NUM * 2K
     TBuf<> softmaxExpBuff;        // PRE_LOAD_NUM * 2K
@@ -198,6 +208,10 @@ private:
     LocalTensor<SINKS_T> sinksUb;
     LocalTensor<SINKS_T> sinksBrcbUb;
 
+    LocalTensor<int32_t> v0PhysicalCacheUb_;
+    int64_t v0CachedTopkBase_ = -1;
+    bool v0PhysicalCacheValid_ = false;
+    int32_t shiftRightNum_ = 0;
     uint32_t mergeMte3Idx = 0;
 };
 
@@ -226,6 +240,15 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::InitBuffers(TPipe *pipe)
     pipe->InitBuffer(sinksBuff, MAX_N1_SIZE * sizeof(SINKS_T));
     // 分配256+N1大小内存，其中256是m轴VEC最大切块
     pipe->InitBuffer(sinksBrcbBuff, MAX_N1_SIZE * sizeof(SINKS_T) * BLOCK_ELEMENT_NUM * 3U);
+
+    if constexpr (IS_VEC_S2PHYADDR) {
+        shiftRightNum_ = 0;
+        for (uint64_t blockSize = constInfo.paCmpBlockSize; blockSize > 1U; blockSize >>= 1U) {
+            ++shiftRightNum_;
+        }
+        pipe->InitBuffer(v0PhysicalCacheBuff, V0_CACHE_TOPK_PER_AIV * sizeof(int32_t));
+        v0PhysicalCacheUb_ = v0PhysicalCacheBuff.Get<int32_t>();
+    }
 
     softmaxMaxUb = softmaxMaxBuff.Get<T>();
     softmaxSumUb = softmaxSumBuff.Get<T>();
@@ -535,6 +558,76 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::GetRealS2Idx(int64_t s2GmOffset, 
 }
 
 template <typename SMLAT>
+__aicore__ inline bool SMLAVectorBlock<SMLAT>::PrepareVec0AddressCache(int64_t topkGmBaseOffset,
+                                                                       const RunInfo &runInfo)
+{
+    if (v0CachedTopkBase_ == topkGmBaseOffset) {
+        return v0PhysicalCacheValid_;
+    }
+    v0PhysicalCacheValid_ = false;
+    WaitFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
+    DataCopyExtParams copyParams;
+    copyParams.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    LocalTensor<int32_t> blockTableUb = inputBuff1.Get<int32_t>();
+    copyParams.blockCount = 1;
+    copyParams.blockLen = constInfo.cmpMaxBlockNumPerBatch * sizeof(int32_t);
+    copyParams.srcStride = 0;
+    DataCopyPad(blockTableUb, cmpBlockTableGm_[runInfo.bIdx * constInfo.cmpMaxBlockNumPerBatch], copyParams,
+                padParams);
+    LocalTensor<int32_t> sparseIdxUb = blockTableUb[V0_CACHE_MAX_BLOCK_NUM];
+    copyParams.blockCount = V0_CACHE_MAX_TOPK_NUM / constInfo.s2BaseSize;
+    copyParams.blockLen = constInfo.s2BaseSize / 2U * sizeof(int32_t);
+    copyParams.srcStride = constInfo.s2BaseSize / 2U * sizeof(int32_t);
+    DataCopyPad(sparseIdxUb,
+                topkGm_[topkGmBaseOffset + GetSubBlockIdx() * (constInfo.s2BaseSize / 2U)], copyParams, padParams);
+    SetFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_V0BUF_FLAG);
+    WaitFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_V0BUF_FLAG);
+
+    LocalTensor<int32_t> pageIdxUb = sparseIdxUb[V0_CACHE_TOPK_PER_AIV];
+    LocalTensor<int32_t> offsetUb = pageIdxUb[V0_CACHE_TOPK_PER_AIV];
+    LocalTensor<float> sparseFpUb = offsetUb[V0_CACHE_TOPK_PER_AIV].template ReinterpretCast<float>();
+    LocalTensor<float> reduceWorkUb = sparseFpUb[V0_CACHE_TOPK_PER_AIV];
+    LocalTensor<float> boundsUb = reduceWorkUb[V0_CACHE_TOPK_PER_AIV];
+    Cast(sparseFpUb, sparseIdxUb, RoundMode::CAST_NONE, V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    ReduceMin(boundsUb, sparseFpUb, reduceWorkUb, V0_CACHE_TOPK_PER_AIV, false);
+    PipeBarrier<PIPE_V>();
+    ReduceMax(boundsUb[8], sparseFpUb, reduceWorkUb, V0_CACHE_TOPK_PER_AIV, false);
+    SetFlag<AscendC::HardEvent::V_S>(SYNC_INPUT_V0BUF_FLAG);
+    WaitFlag<AscendC::HardEvent::V_S>(SYNC_INPUT_V0BUF_FLAG);
+    int64_t indexLimit = Min(static_cast<int64_t>(runInfo.cmpS2IdLimit),
+                             static_cast<int64_t>(constInfo.cmpMaxBlockNumPerBatch) * constInfo.paCmpBlockSize);
+    if (boundsUb.GetValue(0) < 0 || boundsUb.GetValue(8) >= indexLimit) {
+        SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
+        v0CachedTopkBase_ = topkGmBaseOffset;
+        return false;
+    }
+    ShiftRight(pageIdxUb, sparseIdxUb, shiftRightNum_, V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    ShiftLeft(offsetUb, pageIdxUb, shiftRightNum_, V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    Sub(offsetUb, sparseIdxUb, offsetUb, V0_CACHE_TOPK_PER_AIV);
+    ShiftLeft(pageIdxUb, pageIdxUb, static_cast<int32_t>(2), V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    Gather(v0PhysicalCacheUb_, blockTableUb, pageIdxUb.template ReinterpretCast<uint32_t>(), 0,
+           V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    Muls(v0PhysicalCacheUb_, v0PhysicalCacheUb_, static_cast<int32_t>(constInfo.cmpKvStride0),
+         V0_CACHE_TOPK_PER_AIV);
+    Muls(offsetUb, offsetUb, static_cast<int32_t>(constInfo.kvHeadNum * constInfo.headDim),
+         V0_CACHE_TOPK_PER_AIV);
+    PipeBarrier<PIPE_V>();
+    Add(v0PhysicalCacheUb_, v0PhysicalCacheUb_, offsetUb, V0_CACHE_TOPK_PER_AIV);
+    SetFlag<AscendC::HardEvent::V_S>(SYNC_INPUT_V0BUF_FLAG);
+    WaitFlag<AscendC::HardEvent::V_S>(SYNC_INPUT_V0BUF_FLAG);
+    SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
+    v0CachedTopkBase_ = topkGmBaseOffset;
+    v0PhysicalCacheValid_ = true;
+    return v0PhysicalCacheValid_;
+}
+
+template <typename SMLAT>
 __aicore__ inline int64_t SMLAVectorBlock<SMLAT>::GetKeyGmOffset(int64_t realS2Idx, const RunInfo &runInfo,
                                                                  int64_t s2IdLimit)
 {
@@ -632,6 +725,42 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyInKv(int64_t &mte2Size, int64
 }
 
 template <typename SMLAT>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::CopyInKvFromPhysicalCache(int64_t &mte2Size, int64_t mte3Size,
+                                                                         int64_t mergeMte3Idx, int64_t cacheIdx0,
+                                                                         int64_t cacheIdx1)
+{
+    int64_t keyOffset0 = static_cast<int64_t>(v0PhysicalCacheUb_.GetValue(cacheIdx0));
+    int64_t keyOffset1 = static_cast<int64_t>(v0PhysicalCacheUb_.GetValue(cacheIdx1));
+    int64_t keySrcStride = ((keyOffset0 > keyOffset1 ? keyOffset0 - keyOffset1 : keyOffset1 - keyOffset0) -
+                            static_cast<int64_t>(constInfo.headDim)) *
+                           sizeof(KV_T);
+    if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0)) {
+        DataCopyExtParams singleParams;
+        singleParams.blockCount = 1;
+        singleParams.blockLen = constInfo.headDim * sizeof(KV_T);
+        singleParams.srcStride = 0;
+        singleParams.dstStride = 0;
+        DataCopyPadExtParams<KV_T> padParams{false, 0, 0, 0};
+        int64_t ubOffset = mergeMte3Idx % 2 * INPUT2_BUFFER_OFFSET / sizeof(KV_T) +
+                           (mte2Size - mte3Size) * constInfo.headDim;
+        DataCopyPad(kvMergUb_[ubOffset], cmpKvGm_[keyOffset0], singleParams, padParams);
+        DataCopyPad(kvMergUb_[ubOffset + constInfo.headDim], cmpKvGm_[keyOffset1], singleParams, padParams);
+    } else {
+        DataCopyExtParams pairParams;
+        pairParams.blockCount = 2;
+        pairParams.blockLen = constInfo.headDim * sizeof(KV_T);
+        pairParams.srcStride = keySrcStride;
+        pairParams.dstStride = 0;
+        DataCopyPadExtParams<KV_T> padParams{false, 0, 0, 0};
+        int64_t startGmOffset = keyOffset0 < keyOffset1 ? keyOffset0 : keyOffset1;
+        DataCopyPad(kvMergUb_[mergeMte3Idx % 2 * INPUT2_BUFFER_OFFSET / sizeof(KV_T) +
+                              (mte2Size - mte3Size) * constInfo.headDim],
+                    cmpKvGm_[startGmOffset], pairParams, padParams);
+    }
+    mte2Size += 2;
+}
+
+template <typename SMLAT>
 __aicore__ inline void SMLAVectorBlock<SMLAT>::CopyOutMrgeResult(int64_t mte2Size, int64_t mte3Size,
                                                                  int64_t s2GmStartOffset, int64_t mergeMte3Idx,
                                                                  const RunInfo &runInfo)
@@ -659,18 +788,39 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0L(const RunInfo &runIn
 {
     int64_t s2ProcessSize = runInfo.v0S2DealSize;
     int64_t s2Pair = CeilDiv(s2ProcessSize, 2 * constInfo.sparseBlockSize);
-    int64_t topkGmBaseOffset = runInfo.topKBaseOffset + runInfo.v0S2Start;
-    int64_t mte2Size = 0;
-    int64_t mte3Size = 0;
-    int64_t s2IdxArray0 = -1;
-    int64_t s2IdxArray1 = -1;
-    bool needWaitMte3ToMte2 = true;
     int64_t s2SplitPoint = SMLAAlign(s2Pair, 2) * constInfo.sparseBlockSize;
     int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : s2SplitPoint;
     int64_t s2GmLimit = GetSubBlockIdx() == 0 ? s2SplitPoint : s2ProcessSize;
     if (s2GmLimit > s2ProcessSize) {
         s2GmLimit = s2ProcessSize;
     }
+    if (s2GmStartOffset >= s2GmLimit) {
+        return;
+    }
+    if constexpr (IS_VEC_S2PHYADDR) {
+        // Only enabled kernels prepare and validate the cache at runtime.
+        if (runInfo.v0S2Start == 0 && runInfo.v0S2DealSize == V0_CACHE_MAX_TOPK_NUM &&
+            PrepareVec0AddressCache(runInfo.topKBaseOffset, runInfo)) {
+            ProcessVec0LImpl<true>(runInfo, s2GmStartOffset, s2GmLimit);
+        } else {
+            ProcessVec0LImpl<false>(runInfo, s2GmStartOffset, s2GmLimit);
+        }
+    } else {
+        ProcessVec0LImpl<false>(runInfo, s2GmStartOffset, s2GmLimit);
+    }
+}
+
+template <typename SMLAT>
+template <bool USE_PHYSICAL_CACHE>
+__aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0LImpl(
+    const RunInfo &runInfo, int64_t s2GmStartOffset, int64_t s2GmLimit)
+{
+    int64_t topkGmBaseOffset = runInfo.topKBaseOffset + runInfo.v0S2Start;
+    int64_t mte2Size = 0;
+    int64_t mte3Size = 0;
+    int64_t s2IdxArray0 = -1;
+    int64_t s2IdxArray1 = -1;
+    bool needWaitMte3ToMte2 = true;
     // 处理两个基本块
     for (int64_t s2GmOffsetArray = s2GmStartOffset; s2GmOffsetArray < s2GmLimit;
          s2GmOffsetArray += 2 * constInfo.sparseBlockSize) {
@@ -678,15 +828,21 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessVec0L(const RunInfo &runIn
             WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2 + SYNC_INPUT_BUF2_FLAG);
             needWaitMte3ToMte2 = false;
         }
-        GetRealS2Idx(s2GmOffsetArray, s2IdxArray0, topkGmBaseOffset, runInfo);
-        if (unlikely(s2IdxArray0 < 0)) {
-            CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
-            SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2 + SYNC_INPUT_BUF2_FLAG);
-            mergeMte3Idx++;
-            break;
+        if constexpr (USE_PHYSICAL_CACHE) {
+            int64_t cacheIdx0 = runInfo.v0S2Start / constInfo.s2BaseSize * (constInfo.s2BaseSize / 2U) +
+                                s2GmOffsetArray - s2GmStartOffset;
+            CopyInKvFromPhysicalCache(mte2Size, mte3Size, mergeMte3Idx, cacheIdx0, cacheIdx0 + 1);
+        } else {
+            GetRealS2Idx(s2GmOffsetArray, s2IdxArray0, topkGmBaseOffset, runInfo);
+            if (unlikely(s2IdxArray0 < 0)) {
+                CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+                SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2 + SYNC_INPUT_BUF2_FLAG);
+                mergeMte3Idx++;
+                break;
+            }
+            GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize, s2IdxArray1, topkGmBaseOffset, runInfo);
+            CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1, runInfo);
         }
-        GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize, s2IdxArray1, topkGmBaseOffset, runInfo);
-        CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1, runInfo);
         if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > 16) ||
             s2GmOffsetArray + 2 * constInfo.sparseBlockSize >= s2GmLimit) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);

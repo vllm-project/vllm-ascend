@@ -115,6 +115,10 @@ TITLES = {
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
     "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
+    "tutorials/models/HY4-Flash.md": {
+        "en": "Hy4-Flash(Experimental)",
+        "zh": "Hy4-Flash(Experimental)",
+    },
     "tutorials/models/InternVL3.5.md": {"en": "InternVL3.5(38B/241B-A28B)", "zh": "InternVL3.5(38B/241B-A28B)"},
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},

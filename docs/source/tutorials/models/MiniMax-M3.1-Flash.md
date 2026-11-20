@@ -12,7 +12,7 @@ MiniMax-M3.1-Flash is a multimodal Mixture-of-Experts model with approximately 4
 
 This document covers supported features, environment and model preparation, single-node deployment, PD separation, functional verification, accuracy and performance evaluation, performance tuning, and troubleshooting.
 
-MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0rc`. This guide is written based on the `main` branch. Use the deployment image for your hardware from [Installation](#4-installation).
+MiniMax-M3.1-Flash is supported on the vLLM Ascend `main` branch and in `v0.32.0rc`. This guide is written based on the `main` branch. Use the deployment image for your hardware from [Section 4](#4-installation).
 
 The features described below are those enabled by the deployment commands in this guide. Refer to [Supported Features](#2-supported-features) for the model support matrix.
 
@@ -194,7 +194,7 @@ When the service spans multiple nodes, install the same vLLM and vLLM Ascend rev
 
 ## 5 Online Service Deployment
 
-Use the container and model weights for your hardware from [Installation](#4-installation).
+Use the container and model weights for your hardware from [Section 4](#4-installation).
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -275,7 +275,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -340,7 +340,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
 
     Wait for the following startup messages, then check the health endpoint from another terminal in the container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -522,7 +522,7 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
 
     Node 1 is headless and does not open an HTTP server. After node 0 prints the following startup messages, check the health endpoint from another terminal in the node 0 container:
 
-    ```text
+    ```output
     INFO:     Started server process
     INFO:     Waiting for application startup.
     INFO:     Application startup complete.
@@ -567,7 +567,7 @@ The following values match the configurations in the Prefill and Decode scripts 
 
 Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all eight NPUs and the W8A8-MXFP8 weights. Prefill uses DP1 × TP4 × PP2. The two Decode hosts form one global DP4 × TP4 × PP1 / EP16 group with two local DP ranks per host: D1 runs ranks 0–1 and D2 runs ranks 2–3. Both Decode hosts serve the HTTP API and are registered separately as proxy endpoints, so do not add `--headless` to the D2 script. The verified configuration uses `--data-parallel-size-local 2` on both hosts and `--data-parallel-start-rank 2` on D2. Each host exposes one API endpoint serving its two local DP ranks; retaining the API on D2 does not change its local DP size. D1 is the Data Parallel master and the two Decode scripts must use the same `DECODE_HEAD_IP`, DP RPC port, and KV port.
 
-The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128K input and 1K output; see the configuration table after the role summary for the 16K input variant.
+The following values match the configurations in the Prefill and Decode scripts below and summarize the differences between the two roles. They use 128k input and 1K output; see the configuration table after the role summary for the 16K input variant.
 
 | Parameter | Prefill | Decode |
 | --- | --- | --- |
@@ -583,9 +583,9 @@ The following values match the configurations in the Prefill and Decode scripts 
 | Main-model execution | Eager | FULL_DECODE_ONLY with 1024-token graph capture |
 | KV cache dtype | fp8 | fp8 (DSpark draft uses bfloat16) |
 
-All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128K prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
+All three scripts use `MAX_MODEL_LEN=133000`, which covers a 128k prompt plus 1K generated tokens. For 16K input workloads, only the Decode side changes: lower the sequence limit and fall back to the default graph capture size, which is enough for 64 sequences × (1 + 7 draft tokens) = 512 tokens per step.
 
-| Parameter | 128K input / 1K output | 16K input / 1K output |
+| Parameter | 128k input / 1K output | 16K input / 1K output |
 | --- | --- | --- |
 | Decode `MAX_NUM_SEQS` | 128 | 64 |
 | Decode `--compilation-config` | `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}` | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` |

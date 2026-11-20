@@ -74,6 +74,9 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
     monkeypatch.setattr("vllm.distributed.parallel_state.model_parallel_is_initialized", lambda: False)
+    monkeypatch.setattr(
+        deepseek_v41_module, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
     monkeypatch.setattr(deepseek_v41_module.envs, "VLLM_MOE_SKIP_PADDING", False)
     # Simulate two ranks with identical local input rows; only collectives are
     # replaced. Exercise the real SP capture and output-gather branches.
@@ -101,6 +104,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch, num_layer
     model._mtp_hidden_buffer = None
     model.shared_attention_state = SimpleNamespace(reset=lambda: None)
     model.layers = [Layer(i) for i in range(num_layers)]
+    model.start_layer, model.end_layer = 0, num_layers
     model.norm = lambda hidden: hidden
     target = AscendDeepseekV41LLMForCausalLM.__new__(AscendDeepseekV41LLMForCausalLM)
     torch.nn.Module.__init__(target)
@@ -243,7 +247,7 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     cache = torch.empty(3, 128, 1, 8)
     attn = SimpleNamespace(
         packed_cache_ops=None,
-        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=cache)),
     )
     values = torch.randn(3, 1, 8)
     with patch("vllm_ascend.models.deepseek_v41.dspark.scatter_cache_sk") as store:
@@ -261,7 +265,7 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     writer = MagicMock()
     attn = SimpleNamespace(
         packed_cache_ops=SimpleNamespace(write_attention_cache=writer),
-        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=cache)),
     )
     slots = torch.tensor([129, -1, 258])
     values = torch.randn(3, 1, 8)

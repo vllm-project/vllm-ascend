@@ -39,7 +39,7 @@ enum class SMLA_LAYOUT {
 
 template <typename Q_T, typename KV_T, typename OUT_T, const bool FLASH_DECODE = false,
           SMLA_LAYOUT LAYOUT_T = SMLA_LAYOUT::BSND, SMLA_LAYOUT KV_LAYOUT_T = SMLA_LAYOUT::PA_BBND,
-          int TEMPLATE_MODE = 0, const bool HEAD_RATIO_ONE = false, typename... Args>
+          int TEMPLATE_MODE = 0, const bool HEAD_RATIO_ONE = false, const bool IS_VEC_S2PHYADDR = false, typename... Args>
 struct SMLAType {
     using queryType = Q_T;
     using kvType = KV_T;
@@ -50,6 +50,7 @@ struct SMLAType {
     static constexpr bool pageAttention = (KV_LAYOUT_T == SMLA_LAYOUT::PA_BBND);
     static constexpr int templateMode = TEMPLATE_MODE;
     static constexpr bool headRatioOne = HEAD_RATIO_ONE;
+    static constexpr bool isVecS2PhyAddr = IS_VEC_S2PHYADDR;
 };
 
 // ================================Util functions==================================

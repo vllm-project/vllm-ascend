@@ -42,11 +42,11 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the Docker image on your node, refer to [using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
-    Start the docker image on each node.
+    Start the Docker image on each node.
 
     ```shell
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
@@ -116,11 +116,11 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+After a successful Docker run, you can verify the running container service by executing the `docker ps` command.
 
 ### 4.2 Source Code Installation
 
-If you don't want to use the docker image as above, you can also build all from source:
+If you don't want to use the Docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
@@ -132,7 +132,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
-While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
+While a single-node setup supports all input/output scenarios, consider deploying multi-node for optimal performance.
 
 Startup Command:
 
@@ -181,7 +181,7 @@ vllm serve Eco-Tech/Kimi-K2.6-w4a8 \
 Key Parameter Descriptions:
 
 - Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios (Influx of long prompts, multimodal inputs (Kimi-K2.6 specific), and sudden surge of concurrent requests, etc.). Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `15000` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--max-model-len` specifies the maximum context length — that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `15000` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--allowed-local-media-path` allows multimodal requests to load local media files, such as images and videos, from `/data/media` and its subdirectories on the server. Place the media files in this directory, or change the path to the directory containing your media files.
 - `--mm-encoder-tp-mode` indicates how to optimize multimodal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
@@ -204,7 +204,7 @@ PD (Prefill-Decode) separation addresses these issues by running Prefill and Dec
 
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling MLAPO fusion operators).
 
-This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
+This architecture is provided as a reference for concurrent multi-user workloads; for production environments, refer to the deployment recommendation in Section 1.
 
 Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes, with 1 Decode instance spanning 2 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
 
@@ -228,7 +228,7 @@ Parameter descriptions:
 |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
 |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
-1. `run_dp_template.sh` script
+1. `run_dp_template.sh` script:
 
     === "Node 0(Prefill)"
 
@@ -558,7 +558,7 @@ Parameter descriptions:
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
-3. Run the `proxy.sh` script on the prefill master node
+3. Run the `proxy.sh` script on the prefill master node:
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -732,7 +732,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Kimi-K2.6-w4a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -740,7 +740,7 @@ There are three `vllm bench` subcommands:
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
 
-Take the `serve` as an example. Run the code as follows.
+Take the `serve` as an example. Run the code as follows:
 
 ```shell
 vllm bench serve --model Eco-Tech/Kimi-K2.6-w4a8 --trust-remote-code --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
@@ -756,7 +756,7 @@ After about several minutes, you can get the performance evaluation result.
 
 **Table 1: Scenario Overview**
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
+> `Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 |Scenario|Deployment Mode|Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
@@ -765,9 +765,9 @@ After about several minutes, you can get the performance evaluation result.
 |High Throughput<br>(16k input)|2P1D deployment|64 (A3)|Kimi-K2.6-w4a8|Scale from dp4 tp4 to dp8 tp4 across nodes|
 |Long Context<br>(128k, no prefix cache)|Single-Node Mixed|16 (A3)|Kimi-K2.6-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
 |Long Context<br>(128k, with prefix cache)|Single-Node Mixed|16 (A3)|Kimi-K2.6-w4a8|dp2 tp8 to optimize memory bandwidth and improve cache utilization|
-|Multimodal<br>(1080P)|Single-Node Mixed|16 (A3)|Kimi-K2.6-w4a8|dp1 tp16 for high-resolution visual inputs|
-|Multimodal<br>(1080P)|1P1D deployment|32 (A3)|Kimi-K2.6-w4a8|dp2 tp8 or dp16 tp1, depending on memory and concurrency|
-|Multimodal<br>(1080P)|2P1D deployment|64 (A3)|Kimi-K2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
+|Multimodal<br>(1080p)|Single-Node Mixed|16 (A3)|Kimi-K2.6-w4a8|dp1 tp16 for high-resolution visual inputs|
+|Multimodal<br>(1080p)|1P1D deployment|32 (A3)|Kimi-K2.6-w4a8|dp2 tp8 or dp16 tp1, depending on memory and concurrency|
+|Multimodal<br>(1080p)|2P1D deployment|64 (A3)|Kimi-K2.6-w4a8|dp8 tp2 to dp32 tp1, maximize throughput for heavy multimodal workloads|
 
 **Table 2: Detailed Node Configuration**
 
@@ -778,14 +778,14 @@ After about several minutes, you can get the performance evaluation result.
 |High Throughput / Low Latency (16k)|Server-D Node|16|8|2|17k|3|
 |Long Context (128k, no cache)|Server / Single Machine|16|16|1|130k|15|
 |Long Context (128k, with cache)|Server / Single Machine|16|8|2|130k|15|
-|Multimodal (1080P)|Server / Single Machine|16|16|1|17k|15|
-|Multimodal (1080P)|Server-P Node|16|8|2|17k|3|
-|Multimodal (1080P)|Server-D Node|16|1|16|17k|3|
+|Multimodal (1080p)|Server / Single Machine|16|16|1|17k|15|
+|Multimodal (1080p)|Server-P Node|16|8|2|17k|3|
+|Multimodal (1080p)|Server-D Node|16|1|16|17k|3|
 
-> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment).
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-online-service-deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Section 5](#5-online-service-deployment)** chapter.
 
 ### 9.2 Tuning Guidelines
 
