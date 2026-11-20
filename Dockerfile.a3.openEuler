@@ -14,30 +14,86 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# 基于空白麒麟 V10 SP3（glibc 2.28）自建 vLLM v0.23.0 + vllm-ascend 0.23.0 环境。
+#
+# 构建上下文要求：
+#   ./ascend/Ascend-cann-9.1.0_linux-aarch64.run        （toolkit）
+#   ./ascend/Ascend-cann-nnal_9.1.0_linux-aarch64.run
+#   ./ascend/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run （可选）
+#
+# mooncake 与客户环境一致：不做 pip 安装，从源码编译 0.3.12.post1
+#
+# 必要条件：--build-arg KYLIN_REPO_URL=<麒麟 dnf 源 .repo 地址>
+#   麒麟 init 镜像带 dnf，但没有 repo 配置、没有 gcc，缺此参数第 1 步直接失败。
+#
+# 本仓库源码必须是 releases/v0.23.0 分支（main 为 vLLM 0.33 世代，无法在此环境运行）。
 
-FROM swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.1.0_20260731131545-a3-openeuler24.03-py3.12
+ARG OS_IMAGE=cr.kylinos.cn/kylin/kylin-server-init:v10sp3-2403
+FROM ${OS_IMAGE}
 
-WORKDIR /workspace
-
-SHELL ["/bin/bash", "-c"]
-
-# Install clang-15 (for triton-ascend)
-RUN yum update -y && \
-    yum install -y git vim wget curl protobuf protobuf-compiler protobuf-devel net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel hiredis-devel clang patch && \
-    rm -rf /var/cache/yum/*
-
-# Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
-    python3 -m pip cache purge
-
-# Install vLLM
+ARG PYTHON_VERSION=3.12.4
+ARG KYLIN_REPO_URL=""
+ARG CANN_PKG_DIR=ascend
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.23.0
 ARG VLLM_COMMIT=""
-ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-# NOTE: vLLM v0.23.0 has no Rust frontend (no tools/build_rust.sh and no
-# requirements/build/rust.txt). The rust toolchain and the rust build step
-# that this file used to carry are removed to keep the tag consistent.
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu/
+ARG ASCEND_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
+ARG SOC_VERSION=ascend910_9382
+ARG FLA_VERSION="26.10.0+feature"
+ARG FLASH_ATTN_NPU_VERSION="0.5.0"
+ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_TAG=v0.3.12.post1
+ARG MAX_JOBS
+
+WORKDIR /workspace
+SHELL ["/bin/bash", "-c"]
+
+# 1) 系统依赖：麒麟 init 镜像无 repo 配置、无 gcc，必须先注入 dnf 源
+RUN set -e; \
+    if [ -n "${KYLIN_REPO_URL}" ]; then \
+        curl -fsSL "${KYLIN_REPO_URL}" -o /etc/yum.repos.d/kylin.repo; \
+    fi; \
+    PM="$(command -v dnf || command -v yum || true)"; \
+    if [ -z "$PM" ]; then \
+        echo "ERROR: 基础镜像无 dnf/yum，需换带包管理器的麒麟基础镜像"; \
+        exit 1; \
+    fi; \
+    $PM install -y git vim wget curl make cmake patch gcc gcc-c++ \
+        openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel \
+        sqlite-devel readline-devel ncurses-devel \
+        numactl numactl-devel libibverbs-devel hiredis-devel libcurl-devel \
+        yaml-cpp-devel gflags-devel glog-devel boost-devel \
+        jemalloc clang && \
+    rm -rf /var/cache/yum/* /var/cache/dnf/*
+
+# 2) 源码编译 Python 3.12（麒麟 V10 自带 3.7，不满足 torch 2.10 / vLLM 0.23 要求）
+RUN curl -fsSL https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz -o /tmp/Python.tgz && \
+    mkdir -p /tmp/pybuild && tar -xzf /tmp/Python.tgz -C /tmp/pybuild --strip-components=1 && \
+    cd /tmp/pybuild && \
+    ./configure --prefix=/usr/local --enable-shared --with-ensurepip=install && \
+    make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig && \
+    rm -rf /tmp/pybuild /tmp/Python.tgz && \
+    python3 -V && python3 -m pip install -U pip setuptools wheel
+
+ENV PATH=/usr/local/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# 3) 安装 CANN 9.1.0（驱动由宿主机提供，不打进镜像）
+COPY ${CANN_PKG_DIR} /tmp/cann/
+RUN set -e && chmod +x /tmp/cann/*.run && \
+    /tmp/cann/Ascend-cann-9.1.0_linux-aarch64.run --install && \
+    /tmp/cann/Ascend-cann-nnal_9.1.0_linux-aarch64.run --install && \
+    if [ -f /tmp/cann/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run ]; then \
+        /tmp/cann/Ascend-cann-A3-ops_9.1.0_linux_aarch64.run --install; \
+    fi && \
+    rm -rf /tmp/cann
+
+# 4) modelscope / ray（多机） / protobuf
+RUN python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+    python3 -m pip cache purge
+
+# 5) 安装 vLLM v0.23.0（源码方式，TARGET_DEVICE=empty；0.23 无 rust 前端）
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
@@ -45,55 +101,49 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
     else \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi && \
-    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
-    # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
+    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] \
+        --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
-# Install vllm-ascend
-# Dependency versions used by the vllm-ascend build.
-ARG SOC_VERSION="ascend910_9382"
-# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
-# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
-# a 128Gi node (OOM-killing kubelet). CI passes --build-arg MAX_JOBS=32 /
-# CARGO_BUILD_JOBS=32; leaving them unset keeps the default nproc parallelism.
-ARG MAX_JOBS
-ARG CARGO_BUILD_JOBS
+# 6) 编译安装 vllm-ascend（源码必须是 releases/v0.23.0）
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
-
-ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
-ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ \
+        --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip cache purge
 
-# ===== Install FLA and flash_attn_npu =====
-ARG FLA_VERSION="26.10.0+feature"
-ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.2.28"
-RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+# 7) memfabric kernel + flash-linear-attention + flash_attn_npu
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    source /usr/local/Ascend/cann/set_env.sh && \
-    export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
-    # Install memfabric_hybrid kernels
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
-    # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install --force-reinstall --no-deps \
         "flash-linear-attention-npu-a3===${FLA_VERSION}" && \
-    # Keep the CANN env and --no-build-isolation: the isolated build env lacks torch/torch_npu.
-    FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
-    # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
-    python3 -m pip install "mooncake-transfer-engine-npu===${MOONCAKE_VERSION}" && \
+    FLASH_ATTN_BUILD_NPU=910 python3 -m pip install --no-build-isolation \
+        "flash_attn_npu==${FLASH_ATTN_NPU_VERSION}" && \
     python3 -m pip cache purge
 
-# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
+# 8) 从源码编译 mooncake 0.3.12.post1（与客户环境一致，不走 pip 二进制）
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    git clone --depth 1 -b ${MOONCAKE_TAG} ${MOONCAKE_REPO} /tmp/Mooncake && \
+    cd /tmp/Mooncake && mkdir -p build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+        -DWITH_TE=ON -DUSE_CUDA=OFF -DUSE_ASCEND=ON && \
+    make -j"${MAX_JOBS:-$(nproc)}" && make install && ldconfig
+
+# 9) mooncake python 绑定
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    cd /tmp/Mooncake && python3 -m pip install . && \
+    rm -rf /tmp/Mooncake && python3 -m pip cache purge
+
+RUN echo 'export LD_PRELOAD=/usr/lib64/libjemalloc.so.2:$LD_PRELOAD' >> ~/.bashrc && \
+    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 
 CMD ["/bin/bash"]
