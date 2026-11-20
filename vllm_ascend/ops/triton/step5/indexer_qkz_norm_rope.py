@@ -48,14 +48,15 @@ import triton.language.extra.cann.extension as extension  # noqa: F401 (used in 
 
 
 def _npu_vec_core_num() -> int:
-    # The vector-core count is constant per device; cache it so the grid
-    # closure does not query the driver on every launch.
-    if not hasattr(_npu_vec_core_num, "_cache"):
-        import triton.runtime.driver as driver
+    # Reuse the shared helper. Its initialization is idempotent, so device
+    # properties are queried only once per process rather than on every launch.
+    from vllm_ascend.ops.triton.triton_utils import (
+        get_vectorcore_num,
+        init_device_properties_triton,
+    )
 
-        properties = driver.active.utils.get_device_properties(torch.npu.current_device())
-        _npu_vec_core_num._cache = properties["num_vectorcore"]
-    return _npu_vec_core_num._cache
+    init_device_properties_triton()
+    return get_vectorcore_num()
 
 
 def _pick_head_chunk(num_heads: int, head_dim: int) -> int:
