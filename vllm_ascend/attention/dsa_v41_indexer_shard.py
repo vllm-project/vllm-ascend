@@ -43,13 +43,21 @@ def uses_v41_full_indexer_variants(config: "VllmConfig") -> bool:
         and parallel.tensor_parallel_size > 1
         and parallel.decode_context_parallel_size == 1
         and config.lora_config is None
+        # A decode query needs room after its computed history.
+        and model.max_model_len > 2 * int(model.hf_text_config.index_topk)
     )
 
 
 def should_shard_v41_full_decode(
-    num_rows: int, tp_size: int, history: np.ndarray, topk: int, *, pcp_min_query_rows: int | None = None
+    num_rows: int,
+    tp_size: int,
+    history: np.ndarray,
+    topk: int,
+    *,
+    num_query_rows: int | None = None,
+    pcp_min_query_rows: int | None = None,
 ) -> bool:
-    if num_rows < tp_size:
+    if num_rows < tp_size or (num_query_rows is not None and num_query_rows < tp_size):
         return False
     if pcp_min_query_rows is not None:
         # The last TP shard starts latest in the padded FULL layout. It must

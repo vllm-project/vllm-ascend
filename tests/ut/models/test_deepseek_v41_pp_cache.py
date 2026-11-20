@@ -156,6 +156,16 @@ def _metadata(slots, rows=4):
     return SimpleNamespace(flat_slot_mapping=slots, slot_mapping=coordinates)
 
 
+def test_pp_transports_native_candidate_lengths_without_topk_lengths(runtime, monkeypatch):
+    shared = _shared()
+    shared.topk_lengths = None
+    partitions = ((0, 25), (25, 40))
+    sender, _ = _stage(monkeypatch, partitions, 0, shared)
+    receiver, _ = _stage(monkeypatch, partitions, 1, shared)
+
+    assert sender.outgoing_states.keys() == receiver.incoming_states.keys() == {TOPK, CANDIDATES, CANDIDATE_LENGTHS}
+
+
 def _bind_source(layers, handler, source, fill=0):
     planes = [_plane(8, 4, w, d, fill) for w, d in [(8, torch.bfloat16), (4, torch.int8), (1, torch.float16)]]
     long_prefix, index_prefix = handler.cache_prefixes(source)

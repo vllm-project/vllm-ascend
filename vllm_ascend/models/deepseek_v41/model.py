@@ -741,7 +741,9 @@ class V41PPCacheHandler(PPDependencyTransport):
         def states(plan):
             result = {}
             if plan.topk:
-                result.update({TOPK: shared.topk_indices, TOPK_LENGTHS: shared.topk_lengths})
+                result[TOPK] = shared.topk_indices
+                if shared.topk_lengths is not None:
+                    result[TOPK_LENGTHS] = shared.topk_lengths
             if plan.candidates:
                 result.update({CANDIDATES: shared.candidates, CANDIDATE_LENGTHS: shared.candidate_lengths})
             return result
@@ -1260,7 +1262,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             dtype=torch.int32,
             device=self.topk_indices_buffer.device,
         )
-        topk_lengths = torch.zeros_like(candidate_lengths)
+        topk_lengths = (
+            torch.zeros_like(candidate_lengths) if DeviceOperator.get_dsv41_packed_cache_ops() is not None else None
+        )
         self.candidate_lengths_buffer = candidate_lengths
         self.topk_lengths_buffer = topk_lengths
         self.shared_attention_state = DeepseekV41SharedAttentionState(

@@ -44,13 +44,9 @@ class DeepSeekV41ModelState(EngramModelState):
         model_specific_attn_metadata=None,
     ) -> dict[str, Any]:
         shard_indexer = V41_FULL_INDEXER_SHARD.get()
-        if (
-            shard_indexer is None
-            and cudagraph_mode == CUDAGraphMode.FULL
-            and uses_v41_full_indexer_variants(self.vllm_config)
-        ):
+        if shard_indexer is None and cudagraph_mode == CUDAGraphMode.FULL:
             shard_indexer = False
-            if not input_batch.is_dummy:
+            if not input_batch.is_dummy and uses_v41_full_indexer_variants(self.vllm_config):
                 batch = input_batch
                 parallel = self.vllm_config.parallel_config
                 min_rows = None
@@ -68,6 +64,7 @@ class DeepSeekV41ModelState(EngramModelState):
                     parallel.tensor_parallel_size,
                     batch.num_computed_tokens_np[: batch.num_reqs],
                     int(model_config.hf_text_config.index_topk),
+                    num_query_rows=input_batch.num_tokens if min_rows is None else min_rows,
                     pcp_min_query_rows=min_rows,
                 )
 
