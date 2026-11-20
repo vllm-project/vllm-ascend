@@ -2,26 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    is_conv_state_dim_first,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
-from vllm.v1.worker.mamba_utils import (
-    MambaCopyBuffers,
-    MambaSpecDecodeGPUContext,
-    collect_mamba_copy_meta,
-    do_mamba_copy_block,
-)
+from vllm.v1.worker.mamba_utils import MambaSpecDecodeGPUContext
 
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa: F401
 from vllm_ascend.device.device_config import get_ascend_device_type
@@ -30,56 +23,6 @@ from vllm_ascend.device.hardware import AscendDeviceType
 _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.MAMBA2: (get_conv_copy_spec, get_temporal_copy_spec)
 }
-
-
-def postprocess_mamba(
-    scheduler_output: SchedulerOutput,
-    kv_cache_config: KVCacheConfig,
-    input_batch: Any,
-    requests: dict[str, Any],
-    forward_context: dict[str, Any],
-    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
-    copy_bufs: MambaCopyBuffers,
-):
-    assert input_batch.mamba_state_idx_cpu is not None
-    num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
-    scheduled_spec_decode_tokens_dict = scheduler_output.scheduled_spec_decode_tokens
-    num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
-    mamba_state_idx_cpu = input_batch.mamba_state_idx_cpu
-    mamba_group_ids = copy_bufs.mamba_group_ids
-    mamba_spec = copy_bufs.mamba_spec
-    copy_bufs.offset = 0
-    for i, req_id in enumerate(input_batch.req_ids):
-        req_state = requests[req_id]
-        num_computed_tokens = req_state.num_computed_tokens
-        num_draft_tokens = len(scheduled_spec_decode_tokens_dict.get(req_id, []))
-        num_scheduled_tokens = num_scheduled_tokens_dict[req_id]
-        num_accepted_tokens = num_accepted_tokens_cpu[i]
-        num_tokens_running_state = num_computed_tokens + num_scheduled_tokens - num_draft_tokens
-        new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens - 1
-        aligned_new_computed_tokens = new_num_computed_tokens // mamba_spec.block_size * mamba_spec.block_size
-        if aligned_new_computed_tokens >= num_tokens_running_state:
-            accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
-            src_block_idx = mamba_state_idx_cpu[i]
-            dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
-            collect_mamba_copy_meta(
-                copy_bufs,
-                kv_cache_config,
-                mamba_state_copy_funcs,
-                mamba_group_ids,
-                src_block_idx,
-                dest_block_idx,
-                accept_token_bias,
-                req_state,
-                forward_context,
-            )
-            if src_block_idx == dest_block_idx:
-                num_accepted_tokens_cpu[i] = 1
-    # Match the explicit metadata staging required by the Ascend copy path.
-    copy_bufs.src_ptrs.copy_to_gpu(copy_bufs.offset)
-    copy_bufs.dst_ptrs.copy_to_gpu(copy_bufs.offset)
-    copy_bufs.sizes.copy_to_gpu(copy_bufs.offset)
-    do_mamba_copy_block(copy_bufs)
 
 
 @dataclass
@@ -94,151 +37,41 @@ class _TestConfig:
     dtype: torch.dtype = torch.float16
 
 
-class _MockCpuGpuBuffer:
-    def __init__(self, size: int, dtype: torch.dtype, device: torch.device):
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
-        self.gpu = torch.zeros(size, dtype=dtype, device=device)
-        self.np = self.cpu.numpy()
-
-    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
-
-
-def _make_scheduler_output(
-    num_scheduled_tokens: dict[str, int],
-    scheduled_spec_decode_tokens: dict[str, list] | None = None,
-) -> SchedulerOutput:
-    cached = CachedRequestData.make_empty()
-    return SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=cached,
-        num_scheduled_tokens=num_scheduled_tokens,
-        total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
-        scheduled_spec_decode_tokens=scheduled_spec_decode_tokens or {},
-        scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-        preempted_req_ids=set(),
-    )
-
-
-def _make_mock_attention(conv_state: torch.Tensor, temporal_state: torch.Tensor) -> MagicMock:
-    attention = MagicMock()
-    attention.kv_cache = [conv_state, temporal_state]
-    return attention
-
-
-def _make_states(
-    cfg: _TestConfig, layer_names: list[str], device: torch.device
-) -> tuple[
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
-    dict[str, MagicMock],
-    dict[str, MagicMock],
-]:
-    conv_py = [
-        torch.randn(cfg.num_blocks, cfg.conv_width, cfg.conv_inner_dim, dtype=cfg.dtype, device=device)
-        for _ in layer_names
-    ]
-    temporal_py = [
-        torch.randn(cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device) for _ in layer_names
-    ]
-    conv_gpu = [s.clone() for s in conv_py]
-    temporal_gpu = [s.clone() for s in temporal_py]
-    fwd_py = {name: _make_mock_attention(c, t) for name, c, t in zip(layer_names, conv_py, temporal_py)}
-    fwd_gpu = {name: _make_mock_attention(c, t) for name, c, t in zip(layer_names, conv_gpu, temporal_gpu)}
-    return conv_py, temporal_py, conv_gpu, temporal_gpu, fwd_py, fwd_gpu
-
-
-def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheConfig:
-    mamba_spec = MambaSpec(
-        block_size=cfg.block_size,
-        shapes=((cfg.conv_width, cfg.conv_inner_dim), (cfg.temporal_state_dim,)),
-        dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="all",
-    )
-    return KVCacheConfig(
-        num_blocks=cfg.num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=mamba_spec)],
-    )
-
-
-def _make_input_batch(req_ids: list[str], num_accepted_tokens: list[int], mamba_state_idx: list[int]) -> MagicMock:
-    batch = MagicMock()
-    batch.req_ids = req_ids
-    batch.req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
-    batch.num_accepted_tokens_cpu = np.array(num_accepted_tokens, dtype=np.int32)
-    batch.mamba_state_idx_cpu = np.array(mamba_state_idx, dtype=np.int32)
-    return batch
-
-
-def _make_requests(
-    req_ids: list[str],
-    num_computed_tokens: list[int],
+def _postprocess_reference(
+    cfg: _TestConfig,
+    conv_states: list[torch.Tensor],
+    temporal_states: list[torch.Tensor],
     block_ids_per_req: list[list[int]],
-) -> dict[str, MagicMock]:
-    requests: dict[str, MagicMock] = {}
-    for i, req_id in enumerate(req_ids):
-        req = MagicMock()
-        req.num_computed_tokens = num_computed_tokens[i]
-        req.block_ids = {0: block_ids_per_req[i]}
-        requests[req_id] = req
-    return requests
+    mamba_state_indices: list[int],
+    running_tokens: list[int],
+    accepted_tokens: list[int],
+    conv_dim_first: bool,
+) -> list[int]:
+    """Save aligned states using ordinary CPU tensor copies."""
+    normalized_accepted = accepted_tokens.copy()
+    for req_idx, (block_ids, src_idx, running, accepted) in enumerate(
+        zip(block_ids_per_req, mamba_state_indices, running_tokens, accepted_tokens, strict=True)
+    ):
+        new_computed = running + accepted - 1
+        aligned = new_computed // cfg.block_size * cfg.block_size
+        if aligned < running:
+            continue
 
+        bias = aligned - running
+        dst_idx = aligned // cfg.block_size - 1
+        src_block = block_ids[src_idx]
+        dst_block = block_ids[dst_idx]
+        temporal_src_block = block_ids[src_idx + bias]
+        for conv, temporal in zip(conv_states, temporal_states, strict=True):
+            # Present both layouts as (block, state_len, dim) for the reference.
+            conv_by_position = conv.transpose(1, 2) if conv_dim_first else conv
+            # A shifted copy can read and write overlapping slices of one block.
+            conv_by_position[dst_block, : cfg.conv_width - bias].copy_(conv_by_position[src_block, bias:].clone())
+            temporal[dst_block].copy_(temporal[temporal_src_block])
 
-def _make_copy_bufs(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device) -> MambaCopyBuffers:
-    return MambaCopyBuffers.create(
-        max_num_reqs=cfg.max_num_reqs,
-        kv_cache_config=kv_cache_config,
-        copy_funcs=_COPY_FUNCS,
-        make_buffer=lambda n, dtype: _MockCpuGpuBuffer(n, dtype, device),
-    )
-
-
-def _make_gpu_ctx(cfg: _TestConfig, kv_cache_config: KVCacheConfig, device: torch.device) -> MambaSpecDecodeGPUContext:
-    return MambaSpecDecodeGPUContext.create(
-        max_num_reqs=cfg.max_num_reqs,
-        kv_cache_config=kv_cache_config,
-        copy_funcs=_COPY_FUNCS,
-        device=device,
-        make_buffer=lambda n, dtype: _MockCpuGpuBuffer(n, dtype, device),
-    )
-
-
-def _run_gpu_postprocess(
-    gpu_ctx: MambaSpecDecodeGPUContext,
-    *,
-    kv_cache_config: KVCacheConfig,
-    forward_context: dict[str, Any],
-    copy_funcs: MambaStateCopyFuncsByType,
-    block_table: torch.Tensor,
-    req_ids: list[str],
-    num_accepted_tokens: list[int],
-    mamba_state_idx: list[int],
-    num_scheduled_tokens: dict[str, int],
-    num_computed_tokens: list[int],
-    num_draft_tokens: dict[str, int],
-    device: torch.device,
-) -> None:
-    def t(values):
-        return torch.tensor(values, dtype=torch.int32, device=device)
-
-    gpu_ctx.initialize_from_forward_context(kv_cache_config, forward_context, copy_funcs, [block_table])
-    gpu_ctx.run_fused_postprocess(
-        num_reqs=len(req_ids),
-        num_accepted_tokens_gpu=t(num_accepted_tokens),
-        mamba_state_idx_gpu=t(mamba_state_idx),
-        num_scheduled_tokens_gpu=t([num_scheduled_tokens[r] for r in req_ids]),
-        num_computed_tokens_gpu=t(num_computed_tokens),
-        num_draft_tokens_gpu=t([num_draft_tokens.get(r, 0) for r in req_ids]),
-    )
-    torch.accelerator.synchronize()
+        if src_idx == dst_idx:
+            normalized_accepted[req_idx] = 1
+    return normalized_accepted
 
 
 @pytest.mark.skipif(
@@ -251,77 +84,87 @@ def test_matches_python_postprocess_mamba():
     device = torch.device("npu:0")
     torch.manual_seed(42)
 
-    req_ids = ["req_0", "req_1", "req_2", "req_3"]
     num_computed_tokens = [60, 30, 45, 10]
-    num_scheduled_tokens = {"req_0": 5, "req_1": 3, "req_2": 8, "req_3": 6}
-    num_draft_tokens = {"req_0": 2, "req_1": 0, "req_2": 3, "req_3": 0}
-    num_accepted_tokens = [3, 2, 4, 2]
-    mamba_state_idx = [3, 1, 2, 0]
+    num_scheduled_tokens = [5, 3, 8, 6]
+    num_draft_tokens = [2, 0, 3, 0]
+    accepted_tokens = [3, 2, 4, 2]
+    mamba_state_indices = [3, 1, 2, 0]
     block_ids_per_req = [
         list(range(8)),
         list(range(8, 16)),
         list(range(16, 24)),
         list(range(24, 32)),
     ]
+    num_reqs = len(accepted_tokens)
+    running_tokens = [
+        computed + scheduled - draft
+        for computed, scheduled, draft in zip(num_computed_tokens, num_scheduled_tokens, num_draft_tokens, strict=True)
+    ]
 
     layer_names = [f"layer_{i}" for i in range(cfg.num_layers)]
-    kv_cache_config = _make_kv_cache_config(cfg, layer_names)
-
-    (
-        conv_states_py,
-        temporal_states_py,
-        conv_states_gpu,
-        temporal_states_gpu,
-        forward_context_py,
-        forward_context_gpu,
-    ) = _make_states(cfg, layer_names, device)
-
-    scheduler_output = _make_scheduler_output(
-        num_scheduled_tokens,
-        {k: [None] * v for k, v in num_draft_tokens.items() if v > 0},
+    conv_dim_first = is_conv_state_dim_first()
+    conv_shape = (cfg.conv_inner_dim, cfg.conv_width) if conv_dim_first else (cfg.conv_width, cfg.conv_inner_dim)
+    temporal_shape = (cfg.temporal_state_dim,)
+    mamba_spec = MambaSpec(
+        block_size=cfg.block_size,
+        shapes=(conv_shape, temporal_shape),
+        dtypes=(cfg.dtype, cfg.dtype),
+        mamba_cache_mode="align",
     )
-    input_batch_py = _make_input_batch(req_ids, num_accepted_tokens.copy(), mamba_state_idx.copy())
-    requests = _make_requests(req_ids, num_computed_tokens, block_ids_per_req)
-    copy_bufs = _make_copy_bufs(cfg, kv_cache_config, device)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=cfg.num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=mamba_spec)],
+    )
 
-    postprocess_mamba(
-        scheduler_output,
-        kv_cache_config,
-        input_batch_py,
-        requests,
-        forward_context_py,
-        _COPY_FUNCS,
-        copy_bufs,
+    conv_states = [torch.randn(cfg.num_blocks, *conv_shape, dtype=cfg.dtype, device=device) for _ in layer_names]
+    temporal_states = [
+        torch.randn(cfg.num_blocks, *temporal_shape, dtype=cfg.dtype, device=device) for _ in layer_names
+    ]
+    expected_conv = [state.to(device="cpu", copy=True) for state in conv_states]
+    expected_temporal = [state.to(device="cpu", copy=True) for state in temporal_states]
+    expected_accepted = _postprocess_reference(
+        cfg,
+        expected_conv,
+        expected_temporal,
+        block_ids_per_req,
+        mamba_state_indices,
+        running_tokens,
+        accepted_tokens,
+        conv_dim_first,
+    )
+
+    forward_context = {
+        name: SimpleNamespace(kv_cache=[conv, temporal])
+        for name, conv, temporal in zip(layer_names, conv_states, temporal_states, strict=True)
+    }
+    block_table = torch.tensor(block_ids_per_req, dtype=torch.int32, device=device)
+    gpu_ctx = MambaSpecDecodeGPUContext.create(
+        max_num_reqs=cfg.max_num_reqs,
+        kv_cache_config=kv_cache_config,
+        copy_funcs=_COPY_FUNCS,
+        forward_context=forward_context,
+        device=device,
+    )
+    gpu_ctx.initialize_from_forward_context(kv_cache_config, forward_context, _COPY_FUNCS, [block_table])
+
+    # The align path snapshots the entire persistent accepted-token buffer.
+    accepted_tokens_gpu = torch.zeros(cfg.max_num_reqs, dtype=torch.int32, device=device)
+    accepted_tokens_gpu[:num_reqs] = torch.tensor(accepted_tokens, dtype=torch.int32, device=device)
+    # Model Runner V2 supplies the post-step computed count for each request slot.
+    new_computed_tokens = [
+        running + accepted - 1 for running, accepted in zip(running_tokens, accepted_tokens, strict=True)
+    ]
+    gpu_ctx.run_fused_postprocess_align(
+        num_reqs=num_reqs,
+        num_accepted_tokens_gpu=accepted_tokens_gpu,
+        state_idx_gpu=torch.tensor(mamba_state_indices, dtype=torch.int32, device=device),
+        new_num_computed_tokens_gpu=torch.tensor(new_computed_tokens, dtype=torch.int32, device=device),
+        idx_mapping=torch.arange(num_reqs, dtype=torch.int32, device=device),
     )
     torch.accelerator.synchronize()
 
-    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
-    block_table_gpu = torch.zeros(len(req_ids), 8, dtype=torch.int32, device=device)
-    for i, block_ids in enumerate(block_ids_per_req):
-        block_table_gpu[i, : len(block_ids)] = torch.tensor(block_ids, dtype=torch.int32)
-
-    _run_gpu_postprocess(
-        gpu_ctx,
-        kv_cache_config=kv_cache_config,
-        forward_context=forward_context_gpu,
-        copy_funcs=_COPY_FUNCS,
-        block_table=block_table_gpu,
-        req_ids=req_ids,
-        num_accepted_tokens=num_accepted_tokens,
-        mamba_state_idx=mamba_state_idx,
-        num_scheduled_tokens=num_scheduled_tokens,
-        num_computed_tokens=num_computed_tokens,
-        num_draft_tokens=num_draft_tokens,
-        device=device,
-    )
-
     for i in range(cfg.num_layers):
-        torch.testing.assert_close(conv_states_gpu[i], conv_states_py[i])
-        torch.testing.assert_close(temporal_states_gpu[i], temporal_states_py[i])
-
-    expected_accepted = torch.tensor(
-        input_batch_py.num_accepted_tokens_cpu[: len(req_ids)],
-        dtype=torch.int32,
-        device=device,
-    )
-    torch.testing.assert_close(gpu_ctx.num_accepted_tokens_out[: len(req_ids)], expected_accepted)
+        torch.testing.assert_close(conv_states[i].cpu(), expected_conv[i])
+        torch.testing.assert_close(temporal_states[i].cpu(), expected_temporal[i])
+    torch.testing.assert_close(accepted_tokens_gpu[:num_reqs].cpu(), torch.tensor(expected_accepted, dtype=torch.int32))
