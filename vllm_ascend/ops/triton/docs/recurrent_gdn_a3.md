@@ -3,7 +3,34 @@
 Upstream head: b03394cdc92571441ad79edede46b2e3bc22ff0a.
 Applied on top of PR #22010, the minimal #21820 prepare fusion, and #21678.
 
-## A3 adaptation
+## Current status
+
+Recurrent preprocessing fusion is disabled by `_supports_fused_recurrent_gdn`
+returning `False`, including on capable A3/A5 backends. Calls retain external
+gate/beta computation, Q/K normalization and contiguous QKV. This does not
+downgrade the installed FLA wheel: the tested new wheel still uses recurrent V2.
+The adaptation below describes the retained implementation, not active dispatch.
+
+The chunk prefill adaptor also disables internal beta sigmoid because its caller
+already supplies activated beta. Enabling it computed sigmoid twice.
+
+Controlled A3 64K/1K tests used C40/N160, approximately 90% P prefix-cache hits,
+two PP2 prefill services and one DP2 decode service on the same six dies.
+Output throughput was 1251.93 token/s before these corrections, 1427.16 after
+the chunk beta correction alone, and 1728.75 after also disabling recurrent
+preprocessing fusion and restoring contiguous QKV. The clean-image reference
+was 1809.60 token/s. MTP acceptance was 50.89%, 65.65%, 84.40% and 92.43%,
+respectively. These are single-run observations, not confidence intervals or
+model-accuracy scores; the remaining throughput gap is not fully attributed.
+
+New-wheel numerical checks matched dense and strided QKV outputs/state exactly
+for the tested eager and graph cases. Differences from external preprocessing
+were concentrated in fused Q/K normalization and beta sigmoid. Intermediate
+BF16 rounding is a suspected mechanism, not a proven attribution to one flag.
+Re-enabling fusion requires model-quality validation beyond the original
+operator relative-L2 threshold.
+
+## Original A3 adaptation
 
 Enable FLA_GDN_RECURRENT_FUSION for A3 and retain A5. A2/310P remain disabled.
 The installed A3 FLA 26.10.0+main.dev2ef0735 wheel supports the extended recurrent API.

@@ -21,7 +21,7 @@ kernel, verifying the optimized parameter contract:
 * q/k/v are handed over head-first (BNSD) without copying when the transpose
   is already contiguous, and as sequence-major (BSND) otherwise;
 * q/k normalization is delegated to the kernel (use_qk_l2norm_in_kernel=True);
-* beta sigmoid is delegated to the kernel (use_beta_sigmoid_in_kernel=True);
+* beta is already activated by the caller (use_beta_sigmoid_in_kernel=False);
 * the recurrent state keeps its [N, Hv, Dk, Dv] layout (state_v_first=True);
 * use_exp2=False, disable_recompute=False for the A2/A3 optimized path.
 """
@@ -94,13 +94,27 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         self.assertEqual(call["chunk_size"], 64)
         self.assertFalse(call["use_exp2"])
         self.assertTrue(call["use_qk_l2norm_in_kernel"])
-        self.assertTrue(call["use_beta_sigmoid_in_kernel"])
+        self.assertFalse(call["use_beta_sigmoid_in_kernel"])
         self.assertFalse(call["disable_recompute"])
         self.assertTrue(call["state_v_first"])
         self.assertFalse(call["allow_neg_eigval"])
         self.assertTrue(call["output_final_state"])
         self.assertEqual(call["layout"], "BSND")
         self.assertEqual(call["scale"], 0.125)
+
+    def test_already_activated_beta_is_not_sigmoided_again(self):
+        from vllm_ascend.device.device_op import BaseDeviceAdaptor
+
+        q, k, v, g, _ = make_inputs()
+        beta = torch.sigmoid(torch.zeros(BATCH, TOKENS, HV, dtype=torch.bfloat16))
+        state = make_state()
+
+        def fused_fwd(q_in, k_in, v_in, g_in, beta_in, **kwargs):
+            effective_beta = beta_in.sigmoid() if kwargs["use_beta_sigmoid_in_kernel"] else beta_in
+            return effective_beta, state
+
+        actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd)
+        torch.testing.assert_close(actual, torch.full_like(beta, 0.5), rtol=0, atol=0)
 
     # ------------------------------------------------------------------ #
     # 2. Layout selection: BNSD when head-first transpose is contiguous. #

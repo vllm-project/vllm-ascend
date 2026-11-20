@@ -188,6 +188,8 @@ def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor
 @lru_cache(maxsize=1)
 def _supports_fused_recurrent_gdn() -> bool:
     """Probe the installed FLA API once, without reading NPU tensor values."""
+    # Keep external BF16 preprocessing until fused rounding parity is validated.
+    return False
     if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_RECURRENT_FUSION):
         return False
     required = {"use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel", "A_log", "dt_bias"}
