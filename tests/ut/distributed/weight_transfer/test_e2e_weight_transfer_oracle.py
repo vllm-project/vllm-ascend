@@ -187,3 +187,35 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.mark.parametrize("prompts", [CASE.prompts, ((1000, 1001, 1002),)])
+@pytest.mark.parametrize("image_prompt", [False, True])
+def test_generation_signature_preserves_case_prompts_and_optional_image(prompts, image_prompt):
+    client = MagicMock()
+    text_choice = client.completions.create.return_value.choices[0]
+    text_choice.text = "text"
+    text_choice.logprobs.token_logprobs = [-0.5]
+    image_choice = client.chat.completions.create.return_value.choices[0]
+    image_choice.message.content = "image"
+    image_choice.logprobs.content = [MagicMock(logprob=-0.25)]
+
+    signature = utils.generation_signature(client, CASE.model, prompts=prompts, image_prompt=image_prompt)
+
+    expected = [("text", (-0.5,))] * len(prompts)
+    if image_prompt:
+        expected.append(("image", (-0.25,)))
+    assert signature == expected
+    assert [call.kwargs["prompt"] for call in client.completions.create.call_args_list] == [
+        list(prompt) if isinstance(prompt, tuple) else prompt for prompt in prompts
+    ]
+    if image_prompt:
+        client.chat.completions.create.assert_called_once()
+        request = client.chat.completions.create.call_args.kwargs
+        assert request["model"] == CASE.model
+        assert request["messages"][0]["content"] == [
+            {"type": "text", "text": utils.IMAGE_PROMPT},
+            {"type": "image_url", "image_url": {"url": utils.IMAGE_DATA_URL}},
+        ]
+    else:
+        client.chat.completions.create.assert_not_called()
