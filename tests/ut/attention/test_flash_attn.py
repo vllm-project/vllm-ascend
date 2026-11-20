@@ -263,11 +263,11 @@ def test_flash_attn_requires_live_dflash_loader_tag(monkeypatch, select_flash_at
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True, None])
-def test_dflash_selection_is_independent_of_execution_mode(select_flash_attn, dflash2_config, enforce_eager):
+def test_dflash_selection_requires_eager_draft(select_flash_attn, dflash2_config, enforce_eager):
     select, _ = select_flash_attn
     dflash2_config.speculative_config.enforce_eager = enforce_eager
     selector = AttentionSelectorConfig(head_size=128, block_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto")
-    assert select(dflash2_config, selector)
+    assert select(dflash2_config, selector) == bool(enforce_eager)
 
 
 @pytest.mark.parametrize("sampling", ["greedy", "probabilistic"])
