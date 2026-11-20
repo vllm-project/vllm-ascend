@@ -24,34 +24,6 @@ def is_kv_save_role(kv_role: str, save_decode_cache: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or save_decode_cache
 
 
-def can_publish_single_writer_kv_events(
-    *,
-    tp_size: int,
-    num_kv_heads: int,
-    pp_size: int,
-    pcp_size: int,
-    dcp_size: int,
-    use_layerwise: bool,
-    use_kvpp: bool,
-    use_hybrid: bool,
-    tp_mismatch: bool,
-) -> bool:
-    """Allow union only for proven complete-block writers.
-
-    With one physical KV-head partition, TP replicas can own disjoint blocks
-    without splitting a block's contents. Keep the legacy intersection for
-    context/layer partitions, hybrid groups, and TP-mismatch layouts.
-    """
-    sizes = (tp_size, num_kv_heads, pp_size, pcp_size, dcp_size)
-    if any(type(size) is not int or size <= 0 for size in sizes):
-        return False
-    return (
-        min(tp_size, num_kv_heads) == 1
-        and pp_size == pcp_size == dcp_size == 1
-        and not (use_layerwise or use_kvpp or use_hybrid or tp_mismatch)
-    )
-
-
 @dataclass(frozen=True)
 class TPMismatchInfo:
     enabled: bool

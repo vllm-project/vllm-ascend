@@ -38,7 +38,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
     RequestTracker,
-    can_publish_single_writer_kv_events,
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
@@ -51,35 +50,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
-    def test_single_writer_events_require_a_complete_block_layout(self):
-        config = dict(
-            tp_size=8,
-            num_kv_heads=1,
-            pp_size=1,
-            pcp_size=1,
-            dcp_size=1,
-            use_layerwise=False,
-            use_kvpp=False,
-            use_hybrid=False,
-            tp_mismatch=False,
-        )
-        self.assertTrue(can_publish_single_writer_kv_events(**config))
-        self.assertTrue(can_publish_single_writer_kv_events(**(config | dict(tp_size=1, num_kv_heads=8))))
-        for field, value in (
-            ("num_kv_heads", 2),
-            ("pp_size", 2),
-            ("pcp_size", 2),
-            ("dcp_size", 2),
-            ("use_layerwise", True),
-            ("use_kvpp", True),
-            ("use_hybrid", True),
-            ("tp_mismatch", True),
-            ("tp_size", 0),
-            ("num_kv_heads", None),
-        ):
-            with self.subTest(field=field, value=value):
-                self.assertFalse(can_publish_single_writer_kv_events(**(config | {field: value})))
-
     def test_sharded_mamba_groups_exclude_tp_replicas(self):
         mamba_spec = MambaSpec(
             shapes=((4,),),
