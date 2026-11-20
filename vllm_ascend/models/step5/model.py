@@ -613,34 +613,31 @@ class AscendStep5Attention(nn.Module):
         # is [Q, K, V, gate]. ``MergedColumnParallelLinear`` cannot replicate
         # KV heads, so packing stays off when ``total_num_kv_heads < tp_size``
         # and the layer falls back to ``qkv_proj`` + ``g_proj``.
-        tp_rank = get_tensor_model_parallel_rank()
-        self.fuse_qkv_gate = (
-            use_head_wise_attn_gate
-            and not qkv_bias
-            and self.total_num_kv_heads >= tp_size
-            and (
-                quant_config is None
-                or all(
-                    isinstance(
-                        LinearBase(
-                            hidden_size,
-                            width,
-                            quant_config=quant_config,
-                            prefix=f"{prefix}.{name}",
-                            tp_rank=tp_rank,
-                            tp_size=tp_size,
-                        ).quant_method,
-                        UnquantizedLinearMethod,
-                    )
-                    for name, width in (
-                        (
-                            "qkv_proj",
-                            (self.total_num_heads + 2 * num_kv_heads) * self.head_dim,
-                        ),
-                        ("g_proj", self.total_num_heads),
-                    )
+        packed_quant_ok = True
+        if use_head_wise_attn_gate and quant_config is not None:
+            tp_rank = get_tensor_model_parallel_rank()
+            packed_quant_ok = all(
+                isinstance(
+                    LinearBase(
+                        hidden_size,
+                        width,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.{name}",
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                    ).quant_method,
+                    UnquantizedLinearMethod,
+                )
+                for name, width in (
+                    (
+                        "qkv_proj",
+                        (self.total_num_heads + 2 * num_kv_heads) * self.head_dim,
+                    ),
+                    ("g_proj", self.total_num_heads),
                 )
             )
+        self.fuse_qkv_gate = (
+            use_head_wise_attn_gate and not qkv_bias and self.total_num_kv_heads >= tp_size and packed_quant_ok
         )
         if self.fuse_qkv_gate:
             # Keep the qkv_proj prefix so quantization configuration and
