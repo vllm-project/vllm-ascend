@@ -114,10 +114,6 @@ def make_chat_warmup_fn(chat_url: str, model: str) -> Callable[[], None]:
         )
         if not response.ok:
             # TODO: temporary smoke diagnostics, remove before merging
-            logger.warning(
-                "Spec-decode warmup request returned HTTP %s; body: %s",
-                response.status_code,
-                response.text[:1000],
-            )
+            print(f"[debug] warmup HTTP {response.status_code}; body: {response.text[:1000]}")
 
     return warmup_fn
