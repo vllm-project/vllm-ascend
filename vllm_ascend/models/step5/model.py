@@ -662,6 +662,7 @@ class AscendStep5Attention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         self.fuse_qkv_gate = (
             use_head_wise_attn_gate
+            and not qkv_bias
             and self.total_num_kv_heads >= tp_size
             and (
                 quant_config is None
