@@ -3,9 +3,9 @@
 """HCCL adapters for upstream vLLM's dense NCCL weight-transfer engines.
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
-init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. The packed producer/consumer
-and the layerwise cross-chunk behaviour are unchanged.
+init payload stay upstream. NPU streams, the HCCL rendezvous and legacy
+per-update packed wire parameters are local. This implementation targets
+Ascend's verified official vLLM main commit c410543d9f.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +54,8 @@ class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
 
     def __post_init__(self) -> None:
         _validate_packed_params(self)
+        if getattr(self, "use_load_plan", False):
+            raise ValueError("HCCL weight transfer does not yet support use_load_plan")
 
 
 @dataclass
@@ -96,6 +98,10 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
         self._init_info = init_info
+        if not vllm_version_is("0.33.0"):
+            # The inherited lifecycle inspects these fields even though the
+            # HCCL data plane currently uses model.load_weights exclusively.
+            self._plan_metadata = self._plan_manifest = self._plan = None
         # Preserve the parent's handshake attributes, resetting omitted values
         # on re-init. _wire_params still supports legacy per-update overrides.
         self.packed = init_info.packed if init_info.packed is not None else False
@@ -143,9 +149,11 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         return params
 
     def receive_weights(self, update_info: HCCLWeightTransferUpdateInfo) -> None:  # type: ignore[override]
-        """Receive one round over the NPU data plane and load it layerwise."""
+        """Receive one round and feed the model's selected reload mode."""
         if self.model_update_group is None:
             raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
+        if getattr(update_info, "src", 0) != 0:
+            raise ValueError("HCCL weight transfer supports only trainer sender rank 0")
         params = self._wire_params(update_info)
         # Upstream main omits unchanged metadata after the first update. Keep
         # the cache model-specific, while resolving this round's wire params
@@ -153,7 +161,9 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         if update_info.names:
             self._last_hccl_update_info[self.model] = update_info
         else:
-            update_info = self._last_hccl_update_info.get(self.model, update_info)
+            if self.model not in self._last_hccl_update_info:
+                raise ValueError("HCCL metadata cannot be reused before the first update for this model")
+            update_info = self._last_hccl_update_info[self.model]
 
         mtp_check = nullcontext()
         if vllm_version_is("0.33.0"):
@@ -187,6 +197,19 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         with torch.npu.device(self.device):
             super().update_weights(update_info)
 
+    def finish_weight_update(self) -> None:
+        """Finalize on NPU and release its allocator's cached memory."""
+        if vllm_version_is("0.33.0"):
+            super().finish_weight_update()
+            return
+        from vllm.model_executor.model_loader.reload import finish_reload
+
+        with torch.npu.device(self.device):
+            finish_reload(self.model, self.model_config, self.device)
+            # torch 2.10's accelerator.empty_cache expects DeviceAllocator;
+            # torch_npu owns a different caching allocator.
+            torch.npu.empty_cache()
+
     def shutdown(self) -> None:
         # PyHcclCommunicator releases its comm through `close()`, not `destroy()`.
         group, self.model_update_group = getattr(self, "model_update_group", None), None
@@ -208,11 +231,13 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
+        rank: int = 0,
         device: torch.device | None = None,
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     ) -> None:
+        rank_kwargs = {} if vllm_version_is("0.33.0") else {"rank": rank}
         super().__init__(
             client=client,
             source=source,
@@ -220,6 +245,7 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             packed=packed,
             packed_buffer_size_bytes=packed_buffer_size_bytes,
             packed_num_buffers=packed_num_buffers,
+            **rank_kwargs,
         )
         if device is None:
             index = torch.accelerator.current_device_index()
@@ -230,8 +256,8 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         self.model_update_group = None
         self._state = "ready"
 
-    # Mirror NCCLTrainerWeightTransferEngine.trainer_init orchestration until
-    # upstream exposes a hook for the endpoint opener and worker init-info type.
+    # Keep the HCCL rendezvous local: if opening the trainer endpoint fails,
+    # joining the worker RPC thread would block on a peer still in rendezvous.
     @classmethod
     def trainer_init(  # type: ignore[override]
         cls,
@@ -244,10 +270,15 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             raise ValueError("HCCL trainer weight transfer requires a WeightSource.")
         if init_info.world_size < 2:
             raise ValueError("HCCL trainer weight transfer requires at least one worker")
+        if not vllm_version_is("0.33.0"):
+            if not source.implements_iter_full():
+                raise TypeError("HCCL broadcast requires a WeightSource implementing iter_full()")
+            cls._broadcast_plan(source.metadata)
         engine = cls(
             client=client,
             source=source,
             is_sender=init_info.is_sender,
+            rank=init_info.rank,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
@@ -329,6 +360,17 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                         stream.synchronize()
 
     else:
+
+        @staticmethod
+        def _broadcast_plan(meta: list[ParamMeta]) -> tuple[list[int], list[tuple[int, list[ParamMeta]]]]:
+            """Refuse unsupported owners on every rank before any RPC starts."""
+            group_ranks, slices = NCCLTrainerWeightTransferEngine._broadcast_plan(meta)
+            if group_ranks != [0]:
+                raise ValueError(
+                    "HCCL weight transfer supports only trainer sender rank 0; "
+                    "every parameter must be gathered and broadcast by rank 0"
+                )
+            return group_ranks, slices
 
         def _broadcast(self, meta: list[ParamMeta], src: int) -> None:  # type: ignore[misc]
             """Broadcast one update slice from the single HCCL trainer sender.

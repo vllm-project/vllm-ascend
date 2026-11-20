@@ -111,7 +111,7 @@ def test_reinit_closes_previous_session_before_creating_next(_mock_device):
 def test_inherits_upstream_orchestration():
     assert issubclass(HCCLWeightTransferEngine, NCCLWeightTransferEngine)
     assert issubclass(HCCLTrainerWeightTransferEngine, NCCLTrainerWeightTransferEngine)
-    for name in ("start_weight_update", "finish_weight_update"):
+    for name in ("start_weight_update",):
         assert getattr(HCCLWeightTransferEngine, name) is getattr(NCCLWeightTransferEngine, name)
     assert HCCLTrainerWeightTransferEngine._checked_iter is NCCLTrainerWeightTransferEngine._checked_iter
 
@@ -180,7 +180,7 @@ def test_rejects_invalid_wire_params(name, value):
 
 def _trainer(sender=True):
     return HCCLTrainerWeightTransferEngine(
-        client=MagicMock(), source=MagicMock(), is_sender=sender, device=torch.device("cpu")
+        client=MagicMock(), source=MagicMock(), is_sender=sender, rank=0 if sender else 1, device=torch.device("cpu")
     )
 
 
@@ -204,6 +204,8 @@ def test_trainer_init_builds_rank_zero_handshake(sender, packed):
     ):
         engine = WeightTransferTrainerFactory.trainer_init(info, client=client, source=MagicMock())
     assert engine.is_sender is sender
+    if not vllm_version_is("0.33.0"):
+        assert engine.rank == info.rank
     if sender:
         payload = client.init_weight_transfer_engine.call_args.args[0]
         assert payload["rank_offset"] == 1
@@ -347,8 +349,10 @@ def test_send_reuses_real_upstream_round_trip(sender):
         engine.send_weights()
     if vllm_version_is("0.33.0"):
         broadcast.assert_called_once_with(engine.source, [])
-    else:
+    elif sender:
         broadcast.assert_called_once_with([param], 0)
+    else:
+        broadcast.assert_not_called()
     sync.assert_called_once_with()
     if sender:
         assert [call[0] for call in engine.client.method_calls] == [
@@ -414,14 +418,46 @@ def test_worker_metadata_is_per_model_and_cleared_on_reinit():
         original_model = engine.model
         engine.receive_weights(full)
         engine.model = MagicMock()
-        engine.receive_weights(empty)
+        with pytest.raises(ValueError, match="before the first update"):
+            engine.receive_weights(empty)
         engine.model.load_weights.assert_not_called()
         engine.model = original_model
         engine.receive_weights(empty)
         assert original_model.load_weights.call_count == 2
         engine.init_transfer_engine(init)
-        engine.receive_weights(empty)
+        with pytest.raises(ValueError, match="before the first update"):
+            engine.receive_weights(empty)
         assert original_model.load_weights.call_count == 2
         engine.model_update_group.broadcast.reset_mock()
         engine.receive_weights(full)
         engine.model_update_group.broadcast.assert_called_once()
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="main-only load plan field")
+def test_load_plan_is_refused_by_both_handshake_types():
+    with pytest.raises(ValueError, match="use_load_plan"):
+        HCCLTrainerInitInfo(rank=0, master_address="host", master_port=1234, world_size=2, use_load_plan=True)
+    with pytest.raises(ValueError, match="use_load_plan"):
+        HCCLWeightTransferInitInfo(
+            master_address="host", master_port=1234, world_size=2, rank_offset=1, use_load_plan=True
+        )
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="main-only parameter ownership")
+@pytest.mark.parametrize("trainer_rank", [0, 1])
+def test_unsupported_broadcaster_is_refused_before_init_rpc(trainer_rank):
+    source, client = MagicMock(), MagicMock()
+    source.metadata = [ParamMeta(name="w", dtype=torch.bfloat16, shape=(1,), owners=(1,))]
+    info = HCCLTrainerInitInfo(rank=trainer_rank, master_address="host", master_port=1234, world_size=3)
+    with pytest.raises(ValueError, match="sender rank 0"):
+        HCCLTrainerWeightTransferEngine.trainer_init(info, client=client, source=source)
+    client.init_weight_transfer_engine.assert_not_called()
+
+
+@pytest.mark.skipif(vllm_version_is("0.33.0"), reason="main-only parameter ownership")
+def test_unsupported_broadcaster_is_refused_before_update_rpc():
+    engine = _trainer()
+    engine.source.metadata = [ParamMeta(name="w", dtype=torch.bfloat16, shape=(1,), owners=(1,))]
+    with pytest.raises(ValueError, match="sender rank 0"):
+        engine.send_weights()
+    assert engine.client.method_calls == []

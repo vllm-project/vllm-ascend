@@ -48,6 +48,8 @@ class HCCLWeightTransferInitInfo(NCCLWeightTransferInitInfo):
             raise ValueError("HCCL weight transfer requires TCP rendezvous; `nccl_unique_id_b64` is not supported")
         super().__post_init__()
         _validate_packed_params(self)
+        if getattr(self, "use_load_plan", False):
+            raise ValueError("HCCL weight transfer does not yet support use_load_plan")
 
 
 def stateless_init_process_group(
