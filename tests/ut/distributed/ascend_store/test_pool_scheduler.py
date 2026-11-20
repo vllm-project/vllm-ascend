@@ -1530,7 +1530,8 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
 
         event_id = req_meta.event_id
         assert event_id is not None
-        self.assertEqual(UUID(int=event_id).version, 4)
+        self.assertGreaterEqual(event_id, 0)
+        self.assertLessEqual(event_id, torch.iinfo(torch.int64).max)
         # Neither the null block nor speculative scratch may be pinned.
         pinned_blocks = scheduler._block_pool.blocks[1:3]
         scheduler._block_pool.touch.assert_called_once_with(pinned_blocks)
@@ -1553,23 +1554,26 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         first = ReqMeta("r1", block_ids_by_group=[[1, 2]], can_save=True)
         second = ReqMeta("r1", block_ids_by_group=[[3, 4]], can_save=True)
         first_uuid = UUID("11223344-5566-4788-99aa-bbccddeeff01")
+        colliding_uuid = UUID("e1223344-5566-4788-99aa-bbccddeeff01")
         second_uuid = UUID("11223344-5566-4788-99aa-bbccddeeff02")
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks.uuid.uuid4",
-            side_effect=[first_uuid, first_uuid, first_uuid, second_uuid],
+            side_effect=[first_uuid, colliding_uuid, first_uuid, second_uuid],
         ):
             scheduler.retain_blocks_for_save(first)
             scheduler.retain_blocks_for_save(second)
 
-        self.assertEqual(first.event_id, first_uuid.int)
-        self.assertEqual(second.event_id, second_uuid.int)
-        worker_meta = AscendStoreKVConnectorWorkerMetadata({second_uuid.int: 1})
+        first_event_id = 0x19AA_BBCC_DDEE_FF01
+        second_event_id = 0x19AA_BBCC_DDEE_FF02
+        self.assertEqual(first.event_id, first_event_id)
+        self.assertEqual(second.event_id, second_event_id)
+        worker_meta = AscendStoreKVConnectorWorkerMetadata({second_event_id: 1})
         scheduler.update_connector_output(
             KVConnectorOutput(kv_connector_worker_meta=worker_meta.aggregate(worker_meta))
         )
 
         scheduler._block_pool.free_blocks.assert_called_once_with([scheduler._block_pool.blocks[3]])
-        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {first_uuid.int: [1]})
+        self.assertEqual(scheduler._in_flight_save_blocks.sending_blocks, {first_event_id: [1]})
         self.assertTrue(scheduler.has_pending_push_work())
 
     def test_invalid_event_id(self):
