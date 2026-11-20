@@ -561,6 +561,12 @@ struct NormQuantKernel {
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3V);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3V);
             }
+            // With split-K=1 the inner reduction never fences this UB buffer.
+            // Finish vector reads before the next row's MTE2 overwrites it.
+            if (params.projectionSplits == 1U) {
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(vMte2);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(vMte2);
+            }
         }
 
         pipe->ReleaseEventID<AscendC::HardEvent::MTE2_V>(mte2V);
@@ -614,6 +620,7 @@ struct RopeScatterKernel {
         GM_ADDR ropeSin;
         GM_ADDR slots;
         GM_ADDR cache;
+        GM_ADDR kvOutput;
         uint64_t cacheStride0;
         uint64_t cacheStride1;
         uint64_t cachePages;
@@ -625,7 +632,8 @@ struct RopeScatterKernel {
     static bool CanImplement(const Arguments &args)
     {
         return args.qOutput != nullptr && args.kv != nullptr && args.ropeCos != nullptr &&
-            args.ropeSin != nullptr && args.slots != nullptr && args.cache != nullptr &&
+            args.ropeSin != nullptr &&
+            (args.kvOutput != nullptr || (args.slots != nullptr && args.cache != nullptr)) &&
             args.t > 0 && args.t <= kMaxT;
     }
 
@@ -687,13 +695,17 @@ struct RopeScatterKernel {
         AscendC::GlobalTensor<float> gmCos;
         AscendC::GlobalTensor<float> gmSin;
         AscendC::GlobalTensor<int64_t> gmSlots;
-        AscendC::GlobalTensor<bfloat16_t> gmCache;
+        AscendC::GlobalTensor<bfloat16_t> gmKvDst;
         gmQ.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(params.qOutput));
         gmKv.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(params.kv));
         gmCos.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(params.ropeCos));
         gmSin.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(params.ropeSin));
-        gmSlots.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(params.slots));
-        gmCache.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(params.cache));
+        const bool writeCache = params.kvOutput == nullptr;
+        if (writeCache) {
+            gmSlots.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(params.slots));
+        }
+        gmKvDst.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            writeCache ? params.cache : params.kvOutput));
 
         auto *pipe = GetTPipePtr();
         const int32_t inputReady[2] = {
@@ -795,13 +807,19 @@ struct RopeScatterKernel {
                 AscendC::RoundMode::CAST_RINT, kRopeDim);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vMte3);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vMte3);
-            const int64_t slot = gmSlots.GetValue(token);
-            if (slot >= 0 && static_cast<uint64_t>(slot) < params.cachePages * kCacheRowsPerPage) {
-                const uint64_t page = static_cast<uint64_t>(slot) / kCacheRowsPerPage;
-                const uint64_t row = static_cast<uint64_t>(slot) % kCacheRowsPerPage;
-                const uint64_t cacheOffset = page * params.cacheStride0 + row * params.cacheStride1;
-                AscendC::DataCopy(
-                    gmCache[cacheOffset], rowLocal[kvSlot], kHeadDim);
+            uint64_t dstOffset = kvOffset;
+            bool writeRow = true;
+            if (writeCache) {
+                const int64_t slot = gmSlots.GetValue(token);
+                writeRow = slot >= 0 && static_cast<uint64_t>(slot) < params.cachePages * kCacheRowsPerPage;
+                if (writeRow) {
+                    const uint64_t page = static_cast<uint64_t>(slot) / kCacheRowsPerPage;
+                    const uint64_t row = static_cast<uint64_t>(slot) % kCacheRowsPerPage;
+                    dstOffset = page * params.cacheStride0 + row * params.cacheStride1;
+                }
+            }
+            if (writeRow) {
+                AscendC::DataCopy(gmKvDst[dstOffset], rowLocal[kvSlot], kHeadDim);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(slotFree[kvSlot]);
                 pending[kvSlot] = true;
             }

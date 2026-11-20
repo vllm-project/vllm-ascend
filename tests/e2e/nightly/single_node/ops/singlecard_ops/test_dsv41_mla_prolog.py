@@ -11,11 +11,20 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
+pytestmark = pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Atlas A3 kernel")
 
-@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A3, reason="Atlas A3 kernel")
+
 @pytest.mark.parametrize("heads", [16, 32, 64])
 @pytest.mark.parametrize("tokens", [1, 3, 129])
 def test_dsv41_mla_prolog(heads, tokens):
+    _check_mla_prolog(heads, tokens, replay=False)
+
+
+def test_dsv41_mla_prolog_aclgraph_replay():
+    _check_mla_prolog(heads=16, tokens=3, replay=True)
+
+
+def _check_mla_prolog(heads, tokens, *, replay):
     torch.manual_seed(2026)
     device = "npu"
     dtype = torch.bfloat16
@@ -42,27 +51,56 @@ def test_dsv41_mla_prolog(heads, tokens):
     slots = torch.tensor(valid_slots, dtype=torch.int64, device=device)
     # Model cache views can have gaps between pages.
     cache = torch.full((pages, block_size + 2, 1, head_dim), 17, dtype=dtype, device=device)
-    reference_cache = cache.clone()
+    args = (x, wqa, gamma_qa, wqb, wqb_scale, wkv, gamma_kv, cos, sin)
 
-    qr_ref, _ = torch_npu.npu_rms_norm(F.linear(x, wqa), gamma_qa, epsilon)
-    kv_ref, _ = torch_npu.npu_rms_norm(F.linear(x, wkv), gamma_kv, epsilon)
-    q_int8, token_scale = torch_npu.npu_dynamic_quant(qr_ref)
-    q_ref = torch_npu.npu_quant_matmul(q_int8, wqb, wqb_scale, pertoken_scale=token_scale, output_dtype=dtype).view(
-        tokens, heads, head_dim
-    )
-    kv_ref = kv_ref.view(tokens, 1, head_dim)
-    for tensor in (q_ref, kv_ref):
-        DeviceOperator.apply_partial_rotary_inplace(tensor, cos, sin, start=head_dim - rope_dim, end=head_dim)
-    for index, slot in enumerate(valid_slots):
-        if 0 <= slot < pages * block_size:
-            reference_cache[slot // block_size, slot % block_size] = kv_ref[index]
+    def reference():
+        qr, _ = torch_npu.npu_rms_norm(F.linear(x, wqa), gamma_qa, epsilon)
+        kv, _ = torch_npu.npu_rms_norm(F.linear(x, wkv), gamma_kv, epsilon)
+        q_int8, token_scale = torch_npu.npu_dynamic_quant(qr)
+        q = torch_npu.npu_quant_matmul(q_int8, wqb, wqb_scale, pertoken_scale=token_scale, output_dtype=dtype)
+        q = q.view(tokens, heads, head_dim)
+        kv = kv.view(tokens, 1, head_dim)
+        for tensor in (q, kv):
+            DeviceOperator.apply_partial_rotary_inplace(tensor, cos, sin, start=head_dim - rope_dim, end=head_dim)
+        return q, qr, kv
 
-    q, qr = torch.ops._C_ascend.dsv41_mla_prolog(
-        x, wqa, gamma_qa, wqb, wqb_scale, wkv, gamma_kv, cos, sin, slots, cache[:, :block_size], epsilon
-    )
+    def fused_write():
+        return torch.ops._C_ascend.dsv41_mla_prolog(*args, slots, cache[:, :block_size], epsilon)
 
-    torch.testing.assert_close(qr, qr_ref, rtol=0.02, atol=0.02)
-    torch.testing.assert_close(q, q_ref, rtol=0.03, atol=0.03)
-    torch.testing.assert_close(cache, reference_cache, rtol=0.02, atol=0.02)
-    unwritten = reference_cache[..., 0] == 17
-    torch.testing.assert_close(cache[unwritten], reference_cache[unwritten], rtol=0, atol=0)
+    def check_cache(q, qr, expected_slots):
+        q_ref, qr_ref, kv_ref = reference()
+        reference_cache = torch.full_like(cache, 17)
+        for index, slot in enumerate(expected_slots):
+            if 0 <= slot < pages * block_size:
+                reference_cache[slot // block_size, slot % block_size] = kv_ref[index]
+        torch.testing.assert_close(qr, qr_ref, rtol=0.02, atol=0.02)
+        torch.testing.assert_close(q, q_ref, rtol=0.03, atol=0.03)
+        torch.testing.assert_close(cache, reference_cache, rtol=0.02, atol=0.02)
+        unwritten = reference_cache[..., 0] == 17
+        torch.testing.assert_close(cache[unwritten], reference_cache[unwritten], rtol=0, atol=0)
+
+    if replay:
+        # Capture with dummy slots, then exercise two different live-token masks.
+        slots.fill_(-1)
+        fused_write()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            q, qr = fused_write()
+
+        for replay_slots in ([127, 128, -1], [256, -1, -1]):
+            x.normal_()
+            angles = torch.randn_like(angles[..., ::2]).repeat_interleave(2, dim=-1)
+            cos.copy_(angles.cos())
+            sin.copy_(angles.sin())
+            slots.copy_(torch.tensor(replay_slots, dtype=slots.dtype, device=device))
+            cache.fill_(17)
+            graph.replay()
+            check_cache(q, qr, replay_slots)
+    else:
+        check_cache(*fused_write(), valid_slots)
+        q_ref, qr_ref, kv_ref = reference()
+        q, qr, kv = torch.ops._C_ascend.dsv41_mla_prolog_no_cache(*args, epsilon)
+        torch.testing.assert_close(qr, qr_ref, rtol=0.02, atol=0.02)
+        torch.testing.assert_close(q, q_ref, rtol=0.03, atol=0.03)
+        torch.testing.assert_close(kv, kv_ref.squeeze(1), rtol=0.02, atol=0.02)

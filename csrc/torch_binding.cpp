@@ -3101,6 +3101,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor(a!) kv_cache, float epsilon) -> (Tensor, Tensor)");
     ops.impl("dsv41_mla_prolog", torch::kPrivateUse1,
              &vllm_ascend::dsv41_mla_prolog_npu);
+    ops.def(
+        "dsv41_mla_prolog_no_cache(Tensor x, Tensor wq_a, Tensor gamma_q_a, "
+        "Tensor wq_b, Tensor wq_b_scale, Tensor wkv, Tensor gamma_kv, "
+        "Tensor rope_cos, Tensor rope_sin, float epsilon) -> (Tensor, Tensor, Tensor)");
+    ops.impl("dsv41_mla_prolog_no_cache", torch::kPrivateUse1,
+             &vllm_ascend::dsv41_mla_prolog_no_cache_npu);
 #endif
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)

@@ -6,9 +6,10 @@
 #ifndef DSV41_MLA_PROLOG_TORCH_ADPT_H_
 #define DSV41_MLA_PROLOG_TORCH_ADPT_H_
 
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 
-#include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <cmath>
 #include <tuple>
 
 #include "../../direct_kernels/dsv41_mla_prolog/dsv41_mla_prolog_direct_api.h"
@@ -16,11 +17,11 @@
 
 namespace vllm_ascend {
 
-inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
+inline std::tuple<at::Tensor, at::Tensor, at::Tensor> run_dsv41_mla_prolog(
     const at::Tensor &x, const at::Tensor &wQa, const at::Tensor &gammaQa,
     const at::Tensor &wQb, const at::Tensor &wQbScale, const at::Tensor &wKv,
     const at::Tensor &gammaKv, const at::Tensor &cos, const at::Tensor &sin,
-    const at::Tensor &slotMapping, at::Tensor &kvCache, double epsilon)
+    const at::Tensor *slotMapping, const at::Tensor *kvCache, double epsilon)
 {
     using namespace Dsv41;
     TORCH_CHECK(x.dim() == 2, "x must have two dimensions.");
@@ -62,29 +63,34 @@ inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
             cos.numel() == x.size(0) * kRopeDim &&
             sin.numel() == x.size(0) * kRopeDim,
         "rope_cos/rope_sin must be FP32 with T * 64 values.");
-    TORCH_CHECK(
-        slotMapping.dim() == 1 && slotMapping.size(0) == numTokens &&
-            slotMapping.scalar_type() == at::kLong,
-        "slot_mapping must be [T] flat INT64 indices.");
-    TORCH_CHECK(
-        kvCache.device() == x.device() &&
-            (kvCache.dim() == 3 || (kvCache.dim() == 4 && kvCache.size(2) == 1)),
-        "kv_cache must be [pages, 128, 512] or [pages, 128, 1, 512].");
-    const bool blockDimOk = kvCache.size(0) > 0 &&
-        kvCache.size(1) == kCacheRowsPerPage && kvCache.size(-1) == kHeadDim;
-    TORCH_CHECK(
-        blockDimOk && kvCache.scalar_type() == at::kBFloat16,
-        "kv_cache must be BF16 with 128 rows per page and head size 512.");
-    TORCH_CHECK(
-        kvCache.stride(-1) == 1 && kvCache.stride(1) >= kHeadDim &&
-            (kvCache.size(0) == 1 ||
-             kvCache.stride(0) >= (kCacheRowsPerPage - 1) * kvCache.stride(1) + kHeadDim),
-        "kv_cache rows must be dense; page/block strides may contain gaps.");
-    TORCH_CHECK(epsilon > 0.0, "epsilon must be positive.");
+    if (kvCache != nullptr) {
+        TORCH_CHECK(
+            slotMapping->dim() == 1 && slotMapping->size(0) == numTokens &&
+                slotMapping->scalar_type() == at::kLong,
+            "slot_mapping must be [T] flat INT64 indices.");
+        TORCH_CHECK(
+            kvCache->device() == x.device() &&
+                (kvCache->dim() == 3 || (kvCache->dim() == 4 && kvCache->size(2) == 1)),
+            "kv_cache must be [pages, 128, 512] or [pages, 128, 1, 512].");
+        const bool blockDimOk = kvCache->size(0) > 0 &&
+            kvCache->size(1) == kCacheRowsPerPage && kvCache->size(-1) == kHeadDim;
+        TORCH_CHECK(
+            blockDimOk && kvCache->scalar_type() == at::kBFloat16,
+            "kv_cache must be BF16 with 128 rows per page and head size 512.");
+        TORCH_CHECK(
+            kvCache->stride(-1) == 1 && kvCache->stride(1) >= kHeadDim &&
+                (kvCache->size(0) == 1 ||
+                 kvCache->stride(0) >= (kCacheRowsPerPage - 1) * kvCache->stride(1) + kHeadDim),
+            "kv_cache rows must be dense; page/block strides may contain gaps.");
+        TORCH_CHECK(slotMapping->device() == x.device() && slotMapping->is_contiguous(),
+            "slot_mapping must be contiguous and on the same device as x.");
+    }
+    const auto epsilonFp32 = static_cast<float>(epsilon);
+    TORCH_CHECK(std::isfinite(epsilonFp32) && epsilonFp32 > 0.0F, "epsilon must be finite and positive in FP32.");
 
     const auto device = x.device();
     const at::Tensor tensors[] = {
-        wQa, gammaQa, wQb, wQbScale, wKv, gammaKv, cos, sin, slotMapping, kvCache};
+        wQa, gammaQa, wQb, wQbScale, wKv, gammaKv, cos, sin};
     for (const auto &tensor : tensors) {
         TORCH_CHECK(
             tensor.device() == device,
@@ -92,7 +98,7 @@ inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
     }
 
     const at::Tensor denseInputs[] = {
-        wQa, gammaQa, wQbScale, wKv, gammaKv, cos, sin, slotMapping};
+        wQa, gammaQa, wQbScale, wKv, gammaKv, cos, sin};
     for (const auto &tensor : denseInputs) {
         TORCH_CHECK(tensor.is_contiguous(), "DeepSeek-V4.1 MLA prolog inputs must be contiguous.");
     }
@@ -108,6 +114,8 @@ inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
         at::empty({numTokens, numHeads, kHeadDim}, x.options());
     at::Tensor qr = at::empty({numTokens, kQa}, x.options());
 
+    at::Tensor kvOutput;
+
     Dsv41MlaPrologDirectArgs args{};
     args.x = reinterpret_cast<const uint16_t *>(x.data_ptr());
     args.wQa = reinterpret_cast<const uint16_t *>(wQa.data_ptr());
@@ -118,18 +126,23 @@ inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
     args.gammaKv = reinterpret_cast<const uint16_t *>(gammaKv.data_ptr());
     args.ropeCos = reinterpret_cast<const float *>(cos.data_ptr());
     args.ropeSin = reinterpret_cast<const float *>(sin.data_ptr());
-    args.slots = reinterpret_cast<const int64_t *>(slotMapping.data_ptr());
-    args.kvCache = reinterpret_cast<uint16_t *>(kvCache.data_ptr());
-    args.cacheStride0 = static_cast<uint64_t>(kvCache.stride(0));
-    args.cacheStride1 = static_cast<uint64_t>(kvCache.stride(1));
-    args.cachePages = static_cast<uint64_t>(kvCache.size(0));
+    if (kvCache != nullptr) {
+        args.slots = reinterpret_cast<const int64_t *>(slotMapping->data_ptr());
+        args.kvCache = reinterpret_cast<uint16_t *>(kvCache->data_ptr());
+        args.cacheStride0 = static_cast<uint64_t>(kvCache->stride(0));
+        args.cacheStride1 = static_cast<uint64_t>(kvCache->stride(1));
+        args.cachePages = static_cast<uint64_t>(kvCache->size(0));
+    } else {
+        kvOutput = at::empty({numTokens, kHeadDim}, x.options());
+        args.kvOutput = reinterpret_cast<uint16_t *>(kvOutput.data_ptr());
+    }
     args.numHeads = static_cast<uint32_t>(numHeads);
     args.qOutput = reinterpret_cast<uint16_t *>(qOutput.data_ptr());
     args.qr = reinterpret_cast<uint16_t *>(qr.data_ptr());
     args.workspace = workspace.data_ptr();
     args.workspaceSize = workspaceBytes;
     args.t = static_cast<int32_t>(numTokens);
-    args.epsilon = static_cast<float>(epsilon);
+    args.epsilon = epsilonFp32;
 
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
@@ -139,7 +152,27 @@ inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
             args, reinterpret_cast<void *>(stream));
     });
     cmd.Run();
-    return std::tuple<at::Tensor, at::Tensor>(qOutput, qr);
+    return {qOutput, qr, kvOutput};
+}
+
+inline std::tuple<at::Tensor, at::Tensor> dsv41_mla_prolog_npu(
+    const at::Tensor &x, const at::Tensor &wQa, const at::Tensor &gammaQa,
+    const at::Tensor &wQb, const at::Tensor &wQbScale, const at::Tensor &wKv,
+    const at::Tensor &gammaKv, const at::Tensor &cos, const at::Tensor &sin,
+    const at::Tensor &slotMapping, at::Tensor &kvCache, double epsilon)
+{
+    auto [q, qr, kv] = run_dsv41_mla_prolog(
+        x, wQa, gammaQa, wQb, wQbScale, wKv, gammaKv, cos, sin, &slotMapping, &kvCache, epsilon);
+    return {q, qr};
+}
+
+inline std::tuple<at::Tensor, at::Tensor, at::Tensor> dsv41_mla_prolog_no_cache_npu(
+    const at::Tensor &x, const at::Tensor &wQa, const at::Tensor &gammaQa,
+    const at::Tensor &wQb, const at::Tensor &wQbScale, const at::Tensor &wKv,
+    const at::Tensor &gammaKv, const at::Tensor &cos, const at::Tensor &sin, double epsilon)
+{
+    return run_dsv41_mla_prolog(
+        x, wQa, gammaQa, wQb, wQbScale, wKv, gammaKv, cos, sin, nullptr, nullptr, epsilon);
 }
 }  // namespace vllm_ascend
 

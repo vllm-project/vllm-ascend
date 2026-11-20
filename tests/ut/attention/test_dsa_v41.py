@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
@@ -395,50 +396,77 @@ def test_a5_indexer_uses_prequantized_query(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "device, enabled, eager, pcp, dcp, nz_mode, custom_ops, registered, expect_fused",
+    "device, enabled, mode, pcp, dcp, nz_mode, custom_ops, registered, expect_fused",
     [
-        (AscendDeviceType.A3, True, True, 1, 1, 1, True, True, True),
-        (AscendDeviceType.A2, True, True, 1, 1, 1, True, True, False),
-        (AscendDeviceType.A5, True, True, 1, 1, 1, True, True, False),
-        (AscendDeviceType.A3, False, True, 1, 1, 1, True, True, False),
-        (AscendDeviceType.A3, True, False, 1, 1, 1, True, True, False),
-        (AscendDeviceType.A3, True, True, 2, 1, 1, True, True, False),
-        (AscendDeviceType.A3, True, True, 1, 2, 1, True, True, False),
-        (AscendDeviceType.A3, True, True, 1, 1, 2, True, True, False),
-        (AscendDeviceType.A3, True, True, 1, 1, 1, False, True, False),
-        (AscendDeviceType.A3, True, True, 1, 1, 1, True, False, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 1, 1, 1, True, True, True),
+        (AscendDeviceType.A2, True, CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A5, True, CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, False, CUDAGraphMode.NONE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, 1, True, True, True),
+        (AscendDeviceType.A3, True, CUDAGraphMode.FULL, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.PIECEWISE, 1, 1, 1, True, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 4, 1, 1, True, True, True),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 1, 2, 1, True, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 1, 1, 2, True, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 1, 1, 1, False, True, False),
+        (AscendDeviceType.A3, True, CUDAGraphMode.NONE, 1, 1, 1, True, False, False),
     ],
 )
 def test_mla_prologue_activation(
-    monkeypatch, device, enabled, eager, pcp, dcp, nz_mode, custom_ops, registered, expect_fused
+    monkeypatch, device, enabled, mode, pcp, dcp, nz_mode, custom_ops, registered, expect_fused
 ):
-    op = Mock()
+    ops = {"dsv41_mla_prolog": Mock(), "dsv41_mla_prolog_no_cache": Mock()} if registered else {}
     config = SimpleNamespace(
         ascend_fusion_config=SimpleNamespace(fuse_sparse_mla_prologue=enabled),
         weight_nz_mode=nz_mode,
     )
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(enforce_eager=eager),
+        model_config=SimpleNamespace(enforce_eager=False),
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
     )
     monkeypatch.setattr(dsa_v41, "get_current_hardware_profile", lambda: get_hardware_profile(device))
     monkeypatch.setattr(dsa_v41, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(dsa_v41, "enable_custom_op", lambda: custom_ops)
-    monkeypatch.setattr(torch.ops, "_C_ascend", SimpleNamespace(**({"dsv41_mla_prolog": op} if registered else {})))
+    monkeypatch.setattr(torch.ops, "_C_ascend", SimpleNamespace(**ops))
 
-    assert AscendDSAV41Impl._resolve_fused_mla_prolog(config) is (op if expect_fused else None)
+    assert AscendDSAV41Impl._resolve_fused_mla_prolog(config) == (tuple(ops.values()) if expect_fused else (None, None))
 
 
-@pytest.mark.parametrize("case", ["fused", "fallback", "pcp"])
-def test_mla_prologue_preserves_indexer_and_compression(case):
+@pytest.mark.parametrize(
+    "mode, prefills, decodes, replicated, fused_tokens, write_cache, op_succeeds",
+    [
+        (CUDAGraphMode.NONE, 0, 2, False, 2, True, True),
+        (CUDAGraphMode.NONE, 2, 0, False, 2, False, True),
+        (CUDAGraphMode.NONE, 1, 1, False, 2, False, True),
+        (CUDAGraphMode.NONE, 2, 0, True, 2, False, True),
+        (CUDAGraphMode.NONE, 0, 2, False, 2, True, False),
+        (CUDAGraphMode.FULL, 0, 1, False, 4, True, True),
+        (CUDAGraphMode.FULL, 1, 1, False, None, False, False),
+        (CUDAGraphMode.FULL, 0, 2, True, None, False, False),
+        (CUDAGraphMode.PIECEWISE, 0, 2, False, None, False, False),
+    ],
+)
+def test_mla_prologue_preserves_indexer_and_compression(
+    monkeypatch, mode, prefills, decodes, replicated, fused_tokens, write_cache, op_succeeds
+):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.multistream_dsv4_dsa_overlap = False
     impl._fused_mla_prolog = Mock()
-    x, q, qr, kv = (torch.empty(2, 4, dtype=torch.bfloat16) for _ in range(4))
-    cos, sin = torch.empty(2, 2), torch.empty(2, 2)
-    swa = SimpleNamespace(num_actual_tokens=2)
-    local_metadata = SimpleNamespace(swa=swa, rope=Mock(return_value=(cos, sin)))
-    global_metadata = SimpleNamespace() if case == "pcp" else local_metadata
+    impl._fused_mla_prolog_no_cache = Mock()
+    x = torch.empty(4, 4, dtype=torch.bfloat16)
+    q, qr, kv = (torch.empty(fused_tokens or 2, 4, dtype=x.dtype) for _ in range(3))
+    cos, sin = torch.empty(4, 2), torch.empty(4, 2)
+    swa = SimpleNamespace(
+        num_actual_tokens=2,
+        num_input_tokens=4,
+        num_prefills=prefills,
+        num_decodes=decodes,
+        num_reqs=2,
+        global_metadata=object() if replicated else None,
+    )
+    local_metadata = SimpleNamespace(swa=swa, rope=Mock(side_effect=lambda _, tokens: (cos[:tokens], sin[:tokens])))
+    global_metadata = SimpleNamespace() if replicated else local_metadata
     attn = SimpleNamespace(
         rotary_emb=SimpleNamespace(layername="test"),
         q_norm=Mock(return_value=qr),
@@ -446,60 +474,61 @@ def test_mla_prologue_preserves_indexer_and_compression(case):
         wq_b=Mock(return_value=q),
         head_dim=4,
     )
-    impl._try_fused_mla_prolog = Mock(return_value=(q, qr) if case == "fused" else None)
+    fused_result = (q, qr) if write_cache else (q, qr, kv)
+    impl._try_fused_mla_prolog = Mock(return_value=fused_result if op_succeeds else None)
     impl._project_kv = Mock(return_value=kv)
     impl._write_swa_cache = Mock()
     impl._apply_rotary = Mock()
     impl._prepare_indexer_inputs = Mock()
     impl._prepare_compressed_cache = Mock()
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=mode))
 
     q_out, indexer = impl._preprocess(attn, x, local_metadata, global_metadata)
 
+    assert q_out.data_ptr() == q.data_ptr()
+    assert q_out.size(0) == 2
     assert indexer is impl._prepare_indexer_inputs.return_value
-    indexer_args = impl._prepare_indexer_inputs.call_args.args
-    assert indexer_args[0] is attn
-    assert indexer_args[1].data_ptr() == x.data_ptr()
-    assert indexer_args[2] is qr
-    assert indexer_args[3] is cos and indexer_args[4] is sin
+    indexer_attn, indexer_x, indexer_qr, indexer_cos, indexer_sin = impl._prepare_indexer_inputs.call_args.args
+    assert indexer_attn is attn
+    assert indexer_x.data_ptr() == x.data_ptr()
+    assert indexer_qr.data_ptr() == qr.data_ptr()
+    assert indexer_x.size(0) == indexer_qr.size(0) == indexer_cos.size(0) == indexer_sin.size(0) == 2
     assert impl._prepare_compressed_cache.call_args.args[4:] == (local_metadata, global_metadata, indexer)
-    assert impl._try_fused_mla_prolog.call_count == int(case != "pcp")
-    if case == "fused":
-        assert q_out is q
+    if fused_tokens is None:
+        impl._try_fused_mla_prolog.assert_not_called()
+    else:
+        impl._try_fused_mla_prolog.assert_called_once()
+        _, fused_x, fused_cos, fused_sin, fused_swa = impl._try_fused_mla_prolog.call_args.args
+        assert fused_swa is swa
+        assert fused_x.size(0) == fused_cos.size(0) == fused_sin.size(0) == fused_tokens
+        assert impl._try_fused_mla_prolog.call_args.kwargs == {"write_cache": write_cache}
+    if op_succeeds:
         attn.wq_a.assert_not_called()
         impl._project_kv.assert_not_called()
-        impl._write_swa_cache.assert_not_called()
         impl._apply_rotary.assert_not_called()
     else:
-        assert q_out.data_ptr() == q.data_ptr()
         attn.wq_a.assert_called_once()
         impl._project_kv.assert_called_once()
-        impl._write_swa_cache.assert_called_once_with(attn, swa, kv)
         impl._apply_rotary.assert_called_once()
+    if op_succeeds and write_cache:
+        impl._write_swa_cache.assert_not_called()
+    else:
+        impl._write_swa_cache.assert_called_once_with(attn, swa, kv)
 
 
 @pytest.mark.parametrize(
-    "tokens, swa_overrides, packed_cache",
-    [
-        (0, {}, None),
-        (4097, {}, None),
-        (3, {"global_metadata": object()}, None),
-        (3, {"num_prefills": 1}, None),
-        (3, {"num_decodes": 2}, None),
-        (3, {"storage_block_size": 64}, None),
-        (3, {}, object()),
-    ],
+    "tokens, block_size, packed_cache",
+    [(0, 128, None), (4097, 128, None), (3, 64, None), (3, 128, object())],
 )
-def test_mla_prologue_skips_ineligible_batches(tokens, swa_overrides, packed_cache):
+@pytest.mark.parametrize("write_cache", [True, False])
+def test_mla_prologue_skips_ineligible_batches(tokens, block_size, packed_cache, write_cache):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl._fused_mla_prolog = Mock()
+    impl._fused_mla_prolog_no_cache = Mock()
     attn = SimpleNamespace(packed_cache_ops=packed_cache)
-    metadata = SimpleNamespace(
-        **(
-            {"global_metadata": None, "num_prefills": 0, "num_decodes": 3, "num_reqs": 3, "storage_block_size": 128}
-            | swa_overrides
-        ),
-    )
+    metadata = SimpleNamespace(storage_block_size=block_size)
     # Shape-only input ensures the batch gate exits before reading any weights.
     x = SimpleNamespace(shape=(tokens, 5120))
-    assert impl._try_fused_mla_prolog(attn, x, None, None, metadata) is None
+    assert impl._try_fused_mla_prolog(attn, x, None, None, metadata, write_cache=write_cache) is None
     impl._fused_mla_prolog.assert_not_called()
+    impl._fused_mla_prolog_no_cache.assert_not_called()

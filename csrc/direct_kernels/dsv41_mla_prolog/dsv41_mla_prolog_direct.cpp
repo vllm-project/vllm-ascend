@@ -21,11 +21,12 @@ bool Valid(const Dsv41MlaPrologDirectArgs &args)
     return args.x != nullptr && args.wQa != nullptr && args.gammaQa != nullptr &&
         args.wQb != nullptr && args.wQbScale != nullptr && args.wKv != nullptr &&
         args.gammaKv != nullptr && args.ropeCos != nullptr &&
-        args.ropeSin != nullptr && args.slots != nullptr &&
-        args.kvCache != nullptr && args.qOutput != nullptr && args.qr != nullptr &&
+        args.ropeSin != nullptr && args.qOutput != nullptr && args.qr != nullptr &&
+        (args.kvOutput != nullptr ||
+         (args.slots != nullptr && args.kvCache != nullptr && args.cachePages > 0)) &&
         args.workspace != nullptr && args.t > 0 &&
         args.t <= static_cast<int32_t>(Dsv41::kMaxT) &&
-        Dsv41::SupportsHeads(args.numHeads) && args.cachePages > 0 && args.epsilon > 0.0F;
+        Dsv41::SupportsHeads(args.numHeads) && args.epsilon > 0.0F;
 }
 
 uint32_t QueryAicCount()
@@ -122,6 +123,7 @@ int dsv41_mla_prolog_direct(
         reinterpret_cast<uint8_t *>(const_cast<float *>(args.ropeSin)),
         reinterpret_cast<uint8_t *>(const_cast<int64_t *>(args.slots)),
         reinterpret_cast<uint8_t *>(args.kvCache),
+        reinterpret_cast<uint8_t *>(args.kvOutput),
         args.cacheStride0,
         args.cacheStride1,
         args.cachePages,

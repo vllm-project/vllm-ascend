@@ -23,6 +23,7 @@ struct Dsv41MlaPrologDirectArgs {
     const float *ropeSin;
     const int64_t *slots;
     uint16_t *kvCache;
+    uint16_t *kvOutput; // Dense [T, 512] KV output in place of paged cache writes.
     uint64_t cacheStride0;
     uint64_t cacheStride1;
     uint64_t cachePages;

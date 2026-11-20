@@ -18,6 +18,7 @@ import torch_npu
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -359,11 +360,12 @@ class AscendDSAV41Impl:
     """
 
     _fused_mla_prolog = None
+    _fused_mla_prolog_no_cache = None
 
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        self._fused_mla_prolog = self._resolve_fused_mla_prolog(ascend_config)
+        self._fused_mla_prolog, self._fused_mla_prolog_no_cache = self._resolve_fused_mla_prolog(ascend_config)
         self.prefix = prefix
         self.layer_name = f"{prefix}.attn"
         self.role = role
@@ -382,17 +384,17 @@ class AscendDSAV41Impl:
             or config.weight_nz_mode != 1
             or not get_current_hardware_profile().supports(HardwareCapability.DSV41_MLA_PROLOG)
         ):
-            return None
+            return None, None
         vllm_config = get_current_vllm_config()
-        parallel = vllm_config.parallel_config
-        if (
-            not vllm_config.model_config.enforce_eager
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or not enable_custom_op()
+        if vllm_config.parallel_config.decode_context_parallel_size != 1 or not enable_custom_op():
+            return None, None
+        if not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.cudagraph_mode not in (
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
         ):
-            return None
-        return getattr(torch.ops._C_ascend, "dsv41_mla_prolog", None)
+            return None, None
+        ops = torch.ops._C_ascend
+        return getattr(ops, "dsv41_mla_prolog", None), getattr(ops, "dsv41_mla_prolog_no_cache", None)
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
         swa = metadata[self.swa_prefix]
@@ -460,15 +462,12 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, metadata, metadata)
 
-    def _try_fused_mla_prolog(self, attn, x, cos, sin, metadata):
+    def _try_fused_mla_prolog(self, attn, x, cos, sin, metadata, *, write_cache):
+        op = self._fused_mla_prolog if write_cache else self._fused_mla_prolog_no_cache
         tokens = x.shape[0]
-        # Prefill and mixed batches can reuse SWA rows within a step. Keep
-        # their existing writes, as well as PCP's replicated-cache gather.
         if (
-            not 0 < tokens <= 4096
-            or metadata.global_metadata is not None
-            or metadata.num_prefills != 0
-            or metadata.num_decodes != metadata.num_reqs
+            op is None
+            or not 0 < tokens <= 4096
             or metadata.storage_block_size != 128
             or getattr(attn, "packed_cache_ops", None) is not None
         ):
@@ -483,23 +482,29 @@ class AscendDSAV41Impl:
         ):
             return None
 
-        cache = attn.dsa_attn.swa_cache_layer.kv_cache
-        slots = metadata.flat_slot_mapping
-        if (
-            not isinstance(cache, torch.Tensor)
-            or cache.dtype != torch.bfloat16
-            or cache.device != x.device
-            or cache.ndim not in (3, 4)
-            or cache.shape[1:] not in ((128, 512), (128, 1, 512))
-            or cache.shape[0] == 0
-            or cache.stride(-1) != 1
-            or cache.stride(1) < 512
-            or (cache.shape[0] > 1 and cache.stride(0) < 127 * cache.stride(1) + 512)
-            or slots is None
-            or slots.ndim != 1
-            or slots.shape[0] < tokens
-        ):
-            return None
+        cache_args = ()
+        if write_cache:
+            cache = attn.dsa_attn.swa_cache_layer.kv_cache
+            slots = metadata.flat_slot_mapping
+            if (
+                not isinstance(cache, torch.Tensor)
+                or cache.dtype != torch.bfloat16
+                or cache.device != x.device
+                or cache.ndim not in (3, 4)
+                or cache.shape[1:] not in ((128, 512), (128, 1, 512))
+                or cache.shape[0] == 0
+                or cache.stride(-1) != 1
+                or cache.stride(1) < 512
+                or (cache.shape[0] > 1 and cache.stride(0) < 127 * cache.stride(1) + 512)
+                or slots is None
+                or slots.ndim != 1
+                or slots.shape[0] < tokens
+                or slots.dtype != torch.int64
+                or slots.device != x.device
+                or not slots.is_contiguous()
+            ):
+                return None
+            cache_args = (slots[:tokens], cache)
 
         scheme = getattr(attn.wq_b.quant_method, "quant_method", None)
         if type(scheme) is not AscendW8A8DynamicLinearMethod:
@@ -534,21 +539,16 @@ class AscendDSAV41Impl:
             for tensor, shape in bf16_inputs
         ):
             return None
-        if (
-            slots.dtype != torch.int64
-            or slots.device != x.device
-            or not slots.is_contiguous()
-            or any(
-                tensor.shape != (tokens, 1, 1, 64)
-                or tensor.dtype != torch.float32
-                or tensor.device != x.device
-                or not tensor.is_contiguous()
-                for tensor in (cos, sin)
-            )
+        if any(
+            tensor.shape != (tokens, 1, 1, 64)
+            or tensor.dtype != torch.float32
+            or tensor.device != x.device
+            or not tensor.is_contiguous()
+            for tensor in (cos, sin)
         ):
             return None
 
-        return self._fused_mla_prolog(
+        return op(
             x,
             attn.wq_a.weight,
             attn.q_norm.weight,
@@ -558,8 +558,7 @@ class AscendDSAV41Impl:
             attn.kv_norm.weight,
             cos,
             sin,
-            slots[:tokens],
-            cache,
+            *cache_args,
             eps,
         )
 
@@ -569,19 +568,37 @@ class AscendDSAV41Impl:
         All projections use the same local hidden states and RoPE. Global
         metadata addresses the gathered caches; without PCP both views coincide.
         """
-        hidden_states = hidden_states[: local_metadata.swa.num_actual_tokens]
-        cos, sin = (
-            local_metadata.rope(attn.rotary_emb.layername, hidden_states.shape[0])
-            if hidden_states.shape[0]
-            else (None, None)
-        )
-        fused = (
-            self._try_fused_mla_prolog(attn, hidden_states, cos, sin, local_metadata.swa)
-            if self._fused_mla_prolog is not None and local_metadata is global_metadata
-            else None
-        )
+        swa = local_metadata.swa
+        num_tokens = swa.num_actual_tokens
+        cos, sin = local_metadata.rope(attn.rotary_emb.layername, num_tokens) if num_tokens else (None, None)
+        fused = None
+        if self._fused_mla_prolog is not None or self._fused_mla_prolog_no_cache is not None:
+            mode = get_forward_context().cudagraph_runtime_mode
+            replicated_cache = local_metadata is not global_metadata or swa.global_metadata is not None
+            pure_decode = swa.num_prefills == 0 and (mode == CUDAGraphMode.FULL or swa.num_decodes == swa.num_reqs)
+            # Prefill and PCP retain the framework's SWA write ordering and gathers.
+            write_cache = pure_decode and not replicated_cache
+            if mode == CUDAGraphMode.NONE or (mode == CUDAGraphMode.FULL and write_cache):
+                fused_tokens = swa.num_input_tokens if mode == CUDAGraphMode.FULL else num_tokens
+                if 0 < fused_tokens <= hidden_states.shape[0]:
+                    # A replay uses the capture bucket's shape and persistent slots.
+                    fused_cos, fused_sin = cos, sin
+                    if fused_tokens != num_tokens:
+                        fused_cos, fused_sin = local_metadata.rope(attn.rotary_emb.layername, fused_tokens)
+                    fused = self._try_fused_mla_prolog(
+                        attn, hidden_states[:fused_tokens], fused_cos, fused_sin, swa, write_cache=write_cache
+                    )
+
+        hidden_states = hidden_states[:num_tokens]
         if fused is not None:
-            q, qr = fused
+            if write_cache:
+                q, qr = fused
+                # Keep the attention and compressor query shape used by the runner.
+                if fused_tokens != num_tokens:
+                    q, qr = q[:num_tokens], qr[:num_tokens]
+            else:
+                q, qr, kv = fused
+                self._write_swa_cache(attn, swa, kv)
         elif hidden_states.shape[0] and self.multistream_dsv4_dsa_overlap:
             q, qr = self._multistream_qkv(attn, hidden_states, cos, sin, local_metadata.swa)
         else:

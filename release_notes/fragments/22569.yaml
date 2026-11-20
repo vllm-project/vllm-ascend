@@ -2,8 +2,9 @@ pr: 22569
 entries:
   - category: performance
     text: >-
-      Added an opt-in fused MLA prologue for eligible DeepSeek-V4.1-Flash eager
-      decode batches on Atlas A3. Set ascend_fusion_config.fuse_sparse_mla_prologue
+      Added an opt-in fused MLA prologue for eligible DeepSeek-V4.1-Flash batches
+      on Atlas A3, with framework KV writes for eager prefill and fused KV writes
+      for pure decode in eager or full decode-only ACL Graph mode. Set ascend_fusion_config.fuse_sparse_mla_prologue
       to true in --additional-config with weight_nz_mode set to 1.
     model: DeepSeek-V4.1-Flash
     hardware: [A3]

@@ -2838,27 +2838,34 @@ headroom for the KV cache.
 
 ### 9.1 Fused MLA Prologue on Atlas A3
 
-Enable this path for eligible pure decode batches of DeepSeek-V4.1-Flash on Atlas A3. Use a
-build with A3 custom operators, tensor parallel size 1, 2, or 4, and a compatible checkpoint.
-The attention weights must provide BF16 ND `wq_a` and `wkv` projections and a
-`W8A8_DYNAMIC` `wq_b` projection with BF16 per-channel scales. For a ModelSlim
-checkpoint, use `--quantization ascend`.
+Enable this path for eligible prefill and decode batches of DeepSeek-V4.1-Flash on Atlas A3.
+Use a build with A3 custom operators, tensor parallel size 1, 2, or 4, and a compatible checkpoint.
+The attention projections `wq_a` and `wkv` must use BF16 ND weights. The `wq_b` projection must
+use `W8A8_DYNAMIC` with an INT8 FRACTAL_NZ weight and BF16 per-channel scales. For a
+ModelSlim checkpoint, use `--quantization ascend`. Check the attention tensor layouts even
+when the checkpoint is labeled W4A8.
 
-Add these options to the A3 colocated or decode-server command. Merge the two JSON
-settings into your existing `--additional-config` value and remove the
-`--compilation-config` option for graph capture.
+Merge the JSON entries into the existing `--additional-config` object on each server
+where you want to enable the fusion.
 
 ```bash
---enforce-eager \
 --dtype bfloat16 --kv-cache-dtype auto --block-size 128 \
---prefill-context-parallel-size 1 --decode-context-parallel-size 1 \
+--decode-context-parallel-size 1 \
 --additional-config '{"weight_nz_mode":1,"ascend_fusion_config":{"fuse_sparse_mla_prologue":true}}'
 ```
 
-The switch defaults to `false`. With the switch enabled, A2 and A5, prefill and mixed
-batches, and batches that fail the kernel's shape or cache checks use the existing
-attention path. To verify activation, look for `dsv41_mla_prolog` in the NPU
-profiler during pure decode.
+- **Prefill server**. Use eager execution (`--enforce-eager` or `cudagraph_mode=NONE`).
+  The prologue returns KV rows for the existing framework writer, including its
+  gather when prefill context parallelism is active. Eager mixed batches use the same path.
+- **Decode server**. Use `--prefill-context-parallel-size 1` and add
+  `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` with `--enforce-eager`
+  omitted. The prologue writes SWA KV directly, using the capture bucket's token
+  shape and skipping padded slots. Eager pure decode is also supported.
+
+The switch defaults to `false`. Ineligible devices, graph modes, batches and tensor
+layouts use the existing attention implementation. In an NPU profile, look for
+`dsv41_mla_prolog` on Decode or `dsv41_mla_prolog_no_cache` on Prefill at the
+PyTorch operator level.
 
 ### 9.2 Tool-Assisted Tuning with msmodeling
 
