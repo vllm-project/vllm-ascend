@@ -21,7 +21,6 @@ UNVERIFIED_GPU_WORKER_METHODS = (
     "checkpoint_restore",
     "_scoped_allocator_max_split",
     "_init_workspace_and_model_runner",
-    "_make_model_runner",
     "handle_ft_command",
     "_compile_or_warm_up_model",
     "_maybe_activate_jit_monitor",
