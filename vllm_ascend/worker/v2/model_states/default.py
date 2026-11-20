@@ -383,7 +383,9 @@ class AscendModelState(DefaultModelState):
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+    def dummy_inputs_embeds(self, num_tokens: int, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if input_ids is not None:
+            return super().dummy_inputs_embeds(num_tokens, input_ids)
         if embedding_tp_enable():
             if not hasattr(self, "_embedding_tp_dummy_join"):
                 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding, VocabParallelMode
@@ -445,6 +447,14 @@ class AscendModelState(DefaultModelState):
             return prepare_engram_graph_inputs(num_tokens)
         return {}
 
+    def _check_finegrained_tp_idle_graph_step(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if (
+            ring_state_update_skipped()
+            and cudagraph_mode == CUDAGraphMode.NONE
+            and get_ascend_config().finegrained_tp_config.requires_graph(self.vllm_config)
+        ):
+            raise RuntimeError("Fine-grained projection / MLP TP require every DP rank on a captured graph.")
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -458,6 +468,7 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        self._check_finegrained_tp_idle_graph_step(cudagraph_mode)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:

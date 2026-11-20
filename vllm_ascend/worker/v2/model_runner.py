@@ -217,9 +217,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
         ftpc = self.ascend_config.finegrained_tp_config
-        self._finegrained_tp_requires_graph = (
-            ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1
-        ) and self.dp_size > 1
+        self._finegrained_tp_requires_graph = ftpc.requires_graph(vllm_config) and self.dp_size > 1
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -882,7 +880,7 @@ class NPUModelRunner(GPUModelRunner):
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
             raise RuntimeError(
-                "o_proj / MLP TP require every step on a captured graph: this step dispatched "
+                "Fine-grained projection / MLP TP require every step on a captured graph: this step dispatched "
                 "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."

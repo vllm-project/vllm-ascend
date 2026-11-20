@@ -1166,7 +1166,7 @@ def test_native_pcp_dcp_packed_kv_preserves_gathered_payload_addresses(
     impl.indexer = Mock(return_value=torch.zeros(len(local), 1, 1, dtype=torch.int32))
     impl._execute_sparse_flash_attention_process = Mock(return_value=hidden)
     impl._v_up_proj = lambda values: values
-    impl._finalize_o_proj = lambda values, output: output.copy_(values)
+    impl.o_proj = lambda values: (values, None)
 
     def quantize(values, *_args, **_kwargs):
         rows = len(values)
