@@ -81,7 +81,11 @@ def build_pool_key_namespace(
 
 
 def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
-    """Pass the original size through Core's config copies on the padded descriptors."""
+    """Reserve alignment padding once for the device slab shared by all device descriptors.
+
+    Core uses their common size for one allocation. Only the device descriptors need
+    replacing, so the allocation config can share the original groups and Host descriptors.
+    """
     original_tensors = kv_cache_config.kv_cache_tensors
     device_sizes = {
         tensor.logical_size if isinstance(tensor, AlignedKVCacheTensor) else tensor.size
@@ -140,15 +144,16 @@ def plan_hisparse_store_views(
     from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
 
     host_num_blocks = config.hisparse_host_num_blocks
-    assert host_num_blocks is not None
-    excluded = set()
-    normalized = {}
+    if host_num_blocks is None:
+        raise ValueError("HiSparse Host pool must be sized before AscendStore registers KV cache views.")
+    excluded_layer_names = set()
+    normalized_caches = {}
     host_layers = set()
     host_storage_base_ptrs: set[int] = set()
     host_memory_group_ids = set()
     for group_id, group in enumerate(config.kv_cache_groups):
         if not group.enable_kv_transfer:
-            excluded.update(group.layer_names)
+            excluded_layer_names.update(group.layer_names)
             continue
         if group.host_resident:
             host_memory_group_ids.add(group_id)
@@ -156,19 +161,23 @@ def plan_hisparse_store_views(
             parts = as_cache_tuple(kv_caches[name])
             if group.role == "hisparse_indexer":
                 parts = hisparse_indexer_transfer_views(parts, forward_context[name])
-            normalized[name] = parts
+            normalized_caches[name] = parts
             if group.host_resident:
                 host_layers.add(name)
                 host_storage_base_ptrs.update(get_storage_key(part) for part in parts)
     layout = HiSparseStoreViews(
         host_num_blocks, frozenset(host_layers), frozenset(host_storage_base_ptrs), frozenset(host_memory_group_ids)
     )
-    return layout, normalized, excluded
+    return layout, normalized_caches, excluded_layer_names
 
 
 def _hisparse_page_geometry(kv_cache_config: KVCacheConfig, dcp_size: int, transfer_granularity: int) -> tuple:
-    # Include planned page geometry, never addresses or pool capacity. Bump
-    # the key version for any serialization change outside these fields.
+    """Fingerprint transferable groups and block strides for the external key namespace.
+
+    Each layer contributes its name, dtype, tokens per block, bytes per page, head size,
+    KV head count, scale dimension and scale dtype, in that order. Addresses and pool
+    capacity may vary between workers. Bump the namespace for incompatible format changes.
+    """
     groups = []
     layers = set()
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):

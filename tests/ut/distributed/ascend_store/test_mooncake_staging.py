@@ -96,6 +96,20 @@ def test_get_rejects_malformed_sdk_results(registered):
     assert host.raw[:8] == b"........"
 
 
+def test_unknown_memory_location_rejected_before_copy_or_sdk(registered, monkeypatch):
+    bulk, sdk, host, _ = registered
+    memmove = Mock()
+    monkeypatch.setattr(ctypes, "memmove", memmove)
+    args = (["bad"], [[ctypes.addressof(host)]], [[8]])
+    with pytest.raises(ValueError, match="PUT memory location"):
+        bulk.put(*args, None, memory_location="host")
+    with pytest.raises(ValueError, match="GET memory location"):
+        bulk.get(*args, memory_location="host")
+    memmove.assert_not_called()
+    sdk.batch_put_from_multi_buffers.assert_not_called()
+    sdk.batch_get_into_multi_buffers.assert_not_called()
+
+
 @pytest.mark.parametrize(("offset", "size", "message"), [(28, 8, "outside"), (0, 18, "capacity")])
 def test_invalid_host_geometry_never_reaches_sdk(registered, offset, size, message):
     bulk, sdk, host, _ = registered

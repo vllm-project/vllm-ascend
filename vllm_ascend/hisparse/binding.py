@@ -29,28 +29,32 @@ def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[s
         ):
             raise RuntimeError("HiSparse AscendStore device views require a slab alignment reservation.")
         return []
-    size, alignment = reserved[0].logical_size, reserved[0].alignment
+    logical_size_bytes, alignment = reserved[0].logical_size, reserved[0].alignment
     if len(reserved) != len(device_tensors) or any(
-        (t.logical_size, t.alignment) != (size, alignment) for t in reserved
+        (t.logical_size, t.alignment) != (logical_size_bytes, alignment) for t in reserved
     ):
         raise ValueError("HiSparse device views require a consistent slab alignment reservation.")
     first_view = kv_caches[reserved[0].layers[0]]
-    owner = first_view.untyped_storage()
-    start = -owner.data_ptr() % alignment
-    if owner.nbytes() != size + alignment - 1:
+    backing_storage = first_view.untyped_storage()
+    reserved_bytes = logical_size_bytes + alignment - 1
+    if backing_storage.nbytes() < reserved_bytes:
         raise ValueError("HiSparse device slab is missing its reserved alignment padding.")
 
-    # Core binds Resident and Hot using offsets from the storage base. Use
-    # one storage slice for all device views so those offsets still start at 0.
-    aligned_storage = owner[start : start + size]
+    # Skip the fewest bytes needed to reach the next aligned address (zero if aligned).
+    align_offset_bytes = -backing_storage.data_ptr() % alignment
+    aligned_storage = backing_storage[align_offset_bytes : align_offset_bytes + logical_size_bytes]
     for tensor in reserved:
         for name in tensor.layers:
             view = kv_caches[name]
-            if view.untyped_storage().data_ptr() != owner.data_ptr():
+            if view.untyped_storage().data_ptr() != backing_storage.data_ptr():
                 raise ValueError("HiSparse device cache views must share one backing allocation.")
-            if view.ndim == 1 and view.numel() == owner.nbytes():  # Raw Resident and Hot slab.
-                kv_caches[name] = view.new_empty(0).set_(aligned_storage, 0, (size,), (1,))
+            if view.ndim == 1 and view.element_size() == 1:
+                # Core gives Resident and Hot the flat byte buffer. Drop all allocator padding.
+                if view.storage_offset() != 0 or view.stride(0) != 1 or view.numel() < reserved_bytes:
+                    raise ValueError("HiSparse raw device view must cover the reserved slab from its base.")
+                kv_caches[name] = view.new_empty(0).set_(aligned_storage, 0, (logical_size_bytes,), (1,))
             else:
+                # Typed offsets are in elements and remain relative to the shared slab base.
                 kv_caches[name] = view.new_empty(0).set_(
                     aligned_storage, view.storage_offset(), view.size(), view.stride()
                 )
@@ -60,7 +64,10 @@ def _align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[s
 def prepare_hisparse_cache_views(
     kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any], forward_context: dict[str, Any]
 ) -> None:
-    """Publish the aligned slab and indexer views only after every view is valid."""
+    """Replace the view objects before Core binds them to layers or registers them with connectors.
+
+    Callers that retain individual tensors before this hook would keep the original views.
+    """
     prepared_caches = kv_caches.copy()
     reserved = _align_hisparse_slab_views(kv_cache_config, prepared_caches)
     _bind_indexer_views(prepared_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)

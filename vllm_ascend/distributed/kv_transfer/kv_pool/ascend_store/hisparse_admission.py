@@ -36,9 +36,9 @@ class AscendStoreHiSparseResidentManager(HiSparseResidentManager):
             # Core constructs this manager with the same spec-derived cap it
             # uses for startup sizing. Bound the uncached suffix by that cap
             # and let Core account for the writable imported tail separately.
-            imported_pages = cdiv(total_computed_tokens, self.block_size)
+            total_computed_pages = cdiv(total_computed_tokens, self.block_size)
             existing_pages = len(self.req_to_blocks.get(request_id, ()))
-            limit_pages = max(imported_pages, existing_pages) + self.max_admission_blocks_per_request
+            limit_pages = max(total_computed_pages, existing_pages) + self.max_admission_blocks_per_request
             num_tokens = min(num_tokens, limit_pages * self.block_size)
 
         return super().get_num_blocks_to_allocate(

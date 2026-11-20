@@ -11,6 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.hisparse.layout import get_hisparse_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupRole,
+    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     SparseCacheRole,
@@ -105,9 +107,14 @@ def memcache_backend() -> MemcacheBackend:
     return backend
 
 
-@pytest.mark.parametrize("misalignment", [0, 1, SLAB_ALIGNMENT - 1])
+@pytest.mark.parametrize(
+    ("misalignment", "storage_tail", "view_tail"),
+    [(0, 0, 0), (1, 0, 0), (SLAB_ALIGNMENT - 1, 0, 0), (1, 4096, 0), (1, 4096, 4096)],
+)
 @pytest.mark.parametrize("indexer_c8", [False, True])
-def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool, misalignment: int) -> None:
+def test_hisparse_groups_register_with_independent_host_blocks(
+    indexer_c8: bool, misalignment: int, storage_tail: int, view_tail: int
+) -> None:
     pytest.importorskip("vllm.v1.hisparse.backend", reason="requires the HiSparse backend extension")
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 
@@ -161,10 +168,12 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     )
     source = aligned_tensor(num_host_blocks * 32768).view(torch.bfloat16).view(num_host_blocks, 128, 1, 128)
     padded_size = size + SLAB_ALIGNMENT - 1
-    backing = aligned_tensor(padded_size + misalignment)
+    backing = aligned_tensor(padded_size + misalignment + storage_tail)
     storage = backing.untyped_storage()
     begin = backing.storage_offset() + misalignment
-    owner = torch.empty(0, dtype=torch.int8).set_(storage[begin : begin + padded_size], 0, (padded_size,), (1,))
+    owner = torch.empty(0, dtype=torch.int8).set_(
+        storage[begin : begin + padded_size + storage_tail], 0, (padded_size + view_tail,), (1,)
+    )
     assert owner.data_ptr() % SLAB_ALIGNMENT == misalignment
     context = {source_name: SimpleNamespace(), indexer_name: SimpleNamespace()}
     allocation_config = aligned_hisparse_allocation_config(cache_config)
@@ -287,10 +296,34 @@ def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
     assert caches["cache"] is original
 
 
+@pytest.mark.parametrize("raw_view", [lambda buf: buf[1:], lambda buf: buf[::2], lambda buf: buf[:128]])
+def test_hisparse_rejects_incomplete_raw_view_with_larger_storage(raw_view):
+    tensor = KVCacheTensor(128, ["resident"], 0, 128)
+    config = aligned_hisparse_allocation_config(KVCacheConfig(1, [tensor], []))
+    reserved_bytes = config.kv_cache_tensors[0].size
+    raw = raw_view(torch.empty(2 * reserved_bytes, dtype=torch.int8))
+    caches = {"resident": raw}
+    with pytest.raises(ValueError, match="cover the reserved slab from its base"):
+        prepare_hisparse_cache_views(config, caches, {})
+    assert caches["resident"] is raw
+    assert config.kv_cache_tensors[0].size == reserved_bytes
+
+
+def test_register_hisparse_views_requires_sized_host_pool():
+    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    source = KVCacheGroupSpec(["source"], spec, host_resident=True, role=KVCacheGroupRole.HISPARSE_SOURCE)
+    worker = KVPoolWorker.__new__(KVPoolWorker)
+    worker.use_recoverssm = False
+    worker.kv_cache_config = KVCacheConfig(1, [], [source])
+    worker.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(static_forward_context={}))
+    worker.m_store = Mock()
+    with pytest.raises(ValueError, match="Host pool must be sized"):
+        worker.register_kv_caches({})
+    worker.m_store.register_buffer.assert_not_called()
+
+
 @pytest.mark.parametrize("failure", ["bad-indexer-shape", "bad-slab-owner", "missing-context"])
 def test_hisparse_late_view_failure_leaves_all_bindings_untouched(failure):
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-
     names = ["indexer.0", "indexer.1", "indexer.2"]
     size = 3 * 128 * 128 * torch.bfloat16.itemsize
     padded_size = size + SLAB_ALIGNMENT - 1

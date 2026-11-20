@@ -40,11 +40,17 @@ def get_bulk_by_memory_location(
     """Group and rotate homogeneous batches, then restore input key order."""
     if not len(keys) == len(addrs) == len(sizes) == len(memory_locations):
         raise ValueError("Bulk GET requires one buffer list and memory location per key")
+    indices_by_location: dict[MemoryLocation, list[int]] = {MemoryLocation.DEVICE: [], MemoryLocation.HOST: []}
+    for index, location in enumerate(memory_locations):
+        if location not in indices_by_location:
+            raise ValueError(f"Unsupported bulk GET memory location: {location!r}")
+        indices_by_location[location].append(index)
+
     results = [-1] * len(keys)
-    for memory_location in (MemoryLocation.DEVICE, MemoryLocation.HOST):
-        indices = [i for i, location in enumerate(memory_locations) if location is memory_location]
+    for memory_location, indices in indices_by_location.items():
         if not indices:
             continue
+        # Start each TP rank at a different key to spread concurrent reads across the pool.
         rotation = tp_rank % len(indices)
         indices = indices[rotation:] + indices[:rotation]
         batch_keys = [keys[i] for i in indices]
