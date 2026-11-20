@@ -569,10 +569,30 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits,
                 )
             )
+            # Capture TP-gathered FP8 from shared expert's fused AG+MM for
+            # routed-expert reuse (skips routed TP AllGather).
+            pre_gathered_input = None
+            if (
+                submitted_gate_up is not None
+                and submitted_gate_up.gathered_x is not None
+                and submitted_gate_up.gathered_scale is not None
+            ):
+                pre_gathered_input = (
+                    submitted_gate_up.gathered_x,
+                    submitted_gate_up.gathered_scale,
+                )
+                # The gathered FP8 was produced on the shared-expert stream;
+                # ensure the default stream waits before routed experts use it.
+                from vllm_ascend.utils import shared_experts_calculation_stream
+
+                torch.npu.current_stream().wait_stream(
+                    shared_experts_calculation_stream()
+                )
             routed_out, milestones = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                pre_gathered_input=pre_gathered_input,
             )
             assert isinstance(milestones, RoutedMoEMilestones)
             milestones.shared_input_ready = shared_input_ready

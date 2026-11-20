@@ -695,6 +695,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -720,6 +721,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             # The SP model wrapper already shards and gathers the MoE sequence.
             replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
+            pre_gathered_input=pre_gathered_input,
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits

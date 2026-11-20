@@ -111,12 +111,14 @@ class MoECommMethod(ABC):
         router_logits: torch.Tensor,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
+        pre_gathered_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> MoEPrepareOutput:
         return self.prepare_finalize.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=replace_allreduce,
             quant_type=quant_type,
+            pre_gathered_input=pre_gathered_input,
         )
 
     def finalize(
