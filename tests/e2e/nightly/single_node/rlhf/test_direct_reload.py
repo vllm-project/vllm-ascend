@@ -40,3 +40,12 @@ def test_direct_reload_dense_hccl_sleep(packed: bool, execution_mode: str, sleep
 def test_direct_reload_dense_ipc_sleep(packed: bool, execution_mode: str, sleep_level: int):
     case = replace(DIRECT_QWEN_CASES[0], tensor_parallel_size=2)
     run_direct_reload_transaction(case, "npu_ipc", packed, execution_mode, sleep_level=sleep_level)
+
+
+@pytest.mark.e2e_model(DIRECT_QWEN_CASES[1].model)
+@pytest.mark.parametrize("sleep_level", [1, 2], ids=["sleep1", "sleep2"])
+@pytest.mark.parametrize("execution_mode", ["eager", "graph"])
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+@pytest.mark.parametrize("backend", ["hccl", "npu_ipc"])
+def test_direct_reload_moe_sleep(backend: str, packed: bool, execution_mode: str, sleep_level: int):
+    run_direct_reload_transaction(DIRECT_QWEN_CASES[1], backend, packed, execution_mode, sleep_level=sleep_level)
