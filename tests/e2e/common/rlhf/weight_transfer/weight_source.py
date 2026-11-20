@@ -98,6 +98,42 @@ def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
 
 # Default payload shared by the transfer tests.
 FIXED_WEIGHT_SEED = 20260915
+REFERENCE_SHARD_SIZE_BYTES = 4 << 30
+
+
+def _write_reference_shards(weights: Iterator[tuple[str, torch.Tensor]], target: Path) -> None:
+    """Keep a full-model cold reference from retaining the whole payload in RAM."""
+    from safetensors.torch import save_file
+
+    shard: dict[str, torch.Tensor] = {}
+    weight_map: dict[str, str] = {}
+    shard_size, total_size, shard_index = 0, 0, 0
+
+    def flush() -> None:
+        nonlocal shard, shard_size, shard_index
+        if not shard:
+            return
+        shard_index += 1
+        filename = f"model-{shard_index:05d}.safetensors"
+        save_file(shard, str(target / filename), metadata={"format": "pt"})
+        weight_map.update((name, filename) for name in shard)
+        shard, shard_size = {}, 0
+
+    for name, tensor in weights:
+        size = tensor.numel() * tensor.element_size()
+        if shard and shard_size + size > REFERENCE_SHARD_SIZE_BYTES:
+            flush()
+        # An iterator may reuse CPU storage too; each saved entry owns its bytes.
+        shard[name] = tensor.detach().to(device="cpu", copy=True).contiguous()
+        shard_size += size
+        total_size += size
+        if shard_size >= REFERENCE_SHARD_SIZE_BYTES:
+            flush()
+    flush()
+    (target / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_size}, "weight_map": weight_map}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _parameter_seed(name: str, payload_seed: int) -> int:
@@ -167,7 +203,7 @@ def _sampled_tensor(
 
 
 class FixedRandomWeightSource(WeightSource):
-    """Generate every reduced-model parameter deterministically on demand.
+    """Generate every configured model parameter deterministically on demand.
 
     A meta-device Transformers model provides the complete checkpoint-facing
     name and shape set without allocating model storage. Each iteration derives
@@ -225,7 +261,7 @@ class FixedRandomWeightSource(WeightSource):
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
-        assert parameters, f"{case.id}: reduced meta model contains no parameters"
+        assert parameters, f"{case.id}: meta model contains no parameters"
         names = [name for name, _, _ in parameters]
         assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
         self._parameters = parameters
@@ -278,8 +314,8 @@ class FixedRandomWeightSource(WeightSource):
     def write_checkpoint(self, directory: str | Path) -> None:
         """Materialize this source's payload as a normally-loadable checkpoint.
 
-        Writes the repository's *own* ``config.json`` (byte for byte) next to one
-        safetensors file holding exactly what iteration yields: the same
+        Writes the repository's *own* ``config.json`` (byte for byte) next to an
+        indexed, sharded safetensors checkpoint holding exactly what iteration yields: the same
         checkpoint-facing names — including the language-model prefix, the
         DeepSeek-V4 rename map and the fused-expert expansion — the same
         corrected expert shapes, and the same integer tables. Nothing is
@@ -288,7 +324,7 @@ class FixedRandomWeightSource(WeightSource):
 
         The config is copied rather than re-serialized on purpose. The reference
         server takes the same ``--hf-overrides`` as the live-update lane, so both
-        get the reduced model through vLLM's own override path, and both parse
+        get the case's model geometry through vLLM's own override path and parse
         the very same bytes. A re-serialized config would add the derived fields
         a runtime config object carries (``layer_types`` / ``mlp_layer_types``
         for the *original* layer count, for example), which neither matches the
@@ -296,13 +332,14 @@ class FixedRandomWeightSource(WeightSource):
         ``num_hidden_layers`` is reduced.
         """
         from huggingface_hub import hf_hub_download
-        from safetensors.torch import save_file
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
-        state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
-        save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+        config = Path(self._case.model) / "config.json"
+        if not config.is_file():
+            config = Path(hf_hub_download(self._case.model, "config.json"))
+        shutil.copyfile(config, target / "config.json")
+        _write_reference_shards(iter(self), target)
 
 
 # ---------------------------------------------------------------------------
@@ -597,12 +634,16 @@ class DeepseekV41WeightSource(WeightSource):
         return [ParamMeta(spec.name, spec.dtype, spec.shape) for spec in self._specs]
 
     def _make_tensor(self, spec: TensorSpec) -> torch.Tensor:
+        # The existing Engram lane checks table sleep/restore, not table value
+        # updates: its loader rereads the startup shard. Keep only those tables
+        # fixed while Direct alternates every other checkpoint tensor A/B/A.
+        payload_seed = FIXED_WEIGHT_SEED if spec.name in self._engram_shapes else self.seed
         return _sampled_tensor(
             spec.name,
             spec.shape,
             spec.dtype,
             self._device,
-            payload_seed=self.seed,
+            payload_seed=payload_seed,
             num_experts=self._num_experts,
             sample_on_cpu=True,
             norm_suffixes=("norm.weight", "attn_sink"),

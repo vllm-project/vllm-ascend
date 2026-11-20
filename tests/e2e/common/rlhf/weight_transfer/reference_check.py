@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Startup-load reference and two-update equivalence checks."""
+"""Independent cold-load references and repeated-update equivalence checks."""
 
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 from vllm.utils.network_utils import get_open_port
 
@@ -27,27 +27,29 @@ def _common_serve_args(
     port: int,
     gpu_memory_utilization: float,
     tensor_parallel_size: int,
+    execution_mode: str = "graph",
+    enable_sleep: bool = True,
 ) -> list[str]:
     """Flags a live-update lane and its reference share.
 
     Holding them in one place is what makes the two signatures comparable: the
-    reference may differ from the lane in exactly one way — it loads the payload
-    at startup instead of starting from dummy weights and receiving it live.
+    reference loads its payload at startup instead of receiving a live update.
+    The live lane may start from dummy weights or a generated checkpoint A.
     dtype, graph mode, NZ layout, memory budget, max length, tokenizer/executor
     backend and config overrides all stay identical.
     """
+    if execution_mode not in ("eager", "graph"):
+        raise ValueError(f"Unsupported execution mode: {execution_mode}")
+    execution_args = (
+        ["--enforce-eager"] if execution_mode == "eager" else ["--compilation-config", FULL_DECODE_ONLY_CONFIG]
+    )
     return [
         "--dtype",
         "bfloat16",
-        "--compilation-config",
-        FULL_DECODE_ONLY_CONFIG,
-        # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
-        # trainer only gets the HBM it needs once the rollout engine sleeps, so
-        # the lane releases the engine with a level-2 sleep before every
-        # transfer. That requires the CaMem pool, and both builders enable it so
-        # the reference stays a plain startup load of the same payload under the
-        # very same allocation pool; the reference itself never sleeps.
-        "--enable-sleep-mode",
+        *execution_args,
+        # Match allocation-pool settings in the live and cold-reference servers.
+        # The reference never sleeps; no-sleep Direct lanes do not enable the pool.
+        *(["--enable-sleep-mode"] if enable_sleep else []),
         "--max-model-len",
         "1024",
         "--gpu-memory-utilization",
@@ -70,6 +72,8 @@ def live_update_serve_args(
     port: int,
     gpu_memory_utilization: float,
     tensor_parallel_size: int = 1,
+    execution_mode: str = "graph",
+    enable_sleep: bool = True,
 ) -> list[str]:
     """A lane that starts from dummy weights and receives W over ``backend``."""
     return [
@@ -82,6 +86,8 @@ def live_update_serve_args(
             port=port,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
+            execution_mode=execution_mode,
+            enable_sleep=enable_sleep,
         ),
     ]
 
@@ -92,6 +98,8 @@ def reference_serve_args(
     port: int,
     gpu_memory_utilization: float,
     tensor_parallel_size: int = 1,
+    execution_mode: str = "graph",
+    enable_sleep: bool = True,
 ) -> list[str]:
     """A server that loads the transfer's payload at normal startup.
 
@@ -109,15 +117,15 @@ def reference_serve_args(
             port=port,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
+            execution_mode=execution_mode,
+            enable_sleep=enable_sleep,
         ),
     ]
 
 
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
-_REFERENCE_SIGNATURES: dict[
-    tuple[str, int, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
-] = {}
+_REFERENCE_SIGNATURES: dict[tuple, list[tuple[str, tuple[float, ...]]]] = {}
 
 
 def reference_signature(
@@ -130,6 +138,8 @@ def reference_signature(
     device_index: int,
     env_dict: dict[str, str] | None = None,
     server_host: str = "127.0.0.1",
+    execution_mode: str = "graph",
+    enable_sleep: bool = True,
 ) -> list[tuple[str, tuple[float, ...]]]:
     """Signature of a server that loaded the payload at normal startup.
 
@@ -145,6 +155,8 @@ def reference_signature(
         gpu_memory_utilization,
         tensor_parallel_size,
         device_index,
+        execution_mode,
+        enable_sleep,
         tuple(sorted((env_dict or {}).items())),
     )
     cached = _REFERENCE_SIGNATURES.get(cache_key)
@@ -162,6 +174,8 @@ def reference_signature(
                 port=port,
                 gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tensor_parallel_size,
+                execution_mode=execution_mode,
+                enable_sleep=enable_sleep,
             ),
             server_host=server_host,
             server_port=port,
@@ -209,8 +223,11 @@ def weight_transfer_servers(
     device_index: int,
     gpu_memory_utilization: float,
     env_dict: dict[str, str],
+    execution_mode: str = "graph",
+    enable_sleep: bool = True,
+    cold_start: bool = False,
 ):
-    """Load W independently, then start the dummy lane under identical settings.
+    """Load A independently, then start the live lane under identical settings.
 
     The reference server must release every TP device before the live-update
     server starts. Both use the case's environment and the same generated W.
@@ -223,25 +240,44 @@ def weight_transfer_servers(
         tensor_parallel_size=tensor_parallel_size,
         device_index=device_index,
         env_dict=env_dict,
+        execution_mode=execution_mode,
+        enable_sleep=enable_sleep,
     )
     for rank in range(tensor_parallel_size):
         wait_for_free_device_memory(device_index + rank, gpu_memory_utilization)
     port = get_open_port()
-    with rlhf_server(
-        case.model,
-        vllm_serve_args=live_update_serve_args(
-            case,
-            backend=backend,
+    with ExitStack() as stack:
+        options = dict(
             port=port,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
-        ),
-        server_host="127.0.0.1",
-        server_port=port,
-        env_dict=env_dict,
-    ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model)
-        yield server, reference, dummy_signature
+            execution_mode=execution_mode,
+            enable_sleep=enable_sleep,
+        )
+        if cold_start:
+            model_path = stack.enter_context(fixed_startup_checkpoint(source))
+            args = reference_serve_args(case, **options)
+            args += ["--weight-transfer-config", json.dumps({"backend": backend})]
+            args += [
+                "--worker-extension-cls",
+                "tests.e2e.common.rlhf.weight_transfer.reload_probe.ReloadProbeWorkerExtension",
+            ]
+        else:
+            model_path = case.model
+            args = live_update_serve_args(case, backend=backend, **options)
+        server = stack.enter_context(
+            rlhf_server(
+                model_path,
+                vllm_serve_args=args,
+                server_host="127.0.0.1",
+                server_port=port,
+                env_dict=env_dict,
+            )
+        )
+        initial_signature = generation_signature(server.get_client(), case.model)
+        if cold_start:
+            assert initial_signature == reference, f"{case.id}: cold A differs from the independent reference"
+        yield server, reference, initial_signature
 
 
 def assert_weight_update_matches_reference(

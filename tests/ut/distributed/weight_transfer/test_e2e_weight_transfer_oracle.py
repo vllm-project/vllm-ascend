@@ -156,7 +156,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
         patch.object(utils, "generation_signature", return_value=signature) as mock_generate,
     ):
         first = reference_signature(
-            MagicMock(case_id=CASE.id),
+            MagicMock(case_id=CASE.id, seed=20260915),
             CASE,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
@@ -164,7 +164,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
             device_index=0,
         )
         second = reference_signature(
-            MagicMock(case_id=CASE.id),
+            MagicMock(case_id=CASE.id, seed=20260915),
             CASE,
             port=PORT + 1,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
@@ -173,7 +173,7 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
         )
         # A different memory budget is a different measurement condition.
         third = reference_signature(
-            MagicMock(case_id=CASE.id),
+            MagicMock(case_id=CASE.id, seed=20260915),
             CASE,
             port=PORT + 2,
             gpu_memory_utilization=0.45,

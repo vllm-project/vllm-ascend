@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class WeightUpdateModelCase:
-    """A layer-reduced model whose complete parameter set is reloaded."""
+    """A model configuration whose complete parameter set is reloaded."""
 
     id: str
     model: str
@@ -44,6 +44,9 @@ class WeightUpdateModelCase:
     instead of being reported as a transfer regression; the reason is attached to
     the case so the report says which prerequisite is missing.
     """
+    # Resource choice for the full-model Direct matrix; legacy runners keep
+    # their own TP defaults unless explicitly passed this value.
+    tensor_parallel_size: int = 1
 
     def server_args(self) -> list[str]:
         # Run the worker out-of-process. With a single-process executor the
@@ -88,6 +91,39 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
+
+# Full checkpoints for Direct's BF16 transport matrix. Overrides leave the
+# original layers and experts intact. Existing reduced CI cases stay separate.
+DIRECT_QWEN_CASES = (
+    WeightUpdateModelCase(
+        id="qwen3-0.6b-full-bf16",
+        model="Qwen/Qwen3-0.6B",
+        hf_overrides={},
+        full_transfer_matrix=True,
+    ),
+    WeightUpdateModelCase(
+        id="qwen3-30b-a3b-full-bf16",
+        model="Qwen/Qwen3-30B-A3B",
+        hf_overrides={},
+        full_transfer_matrix=True,
+        tensor_parallel_size=4,
+    ),
+)
+
+# Full text backbone: no layer/expert reduction. Vision payloads are a separate
+# multimodal scenario; retain the checkpoint's language-model namespace here.
+DIRECT_QWEN35_CASE = WeightUpdateModelCase(
+    id="qwen3.5-35b-a3b-full-text-bf16",
+    model="Qwen/Qwen3.5-35B-A3B",
+    hf_overrides={"architectures": ["Qwen3_5MoeForCausalLM"]},
+    meta_config_attribute="text_config",
+    checkpoint_model_prefix="model.language_model.",
+    full_transfer_matrix=True,
+    tensor_parallel_size=4,
+    # These transactions issue serial requests. Bound the hybrid model's
+    # profiling/state budget without reducing any checkpoint dimensions.
+    extra_server_args=("--max-num-seqs", "32"),
+)
 
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(
@@ -157,9 +193,9 @@ def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.devic
 # read as evidence that one lands.  `AscendParallelEngramEmbedding._weight_loader`
 # deliberately ignores `loaded_weight` and re-reads the rows from the indexed
 # shard bound by `bind_checkpoint` - that streaming is what keeps a
-# 22.89 GiB-per-rank table off the device - while `iter_full()` regenerates the
-# same fixed-seed payload every round (W0 == W1 == W2) and the oracle compares
-# against the startup reference.  A transfer that never landed therefore still
+# 22.89 GiB-per-rank table off the device - while `iter_full()` keeps the table
+# payload fixed even when Direct alternates the other weights A/B/A. The oracle
+# compares against startup loading of that payload. A table transfer that never landed still
 # matches.  Covering it needs distinct per-round payloads, a loader that consumes
 # the transferred tensor inside the reload window, and a per-round reference;
 # tracked separately.
@@ -219,20 +255,27 @@ PACKED_LANE_SKIP_REASON = (
 MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES)
 
 
-def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
+def pytest_model_cases(
+    backend: str,
+    *,
+    model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES,
+    reload_mode: str = "layerwise",
+) -> list[Any]:
     """Select coverage and mark known limitations before entering a runner."""
     # Case data and adapters remain usable without importing pytest.
     import pytest
 
     if backend not in ("npu_ipc", "hccl"):
         raise ValueError(f"Unsupported weight transfer backend: {backend}")
+    if reload_mode not in ("layerwise", "direct"):
+        raise ValueError(f"Unsupported reload mode: {reload_mode}")
     parameters = []
     for packed in (False, True):
         for case in model_cases:
             if not ((backend == "npu_ipc" and not packed) or case.full_transfer_matrix):
                 continue
             marks = [pytest.mark.e2e_model(case.model)]
-            reason = case.skip_reason or (PACKED_LANE_SKIP_REASON if packed else None)
+            reason = case.skip_reason or (PACKED_LANE_SKIP_REASON if packed and reload_mode == "layerwise" else None)
             if reason:
                 marks.append(pytest.mark.skip(reason=f"{case.id}: {reason}"))
             parameters.append(
