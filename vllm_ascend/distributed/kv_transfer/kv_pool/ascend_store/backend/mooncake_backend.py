@@ -608,7 +608,7 @@ class MooncakeBackend(Backend):
                 "and prevent reuse of a buffer with an outstanding transfer."
             )
 
-    def _register_host_buffers(self, buffers: list[BufferDescriptor]) -> None:
+    def _register_buffers_with_host_staging(self, buffers: list[BufferDescriptor]) -> None:
         if not self._use_store_independent_te:
             raise RuntimeError("Mooncake mixed bulk registration requires a Store-owned transfer engine")
         if self._host_staging is not None:
@@ -645,24 +645,24 @@ class MooncakeBackend(Backend):
 
     def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
         if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
-            self._register_host_buffers(buffers)
+            self._register_buffers_with_host_staging(buffers)
             return
-        ptrs, lengths = buffer_arrays(buffers)
+        ptrs, sizes = buffer_arrays(buffers)
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
-            for ptr, length in zip(ptrs, lengths):
-                ret = self.store.register_buffer(ptr, length)
+            for ptr, size in zip(ptrs, sizes):
+                ret = self.store.register_buffer(ptr, size)
                 if ret != 0:
                     logger.error(
                         "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
                         ptr,
-                        length,
+                        size,
                         ret,
                     )
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
-            global_te.register_buffer(ptrs, lengths)
+            global_te.register_buffer(ptrs, sizes)
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:

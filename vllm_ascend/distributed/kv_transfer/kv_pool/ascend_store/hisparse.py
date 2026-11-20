@@ -48,8 +48,8 @@ def validate_hisparse_decode_config(vllm_config: VllmConfig, *, save_decode_cach
     if not save_decode_cache:
         return
     # A newly decoded row can still be Resident-only when a block is published.
-    mirror = vllm_config.attention_config.hisparse_config
-    if mirror is None or not mirror.eager_host_mirror:
+    hisparse_config = vllm_config.attention_config.hisparse_config
+    if hisparse_config is None or not hisparse_config.eager_host_mirror:
         raise ValueError("save_decode_cache=true requires eager_host_mirror=true")
 
 
@@ -111,13 +111,13 @@ def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCach
 
 
 @dataclass(frozen=True)
-class HiSparseStoreViews:
+class HiSparseTransferLayout:
     host_num_blocks: int
     host_layers: frozenset[str]
     host_storage_base_ptrs: frozenset[int]
     host_memory_group_ids: frozenset[int]
 
-    def block_count(self, layer_name: str) -> int | None:
+    def get_host_num_blocks(self, layer_name: str) -> int | None:
         return self.host_num_blocks if layer_name in self.host_layers else None
 
     def buffer_descriptors(self, regions: dict[int, tuple[int, int]]) -> list[BufferDescriptor]:
@@ -140,7 +140,7 @@ def plan_hisparse_store_views(
     forward_context: dict[str, Any],
     as_cache_tuple: Callable[..., tuple[torch.Tensor, ...]],
     get_storage_key: Callable[[torch.Tensor], int],
-) -> tuple[HiSparseStoreViews, dict[str, torch.Tensor], set[str]]:
+) -> tuple[HiSparseTransferLayout, dict[str, torch.Tensor], set[str]]:
     from vllm_ascend.hisparse.binding import hisparse_indexer_transfer_views
 
     host_num_blocks = config.hisparse_host_num_blocks
@@ -165,7 +165,7 @@ def plan_hisparse_store_views(
             if group.host_resident:
                 host_layers.add(name)
                 host_storage_base_ptrs.update(get_storage_key(part) for part in parts)
-    layout = HiSparseStoreViews(
+    layout = HiSparseTransferLayout(
         host_num_blocks, frozenset(host_layers), frozenset(host_storage_base_ptrs), frozenset(host_memory_group_ids)
     )
     return layout, normalized_caches, excluded_layer_names

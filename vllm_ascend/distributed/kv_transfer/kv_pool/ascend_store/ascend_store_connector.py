@@ -165,10 +165,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             except ValueError as error:
                 incompatibilities.append(str(error))
             try:
-                hisparse_backend = get_backend_class(self.backend_name)
-                if hisparse_backend is None:
+                pool_backend_class = get_backend_class(self.backend_name)
+                if pool_backend_class is None:
                     raise ValueError(f"unknown pool backend {self.backend_name!r}")
-                hisparse_backend.validate_hisparse_colocated_config()
+                pool_backend_class.validate_hisparse_colocated_config()
             except (ValueError, OSError, NotImplementedError) as error:
                 incompatibilities.append(str(error))
             if incompatibilities:

@@ -14,7 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
     buffer_arrays,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
-    HiSparseStoreViews,
+    HiSparseTransferLayout,
     has_hisparse_cache_layout,
     is_hisparse_ascendstore_enabled,
 )
@@ -38,15 +38,15 @@ def test_invalid_memory_geometry_fails_before_registration(kwargs, message):
 
 def test_layout_preserves_exact_host_range_and_aligned_device_prefix():
     device = DEVICE_BUFFER_ALIGNMENT
-    layout = HiSparseStoreViews(10, frozenset({"source"}), frozenset({17}), frozenset({0}))
+    layout = HiSparseTransferLayout(10, frozenset({"source"}), frozenset({17}), frozenset({0}))
     buffers = layout.buffer_descriptors({17: (19, 119), device: (device, device + 128)})
     assert buffers == [
         BufferDescriptor(address=19, size_bytes=100, memory_location=MemoryLocation.HOST),
         BufferDescriptor(address=device, size_bytes=128, alignment_bytes=DEVICE_BUFFER_ALIGNMENT),
     ]
     assert buffer_arrays(buffers) == ([19, device], [100, 128])
-    assert layout.block_count("source") == 10
-    assert layout.block_count("indexer") is None
+    assert layout.get_host_num_blocks("source") == 10
+    assert layout.get_host_num_blocks("indexer") is None
     with pytest.raises(FrozenInstanceError):
         buffers[0].__setattr__("address", device)
 
