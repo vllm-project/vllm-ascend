@@ -169,6 +169,81 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+#### Direct reload on vLLM main (development)
+
+This development branch adds BF16 Direct reload adaptation for
+official vLLM main at `c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15`. The BF16
+validation matrix below checks reload equivalence for the listed model
+configurations using generated payloads.
+
+Set the upstream `VLLM_RELOAD_MODE=direct` **before the server loads its model**.
+vLLM parses this setting and records the checkpoint layouts at cold start;
+Ascend supplies NPU post-load processing and transport implementations.
+The reload mode and the transport are separate choices: `packed` is selected in
+the trainer init info, rather than by changing the server's reload mode.
+
+For example, start a BF16 eager HCCL server from real checkpoint weights:
+
+```bash
+VLLM_RELOAD_MODE=direct VLLM_USE_V2_MODEL_RUNNER=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --dtype bfloat16 --enforce-eager \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+For graph validation, replace `--enforce-eager` with
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}'`.
+For NPU IPC use the Ascend `ipc` backend alias, colocate each trainer with its
+rollout worker on the same physical NPU, and enable HTTP IPC serialization as
+described above. `NPUIPCTrainerInitInfo` uses the internal key `npu_ipc`.
+
+Construct the trainer with `HCCLTrainerInitInfo(..., packed=False)` or
+`NPUIPCTrainerInitInfo(..., packed=False)` for unpacked transfer; set
+`packed=True` for packed transfer. `engine.send_weights()` owns
+`start_weight_update -> update_weights -> finish_weight_update`. The caller
+pauses generation before this transaction and resumes it after success.
+A failed Direct update may leave partial checkpoint data in the model; keep
+generation paused until a new complete update succeeds, or restart the worker.
+An HCCL communication failure requires a new transfer engine and rendezvous.
+
+The main-specific transport behavior is:
+
+| Path | Implementation |
+| --- | --- |
+| HCCL unpacked | Broadcast and load one tensor at a time on the assigned NPU stream |
+| HCCL packed | Use the verified packed tensor layout; order HCCL streams and return owned tensors |
+| NPU IPC unpacked | Export independent tensors in bounded batches, copy imports to owned worker storage, and acknowledge before releasing each batch |
+| NPU IPC packed | Export one reusable buffer; carry parameter names, shapes and `tensor_sizes` for each chunk |
+
+The unpacked IPC implementation bounds each batch's exported tensor payload
+to 256 MiB, with a larger single parameter sent alone, in addition to the
+source's own storage and allocator overhead. Each tensor keeps an independent
+IPC handle. Batching reduces control-plane RPCs; it adds a worker-side copy.
+Packed transfer batches communication into chunks. Neither transport is a
+zero-copy guarantee for the model's runtime weights.
+
+The validation entry point is
+`tests/e2e/nightly/single_node/rlhf/test_direct_reload.py`: full
+Qwen3-0.6B (TP1) and Qwen3-30B-A3B (TP4), each across HCCL/IPC,
+unpacked/packed and eager/graph, for 16 cases. Each case starts from cold A,
+runs A -> A -> B -> A, and compares each update with an independent cold
+reference. Test-only worker extensions compare parameter/runtime addresses
+and graph objects, reject recapture, and require graph replay after each update.
+Validation is tracked per paired commit, model, transport and execution mode.
+
+The matrix generates deterministic BF16 tensors A/B from the complete model
+configuration and writes those exact tensors to the cold-reference checkpoints.
+It validates reload equivalence, rather than published checkpoint quality.
+The Qwen3.5 expansion in `test_direct_reload_qwen35.py` uses the full text
+backbone without reducing layers or experts; vision inputs are a separate case.
+
+This matrix runs without sleep. Sleep level 1/2, MTP/draft models, quantization,
+HCCL multiple broadcasting trainer ranks, and HCCL `use_load_plan=True` are
+outside this iteration. The latter two are rejected before communication.
+The newer `chunk_capacity`/`last` protocol and unrelated KV cache refactors
+after the verified commit are outside this branch's adaptation scope.
+
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL
