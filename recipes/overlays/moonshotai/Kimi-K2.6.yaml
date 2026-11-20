@@ -1,0 +1,60 @@
+# Source: https://github.com/vllm-project/vllm/blob/9e6c6b007ae698bd8604620b17d5720a89169da8/recipes/models/moonshotai/Kimi-K2.6.yaml
+# Extracted with vllm-project/recipes@8509229176ba2d1837339ffc4cbb4f34c1bf5e66.
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/Kimi-K2.6-W4A8
+    precision: int4
+    label: W4A8 (Ascend)
+    vram_minimum_gb: 600
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--data-parallel-size'
+      - '4'
+      - '--speculative-config'
+      - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
+      - '--no-enable-prefix-caching'
+      - '--enable-expert-parallel'
+      - '--max-num-seqs'
+      - '4'
+      - '--max-model-len'
+      - '34816'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--gpu-memory-utilization'
+      - '0.87'
+      - '--served-model-name'
+      - kimi_k26
+      - '--seed'
+      - '42'
+      - '--async-scheduling'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--mm-encoder-tp-mode'
+      - data
+      - '--additional-config'
+      - '{"enable_balance_scheduling": true}'
+    extra_env:
+      HCCL_OP_EXPANSION_MODE: AIV
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '600'
+      VLLM_ASCEND_ENABLE_MLAPO: '1'
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+      VLLM_ASCEND_BALANCE_SCHEDULING: '0'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+          docker: true
+    description: "ModelSlim W4A8 (weights on ModelScope: Eco-Tech/Kimi-K2.6-W4A8) — 1 Atlas 800 A3 (64G x 16), TP4xDP4 + DFlash; first-party verified 2026-10-28 on a nightly build (release-tag re-verify pending). System-level tuning (cpufreq governor, sysctl) from the companion Ascend recipe is host-side and skipped in unprivileged environments."
+meta:
+  hardware:
+    # First-party verification 2026-10-28 plus official runner-CI end-to-end
+    # verification passed (companion Ascend recipe merged as
+    # vllm-ascend/vllm-ascend-recipes#100, 2026-11-05).
+    ascend_910c: verified
