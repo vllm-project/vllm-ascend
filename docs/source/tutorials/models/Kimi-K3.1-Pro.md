@@ -863,31 +863,6 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     | Draft enforce_eager / kv_cache_dtype | `false / auto` | `false / auto` |
     | `--tokenizer-mode` | `kimi_k3` | `kimi_k3` |
 
-#### 5.1.3 Optional DSpark C8 with QuantFlashMLA {#513-dspark-c8}
-
-On 950DT Products, use a compatible DSpark C8 draft checkpoint that contains
-its own ModelSlim attention recipe and KV scales. On both Prefill and Decode,
-enable Model Runner V2 and use `--kv-cache-dtype fp8`. In each role's
-`--speculative-config`, point `model` to the C8 draft and set
-`"quantization": "ascend"`. Set the draft TP size to match the target TP size
-on that role. Both roles need an ABI-compatible operator package that exposes
-`quant_flash_mla` and `quant_flash_mla_metadata`.
-
-QuantFlashMLA requires PCP1 on both roles. Use a separate configuration from
-the PCP8 Prefill template above. The eight-node validation used four Prefill
-and four Decode hosts, TP8 per host, and PP1 and PCP1 on both roles. Prefill
-used DCP1 with eager execution, and Decode used DCP8 with
-`FULL_DECODE_ONLY`. The operator must support both the local and DCP-gathered
-query head counts.
-
-Use Mooncake pull transfer with `MooncakePullConnector` or
-`MooncakeConnectorV2` without layerwise mode. The KV cache dtype and page layout
-must match across roles for every transferred layer. Check the
-`MLA decode backend` startup logs on both roles to confirm that the eligible
-draft layers select `QuantFlashMLA`. Prefill attention still uses FIA and writes
-FP8 draft KV for QuantFlashMLA decode. No `--block-size` override is needed for
-the quantized staging workspace.
-
 ### 5.2 Long-Context and 1M PD Separation Deployment {#52-long-context}
 
 #### 5.2.1 Create the Engine Templates {#521-create-the-engine-templates}
