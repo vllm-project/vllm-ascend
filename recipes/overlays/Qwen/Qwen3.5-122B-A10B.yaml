@@ -1,4 +1,4 @@
-# Source: https://github.com/vllm-project/vllm/blob/8586ccbcf58e69ecb69e370dd2fa69fb739f9b0c/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
+# Source: https://github.com/vllm-project/vllm/blob/97372a5f920930356cf65ad9fd219c978443763f/recipes/models/Qwen/Qwen3.5-122B-A10B.yaml
 # Ascend lane extracted from a measured vLLM-Ascend deployment (hardware-scoped overrides only).
 meta:
   hardware:
@@ -10,12 +10,8 @@ hardware_overrides:
       - '1'
       - '--max-model-len'
       - '200000'
-      - '--max-num-batched-tokens'
-      - '16384'
       - '--block-size'
       - '128'
-      - '--max-num-seqs'
-      - '46'
       - '--gpu-memory-utilization'
       - '0.88'
       - '--trust-remote-code'
@@ -31,16 +27,19 @@ hardware_overrides:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - '--enable-chunked-prefill'
       - '--enable-prefix-caching'
+      - '--max-num-seqs'
+      - '46'
+      - '--max-num-batched-tokens'
+      - '16384'
     extra_env:
       HCCL_CONNECT_TIMEOUT: '7200'
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       HCCL_BUFFSIZE: '1024'
+      VLLM_ASCEND_ENABLE_BATCH_MEMCPY: '1'
+      HCCL_EXEC_TIMEOUT: '0'
       HCCL_OP_EXPANSION_MODE: AIV
       TASK_QUEUE_ENABLE: '1'
       OMP_NUM_THREADS: '1'
-      HCCL_SOCKET_IFNAME: '$IFACE_NAME'
-      GLOO_SOCKET_IFNAME: '$IFACE_NAME'
-      TP_SOCKET_IFNAME: '$IFACE_NAME'
 hardware_notes:
   ascend_910b:
     title: vLLM Ascend A2 image required
@@ -68,25 +67,21 @@ guide_sections:
     Verified with `quay.io/ascend/vllm-ascend:v0.30.0` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (topology per hardware notes).
 
     ```bash
-    export IFACE_NAME=<cluster-nic-name>   # e.g. eth7 / bond0 of the RoCE plan
     export HCCL_CONNECT_TIMEOUT=7200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
+    export VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1
+    export HCCL_EXEC_TIMEOUT=0
     export HCCL_OP_EXPANSION_MODE=AIV
     export TASK_QUEUE_ENABLE=1
     export OMP_NUM_THREADS=1
-    export HCCL_SOCKET_IFNAME="$IFACE_NAME"
-    export GLOO_SOCKET_IFNAME="$IFACE_NAME"
-    export TP_SOCKET_IFNAME="$IFACE_NAME"
     vllm serve Qwen/Qwen3.5-122B-A10B \
       --served-model-name qwen3.5-122b-a10b \
       --data-parallel-size 1 \
       --data-parallel-size-local 1 \
       --tensor-parallel-size 8 \
       --max-model-len 200000 \
-      --max-num-batched-tokens 16384 \
       --block-size 128 \
-      --max-num-seqs 46 \
       --gpu-memory-utilization 0.88 \
       --trust-remote-code \
       --async-scheduling \
@@ -97,5 +92,7 @@ guide_sections:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --enable-chunked-prefill \
       --enable-prefix-caching \
-      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --max-num-seqs 46 \
+      --max-num-batched-tokens 16384
     ```
