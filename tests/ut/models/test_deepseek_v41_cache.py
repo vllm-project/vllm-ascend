@@ -284,6 +284,61 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
         slot_offset += blocks * page_size
 
 
+def test_uneven_swa_columns_are_not_truncated():
+    """Regression: ``zip(*swa_columns)`` silently drops the tail SWA layers
+    when they do not divide evenly across the KV source tuples.
+
+    A 15-layer backbone over 4 KV sources distributes the SWA layers as
+    ``[4, 4, 4, 3]``. ``zip`` truncated to 3 columns and dropped the last
+    group of 3 layers (12/13/14), so the reduced checkpoint failed to start
+    with ``AssertionError: Some layers are not assigned to any group``.
+    ``zip_longest`` + ``None`` filter keeps all 15.
+    """
+    block_size = 128
+    specs = {}
+    for idx in (2, 4, 6, 8):  # 4 KV sources -> 4 physical tuples
+        prefix = f"model.layers.{idx}.self_attn"
+        specs[f"{prefix}.long_kv_cache"] = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            tokens_per_state=2,
+            model_version="deepseek_v41",
+        )
+        specs[f"{prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            tokens_per_state=2,
+            model_version="deepseek_v41",
+            scale_dim=1,
+            scale_dtype=torch.float16,
+        )
+    for idx in (2, 4, 6):  # ratio-2 KV sources add a state ring cache
+        specs[f"model.layers.{idx}.self_attn.compressor.state_cache"] = CircularBufferSpec(
+            block_size=STATE_RING_ROWS,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float32,
+            head_size_v=0,
+        )
+    for idx in range(15):  # 15 SWA layers, uneven [4, 4, 4, 3] over 4 tuples
+        specs[f"model.layers.{idx}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            sliding_window=128,
+            model_version="deepseek_v41",
+        )
+
+    groups = group_cache_specs(specs)
+    swa_layers = [name for group in groups for name in group.kv_cache_specs if name.endswith(".swa_cache")]
+    assert len(swa_layers) == 15, f"expected all 15 SWA layers, got {len(swa_layers)}: {swa_layers}"
+
+
 def test_candidate_source_folded_index_cache_is_in_same_physical_slot(runtime):
     specs = collect_specs(runtime)
     name = "model.layers.20.self_attn.indexer.k_cache_folded"
