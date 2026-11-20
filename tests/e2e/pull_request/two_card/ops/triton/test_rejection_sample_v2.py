@@ -11,15 +11,16 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
+if not vllm_version_is("0.33.0"):
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import unconditional_to_conditional_rates
+else:
+    # The legacy module exists only in vLLM v0.33.0.
+    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates  # type: ignore[import-not-found]
+
 VOCAB_SIZE = 4096
-
-
-def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
-    """Convert unconditional acceptance rates to conditional rates, c_i = p_i / p_{i-1}."""
-    return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
-
 
 pytest.importorskip("triton")
 if not (hasattr(torch, "npu") and torch.npu.is_available()):
