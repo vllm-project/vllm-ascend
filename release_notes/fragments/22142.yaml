@@ -1,0 +1,10 @@
+pr: 22142
+entries:
+  - category: performance
+    text: >-
+      Optimized DeepSeek V4.1 Flash decode on Atlas A2 with Model Runner V2
+      and full decode graphs. The optimization fuses the mHC residual update,
+      residual collapse, and RMSNorm into one Triton kernel, and computes mHC
+      coefficients on a separate stream so they can overlap with attention and MoE.
+    model: DeepSeek V4.1 Flash
+    hardware: [A2]

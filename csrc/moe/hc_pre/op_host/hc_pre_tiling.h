@@ -122,8 +122,6 @@ TILING_DATA_FIELD_DEF(int64_t, sinkhornTailRowFactorOfTailBlock);
 
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS(HcPre, HcPreTilingData)
-
 // ----------算子CompileInfo定义----------
 struct HcPreCompileInfo {
     uint64_t coreNum = 0;

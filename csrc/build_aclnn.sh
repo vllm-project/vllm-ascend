@@ -115,6 +115,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
+        "hc_pre_coefficients"
         "hc_post"
         "inplace_partial_rotary_mul"
         "rms_norm_dynamic_quant"

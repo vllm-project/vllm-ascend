@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -52,6 +53,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 from vllm.models.deepseek_v41.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -70,6 +72,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
+from vllm_ascend.ops.triton.mhc_post_collapse_norm import MHC_FUSION_HIDDEN_SIZE, MHC_POST_COLLAPSE_NORM
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
@@ -106,6 +109,16 @@ from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
+from .mhc import MHC_MAX_ROWS
+
+
+def _native_mhc_step(layer, positions, residual, pre_mix, input_ids, _prepared):
+    hidden_states, pre_mix = layer(positions, residual, pre_mix, None, input_ids=input_ids)
+    return hidden_states, pre_mix, None
+
+
+def _prepared_mhc_attention(_residual, _pre_mix, prepared):
+    return prepared
 
 
 def _retain_local_engram_tables(model):
@@ -979,6 +992,63 @@ class DeepseekV41DecoderLayer(nn.Module):
         hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
         return hidden_states, ffn_pre
 
+    def _mhc_attention_input(self, residual, pre_mix, _prepared):
+        x, post, comb, pre = self.hc_pre(residual, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base, pre_mix)
+        return self.input_layernorm(x), post, comb, pre
+
+    def _mhc_finish(self, x, residual, post, comb, pre, *, hc_post):
+        return hc_post(x, residual, post, comb), pre, None
+
+    def _mhc_next_attention(self, x, residual, post, comb, pre):
+        updated, normalized, next_post, next_comb, next_pre = torch.ops.vllm.dsv41_mhc_attention_input(
+            x,
+            residual,
+            post,
+            comb,
+            pre,
+            self.input_layernorm.weight,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            self.hc_sinkhorn_iters,
+            self.norm_eps,
+            self.hc_eps,
+        )
+        return updated, pre, (normalized, next_post, next_comb, next_pre)
+
+    def _forward_fused_mhc(
+        self,
+        _layer,
+        positions,
+        residual,
+        pre_mix,
+        input_ids,
+        prepared,
+        *,
+        attention_input,
+        finish,
+        wait_for_attention,
+    ):
+        x, post, comb, pre = attention_input(residual, pre_mix, prepared)
+        x = self.self_attn(positions, x, None)
+        residual, x, x_fp32, post, comb, pre = torch.ops.vllm.dsv41_mhc_moe_input(
+            x,
+            residual,
+            post,
+            comb,
+            pre,
+            self.post_attention_layernorm.weight,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.hc_sinkhorn_iters,
+            self.norm_eps,
+            self.hc_eps,
+            wait_for_attention,
+        )
+        x = self.mlp(x, input_ids=input_ids, hidden_states_fp32=x_fp32, already_sequence_parallel=False)
+        return finish(x, residual, post, comb, pre)
+
 
 @support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0, "inputs_embeds": 0})
 class DeepseekV41Model(nn.Module, EagleModelMixin):
@@ -1232,6 +1302,74 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
 
             rollback.pop_all()
+
+        self._native_mhc_steps = (_native_mhc_step,) * len(self.layers)
+        self._mhc_prefix = None
+        self._mhc_replay = None
+
+    def initialize_mhc(self, vllm_config):
+        self._mhc_prefix = None
+        self._mhc_replay = None
+        parallel = vllm_config.parallel_config
+        if (
+            vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+            or not HAS_TRITON
+            or not get_current_hardware_profile().supports(HardwareCapability.DSV41_MHC_BOUNDARY_FUSION)
+            or vllm_config.model_config.dtype != torch.bfloat16
+            or self.config.hidden_size != MHC_FUSION_HIDDEN_SIZE
+            or self.hc_mult != 4
+            or self.use_sequence_parallel
+            or parallel.pipeline_parallel_size != 1
+            or parallel.use_ubatching
+        ):
+            return
+
+        warmup_keys = []
+        for layer in self.layers:
+            for norm, write_fp32 in ((layer.input_layernorm, False), (layer.post_attention_layernorm, True)):
+                if (
+                    getattr(norm, "bias_loaded", False)
+                    or norm.variance_epsilon != layer.norm_eps
+                    or norm.weight.shape != (MHC_FUSION_HIDDEN_SIZE,)
+                    or not norm.weight.is_contiguous()
+                ):
+                    return
+                warmup_keys.append((norm.weight.dtype, write_fp32))
+            for fn, scale, base in (
+                (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
+                (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+            ):
+                for tensor, shape in ((fn, (24, 4 * MHC_FUSION_HIDDEN_SIZE)), (scale, (3,)), (base, (24,))):
+                    if tensor.shape != shape or tensor.dtype != torch.float32 or not tensor.is_contiguous():
+                        return
+        for weight_dtype, write_fp32 in warmup_keys:
+            MHC_POST_COLLAPSE_NORM.register_warmup(weight_dtype, write_fp32)
+        self._mhc_prefix = self._plan_mhc(self.start_layer, self.decoder_replay_start)
+        self._mhc_replay = self._plan_mhc(self.decoder_replay_start, self.end_layer)
+
+    def _plan_mhc(self, start_layer, end_layer):
+        steps = list(self._native_mhc_steps)
+        attention_input = None
+        hc_post = torch.ops.vllm.dsv41_mhc_finish_overlap
+        for idx in range(start_layer, end_layer):
+            layer = self.layers[idx]
+            next_idx = idx + 1
+            next_layer = self.layers[next_idx] if next_idx < end_layer else None
+            has_prepared_attention = attention_input is not None
+            if next_layer is not None and next_layer.engram is None:
+                finish = next_layer._mhc_next_attention
+                next_attention_input = _prepared_mhc_attention
+            else:
+                finish = partial(layer._mhc_finish, hc_post=hc_post)
+                next_attention_input = None
+            steps[idx] = partial(
+                layer._forward_fused_mhc,
+                attention_input=attention_input if has_prepared_attention else layer._mhc_attention_input,
+                finish=finish,
+                wait_for_attention=has_prepared_attention,
+            )
+            attention_input = next_attention_input
+        return tuple(steps)
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1685,6 +1823,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         engram_graph_events=False,
         lookback_token_ids=None,
         engram_mask_ready_event=None,
+        mhc_steps=None,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
@@ -1724,7 +1863,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         pre_mix[:, 0] = 1.0
         last_layer = None
         aux_hidden_states = []
-        for layer in self.layers:
+        prepared_attention = None
+        steps = self._native_mhc_steps if mhc_steps is None else mhc_steps
+        for layer, step in zip(self.layers, steps):
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 assert self.decoder_replay_layer_name is not None
                 num_late_aux = sum(
@@ -1778,7 +1919,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.engram_rotation if self.engram_rotated else None,
                 )
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            hidden_states, pre_mix, prepared_attention = step(
+                layer, positions, hidden_states, pre_mix, input_ids, prepared_attention
+            )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         # MTP needs full HC states
         if self._mtp_hidden_buffer is not None:
@@ -1798,6 +1941,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def _run_replay_layers(self, hidden_states, pre_mix, positions, input_ids):
         aux = []
+        prepared_attention = None
+        steps = self._native_mhc_steps
+        if self._mhc_replay is not None and 0 < hidden_states.shape[0] <= MHC_MAX_ROWS:
+            steps = self._mhc_replay
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
             if layer.layer_idx in self.aux_hidden_state_layers:
@@ -1805,8 +1952,28 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
                 aux.append(residual)
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=input_ids)
+            hidden_states, pre_mix, prepared_attention = steps[layer_idx](
+                layer, positions, hidden_states, pre_mix, input_ids, prepared_attention
+            )
         return hidden_states, pre_mix, *aux
+
+
+@support_torch_compile(
+    dynamic_arg_dims={"input_ids": 0, "positions": 0, "intermediate_tensors": 0, "inputs_embeds": 0},
+    use_aot_compile=False,
+)
+class DeepseekV41MhcForward(nn.Module):
+    """Compile the small-row path separately from the baseline shape range."""
+
+    def __init__(self, *, vllm_config, model):
+        super().__init__()
+        self.model_forward = model.forward
+        self.steps = model._mhc_prefix
+
+    def forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None, **kwargs):
+        return self.model_forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, mhc_steps=self.steps, **kwargs
+        )
 
 
 class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, SupportsPP, SupportsLoRA, SupportsEagle3):
@@ -1828,6 +1995,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     @close_engram_on_init_failure(("model", "_engram_remote_reader"))
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.vllm_config = vllm_config
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
@@ -1840,6 +2008,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         self.requires_uncompiled_fallback = DeviceOperator.get_dsv41_packed_cache_ops() is not None
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self._mhc_forward: DeepseekV41MhcForward | None = None
         with ExitStack() as rollback:
             for module in self.model.modules():
                 if getattr(module, "_shared_pool_client", None) is not None:
@@ -1930,11 +2099,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
+        model: DeepseekV41Model | DeepseekV41MhcForward = self.model
+        if self._mhc_forward is not None and 0 < positions.shape[0] <= MHC_MAX_ROWS:
+            model = self._mhc_forward
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count
             ) as graph_inputs:
-                return self.model(
+                return model(
                     input_ids,
                     positions,
                     intermediate_tensors,
@@ -1942,7 +2114,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     lookback_token_ids=lookback_token_ids,
                     **graph_inputs,
                 )
-        return self.model(
+        return model(
             input_ids,
             positions,
             intermediate_tensors,
@@ -1954,6 +2126,16 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             lookback_token_ids=lookback_token_ids,
             engram_mask_ready_event=engram_mask_ready_event,
         )
+
+    def process_weights_after_loading(self) -> None:
+        # Recheck the loaded layout after each weight load or reload.
+        self._mhc_forward = None
+        self.model.initialize_mhc(self.vllm_config)
+        if self.model._mhc_prefix is not None:
+            # The base and fused forwards share a CompilationConfig, but their
+            # npugraph_ex artifacts for the same compile range must stay separate.
+            with set_model_tag("dsv41_mhc_overlap"):
+                self._mhc_forward = DeepseekV41MhcForward(vllm_config=self.vllm_config, model=self.model)
 
     @property
     def decoder_replay_layers(self):

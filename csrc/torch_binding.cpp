@@ -1709,6 +1709,20 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_npu(
     return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> dsv41_hc_pre_coefficients_npu(
+    const at::Tensor &x, const at::Tensor &hc_fn, const at::Tensor &hc_scale, const at::Tensor &hc_base,
+    int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    const auto rows = x.size(0);
+    const auto fp32 = x.options().dtype(at::kFloat);
+    auto post = at::empty({rows, HC_PRE_HC_LIMIT}, fp32);
+    auto comb = at::empty({rows, HC_PRE_HC_LIMIT, HC_PRE_HC_LIMIT}, fp32);
+    auto pre = at::empty_like(post);
+    EXEC_NPU_CMD(aclnnHcPreCoefficients, x, hc_fn, hc_scale, hc_base, hc_sinkhorn_iters, hc_eps, norm_eps,
+                 post, comb, pre);
+    return {post, comb, pre};
+}
+
 void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice, bool negate_sin)
 {
     constexpr int BSND_DIM_NUM = 4;
@@ -3452,6 +3466,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor y, Tensor post, Tensor comb_frag, Tensor pre)"
         );
     ops.impl("npu_hc_pre_v3", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v3_npu);
+
+    ops.def(
+        "dsv41_hc_pre_coefficients(Tensor x, Tensor hc_fn, Tensor hc_scale, Tensor hc_base, "
+        "int hc_sinkhorn_iters, float norm_eps, float hc_eps) -> (Tensor, Tensor, Tensor)");
+    ops.impl("dsv41_hc_pre_coefficients", torch::kPrivateUse1, &vllm_ascend::dsv41_hc_pre_coefficients_npu);
 
     ops.def(
         "inplace_partial_rotary_mul("

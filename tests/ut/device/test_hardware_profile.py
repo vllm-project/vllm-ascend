@@ -60,6 +60,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
+        HardwareCapability.DSV41_MHC_BOUNDARY_FUSION,
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {

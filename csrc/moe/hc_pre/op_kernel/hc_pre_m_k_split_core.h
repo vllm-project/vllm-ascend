@@ -245,8 +245,10 @@ private:
     uint64_t squareSumFp32BufSize_;
 };
 
-template <typename T, bool useOriginal>
+template <typename T, bool useOriginal, bool ComputeY = true>
 class HcPreMembaseKSplitCorePart2 {
+    static_assert(useOriginal || ComputeY, "Coefficient-only mode uses the original row loop");
+
 public:
     __aicore__ inline HcPreMembaseKSplitCorePart2()
     {
@@ -256,15 +258,17 @@ public:
         GM_ADDR hcBase, GM_ADDR y, GM_ADDR post, GM_ADDR combFrag,
         GM_ADDR preMix, GM_ADDR pre, GM_ADDR workspace)
     {
-        xGm.SetGlobalBuffer((__gm__ T *)x);
         hcScaleGm.SetGlobalBuffer((__gm__ float *)hcScale);
         hcBaseGm.SetGlobalBuffer((__gm__ float *)hcBase);
-        yGm.SetGlobalBuffer((__gm__ T *)y);
         postGm.SetGlobalBuffer((__gm__ float *)post);
         combFragGm.SetGlobalBuffer((__gm__ float *)combFrag);
-        preMixGm.SetGlobalBuffer((__gm__ float *)preMix);
         preGm.SetGlobalBuffer((__gm__ float *)pre);
         workspaceGm.SetGlobalBuffer((__gm__ float *)workspace);
+        if constexpr (ComputeY) {
+            xGm.SetGlobalBuffer((__gm__ T *)x);
+            yGm.SetGlobalBuffer((__gm__ T *)y);
+            preMixGm.SetGlobalBuffer((__gm__ float *)preMix);
+        }
     }
 
     __aicore__ inline void InitCommonBuffers(int64_t stage1UsedCoreNum, int64_t rowFactor)
@@ -376,17 +380,24 @@ public:
     __aicore__ inline void InitOriginalBuffers(int64_t stage1UsedCoreNum)
     {
         int64_t rowFactor = tilingData->stage2RowFactor;
-        int64_t xQueSize = rowFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor);
+        const int64_t xQueSize = ComputeY ? rowFactor * tilingData->hcMult * RoundUp<T>(tilingData->dFactor) : 0;
         InitCommonBuffers(stage1UsedCoreNum, rowFactor);
-        InitPreMixBuffer(rowFactor);
+        if constexpr (ComputeY) {
+            InitPreMixBuffer(rowFactor);
+        }
 
         pipe->InitBuffer(mixesQue01, NUM_TWO,
             stage1UsedCoreNum * rowFactor * tilingData->hcMultAlign * NUM_TWO * sizeof(float));
         pipe->InitBuffer(mixesQue2, NUM_TWO,
             stage1UsedCoreNum * rowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
-        pipe->InitBuffer(xQue, NUM_TWO, xQueSize * sizeof(T));
-        pipe->InitBuffer(yQue, NUM_TWO,
-            rowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
+        if constexpr (ComputeY) {
+            pipe->InitBuffer(xQue, NUM_TWO, xQueSize * sizeof(T));
+            pipe->InitBuffer(yQue, NUM_TWO,
+                rowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(T));
+        } else {
+            // Reuse the output queue for pre coefficients.
+            pipe->InitBuffer(yQue, NUM_TWO, rowFactor * tilingData->hcMultAlign * sizeof(float));
+        }
         pipe->InitBuffer(postQue, NUM_TWO,
             rowFactor * tilingData->hcMultAlign * sizeof(float));
         pipe->InitBuffer(combFragQue, NUM_TWO,
@@ -404,9 +415,11 @@ public:
             rowFactor * tilingData->hcMultAlign * NUM_TWO * sizeof(float));
         pipe->InitBuffer(mixes02ReduceBuf,
             rowFactor * tilingData->hcMult * tilingData->hcMultAlign * sizeof(float));
-        pipe->InitBuffer(xCastBuf, xQueSize * sizeof(float));
-        pipe->InitBuffer(yCastBuf,
-            rowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(float));
+        if constexpr (ComputeY) {
+            pipe->InitBuffer(xCastBuf, xQueSize * sizeof(float));
+            pipe->InitBuffer(yCastBuf,
+                rowFactor * RoundUp<T>(tilingData->dFactor) * sizeof(float));
+        }
 
         hcBase0Local = hcBaseBuf0.Get<float>();
         hcBase1Local = hcBaseBuf1.Get<float>();
@@ -415,8 +428,10 @@ public:
         reduceLocal = reduceBuf.Get<float>();
         mixes01ReduceLocal = mixes01ReduceBuf.Get<float>();
         mixes02ReduceLocal = mixes02ReduceBuf.Get<float>();
-        xCastLocal = xCastBuf.Get<float>();
-        yCastLocal = yCastBuf.Get<float>();
+        if constexpr (ComputeY) {
+            xCastLocal = xCastBuf.Get<float>();
+            yCastLocal = yCastBuf.Get<float>();
+        }
     }
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR hcScale, GM_ADDR hcBase,
@@ -429,10 +444,10 @@ public:
         if ASCEND_IS_AIC {
             return;
         }
-        int64_t stage1UsedCoreNum = tilingData->cubeBlockDimK;
-        if constexpr (useOriginal) {
-            InitOriginalBuffers(stage1UsedCoreNum);
-        } else {
+        if constexpr (useOriginal && ComputeY) {
+            InitOriginalBuffers(tilingData->cubeBlockDimK);
+        } else if constexpr (!useOriginal) {
+            int64_t stage1UsedCoreNum = tilingData->cubeBlockDimK;
             if (GetBlockIdx() < tilingData->prePostCoreNum) {
                 InitPrePostBuffers(stage1UsedCoreNum);
             } else {
@@ -883,6 +898,9 @@ public:
         }
 
         int64_t stage1UsedCoreNum = tilingData->cubeBlockDimK;
+        if constexpr (!ComputeY) {
+            InitOriginalBuffers(stage1UsedCoreNum);
+        }
         int64_t mmLastAxisSize = CeilAlign(tilingData->hcMix, MM_CACHE_LINE_BYTES / sizeof(float));
         int64_t xCastFp32BufSize = tilingData->mL1Size *
             CeilAlign(tilingData->cvLoopKSize, MM_CACHE_LINE_BYTES / sizeof(float));
@@ -928,31 +946,43 @@ public:
             ReduceSumARAPerf(mixes01ReduceLocal, mixes01Local, NUM_TWO,
                 stage1UsedCoreNum, curRowFactor * tilingData->hcMultAlign);
 
-            ProcessPre(mixes01ReduceLocal, mixes01ReduceLocal, hcBase0Local,
+            LocalTensor<float> preLocal = mixes01ReduceLocal;
+            if constexpr (!ComputeY) {
+                preLocal = yQue.template AllocTensor<float>();
+            }
+            ProcessPre(preLocal, mixes01ReduceLocal, hcBase0Local,
                 rsqrtLocal, rowBrcbLocal0, hcBrcbLocal1, hcScale0,
                 tilingData->hcEps, curRowFactor, tilingData->hcMult);
-            CopyOutPreAndLoadPreMix(globalRowOffset, curRowFactor);
-            for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
-                int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
-                    tilingData->tailDFactor : tilingData->dFactor;
-                xLocal = xQue.template AllocTensor<T>();
-                CopyIn(xGm[globalRowOffset * tilingData->hcMult * tilingData->d +
-                    dLoopIdx * tilingData->dFactor], xLocal,
-                    curRowFactor * tilingData->hcMult, curDFactor,
-                    tilingData->d - curDFactor);
-                xQue.template EnQue(xLocal);
-                xLocal = xQue.template DeQue<T>();
-                yLocal = yQue.template AllocTensor<T>();
-                ProcessY(yLocal, xLocal,
-                    tilingData->hasPreMix != 0 ? preMixLocal : mixes01ReduceLocal, hcBrcbLocal1,
-                    xCastLocal, yCastLocal, curRowFactor, tilingData->hcMult, curDFactor);
-                xQue.template FreeTensor(xLocal);
-                yQue.template EnQue(yLocal);
-                yLocal = yQue.template DeQue<T>();
-                CopyOut(yLocal,
-                    yGm[globalRowOffset * tilingData->d + dLoopIdx * tilingData->dFactor],
-                    curRowFactor, curDFactor, tilingData->d - curDFactor);
-                yQue.template FreeTensor(yLocal);
+            if constexpr (ComputeY) {
+                CopyOutPreAndLoadPreMix(globalRowOffset, curRowFactor);
+                for (int64_t dLoopIdx = 0; dLoopIdx < tilingData->dLoop; dLoopIdx++) {
+                    int64_t curDFactor = dLoopIdx == tilingData->dLoop - 1 ?
+                        tilingData->tailDFactor : tilingData->dFactor;
+                    xLocal = xQue.template AllocTensor<T>();
+                    CopyIn(xGm[globalRowOffset * tilingData->hcMult * tilingData->d +
+                        dLoopIdx * tilingData->dFactor], xLocal,
+                        curRowFactor * tilingData->hcMult, curDFactor,
+                        tilingData->d - curDFactor);
+                    xQue.template EnQue(xLocal);
+                    xLocal = xQue.template DeQue<T>();
+                    yLocal = yQue.template AllocTensor<T>();
+                    ProcessY(yLocal, xLocal,
+                        tilingData->hasPreMix != 0 ? preMixLocal : mixes01ReduceLocal, hcBrcbLocal1,
+                        xCastLocal, yCastLocal, curRowFactor, tilingData->hcMult, curDFactor);
+                    xQue.template FreeTensor(xLocal);
+                    yQue.template EnQue(yLocal);
+                    yLocal = yQue.template DeQue<T>();
+                    CopyOut(yLocal,
+                        yGm[globalRowOffset * tilingData->d + dLoopIdx * tilingData->dFactor],
+                        curRowFactor, curDFactor, tilingData->d - curDFactor);
+                    yQue.template FreeTensor(yLocal);
+                }
+            } else {
+                yQue.EnQue(preLocal);
+                preLocal = yQue.template DeQue<float>();
+                CopyOut(preLocal, preGm[globalRowOffset * tilingData->hcMult],
+                    curRowFactor, tilingData->hcMult);
+                yQue.template FreeTensor(preLocal);
             }
 
             postLocal = postQue.AllocTensor<float>();
@@ -1031,7 +1061,7 @@ public:
                 combFragGm[globalRowOffset * tilingData->hcMult * tilingData->hcMult],
                 curRowFactor * tilingData->hcMult, tilingData->hcMult);
             combFragQue.FreeTensor(combFragLocal);
-            if (tilingData->hasPreOut != 0) {
+            if (ComputeY && tilingData->hasPreOut != 0) {
                 event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
                 SetFlag<HardEvent::MTE3_V>(eventId);
                 WaitFlag<HardEvent::MTE3_V>(eventId);

@@ -19,6 +19,8 @@
 
 using namespace ge;
 namespace optiling {
+REGISTER_TILING_DATA_CLASS(HcPre, HcPreTilingData)
+
 namespace {
 constexpr uint64_t WORKSPACE_SIZE = 32;
 int64_t CeilDiv(int64_t x, int64_t y)
