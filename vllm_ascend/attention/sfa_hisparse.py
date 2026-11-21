@@ -27,7 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.hisparse import cache_ops
-from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES, compact_c8_indices
 from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -625,7 +625,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
             or query_rope is None
             or num_prefill_tokens <= 0
             or metadata.num_reqs != num_decodes + metadata.num_prefills
-            or not (query.shape[0] == logical_topk.shape[0] == num_prefill_tokens)
+            or query.shape[0] < num_prefill_tokens
+            or query_rope.shape[0] < num_prefill_tokens
+            or logical_topk.shape[0] < num_prefill_tokens
         ):
             return None
         cache = self.hisparse_cache
@@ -649,32 +651,79 @@ class AscendHiSparseImpl(AscendSFAImpl):
         ):
             return None
 
+        query = query[:num_prefill_tokens]
+        query_rope = query_rope[:num_prefill_tokens]
+        logical_topk = logical_topk[:num_prefill_tokens]
+
         # Read the exact layer's live Resident table after the connector updates
         # it. The dense HMA alias includes gaps, so scale only its physical pages.
         page_stride, remainder = divmod(view.attention_block_stride, view.block_size)
         storage = view.attention_cache
+        table = cache.block_table.index_select(0, state_indices[num_decodes : metadata.num_reqs].to(torch.long))
         if (
-            remainder
-            or page_stride < 1
-            or not storage.is_contiguous()
-            or view.cache.stride(0) != view.attention_block_stride * view.cache.stride(1)
-            or storage.size(0) <= (view.cache.size(0) - 1) * page_stride
+            remainder == 0
+            and page_stride >= 1
+            and storage.is_contiguous()
+            and view.cache.stride(0) == view.attention_block_stride * view.cache.stride(1)
+            and storage.size(0) > (view.cache.size(0) - 1) * page_stride
+        ):
+            table = table.clamp_min(0).mul(page_stride)
+            if num_decodes:
+                query_ends = query_ends[num_decodes:] - num_decode_tokens
+                key_lengths = key_lengths[num_decodes:]
+            output = super()._execute_sparse_flash_attention_process(
+                query,
+                query_rope,
+                (storage.unsqueeze(2),),
+                logical_topk.unsqueeze(1),
+                metadata,
+                query_ends,
+                key_lengths,
+                block_table=table,
+            )
+            logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
+            return output
+
+        # HMA shares one pool across heterogeneous specs, so block_stride is
+        # row-aligned rather than page-aligned. Read Resident directly as TND.
+        resident_cache = view.cache
+        req_id_per_token = metadata.req_id_per_token
+        if (
+            resident_cache.ndim != 3
+            or resident_cache.dtype not in (torch.int8, torch.float8_e4m3fn)
+            or resident_cache.shape[-1] != C8_ROW_BYTES
+            or view.block_size <= 0
+            or view.attention_block_stride < view.block_size
+            or resident_cache.stride(1) != C8_ROW_BYTES
+            or resident_cache.stride(2) != 1
+            or resident_cache.stride(0) != view.attention_block_stride * resident_cache.stride(1)
+            or req_id_per_token is None
+            or req_id_per_token.numel() < num_decode_tokens + num_prefill_tokens
+            or table.shape[1] <= 0
         ):
             return None
-        table = cache.block_table.index_select(0, state_indices[num_decodes : metadata.num_reqs].to(torch.long))
-        table.clamp_min_(0).mul_(page_stride)
-        if num_decodes:
-            query_ends = query_ends[num_decodes:] - num_decode_tokens
-            key_lengths = key_lengths[num_decodes:]
-        output = super()._execute_sparse_flash_attention_process(
+
+        req_ids = (
+            (req_id_per_token[num_decode_tokens : num_decode_tokens + num_prefill_tokens] - num_decodes)
+            .clamp(0, table.shape[0] - 1)
+            .to(torch.long)
+        )
+        safe_logical = logical_topk.clamp_min(0).to(torch.long)
+        block_ids = safe_logical // view.block_size
+        offsets = safe_logical % view.block_size
+        in_bounds = (logical_topk >= 0) & (block_ids < table.shape[1])
+        req_tables = table[req_ids]
+        phys_blocks = torch.gather(req_tables, 1, block_ids.clamp_max(table.shape[1] - 1)).to(torch.long)
+        valid = in_bounds & (phys_blocks >= 0)
+        mapped = torch.where(valid, phys_blocks.clamp_min(0) * view.attention_block_stride + offsets, -1).to(
+            torch.int32
+        )
+        output = self._c8_physical_attention(
             query,
             query_rope,
-            (storage.unsqueeze(2),),
-            logical_topk.unsqueeze(1),
-            metadata,
-            query_ends,
-            key_lengths,
-            block_table=table,
+            resident_cache,
+            compact_c8_indices(mapped),
+            indices_are_mapped=True,
         )
         logger.info_once("[hisparse] Resident paged Prefill active: mixed=%s", bool(num_decodes), scope="process")
         return output

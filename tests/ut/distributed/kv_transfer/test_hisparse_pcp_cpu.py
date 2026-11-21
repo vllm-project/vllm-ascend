@@ -467,3 +467,98 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
     impl.hisparse_cache.finish_kv_update.assert_not_called()
     assert impl.hisparse_cache.submit_layer_mirror.call_count == int(prefill and not capture)
+
+
+@pytest.mark.parametrize("block_stride", [128, 192])
+def test_c8_resident_prefill_handles_hma_stride_and_pcp_padding(monkeypatch, block_stride):
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+    from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+    impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = True
+    cache = handle()
+    cache.all_context_pages_resident = True
+    cache.dummy_batch = False
+    cache.draft_layer = False
+    cache.block_table = torch.tensor([[3, 1], [2, 0]], dtype=torch.int32)
+    cache.runtime.request_state_indices = torch.tensor([0, 1], dtype=torch.int32)
+    resident_cache = torch.zeros(4, block_stride, C8_ROW_BYTES, dtype=torch.int8)
+    cache.view = NS(
+        cache=resident_cache,
+        attention_cache=torch.zeros(6, 128, C8_ROW_BYTES, dtype=torch.int8),
+        block_size=128,
+        attention_block_stride=block_stride,
+    )
+    impl.hisparse_cache = cache
+
+    # Include 1 decode token + 2 prefill tokens, while query/topk are padded to 5 rows.
+    meta = NS(
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_reqs=2,
+        num_actual_tokens=3,
+        hisparse_for_capture=False,
+        req_id_per_token=torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+    )
+    query = torch.arange(5 * 8, dtype=torch.float32).reshape(5, 1, 8)
+    query_rope = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 1, 4)
+    logical_topk = torch.tensor(
+        [
+            [0, 129, -1, 300],
+            [128, 5, 256, -1],
+            [99, 99, 99, 99],
+            [99, 99, 99, 99],
+            [99, 99, 99, 99],
+        ],
+        dtype=torch.int32,
+    )
+    query_ends = torch.tensor([1, 3], dtype=torch.int32)
+    key_lengths = torch.tensor([10, 20], dtype=torch.int32)
+
+    monkeypatch.setattr(sfa_hisparse, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    monkeypatch.setattr(sfa_hisparse.torch, "npu", NS(is_current_stream_capturing=lambda: False), raising=False)
+
+    captured = {}
+
+    def fake_pa_bsnd(self, q, q_rope, kv, topk, md, q_ends, k_lens, block_table=None):
+        captured["mode"] = "pa_bsnd"
+        captured["q_shape"] = q.shape
+        captured["q_rope_shape"] = q_rope.shape
+        captured["topk_shape"] = topk.shape
+        captured["q_ends"] = q_ends.tolist()
+        captured["k_lens"] = k_lens.tolist()
+        captured["block_table"] = block_table.tolist()
+        return "pa-bsnd-out"
+
+    def fake_tnd(q, q_rope, res_cache, indices, *, indices_are_mapped=False):
+        captured["mode"] = "tnd"
+        captured["q_shape"] = q.shape
+        captured["q_rope_shape"] = q_rope.shape
+        captured["indices"] = indices.tolist()
+        captured["indices_are_mapped"] = indices_are_mapped
+        return "tnd-out"
+
+    monkeypatch.setattr(AscendSFAImpl, "_execute_sparse_flash_attention_process", fake_pa_bsnd)
+    monkeypatch.setattr(impl, "_c8_physical_attention", fake_tnd)
+
+    out = impl._try_c8_resident_prefill(query, query_rope, logical_topk, meta, query_ends, key_lengths)
+    assert captured["q_shape"] == (2, 1, 8)
+    assert captured["q_rope_shape"] == (2, 1, 4)
+
+    if block_stride == 128:
+        assert out == "pa-bsnd-out"
+        assert captured["mode"] == "pa_bsnd"
+        assert captured["topk_shape"] == (2, 1, 4)
+        assert captured["q_ends"] == [2]
+        assert captured["k_lens"] == [20]
+        assert captured["block_table"] == [[2, 0]]
+    else:
+        assert out == "tnd-out"
+        assert captured["mode"] == "tnd"
+        assert captured["indices_are_mapped"] is True
+        # req_id=1 uses block_table[1]=[2, 0]: block 0->2*192=384, block 1->0*192=0, block 2->oob (-1).
+        assert captured["indices"] == [[384, 1, -1, -1], [0, 389, -1, -1]]
