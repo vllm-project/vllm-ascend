@@ -27,7 +27,7 @@ KV Cache supports the following three external storage backends, choose the stor
 | Hardware | Supported hardware A2/A3/950PR&950DT Products. |
 | Software Dependencies | For HDK/CANN requirements of each series, see the [HDK and CANN Version Compatibility Reference](#hdk-and-cann-version-compatibility-reference). |
 | Model | `kv_load_failure_policy=recompute` does not yet support hybrid attention models (e.g., DeepSeekV4, Qwen 3.5). |
-| Feature Mutex | `use_layerwise` only supported on the Prefill node of the Mooncake/Memcache backends. |
+| Layerwise | Mooncake and Memcache support `use_layerwise` on Prefill and Decode. Decode saving requires `save_decode_cache=true`. |
 
 **Backend-specific**
 
@@ -379,7 +379,7 @@ on the same instances that previously exported the environment variable.
             --decoder-ports 8200
         ```
   
-    3. To enable Decode node KV Cache storage for Prefill use with MLA models, add `consumer_is_to_put: true` to `AscendStoreConnector`; if Prefill enables PP, also set `prefill_pp_size` or `prefill_pp_layer_partition`:
+    3. To save complete Decode KV blocks from the Decode node, set `save_decode_cache: true` on `AscendStoreConnector`. KV received from Prefill is not saved during the Prefill phase. On the first Decode save, missing Prefill ancestor blocks are filled so the new Decode blocks form a reusable prefix. If Prefill enables PP, also set `prefill_pp_size` or `prefill_pp_layer_partition`:
 
         ```json
         {
@@ -389,29 +389,14 @@ on the same instances that previously exported the environment variable.
             "kv_connector_extra_config": {
                 "lookup_rpc_port": "'$LOOKUP_RPC_PORT'",
                 "backend": "mooncake",
-                "consumer_is_to_put": true,
+                "save_decode_cache": true,
                 "prefill_pp_size": 2,
                 "prefill_pp_layer_partition": "30,31"
             }
         }
         ```
 
-    4. To publish complete Decode blocks while keeping Prefill writes disabled, set `save_decode_cache: true` on the consumer. The first Decode save checks the aligned, reachable Prefill prefix and fills missing ancestor blocks. Later saves resume from the worker's last successful offset; failed ranges are checked again at the next completed-block boundary. This mode requires non-layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV.
-
-        ```json
-        {
-            "kv_connector": "AscendStoreConnector",
-            "kv_role": "kv_consumer",
-            "kv_load_failure_policy": "recompute",
-            "kv_connector_extra_config": {
-                "lookup_rpc_port": "'$LOOKUP_RPC_PORT'",
-                "backend": "mooncake",
-                "save_decode_cache": true
-            }
-        }
-        ```
-
-        When Prefill uses PP, configure `prefill_pp_size` or `prefill_pp_layer_partition` as in the preceding example so Decode writes compatible partition keys.
+        Later saves resume from the last successful offset; failed ranges are checked again at the next completed-block boundary. `save_decode_cache` supports blockwise and layerwise transfer. It writes KV to the Store for reuse and does not free the active request's NPU KV.
 
 === "PD-Mixed Scenario"
 
@@ -967,7 +952,7 @@ Expected output: MetaService starts successfully with no errors.
     echo "vLLM started. Log file: log_${ROLE}.log"
     ```
 
-    `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
+    `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends. Decode nodes can use it with `save_decode_cache` to save generated KV. Set `enable_lookup: true` separately if Decode should load from the pool.
 
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
@@ -1609,13 +1594,15 @@ Refer to the verification operations in Steps 1-5 of Configuration Examples.
 | `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
-| `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
-| `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks. A consumer can enable this without `consumer_is_to_put`, keeping Prefill writes disabled; this consumer mode requires `use_layerwise=false`. |
-| `consumer_is_to_load` | bool | false | No | true / false | Whether Decode node loads KV Cache from KV Pool. |
-| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Only supported on the Prefill node. |
+| `save_decode_cache` | bool | false | No | true / false | Save complete Decode KV blocks on a consumer. Prefill writes are skipped until Decode saving starts, when missing Prefill ancestors can be filled. Supports blockwise and layerwise transfer. |
+| `enable_lookup` | bool | true on `kv_producer` and `kv_both`; false on `kv_consumer` | No | true / false | Whether this node queries KV Pool for reusable KV. |
+| `use_layerwise` | bool | false | No | true / false | Layer-by-layer KV save/load, supported by both Mooncake and Memcache backends. Decode saving requires `save_decode_cache=true`. |
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
+
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+
+Existing configurations must replace `consumer_is_to_load` with `enable_lookup` and `consumer_is_to_put` with `save_decode_cache`. The latter saves complete Decode KV blocks and fills missing Prefill ancestors when Decode saving starts; it does not save transferred Prefill KV during Prefill. The old options raise an error at startup.
 
 **NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 

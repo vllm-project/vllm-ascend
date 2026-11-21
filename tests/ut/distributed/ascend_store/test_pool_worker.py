@@ -283,15 +283,15 @@ class TestPCPPoolWorker(unittest.TestCase):
                 pcp_rank=pcp_rank,
             )
             self.assertFalse(worker.group_uses_align_state[0])
-            for kv_role, consumer_is_to_put, expected in (
+            for kv_role, save_decode_cache, expected in (
                 ("kv_producer", False, True),
                 ("kv_both", False, True),
                 ("kv_consumer", False, False),
                 ("kv_consumer", True, True),
             ):
-                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, put=consumer_is_to_put):
+                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, save_decode=save_decode_cache):
                     worker.kv_role = kv_role
-                    worker.consumer_is_to_put = consumer_is_to_put
+                    worker.save_decode_cache = save_decode_cache
                     self.assertEqual(worker._is_layerwise_save_owner(0), expected)
 
     def test_single_mamba_group_uses_pcp_state_shards(self):
@@ -1430,7 +1430,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
             kv_role="kv_consumer",
             extra_config={
                 "backend": "mooncake",
-                "consumer_is_to_put": True,
+                "save_decode_cache": True,
                 "prefill_pp_layer_partition": "16,16",
                 "prefill_pp_size": "2",
             },
@@ -2236,7 +2236,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.use_layerwise = True
         connector.kv_role = "kv_producer"
-        connector.consumer_is_to_put = False
+        connector.save_decode_cache = False
         connector.can_put = True
         connector.connector_worker = worker
         connector._mamba_state = None
@@ -3108,6 +3108,34 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertNotIn(committed_key, request.save_keys)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
 
+    def test_consumer_gva_decode_save_only_allocates_missing_ancestors_and_decode(self):
+        worker = self._make_gva_worker()
+        worker.kv_role = "kv_consumer"
+        worker.save_decode_cache = True
+        existing_key = worker._make_layerwise_full_key(0, "h0")
+        missing_keys = [worker._make_layerwise_full_key(0, key) for key in ("h1", "h2")]
+        worker.m_store.batch_is_exist.side_effect = lambda keys: [int(key == existing_key) for key in keys]
+        worker.m_store.batch_alloc.return_value = [202, 203]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            target_token_len=48,
+            num_prompt_tokens=32,
+            block_ids=[7, 8, 9],
+            block_ids_by_group=[[7, 8, 9]],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9], dtype=np.int64)],
+        )
+
+        worker._data_plane._alloc_gvas_for_save([request])
+
+        self.assertEqual(worker.m_store.batch_alloc.call_args.args[0], missing_keys)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 202, 203])
+
     def test_exists_check_failure_fails_open_and_transfers_all(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes.gva import (
             LAYERWISE_READ_LEASE_TTL_MS,
@@ -3393,7 +3421,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             extra_config={
                 "backend": "mooncake",
                 "prefill_tp_size": 4,
-                "consumer_is_to_put": True,
+                "save_decode_cache": True,
                 "load_async": True,
             },
             num_kv_heads=8,
