@@ -1,6 +1,7 @@
 from threading import Lock
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from torch import nn
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention, Qwen2_5_VisionBlock
@@ -41,7 +42,7 @@ class _ResidualNorm(nn.Module):
         return x, x
 
 
-def test_compiled_vision_block_uses_generic_attention_with_fusion_available():
+def test_compiled_vision_block_uses_generic_attention_with_fusion_available(monkeypatch: pytest.MonkeyPatch):
     num_heads, head_size = 8, 72
     token_count = 7
 
@@ -73,6 +74,8 @@ def test_compiled_vision_block_uses_generic_attention_with_fusion_available():
 
     # The identity MLP doubles the sum of the input and the attention output.
     torch.testing.assert_close(block.forward(*args), 4 * x + 2 * token_count)
+    # The CPU suite registers a mock NPU without real accelerator stream hooks.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
     compiled_forward = torch.compile(block.forward, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled_forward(*args), 4 * x)
 
