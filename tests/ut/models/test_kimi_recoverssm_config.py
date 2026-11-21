@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from vllm_ascend.models.kimi_k3.recoverssm_config import (
@@ -123,6 +124,55 @@ def test_recoverssm_mooncake_requires_sd_conv_layout(connector, role, monkeypatc
     monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
     with pytest.raises(ValueError, match="requires SD convolution cache layout"):
         validate_request_indexed_kda_recoverssm(config)
+
+
+def make_pooled_config(role="kv_consumer"):
+    config = make_config()
+    config.cache_config.enable_prefix_caching = True
+    config.cache_config.mamba_cache_mode = "align"
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role=role,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "MooncakeConnectorV2", "kv_role": role},
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_role": role,
+                    "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "1"},
+                },
+            ]
+        },
+    )
+    return config
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_recoverssm_accepts_mooncake_with_memcache_pooling(role, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: False)
+    validate_request_indexed_kda_recoverssm(make_pooled_config(role))
+
+
+@pytest.mark.parametrize("children", [None, [], [None], [{"kv_connector": "MooncakeConnectorV2"}]])
+def test_recoverssm_rejects_incomplete_multi_connector(children):
+    config = make_pooled_config()
+    config.kv_transfer_config.kv_connector_extra_config["connectors"] = children
+    with pytest.raises(ValueError, match="requires MooncakeConnectorV2 followed by AscendStoreConnector"):
+        validate_request_indexed_kda_recoverssm(config)
+
+
+@pytest.mark.parametrize("store_options", [{"backend": "mooncake"}, {"backend": "memcache", "use_layerwise": True}])
+def test_recoverssm_rejects_other_pool_modes(store_options):
+    config = make_pooled_config()
+    config.kv_transfer_config.kv_connector_extra_config["connectors"][1]["kv_connector_extra_config"] = store_options
+    with pytest.raises(ValueError, match="requires non-layerwise MemCache pooling"):
+        validate_request_indexed_kda_recoverssm(config)
+
+
+def test_recoverssm_memcache_requires_sd_conv_layout(monkeypatch):
+    monkeypatch.setattr("vllm_ascend.models.kimi_k3.recoverssm_config.is_conv_state_dim_first", lambda: True)
+    with pytest.raises(ValueError, match="requires SD convolution cache layout"):
+        validate_request_indexed_kda_recoverssm(make_pooled_config())
 
 
 def test_recoverssm_without_transfer_allows_dim_first_layout(monkeypatch):
