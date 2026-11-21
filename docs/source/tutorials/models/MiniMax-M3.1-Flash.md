@@ -547,7 +547,7 @@ Monitor the role logs while weights load and graph capture completes. Startup du
 
 Use one Prefill host and two hosts for the distributed Decode service (1P1D), each with all 16 NPUs and the W8A8 weights. Prefill uses DP1 × TP4 × PP4. Decode uses one global DP8 × TP4 × PP1 group across the two hosts: D1 runs global DP ranks 0–3 and D2 runs ranks 4–7, and each rank starts one TP4 replica on four local NPUs. Every Decode rank exposes its own HTTP API, and the proxy registers all eight Decode endpoints. Use the same image and weights on all three hosts.
 
-The Prefill settings below are a starting point for 16K–128K input workloads in this three-host deployment. For 4K inputs, see [Workload-Specific Tuning](#922-workload-specific-tuning).
+The Prefill table gives starting settings for 16K–128K inputs in this three-host deployment.
 
 | Parameter | Prefill | Decode |
 | --- | --- | --- |
@@ -568,7 +568,25 @@ The Prefill settings below are a starting point for 16K–128K input workloads i
 
 On Prefill, `--max-num-batched-tokens` sets the per-iteration token budget, `--max-num-scheduled-tokens` caps the tokens issued by the scheduler per iteration, and `--long-prefill-token-threshold` caps the tokens scheduled from a long prompt per iteration. `--max-num-seqs` limits the sequences processed per iteration. Tune `--gpu-memory-utilization` together with `HCCL_BUFFSIZE` to leave device memory for HCCL and temporary MoE buffers while retaining enough KV cache capacity.
 
-These scheduler values are adapted from the [A3 W4A8 Prefill-only benchmarks](#924-a3-w4a8-prefill-only-benchmarks). The A3 deployment script below uses the shared W8A8 checkpoint, a `15,15,15,15` layer partition, and eager execution for both the main model and the DSpark draft. If you change the Prefill layer partition, set the same partition in `VLLM_PP_LAYER_PARTITION` on Prefill and in `kv_connector_extra_config.prefill.pp_layer_partition` on Prefill and both Decode hosts. Validate startup, P-to-D KV transfer, and generation at the target concurrency for the complete deployment.
+The A3 deployment script below uses the shared W8A8 checkpoint, a `15,15,15,15` layer partition, and eager execution for both the main model and the DSpark draft. If you change the Prefill layer partition, set the same partition in `VLLM_PP_LAYER_PARTITION` on Prefill and in `kv_connector_extra_config.prefill.pp_layer_partition` on Prefill and both Decode hosts. Validate startup, Prefill-to-Decode KV transfer, and generation for the complete deployment. For W4A8 on a single host, see [A3 W4A8 Prefill Deployment](#56-a3-w4a8-prefill-deployment).
+
+**A3 Prefill with 4K inputs**
+
+For inputs of approximately 4096 tokens, use the 4K column for the A3 `run_prefill.sh` below.
+
+| Setting in `run_prefill.sh` | 16K–128K inputs | 4K inputs |
+| --- | --- | --- |
+| `MAX_BATCHED_TOKENS` | `32768` | `2048` |
+| `MAX_SCHEDULED_TOKENS` | `32768` | `2048` |
+| `LONG_PREFILL_TOKEN_THRESHOLD` | `32768` | `2048` |
+
+In the `vllm serve` command, replace the main model's `--enforce-eager` line with the following to enable graph capture for 4K inputs.
+
+```bash
+--compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":2048}' \
+```
+
+With chunked Prefill, the 2048-token budget applies per iteration. A 4K prompt can span multiple iterations. `PIECEWISE` allows compatible parts of the main model to use ACLGraph during Prefill. This W8A8 deployment example keeps the DSpark draft in eager mode.
 
 **950DT products deployment configuration**
 
@@ -1277,7 +1295,7 @@ This section uses the 1P1D topology and proxy mapping from [Section 5.3](#53-pd-
 
 - By default the Prefill node performs pool lookup, load, and write.
 
-The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload. For a single-host A3 benchmark with DRAM alone or with DRAM and SSD, see [A3 W4A8 Prefill-only Benchmarks](#924-a3-w4a8-prefill-only-benchmarks).
+The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload. For single-host A3 W4A8 settings with DRAM only or with DRAM and SSD, see [A3 W4A8 Prefill Deployment](#56-a3-w4a8-prefill-deployment).
 
 For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant options, and hardware-specific pooling exports, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-M3.1-Flash-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -2742,6 +2760,41 @@ PYCODE
 
 Also compare backend `/metrics` snapshots before and after the request: the Prefill `vllm:prompt_tokens_total` counter and the receiving Decode `vllm:external_prefix_cache_hits_total` counter should both increase by `1048576`. Repeat against a replica on the other Decode host when validating a new deployment.
 
+### 5.6 A3 W4A8 Prefill Deployment
+
+This configuration runs Prefill on one Atlas 800I A3 host with 16 NPUs (DP1 × TP4 × PP4) and the `Minimax-M3.1-Flash-w4a8-1028_1` checkpoint. Start Prefill on its own and send local requests directly to `127.0.0.1:19100`. For a deployment with separate Prefill and Decode services, use the topology and role scripts in [Section 5.3](#53-pd-disaggregation-1p1d) or [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool).
+
+Start from the A3 Prefill script in Section 5.3 for the local prefix cache, or the A3 Prefill script in Section 5.4 for either external pool. Set `MODEL_PATH` to your copy of the W4A8 checkpoint. Apply the following settings to either script:
+
+- Set `--host 127.0.0.1` and export `VLLM_PP_LAYER_PARTITION=17,15,15,13` and `HCCL_BUFFSIZE=2048`. Keep `HCCL_IF_IP` and the communication interfaces set for the actual host.
+- Keep the Mooncake producer connector. Set its `prefill.pp_layer_partition` to `"17,15,15,13"` and its `decode` object to `{"dp_size":4,"tp_size":4,"pp_size":1}` for this Prefill-only configuration. With `MultiConnector`, change these fields only in the `MooncakeConnectorV1` child.
+- Set `MAX_NUM_SEQS=16`. Pass all three scheduler options explicitly: `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, and `--long-prefill-token-threshold`. Add `--max-num-scheduled-tokens` to the pooled script.
+- Set `enable_fused_mc2=2` and `multistream_overlap_shared_expert=false` in `--additional-config` to use MegaMoE. Use a checkpoint and CANN operator package compatible with MegaMoE.
+- Set the DSpark draft to `--speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}'`. Replace the main model's `--enforce-eager` with `--compilation-config` using the graph settings below.
+
+| Input and cache | All three scheduler token limits | `cudagraph_mode` | `max_cudagraph_capture_size` | `--gpu-memory-utilization` | vLLM prefix cache |
+| --- | --- | --- | --- | --- | --- |
+| 4K, local cache | `2048` | `PIECEWISE` | `2048` | `0.85` | `--enable-prefix-caching` |
+| 16K–128K, local cache | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.85` or `0.86`, depending on the host | `--enable-prefix-caching` |
+| 128K, external DRAM pool | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.82` | `--no-enable-prefix-caching` |
+| 128K, external DRAM and SSD pool | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.80` | `--no-enable-prefix-caching` |
+
+For the **external pools**, keep `MultiConnector` with `MooncakeConnectorV1` and `AscendStoreConnector`. Keep the Mooncake backend, `lookup_rpc_port=37000`, and the `4GB` DRAM segment per worker from the A3 pooled script and JSON. Start Mooncake Master before Prefill and point `master_server_address` to that host's reachable address.
+
+On A3 with HCCS, export `ASCEND_ENABLE_USE_FABRIC_MEM=1` and set both the top-level and `store` fabric windows in `ASCEND_GLOBAL_RESOURCE_CONFIG`. The example below uses `40` as the start address. Choose a window available on your host. For other settings, see the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service).
+
+```bash
+export ASCEND_GLOBAL_RESOURCE_CONFIG='{"fabric_memory.max_capacity":1,"fabric_memory.start_address":40,"store":{"fabric_memory.max_capacity":1,"fabric_memory.start_address":40}}'
+```
+
+| Configuration | DRAM only | DRAM and SSD |
+| --- | --- | --- |
+| Mooncake Master | `--enable_offload=false` | `--enable_offload=true --offload_on_evict=true --offload_force_evict=false` |
+| `enable_ssd_offload` in `mooncake.json` | `false` | `true` |
+| SSD path and limits | Omit `ssd_offload_path`. No SSD mount is needed. | Set `ssd_offload_path` to the writable local SSD mount inside the container. Set `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` and `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` to `5368709120` (5 GiB per worker). Keep the 1 GiB I/O buffer and LRU bucket eviction from the script. |
+
+Use the memory utilization values above as starting points and leave device memory for communication and KV transfer buffers. For SSD offload, make sure the mounted filesystem can accommodate the per-worker disk budget across all 16 workers.
+
 ## 6 Functional Verification
 
 Replace `{ip}` and `{port}` with the service endpoint. All examples use `minimax-m3.1-flash` as the served model name.
@@ -2946,66 +2999,11 @@ The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT produ
 
 Change one parameter at a time and retain the command and benchmark result for each run. For general methods, refer to [Optimization and Tuning](../../developer_guide/performance_and_debug/optimization_and_tuning.md). For feature descriptions and configuration constraints, refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) and [Speculative Decoding Guide](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark).
 
-**A3 Prefill with 4K inputs**
-
-For workloads with approximately 4096 input tokens per request, apply the following changes together to the A3 `run_prefill.sh` in [Section 5.3](#53-pd-disaggregation-1p1d).
-
-| Setting in `run_prefill.sh` | 16K–128K inputs | 4K inputs |
-| --- | --- | --- |
-| `MAX_BATCHED_TOKENS` | `32768` | `2048` |
-| `MAX_SCHEDULED_TOKENS` | `32768` | `2048` |
-| `LONG_PREFILL_TOKEN_THRESHOLD` | `32768` | `2048` |
-
-In the `vllm serve` command, replace the main model's `--enforce-eager` line with the following to enable graph capture for 4K inputs.
-
-```bash
---compilation-config '{"cudagraph_mode":"PIECEWISE","max_cudagraph_capture_size":2048}' \
-```
-
-With chunked Prefill, the 2048-token budget applies per iteration. A 4K prompt can span multiple iterations. `PIECEWISE` allows compatible parts of the main model to use ACLGraph during Prefill. This W8A8 deployment example keeps the DSpark draft in eager mode. Compare TTFT and throughput for the two configurations at the same concurrency and prefix-cache hit rate.
-
 #### 9.2.3 Tool-Assisted Tuning with msmodeling
 
 The msmodeling tool (MindStudio-Modeling) optimizes serving and benchmark parameters together, combining measured results with knowledge-base experience to determine a better parameter set in one run and push performance toward the hardware limit.
 
 For the complete, step-by-step usage guide please refer to **[Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md)**.
-
-#### 9.2.4 A3 W4A8 Prefill-only Benchmarks
-
-Run Prefill on one Atlas 800I A3 host with 16 NPUs (DP1 × TP4 × PP4) and the `Minimax-M3.1-Flash-w4a8-1028_1` checkpoint. Send requests directly to the Prefill HTTP endpoint on `127.0.0.1:19100`. The benchmarks used one output token per request and did not start a Decode service or proxy. These settings document single-host measurements. For a full Prefill/Decode deployment, use the topology in [Section 5.3](#53-pd-disaggregation-1p1d) or [Section 5.4](#54-prefill-decode-disaggregation-with-kv-cache-pool) and validate KV transfer separately.
-
-Start from the A3 Prefill script in Section 5.3 for the local prefix cache, or the A3 Prefill script in Section 5.4 for either external pool. Set `MODEL_PATH` to your copy of the W4A8 checkpoint. Apply the following settings to either script:
-
-- Set `--host 127.0.0.1` and export `VLLM_PP_LAYER_PARTITION=17,15,15,13` and `HCCL_BUFFSIZE=2048`. Keep `HCCL_IF_IP` and the communication interfaces set for the actual host.
-- Keep the Mooncake producer connector. Set its `prefill.pp_layer_partition` to `"17,15,15,13"` and its `decode` object to `{"dp_size":4,"tp_size":4,"pp_size":1}` to match the benchmark configuration. With `MultiConnector`, change these fields only in the `MooncakeConnectorV1` child.
-- Set `MAX_NUM_SEQS=16`. Pass all three scheduler options explicitly: `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, and `--long-prefill-token-threshold`. Add `--max-num-scheduled-tokens` to the pooled script.
-- Set `enable_fused_mc2=2` and `multistream_overlap_shared_expert=false` in `--additional-config` to use MegaMoE. Use a checkpoint and CANN operator package compatible with MegaMoE.
-- Set the DSpark draft to `--speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}'`. Replace the main model's `--enforce-eager` with `--compilation-config` using the graph settings below.
-
-| Input and cache | All three scheduler token limits | `cudagraph_mode` | `max_cudagraph_capture_size` | `--gpu-memory-utilization` | vLLM prefix cache |
-| --- | --- | --- | --- | --- | --- |
-| 4K, local cache | `2048` | `PIECEWISE` | `2048` | `0.85` | `--enable-prefix-caching` |
-| 16K–128K, local cache | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.85` or `0.86`, depending on the host | `--enable-prefix-caching` |
-| 128K, external DRAM pool | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.82` | `--no-enable-prefix-caching` |
-| 128K, external DRAM and SSD pool | `32768` | `FULL_DECODE_ONLY` | `1024` | `0.80` on retry | `--no-enable-prefix-caching` |
-
-For the **external pools**, keep `MultiConnector` with `MooncakeConnectorV1` and `AscendStoreConnector`. Keep the Mooncake backend, `lookup_rpc_port=37000`, and the `4GB` DRAM segment per worker from the A3 pooled script and JSON. Start Mooncake Master before Prefill and point `master_server_address` to that host's reachable address.
-
-The benchmarks used `ASCEND_ENABLE_USE_FABRIC_MEM=1` and set both the top-level and `store` fabric windows in `ASCEND_GLOBAL_RESOURCE_CONFIG`. The example below uses `40` as the start address. Choose a window available on your host. For the available settings, see the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service).
-
-```bash
-export ASCEND_GLOBAL_RESOURCE_CONFIG='{"fabric_memory.max_capacity":1,"fabric_memory.start_address":40,"store":{"fabric_memory.max_capacity":1,"fabric_memory.start_address":40}}'
-```
-
-| Configuration | DRAM only | DRAM and SSD |
-| --- | --- | --- |
-| Mooncake Master | `--enable_offload=false` | `--enable_offload=true --offload_on_evict=true --offload_force_evict=false` |
-| `enable_ssd_offload` in `mooncake.json` | `false` | `true` |
-| SSD path and limits | Omit `ssd_offload_path`. No SSD mount is needed. | Set `ssd_offload_path` to the writable local SSD mount inside the container. Set `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` and `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` to `5368709120` (5 GiB per worker). Keep the 1 GiB I/O buffer and LRU bucket eviction from the script. |
-
-The SSD benchmark also used `--eviction_high_watermark_ratio=0 --promotion_on_hit=false` on the Master to exercise SSD reads. The first SSD run at `0.82` encountered a device-memory allocation failure during KV transfer. With `0.80`, the retry completed but exceeded the TTFT target. Treat the utilization values as starting points and verify memory headroom for KV transfers on your host.
-
-For both external-pool benchmarks, use 128K-token requests with a 90% shared prefix. Warm the pool before measuring and check Prefill logs for external lookup and read hits. To verify the SSD tier, use a working set larger than the DRAM pool, then confirm writes to SSD and reads from SSD when a previously offloaded prefix is reused.
 
 ## 10 FAQ
 
