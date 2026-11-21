@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+from vllm_ascend.ops.triton.sample.fused_add_argmax import TwoStageAddArgmax
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
@@ -42,11 +43,14 @@ def make_spec(supported=True):
         compute_confidence=MagicMock(return_value=torch.ones(6)),
     )
 
-    def run(a, b, out):
+    def try_run(a, b, out):
+        if not supported:
+            return False
         out.copy_((a + b).argmax(-1))
+        return True
 
     spec._add_argmax_workspace = SimpleNamespace(
-        supports=MagicMock(return_value=supported), run=MagicMock(side_effect=run)
+        try_run=MagicMock(side_effect=try_run)
     )
     spec._sample_logits = MagicMock(side_effect=lambda logits, *_: logits.argmax(-1) + 100)
     return spec, previous
@@ -61,7 +65,7 @@ def test_sequential_mapping_and_step_fallback(supported, confidence):
     assert spec.draft_tokens.tolist() == [[102, 103, 104], [103, 104, 100]]
     assert previous[1].tolist() == [102, 103]
     assert previous[2].tolist() == [103, 104]
-    assert spec._add_argmax_workspace.run.call_count == (3 if supported else 0)
+    assert spec._add_argmax_workspace.try_run.call_count == 3
     assert spec._sample_logits.call_count == (0 if supported else 3)
     assert spec.model.compute_confidence.call_count == int(confidence)
     if confidence:
@@ -89,3 +93,17 @@ def test_preserves_parent_sampling(monkeypatch, reason):
     spec._sample_sequential(2, hidden)
     parent.assert_called_once_with(2, hidden)
     spec.model.compute_draft_logits.assert_not_called()
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_workspace_try_run_checks_inputs_once(supported):
+    ws = TwoStageAddArgmax.__new__(TwoStageAddArgmax)
+    ws.supports = MagicMock(return_value=supported)
+    ws._run_supported = MagicMock()
+    a, b, out = object(), object(), object()
+    assert ws.try_run(a, b, out) is supported
+    ws.supports.assert_called_once_with(a, b, out)
+    if supported:
+        ws._run_supported.assert_called_once_with(a, b, out)
+    else:
+        ws._run_supported.assert_not_called()

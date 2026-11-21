@@ -139,8 +139,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             base_i = base_logits[:, i]
             # Persistent, strided column; no per-step output allocation.
             output_i = self.draft_tokens[:num_reqs, i]
-            if ws.supports(base_i, bias, output_i):
-                ws.run(base_i, bias, output_i)
+            if ws.try_run(base_i, bias, output_i):
                 # Kernel emits draft IDs. Mapping must occur before next bias.
                 mapped = self.model.map_draft_to_target(output_i)
                 if mapped is not output_i:

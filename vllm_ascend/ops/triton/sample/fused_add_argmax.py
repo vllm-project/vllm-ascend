@@ -95,9 +95,19 @@ class TwoStageAddArgmax:
             and a.device == b.device == out.device == self.values.device
         )
 
-    def run(self, a, b, out):
+    def try_run(self, a, b, out):
+        """Validate once; let the caller fall back without checking twice."""
         if not self.supports(a, b, out):
+            return False
+        self._run_supported(a, b, out)
+        return True
+
+    def run(self, a, b, out):
+        if not self.try_run(a, b, out):
             raise ValueError("Unsupported inputs; caller must use original path")
+        return out
+
+    def _run_supported(self, a, b, out):
         rows, vocab = a.shape
         if rows == 0:
             return out
