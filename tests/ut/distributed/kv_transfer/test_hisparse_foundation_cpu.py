@@ -503,9 +503,7 @@ def prefill_mask_builder(monkeypatch):
     return build
 
 
-@pytest.mark.parametrize(
-    "boundaries,rows,num_decodes", [([0, 4], 4, 0), ([0, 1, 5], 8, 1)]
-)
+@pytest.mark.parametrize("boundaries,rows,num_decodes", [([0, 4], 4, 0), ([0, 1, 5], 8, 1)])
 def test_prefill_mask_is_reused_without_mutating_layer_topk(
     prefill_mask_builder, monkeypatch, boundaries, rows, num_decodes
 ):
