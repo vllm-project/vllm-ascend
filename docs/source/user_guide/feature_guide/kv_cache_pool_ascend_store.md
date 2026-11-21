@@ -149,29 +149,46 @@ on the same instances that previously exported the environment variable.
     | `protocol` | str | No default | Yes | ascend | Must be set to `ascend` on NPU. |
     | `device_name` | str | "" (empty string) | No | Empty string | The ascend protocol does not use device names; leave empty. |
     | `master_server_address` | str | No default | Yes | <ip>:<port> | Master service IP and port. Can be overridden by the `MOONCAKE_MASTER` environment variable (takes precedence, useful for injecting the master address through Kubernetes). |
-    | `global_segment_size` | str | No default | Yes | Must align to 1 GB (1024 MB / 1048576 KB / 1073741824 B) | Registered memory size per card to the KV Pool. Can be overridden by the `MOONCAKE_GLOBAL_SEGMENT_SIZE` environment variable (takes precedence). |
+    | `global_segment_size` | str or int | No default | Yes | 0, or a positive size aligned to 1 GB (1024 MB / 1048576 KB / 1073741824 B) | Registered KV Pool DRAM per worker. Use 0 when standalone clients provide the pool memory. Can be overridden by `MOONCAKE_GLOBAL_SEGMENT_SIZE` (takes precedence). |
     | `preferred_segment` | bool | false | No | true / false | Whether to prefer storing KV on the local segment. |
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
-    | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
+    | `enable_ssd_offload` | bool | false | No | true / false | Enable local SSD offload in vLLM workers. Keep false when standalone clients own the SSD tier. Environment variables are not supported. |
     | `ssd_offload_path` | str | No default | Required when SSD offload enabled | Absolute path | Absolute path for SSD offload data storage (for example, /nvme/mooncake_offload). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symlinks, and paths containing `..` are rejected. |
-    | `enable_ssd_prefetch` | bool | false | No | true / false | Master switch for SSD-to-DRAM prefetch on exist queries. Implemented by [Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); the idea comes from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213). When true, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so Mooncake promotes SSD-only objects into DRAM during the cache probe. Requires `enable_ssd_offload=true` and a Mooncake build that exposes `ExistOptions`. If `ExistOptions` is missing, prefetch is disabled and a warning is logged. |
-    | `ssd_prefetch_cooldown_sec` | int | omitted | No | Integer seconds; 0 disables | DRAM-pressure backoff. After promotion fails with `NO_AVAILABLE_HANDLE`, prefetch pauses for this many seconds so eviction and offload can free DRAM. Mooncake's built-in default is 5 when this field is omitted. vLLM-Ascend forwards it only when `mooncake.json` sets it. |
-    | `ssd_prefetch_dedup_ttl_sec` | int | omitted | No | Integer seconds; 0 disables | Per-key trigger dedup TTL. The same key is prefetched at most once per this period, which suppresses duplicate probes across TP ranks. Mooncake's built-in default is 30 when this field is omitted. Forwarded only when set. |
+    | `enable_ssd_prefetch` | bool | false | No | true / false | Enable SSD-to-DRAM prefetch on exist queries, including clients with no local SSD or contributed DRAM segment. Requires Mooncake `ExistOptions` and config-dict `setup()`; otherwise prefetch is disabled with a warning. Standalone holders require [Mooncake PR 5598](https://github.com/kvcache-ai/Mooncake/pull/5598). |
+    | `ssd_prefetch_cooldown_sec` | int | omitted | No | Non-negative integer seconds; 0 disables | DRAM-pressure backoff after `NO_AVAILABLE_HANDLE`. Forwarded only when explicitly set for a worker owning local SSD offload. Query-only clients retain the Mooncake default of 5 seconds; configure standalone holders separately. |
+    | `ssd_prefetch_dedup_ttl_sec` | int | omitted | No | Non-negative integer seconds; 0 disables | Per-client key deduplication window. Forwarded only when explicitly set for a worker owning local SSD offload. Query-only clients retain the Mooncake default of 30 seconds; configure standalone holders separately. |
     | `tenant_id` | str | default | No | String | Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. |
 
     </details>
 
-    SSD offload and SSD prefetch are separate. After `enable_ssd_offload` is true, add the following fields to the same `mooncake.json` to prefetch SSD-only objects back into DRAM on exist. Semantics match [Mooncake SSD prefetch](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/store/ssd-prefetch.md) ([Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); concept from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213)):
+    SSD offload and SSD prefetch are separate. Set `enable_ssd_prefetch=true` in `mooncake.json` for the processes that issue existence probes. The requesting Mooncake RealClient initializes its own prefetch runtime to query replica metadata and delegate SSD-only objects to their holders. It can do this without contributing a DRAM segment or owning local SSD storage. See [Mooncake SSD prefetch](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/store/ssd-prefetch.md) ([Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272)).
+
+    Enabling prefetch uses the config-dict form of `MooncakeDistributedStore.setup()`, even when no throttle override is set. This overload cannot take an engine, so the store creates its own TransferEngine instead of sharing the global one. Both `ExistOptions` and this setup overload are required; if either is unavailable, the connector logs a warning and leaves prefetch disabled.
+
+    For standalone storage, keep the existing connection and transport settings and use these fields in the vLLM `mooncake.json`:
 
     ```json
     {
-        "enable_ssd_prefetch": true,
-        "ssd_prefetch_cooldown_sec": 5,
-        "ssd_prefetch_dedup_ttl_sec": 30
+        "global_segment_size": 0,
+        "enable_ssd_offload": false,
+        "enable_ssd_prefetch": true
     }
     ```
 
-    `ssd_prefetch_cooldown_sec` and `ssd_prefetch_dedup_ttl_sec` are forwarded to `MooncakeDistributedStore.setup()` only when the field is present in `mooncake.json`. Omitting a field leaves Mooncake's default (5 seconds and 30 seconds). When `mooncake.json` sets any prefetch knob, the connector uses the config-dict form of `setup()`; that overload cannot take an engine, so the store creates its own TransferEngine instead of sharing the global one. On a Mooncake build without `ExistOptions`, the knobs are not passed and prefetch stays off.
+    Whole-block mode sends the scheduler lookup to the rank-0 worker, which calls Mooncake. Layerwise mode queries Mooncake directly from the scheduler. The client that calls Mooncake must receive `enable_ssd_prefetch=true` during setup and pass `ExistOptions(prefetch_to_memory=True)` during the probe. Queries return their existence results without waiting for promotion to complete.
+
+    Standalone holders need a Mooncake build containing [PR 5598](https://github.com/kvcache-ai/Mooncake/pull/5598), which adds the prefetch CLI options and the delegated RPC entry points. Set `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH` to each holder's SSD directory and add these flags to its `mooncake_client` launch command:
+
+    ```text
+    --enable_offload=true
+    --enable_ssd_prefetch=true
+    --ssd_prefetch_cooldown_sec=5
+    --ssd_prefetch_dedup_ttl_sec=30
+    ```
+
+    With `--start_offload_rpc_server=true` (the default), delegated requests use the dedicated offload RPC listener. With it set to false, PR 5598 serves disk reads and prefetch requests on the main client RPC listener. Enable prefetch on each SSD holder whose objects should be prefetched; a holder with prefetch disabled continues serving normal reads but rejects prefetch requests.
+
+    Requesting clients and holders maintain independent throttle state. vLLM forwards `ssd_prefetch_cooldown_sec` and `ssd_prefetch_dedup_ttl_sec` from `mooncake.json` only to workers owning local SSD offload. Query-only clients use Mooncake's defaults (5 seconds and 30 seconds), while standalone holders use their own CLI settings. Configuring a holder's TTL does not change the requesting client's deduplication window.
 
 2. Start `mooncake_master` (only needs to run on one node):
 

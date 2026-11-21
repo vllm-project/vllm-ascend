@@ -1,0 +1,7 @@
+pr: 22197
+entries:
+  - category: bugfix
+    text: >-
+      Fixed enable_ssd_prefetch=true being ignored in AscendStore deployments
+      where standalone Mooncake clients own the DRAM and SSD pool. Use a Mooncake
+      build with standalone SSD prefetch support and enable prefetch on the holders.

@@ -146,10 +146,14 @@ _SSD_PREFETCH_KNOB_KEYS = ("ssd_prefetch_cooldown_sec", "ssd_prefetch_dedup_ttl_
 
 
 def _resolve_ssd_prefetch(config: "MooncakeStoreConfig", contribute_memory: bool) -> SsdPrefetchConf:
-    """Decide everything about SSD prefetch in one place; every gate warns and
-    disables instead of failing service startup."""
-    # A node that never prefetches may still run a promotion delegated by a
-    # remote peer, so the knobs go whenever this node contributes SSD.
+    """Resolve prefetch for both requesting clients and local SSD holders.
+
+    A requester needs its own prefetch runtime to find and contact remote SSD
+    holders, even when it contributes no segment or local SSD storage. Every
+    enabled client must use config-dict setup to initialize that runtime.
+    """
+    # Only local SSD holders receive throttle overrides. Requesting clients
+    # without local SSD offload retain Mooncake's per-client defaults.
     knobs: dict[str, object] = {}
     if contribute_memory and config.enable_ssd_offload and _mooncake_supports_exist_prefetch():
         for key in _SSD_PREFETCH_KNOB_KEYS:
@@ -157,13 +161,8 @@ def _resolve_ssd_prefetch(config: "MooncakeStoreConfig", contribute_memory: bool
             if value is not None:
                 knobs[key] = value
 
-    enabled = contribute_memory and getattr(config, "enable_ssd_prefetch", False)
-    if enabled and not config.enable_ssd_offload:
-        logger.warning(
-            "enable_ssd_prefetch is true but SSD offload is disabled; prefetch has no effect without SSD offload."
-        )
-        enabled = False
-    elif enabled and not _mooncake_supports_exist_prefetch():
+    enabled = bool(getattr(config, "enable_ssd_prefetch", False))
+    if enabled and not _mooncake_supports_exist_prefetch():
         logger.warning(
             "enable_ssd_prefetch is true, but the installed Mooncake does not support ExistOptions on "
             "batch_is_exist / is_exist (kvcache-ai/Mooncake#4272; concept from RFC #2213). Upgrade Mooncake "
