@@ -615,7 +615,9 @@ def _build_swa_chunk_smla_metadata(
     except Exception:  # noqa: BLE001 - fail open to the unbounded path
         from vllm.logger import logger
 
-        logger.warning_once(
+        # ``warning_once`` does not accept ``exc_info`` on every vLLM logger;
+        # a TypeError here would replace the fail-open path with a crash.
+        logger.warning(
             "PCP SWA chunk staging: rebuilding sparse-MLA metadata failed; "
             "keeping the direct peer-read path for this step.",
             exc_info=True,
@@ -630,7 +632,7 @@ def _build_swa_chunk_smla_metadata(
 
 
 def _maybe_stage_owner_cmp_cache(
-    source_cache, block_table, metadata, num_reqs, pcp_config, seq_lens=None, block_size=None
+    source_cache, block_table, metadata, num_reqs, pcp_config, seq_lens=None, block_size=None, counts=None
 ):
     """Copy a pure-prefill batch's long-KV blocks into local scratch.
 
@@ -679,6 +681,7 @@ def _maybe_stage_owner_cmp_cache(
         block_table,
         seq_lens=seq_lens,
         block_size=block_size,
+        counts=counts,
         enable_timing=pcp_config.enable_timing,
     )
     if result is None:
@@ -825,8 +828,9 @@ class AscendDSAV41Impl:
             # tokens.  The whole compressed history stays on the long-KV gate.
             _pcp_stage_count("swa", "mixed_included")
         if swa_metadata.num_prefills <= 0:
-            _pcp_stage_count("swa", "skipped_nonprefill")
-            return
+            # Pure decode rows replay one window each (chunk_len == 1), so the
+            # same bounded plan applies; count them to measure the benefit.
+            _pcp_stage_count("swa", "decode_included")
         if swa_metadata.ori_sparse_indices is not None:
             _pcp_stage_count("swa", "skipped_sparse")
             return
@@ -942,6 +946,30 @@ class AscendDSAV41Impl:
         _PCP_STAGE_STEP["swa_capacity"] = int(cache.capacity_blocks)
         swa_metadata._pcp_swa_async = (staged[2], (staged[0], staged[1]), plan, rebuilt, has_compressed)
 
+    def _cmp_stage_counts(self, cmp_metadata, num_reqs):
+        """Host-side live-block counts for the long-KV stage table.
+
+        The scheduler's CPU sequence lengths determine the compressed cache
+        length exactly (``seq_len // ratio``), so the fixed, sync-free table
+        builder can be used instead of device boolean indexing.  An
+        over-approximation is safe: the builder clamps and the kernel never
+        references padding rows.
+        """
+        cpu = getattr(cmp_metadata, "seq_lens_cpu", None)
+        block = int(getattr(cmp_metadata, "storage_block_size", 0) or 0)
+        if cpu is None or block <= 0:
+            return None
+        try:
+            seqs = cpu[:num_reqs].tolist()
+        except (TypeError, ValueError):  # fall back to the dynamic builder
+            return None
+        ratio = int(self.role.compress_ratio) if self.role.compress_ratio in (1, 2) else 1
+        counts = []
+        for seq in seqs:
+            cache_len = int(seq) // ratio if ratio > 1 else int(seq)
+            counts.append((cache_len + block - 1) // block)
+        return counts
+
     def _start_owner_long_kv_stage_async(self, attn, metadata):
         """Launch the long-KV source copy on a side stream after the writes.
 
@@ -988,6 +1016,7 @@ class AscendDSAV41Impl:
         num_reqs = metadata.swa.num_reqs
         block_table = cmp_metadata.block_table[:num_reqs]
         seq_lens = cmp_metadata.cache_seq_lens[:num_reqs]
+        counts = self._cmp_stage_counts(cmp_metadata, num_reqs)
         cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=config.owner_stage_bytes)
         start = torch.npu.current_stream().record_event()
         timing = _timing_enter("stage_long_kv_issue", config.enable_timing)
@@ -996,6 +1025,7 @@ class AscendDSAV41Impl:
             block_table,
             seq_lens=seq_lens,
             block_size=getattr(cmp_metadata, "storage_block_size", None),
+            counts=counts,
             enable_timing=config.enable_timing,
             start_event=start,
         )
@@ -1432,6 +1462,7 @@ class AscendDSAV41Impl:
                     self.pcp_config,
                     seq_lens=cmp_seq_lens,
                     block_size=getattr(metadata.attention, "storage_block_size", None),
+                    counts=self._cmp_stage_counts(metadata.attention, num_reqs),
                 )
             _timing_exit(timing)
             if staged is not None:
@@ -1488,8 +1519,7 @@ class AscendDSAV41Impl:
                     # plan/metadata/overflow already failed; retrying the same
                     # device work per layer would only add latency.
                     _pcp_stage_negative(fallback_stage_cache) is None
-                    # Mixed rows are eligible (decode rows replay one window).
-                    and metadata.swa.num_prefills > 0
+                    # Mixed and pure-decode rows replay one bounded window.
                     and metadata.swa.ori_sparse_indices is None
                     # A per-token visible-length floor (bounded replay) is tied
                     # to the unbounded coordinate system; keep that path untouched.
