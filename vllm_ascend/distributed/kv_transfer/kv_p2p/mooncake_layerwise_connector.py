@@ -1,27 +1,22 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import copy
-import hashlib
 import logging
 import math
 import os
 import queue
-import struct
 import threading
 import time
-from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Iterator
+from collections import defaultdict, deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
@@ -55,7 +50,36 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.block_selection import (
+    has_attn_mamba_hybrid_cache,
+    hybrid_prefill_token_count,
+    iter_kv_cache_specs,
+    trim_hybrid_remote_block_ids,
+    truncate_request_for_hybrid_prefill,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.endpoints import (
+    layerwise_handshake_port,
+    layerwise_scheduler_base_port,
+    layerwise_worker_base_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import (
+    DONE_SENDING_MSG,
+    FAILED_SENDING_MSG,
+    GET_META_MSG,
+    LayerMetadata,
+    LayerwiseAgentMetadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport import (
+    SizedDict,
+    ensure_zmq_send,
+    string_to_int64_hash,  # noqa: F401  (re-exported for existing callers/tests)
+    zmq_ctx,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.metaserver import MetaserverClient
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.step import (
+    LayerwiseStepController,
+    LayerwiseTransferPlan,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -68,7 +92,6 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_mappings,
     get_transfer_timeout_value,
     inject_qos,
-    kv_alltoall_and_rearrange,
     parallel_info,
     validate_register_region_count,
 )
@@ -87,22 +110,22 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 # isort: on
 
-DONE_SENDING_MSG = b"done_sending_msg"
-FAILED_SENDING_MSG = b"failed_sending_msg"
+# Back-compat re-exports: the layerwise wire protocol definitions moved to
+# mooncake_v1/common. The imports above keep DONE_SENDING_MSG, FAILED_SENDING_MSG
+# and LayerMetadata importable from this module; MooncakeAgentMetadata keeps its
+# historical name and is bound here (not at the end of the module) because the
+# annotations below reference it while the classes are being defined.
+MooncakeAgentMetadata = LayerwiseAgentMetadata
+
 LAYERWISE_REUSE_WAIT_LOG_INTERVAL_SECONDS = 10.0
-
-
-@dataclass
-class LayerMetadata:
-    tensor_group_idx: list[int]
-    kv_caches_base_addr: list[int]
-    block_len: list[int]
-    block_size_scale: list[int]
-
-
-class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
-    te_rpc_port: int
-    layer_metadata: dict[str, LayerMetadata]
+# Poll/timeout used by the layerwise background threads so a stop request can
+# interrupt a blocking wait. Threads observe the stop event and exit on their
+# own; the ZMQ socket is never closed from another thread.
+THREAD_STOP_POLL_SECONDS = 0.2
+# Best-effort upper bound for joining a layer thread during shutdown.
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
+# Startup wait bound for the layer threads; on timeout the worker rolls back.
+KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS = 5 * 60
 
 
 @dataclass
@@ -191,26 +214,6 @@ class SendReqInfo:
         )
 
 
-@dataclass
-class SizedDict(OrderedDict):
-    def __init__(self, max_size=16000, *args, **kwargs):
-        self.max_size = max_size
-        super().__init__(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        if len(self) > self.max_size:
-            self.popitem(last=False)
-
-    def __getitem__(self, key):
-        try:
-            return super().__getitem__(key)
-        except KeyError:
-            value: dict[int, list[int]] = {}
-            self[key] = value
-            return value
-
-
 class KVCacheSendingLayerThread(threading.Thread):
     def __init__(
         self,
@@ -274,15 +277,31 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event = ready_event
         self.callback_func = callback_func
         self.reuse_completion_callback = reuse_completion_callback
+        # Set by stop() to let the send loop exit; see run().
+        self._stop_event = threading.Event()
+        # First fatal (unrecoverable) error raised by run(); read by the worker.
+        self.fatal_error: BaseException | None = None
+
+    def stop(self) -> None:
+        """Signal the send loop to exit; idempotent."""
+        self._stop_event.set()
 
     def run(self):
         local_rank = get_world_group().local_rank
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
         self.ready_event.set()
-        while True:
-            send_task = self.send_queue.get()
-            self._handle_request(send_task)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    send_task = self.send_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
+                except queue.Empty:
+                    continue
+                self._handle_request(send_task)
+        except Exception as error:
+            self.fatal_error = error
+            logger.exception("Mooncake KVCacheSendingLayerThread terminated unexpectedly. error=%s. ", error)
+            raise
 
     def _handle_request(self, send_task: SendTask):
         error: str | None = None
@@ -417,7 +436,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 layer_local_kv_base_addr = local_layer_metadata.kv_caches_base_addr
                 layer_remote_kv_base_addr = remote_layer_metadata.kv_caches_base_addr
                 block_lens = local_layer_metadata.block_len
-                grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                grouped_remote_block_ids, grouped_local_block_ids = group_contiguous_ids(
                     remote_block_ids, local_block_ids
                 )
                 # kv cache quantization scenario
@@ -601,6 +620,8 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.task_tracker = dict[str, int]()
         self.ready_event = ready_event
         self.metadata = metadata
+        # Set by stop() to let the recv loop exit; see run().
+        self._stop_event = threading.Event()
 
     def get_and_clear_done_requests(self) -> set[str]:
         """
@@ -650,9 +671,13 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
 
+    def stop(self) -> None:
+        """Signal the recv loop to exit; idempotent."""
+        self._stop_event.set()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
-        handshake_port = self.side_channel_port + self.tp_rank
+        handshake_port = layerwise_handshake_port(base_port=self.side_channel_port, tp_rank=self.tp_rank)
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("KVCacheRecvingLayerThread listening on %s, tp_rank=%d", path, self.tp_rank)
         encoder = msgspec.msgpack.Encoder()
@@ -660,8 +685,10 @@ class KVCacheRecvingLayerThread(threading.Thread):
         with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
-            while True:
+            while not self._stop_event.is_set():
                 try:
+                    if sock.poll(int(THREAD_STOP_POLL_SECONDS * 1000)) == 0:
+                        continue
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
                         logger.error(
@@ -747,6 +774,9 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
 class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     requires_full_blocks_on_update_after_alloc = True
     supports_layerwise_buffer_reuse = True
+    # Subclasses that override __init__ without calling super().__init__() keep
+    # inherited shutdown() safe through this class default.
+    _shutdown_complete: bool = False
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
@@ -764,6 +794,16 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeLayerwiseConnectorWorker(vllm_config, kv_cache_config, str(self.engine_id))
+
+    def shutdown(self) -> None:
+        """Idempotent connector shutdown; delegates to scheduler and/or worker side."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         # vLLM main's scheduler uses this for skip_zeroing_group_ids and for
@@ -849,6 +889,9 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         if not self._connector_metadata.requests:
             return
         assert self.connector_worker is not None
+        plan = getattr(self.connector_worker, "_layerwise_step_plan", None)
+        if plan is None or not plan.requests:
+            return
         self.connector_worker.on_kv_cache_written(layer_name)
 
     def save_kv_layer(
@@ -883,9 +926,10 @@ class MooncakeLayerwiseConnectorScheduler:
             )
 
         # Handshake base port
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+        self.side_channel_port = layerwise_scheduler_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_rank=vllm_config.parallel_config.data_parallel_rank,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
 
         # Requests that need to start recv.
@@ -895,77 +939,45 @@ class MooncakeLayerwiseConnectorScheduler:
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
         self.need_truncate = self._has_attn_mamba_hybrid_cache(kv_cache_config)
         self.executor = ThreadPoolExecutor(32)
-        tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
-        ssl_keyfile = tls_config.get("ssl_keyfile")
-        ssl_certfile = tls_config.get("ssl_certfile")
-        ssl_ca_certs = tls_config.get("ssl_ca_certs", False)
-        ssl_keyfile_password = tls_config.get("ssl_keyfile_password")
-        self.cert_path = (ssl_certfile, ssl_keyfile, ssl_keyfile_password)
-        self.ssl_enable = tls_config.get("ssl_enable", False)
-        self.ca_path = ssl_ca_certs
-        if self.ssl_enable:
-            self.metaserver_client = httpx.Client(
-                limits=httpx.Limits(max_connections=100000), timeout=None, cert=self.cert_path, verify=self.ca_path
-            )
-        else:
-            self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+        self.metaserver_client = MetaserverClient(vllm_config)
+        self._shutdown_complete = False
+
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown: stop executor, then close metaserver client."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._shutdown_complete = True
+        try:
+            self.executor.shutdown(wait=True)
+        except Exception as error:
+            logger.warning("Failed to shutdown layerwise scheduler executor. error=%s. ", error)
+        try:
+            self.metaserver_client.close()
+        except Exception as error:
+            logger.warning("Failed to close layerwise metaserver client. error=%s. ", error)
+        logger.info("MooncakeLayerwiseConnectorScheduler shutdown complete. engine_id=%s", self.engine_id)
 
     @staticmethod
     def _iter_kv_cache_specs(kv_cache_config: KVCacheConfig):
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                yield from kv_cache_spec.kv_cache_specs.values()
-            else:
-                yield kv_cache_spec
+        return iter_kv_cache_specs(kv_cache_config)
 
     @classmethod
     def _has_attn_mamba_hybrid_cache(cls, kv_cache_config: KVCacheConfig) -> bool:
-        has_attn = False
-        has_mamba = False
-        for kv_cache_spec in cls._iter_kv_cache_specs(kv_cache_config):
-            has_attn = has_attn or isinstance(kv_cache_spec, AttentionSpec)
-            has_mamba = has_mamba or isinstance(kv_cache_spec, MambaSpec)
-        return has_attn and has_mamba
+        return has_attn_mamba_hybrid_cache(kv_cache_config)
 
     def _hybrid_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        if self.need_truncate and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
-        return num_prompt_tokens
+        return hybrid_prefill_token_count(num_prompt_tokens, need_truncate=self.need_truncate)
 
     def _truncate_request_for_hybrid_prefill(self, request: "Request") -> None:
-        params = request.kv_transfer_params
-        if (
-            params is None
-            or not self.need_truncate
-            or params.get("_p_side_truncated")
-            or getattr(request, "num_prompt_tokens", len(request.prompt_token_ids or [])) <= 1
-        ):
-            return
-
-        if request.prompt_token_ids is not None:
-            request.prompt_token_ids.pop()
-        elif request.prompt_embeds is not None:
-            request.prompt_embeds = request.prompt_embeds[:-1]
-        else:
-            return
-
-        request._all_token_ids.pop()
-        request.num_prompt_tokens -= 1
-        request.max_tokens = 1
-        params["_p_side_truncated"] = True
+        truncate_request_for_hybrid_prefill(request, need_truncate=self.need_truncate)
 
     def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:
-        if not self.need_truncate or prompt_len <= 1:
-            return block_ids
-
-        trimmed_block_ids: list[list[int]] = []
-        for group_block_ids, block_size in zip(block_ids, self.block_size):
-            if prompt_len % block_size == 1:
-                trimmed_block_ids.append(list(group_block_ids[:-1]))
-            else:
-                trimmed_block_ids.append(list(group_block_ids))
-        return tuple(trimmed_block_ids)
+        return trim_hybrid_remote_block_ids(
+            block_ids,
+            prompt_len,
+            need_truncate=self.need_truncate,
+            block_sizes=self.block_size,
+        )
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -1164,17 +1176,7 @@ class MooncakeLayerwiseConnectorScheduler:
         return meta
 
     def _access_metaserver(self, url, message):
-        success = False
-        retry = 0
-        while retry < 3 and success is False:
-            retry += 1
-            try:
-                self.metaserver_client.post(url, json=message)
-                success = True
-            except Exception as e:
-                logger.error("Failed to connect to metaserver. url=%s, retry=%d. ", url, retry)
-                if retry == 3:
-                    raise e
+        self.metaserver_client.access(url, message)
 
     def request_finished(
         self,
@@ -1238,12 +1240,14 @@ class MooncakeLayerwiseConnectorWorker:
             self.total_num_kv_heads = self.vllm_config.model_config.get_total_num_kv_heads()
 
         # Handshake base port
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + self.dp_rank * self.pcp_size * self.tp_size
-            + self.pcp_rank * self.tp_size
+        self.side_channel_port = layerwise_worker_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_rank=self.dp_rank,
+            pcp_size=self.pcp_size,
+            tp_size=self.tp_size,
+            pcp_rank=self.pcp_rank,
         )
-        self.handshake_port = self.side_channel_port + self.tp_rank
+        self.handshake_port = layerwise_handshake_port(base_port=self.side_channel_port, tp_rank=self.tp_rank)
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
@@ -1253,11 +1257,15 @@ class MooncakeLayerwiseConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_recv_layer_thread: KVCacheRecvingLayerThread | None = None
         self.kv_send_layer_thread: KVCacheSendingLayerThread | None = None
+        # Idempotent shutdown state; see shutdown().
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
         self.layer_storage_slots: dict[int, tuple[int, ...]] = {}
         self.storage_send_done_events: list[threading.Event] = []
         self._storage_send_errors: dict[int, str] = {}
         self._pending_reuse_layers: set[int] = set()
         self._cache_write_events: list[torch.npu.Event | None] = [None] * self.total_layers
+        self._layerwise_step_plan: LayerwiseTransferPlan | None = None
 
         self.block_size: list[int] = [spec.block_size for spec in self.kv_cache_specs]
         self.kernel_block_size_scale: list[int] = [1 for _ in range(self.num_kv_cache_groups)]
@@ -1298,23 +1306,64 @@ class MooncakeLayerwiseConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
 
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown of layerwise worker threads."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+        threads = [t for t in (self.kv_recv_layer_thread, self.kv_send_layer_thread) if t is not None]
+        for thread in threads:
+            try:
+                thread.stop()
+            except Exception as error:
+                logger.warning("Failed to signal layerwise thread stop. thread=%s. error=%s. ", thread.name, error)
+        for thread in threads:
+            try:
+                thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    logger.warning(
+                        "Layerwise thread did not stop within %.1f s. thread=%s. ",
+                        SHUTDOWN_JOIN_TIMEOUT_SECONDS,
+                        thread.name,
+                    )
+            except Exception as error:
+                logger.warning("Failed to join layerwise thread. thread=%s. error=%s. ", thread.name, error)
+        fatal_error = self.get_thread_fatal_error()
+        if fatal_error is not None:
+            logger.error(
+                "Layerwise transfer thread reported a fatal error. engine_id=%s. error=%s. ",
+                self.engine_id,
+                fatal_error,
+            )
+        logger.info("MooncakeLayerwiseConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
+
+    def _wait_until_ready(self, thread, ready_event) -> None:
+        """Wait for the layer thread to become ready; roll back on failure."""
+        start_wait_time = time.time()
+        while not ready_event.is_set():
+            if not thread.is_alive():
+                self.shutdown()
+                raise RuntimeError("KV Cache layer thread failed to start.")
+            if time.time() - start_wait_time > KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS:
+                self.shutdown()
+                raise RuntimeError("Timeout waiting for KV Cache layer thread to be ready.")
+            time.sleep(3)
+
+    def get_thread_fatal_error(self) -> BaseException | None:
+        """Return the first fatal error reported by a layer thread, if any."""
+        for thread in (self.kv_recv_layer_thread, self.kv_send_layer_thread):
+            error = getattr(thread, "fatal_error", None) if thread is not None else None
+            if error is not None:
+                return error
+        return None
+
     def _init_layerwise_reuse_state(self) -> None:
-        slot_by_addr: dict[int, int] = {}
-        layer_storage_slots: dict[int, tuple[int, ...]] = {}
-        for layer_idx, layer_names in self.index_to_name.items():
-            slots: list[int] = []
-            for layer_name in layer_names:
-                for addr in self.layer_metadata[layer_name].kv_caches_base_addr:
-                    slot_id = slot_by_addr.setdefault(addr, len(slot_by_addr))
-                    if slot_id not in slots:
-                        slots.append(slot_id)
-            layer_storage_slots[layer_idx] = tuple(slots)
-        self.layer_storage_slots = layer_storage_slots
-        self.storage_send_done_events = []
-        for _ in range(len(slot_by_addr)):
-            event = threading.Event()
-            event.set()
-            self.storage_send_done_events.append(event)
+        """Thin delegate to the layerwise step controller."""
+        controller = self._new_layerwise_step_controller()
+        controller.init_reuse_state()
+        self.layer_storage_slots = controller.layer_storage_slots
+        self.storage_send_done_events = controller.storage_send_done_events
 
     def _mark_layer_reuse_pending(self, layer_idx: int) -> None:
         if layer_idx not in self.layer_storage_slots:
@@ -1530,47 +1579,51 @@ class MooncakeLayerwiseConnectorWorker:
             te_rpc_port=self.te_rpc_port,
             layer_metadata=self.layer_metadata,
         )
-        if self.vllm_config.kv_transfer_config.is_kv_producer:
-            ready_event = threading.Event()
-            self.kv_send_layer_thread = KVCacheSendingLayerThread(
-                engine=self.engine,
-                vllm_config=self.vllm_config,
-                kv_cache_config=self.kv_cache_config,
-                kv_cache_specs=self.kv_cache_specs,
-                attn_resharding_group_idx=self.attn_resharding_group_idx,
-                total_layers=self.total_layers,
-                ready_event=ready_event,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                pd_head_ratio=self.pd_head_ratio,
-                num_head_replica=self.num_head_replica,
-                layer_metadata=self.layer_metadata,
-                use_mla=self.use_mla,
-                use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
-                k_buffer=self.k_buffer,
-                v_buffer=self.v_buffer,
-                enable_kv_quant=self.enable_kv_quant,
-                enable_c8_quant=self.enable_c8_quant,
-                resharding_stream=self.resharding_stream,
-                callback_func=self.send_done_send_signal,
-                reuse_completion_callback=self._complete_layer_reuse,
-            )
-            self.kv_send_layer_thread.start()
-            ready_event.wait()
+        try:
+            if self.vllm_config.kv_transfer_config.is_kv_producer:
+                ready_event = threading.Event()
+                self.kv_send_layer_thread = KVCacheSendingLayerThread(
+                    engine=self.engine,
+                    vllm_config=self.vllm_config,
+                    kv_cache_config=self.kv_cache_config,
+                    kv_cache_specs=self.kv_cache_specs,
+                    attn_resharding_group_idx=self.attn_resharding_group_idx,
+                    total_layers=self.total_layers,
+                    ready_event=ready_event,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    pd_head_ratio=self.pd_head_ratio,
+                    num_head_replica=self.num_head_replica,
+                    layer_metadata=self.layer_metadata,
+                    use_mla=self.use_mla,
+                    use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
+                    k_buffer=self.k_buffer,
+                    v_buffer=self.v_buffer,
+                    enable_kv_quant=self.enable_kv_quant,
+                    enable_c8_quant=self.enable_c8_quant,
+                    resharding_stream=self.resharding_stream,
+                    callback_func=self.send_done_send_signal,
+                    reuse_completion_callback=self._complete_layer_reuse,
+                )
+                self.kv_send_layer_thread.start()
+                self._wait_until_ready(self.kv_send_layer_thread, ready_event)
 
-        if self.vllm_config.kv_transfer_config.is_kv_consumer:
-            ready_event = threading.Event()
-            self.kv_recv_layer_thread = KVCacheRecvingLayerThread(
-                self.tp_rank,
-                self.side_channel_port,
-                self.tp_size,
-                self.pd_head_ratio,
-                self.engine_id,
-                metadata,
-                ready_event,
-            )
-            self.kv_recv_layer_thread.start()
-            ready_event.wait()
+            if self.vllm_config.kv_transfer_config.is_kv_consumer:
+                ready_event = threading.Event()
+                self.kv_recv_layer_thread = KVCacheRecvingLayerThread(
+                    self.tp_rank,
+                    self.side_channel_port,
+                    self.tp_size,
+                    self.pd_head_ratio,
+                    self.engine_id,
+                    metadata,
+                    ready_event,
+                )
+                self.kv_recv_layer_thread.start()
+                self._wait_until_ready(self.kv_recv_layer_thread, ready_event)
+        except Exception:
+            self.shutdown()
+            raise
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_recving = (
@@ -1778,7 +1831,9 @@ class MooncakeLayerwiseConnectorWorker:
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Track D-side receives without resetting forward/MTP send state."""
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
-            for req_id, meta in metadata.requests.items():
+            plan = getattr(self, "_layerwise_step_plan", None)
+            requests = plan.requests if plan is not None else metadata.requests
+            for req_id, meta in requests.items():
                 if meta.do_virtual:
                     self.virtual_request.add(req_id)
                     continue
@@ -1787,99 +1842,55 @@ class MooncakeLayerwiseConnectorWorker:
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
 
+    def _new_layerwise_step_controller(self) -> LayerwiseStepController:
+        return LayerwiseStepController(
+            vllm_config=self.vllm_config,
+            kv_cache_specs=getattr(self, "kv_cache_specs", None),
+            num_kv_cache_groups=getattr(self, "num_kv_cache_groups", 0),
+            block_size=getattr(self, "block_size", None),
+            kernel_block_size_scale=getattr(self, "kernel_block_size_scale", None),
+            attn_resharding_group_idx=getattr(self, "attn_resharding_group_idx", None),
+            total_layers=getattr(self, "total_layers", 0),
+            index_to_name=getattr(self, "index_to_name", None),
+            layer_metadata=getattr(self, "layer_metadata", None),
+            sparse_sfa_c8_layers=getattr(self, "sparse_sfa_c8_layers", None),
+            pd_head_ratio=getattr(self, "pd_head_ratio", None),
+            enable_c8_quant=getattr(self, "enable_c8_quant", False),
+            enable_kv_quant=getattr(self, "enable_kv_quant", False),
+            k_buffer=getattr(self, "k_buffer", None),
+            v_buffer=getattr(self, "v_buffer", None),
+            kv_send_layer_thread=getattr(self, "kv_send_layer_thread", None),
+            resharding_stream=getattr(self, "resharding_stream", None),
+            current_layer=getattr(self, "current_layer", 0),
+            cache_write_events=getattr(self, "_cache_write_events", None),
+            layer_storage_slots=getattr(self, "layer_storage_slots", None),
+            storage_send_done_events=getattr(self, "storage_send_done_events", None),
+            pending_reuse_layers=getattr(self, "_pending_reuse_layers", None),
+            storage_send_errors=getattr(self, "_storage_send_errors", None),
+            align_remote_block_ids=self._align_remote_block_ids,
+            get_kv_split_metadata=self._get_kv_split_metadata,
+            get_kv_split_metadata_for_mamba=self._get_kv_split_metadata_for_mamba,
+            get_kernel_block_ids=self._get_kernel_block_ids,
+            update_decoder_info=self.update_decoder_info,
+            get_nz_cache=self.get_nz_cache,
+            mark_layer_reuse_pending=self._mark_layer_reuse_pending,
+            complete_layer_reuse=self._complete_layer_reuse,
+            send_task_factory=SendTask,
+        )
+
     def prepare_layerwise_step(self, metadata: MooncakeLayerwiseConnectorMetadata) -> None:
         """Prepare layerwise hooks once, when metadata is bound before forward."""
-        self.current_layer = 0
-        self._cache_write_events = [None] * self.total_layers
-        if self.vllm_config.kv_transfer_config.is_kv_producer:
-            # update trans info
-            update_metadata = {}
-            for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
-                transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
-                self._align_remote_block_ids(req_meta)
-                for i, kv_cache_spec in enumerate(self.kv_cache_specs):
-                    if isinstance(kv_cache_spec, MambaSpec):
-                        single_group_transfer_mappings = self._get_kv_split_metadata_for_mamba(
-                            req_meta, req_idx, req_id, i
-                        )
-                    else:
-                        single_group_transfer_mappings = self._get_kv_split_metadata(req_meta, req_idx, req_id, i)
-                    for (host, port), block_dict in single_group_transfer_mappings.items():
-                        if (host, port) not in transfer_mappings:
-                            transfer_mappings[(host, port)] = {
-                                "local_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
-                                "remote_block_ids": [[] for _ in range(self.num_kv_cache_groups)],
-                                "trans_count": [0 for _ in range(self.num_kv_cache_groups)],
-                            }
-                        transfer_mappings[(host, port)]["local_block_ids"][i].extend(
-                            single_group_transfer_mappings[(host, port)]["local_block_ids"]
-                        )
-                        transfer_mappings[(host, port)]["remote_block_ids"][i].extend(
-                            single_group_transfer_mappings[(host, port)]["remote_block_ids"]
-                        )
-                        transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
-                            (host, port)
-                        ]["trans_count"]
-                assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
-                update_req_meta = copy.deepcopy(req_meta)
-                for (host, port), block_dict in transfer_mappings.items():
-                    update_req_meta.remote_host = host
-                    update_req_meta.remote_port = port
-                    update_req_meta.local_block_ids = self._get_kernel_block_ids(block_dict["local_block_ids"])
-                    update_req_meta.remote_block_ids = self._get_kernel_block_ids(block_dict["remote_block_ids"])
-                    update_req_meta.trans_count = block_dict["trans_count"]
-                    update_metadata[req_id] = update_req_meta
-            metadata.requests = {}
-            for req_id, req_meta in update_metadata.items():
-                metadata.requests[req_id] = update_metadata[req_id]
-
-            # update send task trans block info
-            if self.attn_resharding_group_idx:
-                send_task = metadata.send_task
-                send_task.group_rearrange_block_ids = [[] for _ in range(self.num_kv_cache_groups)]
-                send_task.group_num_blocks = [0 for _ in range(self.num_kv_cache_groups)]
-                send_task.group_num_tokens = [0 for _ in range(self.num_kv_cache_groups)]
-                send_task.group_block_table = [None for _ in range(self.num_kv_cache_groups)]
-                send_task.group_block_len_tensor = [None for _ in range(self.num_kv_cache_groups)]
-                send_task.group_seq_start_tensor = [None for _ in range(self.num_kv_cache_groups)]
-                device = self.k_buffer.device  # type: ignore
-                for i in self.attn_resharding_group_idx:
-                    send_task.group_rearrange_block_ids[i].extend(
-                        sorted(
-                            {
-                                block_id
-                                for req_id in metadata.requests
-                                for block_id in metadata.requests[req_id].local_block_ids[i]
-                            }
-                        )
-                    )
-                    flat_block_ids = send_task.group_rearrange_block_ids[i]
-                    block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
-                    send_task.group_num_blocks[i] = len(flat_block_ids)
-                    send_task.group_num_tokens[i] = send_task.group_num_blocks[i] * (
-                        self.block_size[i] // self.kernel_block_size_scale[i]
-                    )
-
-                    send_task.group_block_table[i] = block_ids_tensor.view(1, -1)
-                    send_task.group_block_len_tensor[i] = torch.tensor(
-                        [send_task.group_num_tokens[i]], dtype=torch.int32, device=device
-                    )
-                    send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
+        controller = self._new_layerwise_step_controller()
+        plan = controller.prepare(metadata)
+        self.current_layer = controller.current_layer
+        self._cache_write_events = controller._cache_write_events
+        self._layerwise_step_plan = plan
 
     def on_kv_cache_written(self, layer_name: str) -> None:
-        if self.current_layer >= self.total_layers:
-            return
-        layer_names = self.index_to_name[self.current_layer]
-        if not layer_names:
-            raise RuntimeError(f"Mooncake layerwise metadata is missing physical layer {self.current_layer}")
-        if layer_name and layer_name not in layer_names:
-            raise RuntimeError(
-                f"Mooncake layer hook {layer_name!r} does not belong to physical layer {self.current_layer}: "
-                f"{layer_names}"
-            )
-        cache_write_event = torch.npu.Event()
-        cache_write_event.record()
-        self._cache_write_events[self.current_layer] = cache_write_event
+        """Thin delegate to the layerwise step controller."""
+        controller = self._new_layerwise_step_controller()
+        controller.on_written(layer_name)
+        self.current_layer = controller.current_layer
 
     def save_kv_layer(
         self,
@@ -1890,160 +1901,23 @@ class MooncakeLayerwiseConnectorWorker:
         **kwargs,
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
-        if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
-            if self.current_layer >= self.total_layers:
-                self.current_layer += 1
-                return
-            layer_names = self.index_to_name[self.current_layer]
-            if not layer_names:
-                raise RuntimeError(f"Mooncake layerwise metadata is missing physical layer {self.current_layer}")
-            # Use the scatter-time event recorded by on_kv_cache_written.
-            # The fallback preserves correctness for attention paths that do
-            # not call the early hook, but gives up transfer/compute overlap.
-            if layer_name == "":
-                layer_name = layer_names[0]
-            elif layer_name not in layer_names:
-                raise RuntimeError(
-                    f"Mooncake layer hook {layer_name!r} does not belong to physical layer {self.current_layer}: "
-                    f"{layer_names}"
-                )
-            cache_write_event = self._cache_write_events[self.current_layer]
-            self._cache_write_events[self.current_layer] = None
-            if cache_write_event is None:
-                cache_write_event = torch.npu.Event()
-                cache_write_event.record()
-            send_task = connector_metadata.send_task
-            layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
-            keys = None
-            values = None
-            quant_keys = None
-            quant_values = None
-            if layer_name not in self.sparse_sfa_c8_layers and (
-                (
-                    self.pd_head_ratio != 1
-                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                    and send_task.group_num_blocks[layer_group_idx] > 0
-                )
-                or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
-            ):
-                assert self.resharding_stream is not None
-                with npu_stream_switch(self.resharding_stream):
-                    cache_write_event.wait()
-                    device = self.k_buffer.device  # type: ignore
-                    # Initialize buffers
-                    keys = torch.empty(
-                        (send_task.group_num_tokens[layer_group_idx], *kv_layer[0].size()[-2:]),
-                        dtype=kv_layer[0].dtype,
-                        device=device,
-                    )
-                    values = torch.empty(
-                        (send_task.group_num_tokens[layer_group_idx], *kv_layer[1].size()[-2:]),
-                        dtype=kv_layer[1].dtype,
-                        device=device,
-                    )
+        plan = getattr(self, "_layerwise_step_plan", None)
+        if plan is None:
+            plan = self._compat_layerwise_plan(connector_metadata)
+        controller = self._new_layerwise_step_controller()
+        controller.save_layer(layer_name, kv_layer, attn_metadata, plan, **kwargs)
+        self.current_layer = controller.current_layer
 
-                    # Load cache data into buffers
-                    torch_npu.npu_gather_pa_kv_cache(
-                        kv_layer[0],
-                        kv_layer[1],
-                        send_task.group_block_table[layer_group_idx],
-                        send_task.group_block_len_tensor[layer_group_idx],
-                        seq_offset=send_task.group_seq_start_tensor[layer_group_idx],
-                        key=keys,
-                        value=values,
-                    )
-                    if self.pd_head_ratio != 1:
-                        # sort kv caches for each block
-                        keys = (
-                            keys.view(
-                                send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *keys.shape[1:]
-                            )
-                            .transpose(0, 1)
-                            .reshape_as(keys)
-                        )
-                        values = (
-                            values.view(
-                                send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *values.shape[1:]
-                            )
-                            .transpose(0, 1)
-                            .reshape_as(values)
-                        )
-                        # reshard kv cache
-                        keys = keys.reshape(-1, *kv_layer[0].shape[2:])
-                        values = values.reshape(-1, *kv_layer[1].shape[2:])
-
-                        (keys, values) = kv_alltoall_and_rearrange(self.pd_head_ratio, keys, values)
-                    if self.enable_c8_quant:
-                        layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
-                        quant_keys = torch.clamp(
-                            torch.round(keys * layer._c8_k_inv_scale + layer._c8_k_offset),
-                            -128,
-                            127,
-                        ).to(torch.int8)
-                        quant_values = torch.clamp(
-                            torch.round(values * layer._c8_v_inv_scale + layer._c8_v_offset),
-                            -128,
-                            127,
-                        ).to(torch.int8)
-                        quant_keys = self.get_nz_cache(quant_keys, layer_group_idx)
-                        quant_values = self.get_nz_cache(quant_values, layer_group_idx)
-                    if (
-                        self.enable_kv_quant
-                        and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
-                    ):
-                        layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
-                        keys = torch.ops.vllm.quantize(
-                            keys, layer.fak_descale, layer.fak_descale_reciprocal, layer.fak_offset
-                        )
-                        quant_keys = self.get_nz_cache(keys, layer_group_idx)
-                        quant_values = self.get_nz_cache(values, layer_group_idx)
-
-            assert self.kv_send_layer_thread is not None
-            layer_send_task = SendTask(
-                wait_event=cache_write_event,
-                k_cache=keys,
-                v_cache=values,
-                k_quant_cache=quant_keys,
-                v_quant_cache=quant_values,
-                layer_idx=self.current_layer,
-                layer_name=layer_name,
-                layer_names=layer_names,
-                group_rearrange_block_ids=send_task.group_rearrange_block_ids,
-            )
-            for req_id, req_meta in connector_metadata.requests.items():
-                if len(req_meta.local_block_ids) <= layer_group_idx or not req_meta.local_block_ids[layer_group_idx]:
-                    continue
-                try:
-                    req_meta_update = self.update_decoder_info(req_id, req_meta)
-                except Exception as e:
-                    logger.warning(
-                        "MooncakeLayerwiseConnector transfer fail. req_id=%s, layer_idx=%s, error=%s. ",
-                        req_id,
-                        self.current_layer,
-                        e,
-                    )
-                    layer_send_task.failed_requests[req_id] = req_meta
-                    continue
-                logger.debug("Add request %s to kv send layer thread. req_meta_update=%r", req_id, req_meta_update)
-                layer_send_task.send_request[req_id] = req_meta_update
-
-            needs_reuse_gate = any(
-                len(req_meta.local_block_ids) > layer_group_idx and bool(req_meta.local_block_ids[layer_group_idx])
-                for req_meta in connector_metadata.requests.values()
-            )
-            if needs_reuse_gate:
-                # This must happen before AscendStore publishes StoreSaveDone.
-                # Otherwise its receiver may consume the previous set state
-                # and start H2D before this transfer is registered as pending.
-                self._mark_layer_reuse_pending(self.current_layer)
-            try:
-                self.kv_send_layer_thread.send_queue.put(layer_send_task)
-            except Exception as error:
-                if needs_reuse_gate:
-                    self._complete_layer_reuse(self.current_layer, str(error))
-                raise
-            self.current_layer += 1
+    def _compat_layerwise_plan(self, connector_metadata: MooncakeLayerwiseConnectorMetadata) -> LayerwiseTransferPlan:
+        """Build a read-only plan for direct worker calls that skipped prepare."""
+        send_task = connector_metadata.send_task
+        return LayerwiseTransferPlan(
+            producer=True,
+            requests=copy.deepcopy(connector_metadata.requests),
+            aligned_remote_block_ids=[],
+            send_task_update=None,
+            send_task=send_task,
+        )
 
     # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,
     # while the npu_format_cast method only modifies the memory layout, we manually convert it to NZ shape here
@@ -2085,7 +1959,7 @@ class MooncakeLayerwiseConnectorWorker:
                 sock = self._get_remote_socket(req_meta.remote_host, req_meta.remote_port)
                 path = f"{req_meta.remote_host}:{req_meta.remote_port}"
                 ensure_zmq_send(sock, encoded_data, path)
-                metadata_bytes = ensure_zmq_recv(sock, self.remote_poller, path)
+                metadata_bytes = ensure_zmq_recv_with_poller(sock, self.remote_poller, path)
                 agent_meta: MooncakeAgentMetadata = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
@@ -2186,23 +2060,7 @@ class MooncakeLayerwiseConnectorWorker:
         pass
 
 
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: zmq.Context | None = None  # type: ignore
-    try:
-        ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)
-
-
-def group_concurrent_contiguous(
+def group_contiguous_ids(
     src: list[int], dst: list[int] | None = None
 ) -> tuple[list[npt.NDArray[np.int64]], list[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
@@ -2237,38 +2095,14 @@ def group_concurrent_contiguous(
         return src_groups, dst_groups
 
 
-def string_to_int64_hash(input_str):
-    """
-    Hash the string using SHA-256 and convert it into an int64 integer.
-    """
-    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
-    trunked_bytes = hashed_bytes[:8]
-    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
-    return uint64_value
+# Back-compat alias for the historical name. This layerwise helper is not the
+# same as ``mooncake_v1.common.transport.group_concurrent_contiguous``: it takes
+# an optional destination list, groups on id adjacency only (no block stride or
+# block_len), and returns plain lists, so it is deliberately kept local.
+group_concurrent_contiguous = group_contiguous_ids
 
 
-def ensure_zmq_send(
-    socket: zmq.Socket,  # type: ignore
-    data: bytes,
-    path: str,
-    max_retries: int = 3,
-):
-    retries_left = max_retries
-    while True:
-        try:
-            socket.send(data)
-            return
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
-                time.sleep(0.1)
-            else:
-                logger.error("Send failed after all retries. error=%s. ", e)
-                raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
-
-
-def ensure_zmq_recv(
+def ensure_zmq_recv_with_poller(
     socket: zmq.Socket,  # type: ignore
     poller: zmq.Poller,  # type: ignore
     path: str,
@@ -2291,6 +2125,12 @@ def ensure_zmq_recv(
             else:
                 logger.error("Receive failed after all retries. error=%s. ", e)
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
+
+
+# Back-compat alias for the historical name. Unlike
+# ``mooncake_v1.common.transport.ensure_zmq_recv`` this variant polls the socket
+# with a timeout before receiving, so it is deliberately kept local.
+ensure_zmq_recv = ensure_zmq_recv_with_poller
 
 
 def get_external_request_id(request_id: str):
