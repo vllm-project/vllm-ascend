@@ -56,7 +56,7 @@ from .shared_pool import rollback_shared_engram
 
 if TYPE_CHECKING:
     from .shared_host import HostTableSlice
-    from .shared_pool import SharedPoolClient
+    from .shared_pool import ShardedPoolClient, SharedPoolClient
 
 HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
 
@@ -116,7 +116,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         storage_dtype: torch.dtype = torch.int8,
         local_vmm: bool = False,
         remote_reader=None,
-        shared_pool_endpoint: str | None = None,
+        shared_pool_endpoint: str | list[str] | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
     ) -> None:
@@ -130,7 +130,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         ):
             raise ValueError("Remote Engram requires INT8 or FP8 cpu_offload with dp_shared_memory")
         self._shared_pool_spec = (shared_pool_endpoint, shared_pool_identity, shared_pool_key)
-        self._shared_pool_client: SharedPoolClient | None = None
+        self._shared_pool_client: SharedPoolClient | ShardedPoolClient | None = None
         if shared_pool_endpoint and (
             not cpu_offload or storage_dtype != torch.int8 or not shared_pool_identity or not shared_pool_key
         ):
@@ -243,11 +243,21 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         pool_endpoint, identity, key = self._shared_pool_spec
         if pool_endpoint:
             from .common import warmup_shared_engram_aicpu
-            from .shared_pool import SharedPoolClient
+            from .shared_pool import ShardedPoolClient, SharedPoolClient
 
             assert identity is not None and key is not None
             warmup_shared_engram_aicpu()
-            client = SharedPoolClient(pool_endpoint, identity, device=device)
+            client: SharedPoolClient | ShardedPoolClient
+            if isinstance(pool_endpoint, list):
+                client = ShardedPoolClient(pool_endpoint, identity, device=device)
+            else:
+                client = SharedPoolClient(pool_endpoint, identity, device=device)
+            if isinstance(client, SharedPoolClient) and client.manifest.get("shard", {"index": 0, "count": 1}) != {
+                "index": 0,
+                "count": 1,
+            }:
+                client.close()
+                raise ValueError("single-owner Engram endpoint points to a sharded owner")
             self._shared_pool_client = client
             try:
                 self._codes_uva = codes = client.view(

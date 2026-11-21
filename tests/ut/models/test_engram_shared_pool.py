@@ -10,6 +10,7 @@ import threading
 import types
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -276,7 +277,20 @@ def test_owner_cli_uses_shared_backend_and_endpoint(pool_module, monkeypatch):
         sys, "argv", ["shared_engram", "--backend", "a3", "--model", "model", "--endpoint", "owner:29500"]
     )
     cli.main()
-    assert captured == [("owner:29500", "model-a", {"device": "npu:0", "store_url": None, "world_size": 65})]
+    assert captured == [
+        (
+            "owner:29500",
+            "model-a",
+            {
+                "device": "npu:0",
+                "store_url": None,
+                "world_size": 65,
+                "shard_index": 0,
+                "shard_count": 1,
+                "generation": None,
+            },
+        )
+    ]
     monkeypatch.setattr(
         sys, "argv", ["shared_engram", "--backend", "a2", "--model", "model", "--endpoint", "owner:29500"]
     )
@@ -810,3 +824,243 @@ def test_invalid_bm_object_rejected_before_mapping(pool_module, owner):
         assert client.runtime is None
     finally:
         client.close()
+
+
+def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(pool_module, monkeypatch):
+    pool = pool_module
+    monkeypatch.setattr(pool, "CHUNK_ROWS", 4)
+    monkeypatch.setattr(pool, "GIB", 4)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        types.SimpleNamespace(device=lambda _: __import__("contextlib").nullcontext(), synchronize=lambda: None),
+        raising=False,
+    )
+    events = []
+    runtime = types.SimpleNamespace()
+    monkeypatch.setattr(pool.MemfabricRuntime, "_lock", threading.RLock(), raising=False)
+    monkeypatch.setattr(pool.MemfabricRuntime, "acquire", lambda *args, **kwargs: runtime)
+
+    class Client:
+        def __init__(self, endpoint, identity, *, device):
+            i = int(endpoint)
+            rows = 4 if i == 0 else 7
+            self.manifest = {
+                "generation": "g",
+                "memfabric": {"store_url": "url", "world_size": 3},
+                "shard": {"index": i, "count": 2},
+                "packing": "byte-v1",
+                "tensors": {
+                    key: {
+                        "total_rows": 11,
+                        "first_row": 4 * i,
+                        "rows": rows,
+                        "width": 1,
+                        "dtype": "int8",
+                        "owner_rank": i,
+                        "object_id": 0,
+                        "byte_offset": j * (4 if i == 0 else 8),
+                        "rank_bytes": 2 * (4 if i == 0 else 8),
+                        "space_bytes": 16,
+                    }
+                    for j, key in enumerate(("layer1", "layer2"))
+                },
+            }
+            self.buffers, self.runtime = {}, None
+
+        def close(self):
+            events.append("lease released")
+
+    class Buffer:
+        def __init__(self, runtime, object_id, rows, width, dtype, **kwargs):
+            self.rows, self.space_size, self.fail = rows, 16, False
+            events.append("map")
+
+        def device_pointer(self, offset, size, *, owner_rank):
+            return 1000 * (owner_rank + 1) + offset
+
+        def close(self):
+            events.append("unmap")
+            if self.fail:
+                raise RuntimeError("mapping still live")
+
+    monkeypatch.setattr(pool, "SharedPoolClient", Client)
+    monkeypatch.setattr(pool, "MappedHostBuffer", Buffer)
+    first = pool.ShardedPoolClient(["0", "1"], "model", device="cpu")
+    second = pool.ShardedPoolClient(["0", "1"], "model", device="cpu")
+    view = first.view("layer1", 3, 10, rows=11, width=1, dtype=torch.int8)
+    other = second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
+    assert view.row_offset == other.row_offset == 3
+    assert view.ptrs.tolist() == [1000, 2000, 2004]
+    assert other.ptrs.tolist() == [1004, 2008, 2012]
+    assert events == ["map"] and runtime._packed_refs == 2
+    first.close()
+    assert runtime._packed_refs == 1 and events == ["map", "lease released", "lease released"]
+    second._packed_mapping.fail = True
+    with pytest.raises(RuntimeError, match="mapping still live"):
+        second.close()
+    assert runtime._packed_refs == 1 and events[-1] == "unmap" and events.count("lease released") == 2
+    second._packed_mapping.fail = False
+    second.close()
+    assert runtime._packed_refs == 0 and events.count("lease released") == 4
+    with pytest.raises(RuntimeError, match="client is closed"):
+        second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
+    assert runtime._packed_refs == 0
+
+
+def test_sharded_client_rejects_wrong_group_and_releases_leases(pool_module, monkeypatch):
+    pool = pool_module
+    closed = []
+
+    class Client:
+        def __init__(self, endpoint, identity, *, device):
+            i = int(endpoint)
+            self.manifest = {"generation": str(i), "memfabric": {}, "shard": {"index": i, "count": 2}}
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(pool, "SharedPoolClient", Client)
+    with pytest.raises(ValueError, match="different MemFabric groups"):
+        pool.ShardedPoolClient(["0", "1"], "model", device="cpu")
+    assert len(closed) == 2
+
+
+def test_sharded_client_keeps_other_leases_if_common_mapping_cannot_close(pool_module):
+    events = []
+
+    def fail():
+        events.append("mapping failed")
+        raise RuntimeError("mapping still live")
+
+    client = object.__new__(pool_module.ShardedPoolClient)
+    client.views = []
+    client.closed = False
+    client._closing = False
+    client._packed_mapping = None
+    client.clients = [types.SimpleNamespace(close=fail), types.SimpleNamespace(close=lambda: events.append("released"))]
+    with pytest.raises(RuntimeError, match="mapping still live"):
+        client.close()
+    assert events == ["mapping failed"]
+
+
+def test_sharded_owners_use_common_object_id_and_release_real_leases(pool_module, monkeypatch):
+    pool = pool_module
+    monkeypatch.setattr(pool, "CHUNK_ROWS", 4)
+    ranks = iter([0, 1])
+    monkeypatch.setattr(
+        pool.MemfabricRuntime,
+        "acquire",
+        lambda *args, **kwargs: types.SimpleNamespace(rank=next(ranks), close=lambda: None),
+    )
+    owners = [
+        pool.SharedPoolOwner(
+            free_endpoint(),
+            "model",
+            device="npu:0",
+            store_url="tcp://127.0.0.1:12345",
+            world_size=3,
+            shard_index=i,
+            shard_count=2,
+            generation="group",
+        )
+        for i in range(2)
+    ]
+    try:
+        for i, owner in enumerate(owners):
+            owner.add_packed([("codes", 11, 256, torch.int8)])
+            owner.ready()
+        client = pool.ShardedPoolClient([owner.endpoint for owner in owners], "model", device="npu:0")
+        assert [owner.manifest["tensors"]["codes"]["object_id"] for owner in owners] == [0, 0]
+        with pytest.raises(TimeoutError):
+            owners[1].close()
+        client.close()
+    finally:
+        for owner in reversed(owners):
+            owner.close(timeout=2)
+
+
+def test_packed_tensor_chunks_never_cross_gib_slabs(pool_module, monkeypatch):
+    pool = pool_module
+    monkeypatch.setattr(pool.MemfabricRuntime, "acquire", lambda *args, **kwargs: types.SimpleNamespace(rank=0))
+    owner = pool.SharedPoolOwner(
+        free_endpoint(),
+        "model",
+        device="npu:0",
+        store_url="tcp://127.0.0.1:12345",
+        world_size=3,
+        shard_index=1,
+        shard_count=2,
+        generation="group",
+    )
+    specs = [
+        ("codes1", pool.CHUNK_ROWS + 17, 256, torch.int8),
+        ("scales1", pool.CHUNK_ROWS + 17, 8, torch.float32),
+        ("codes2", 3 * pool.CHUNK_ROWS + 3, 256, torch.int8),
+        ("scales2", 3 * pool.CHUNK_ROWS + 3, 8, torch.float32),
+    ]
+    try:
+        owner.add_packed(specs)
+        for meta in owner.manifest["tensors"].values():
+            assert meta["byte_offset"] % pool.GIB == 0
+            row_bytes = meta["width"] * (1 if meta["dtype"] == "int8" else 4)
+            for row in range(0, meta["rows"], pool.CHUNK_ROWS):
+                start = meta["byte_offset"] + row * row_bytes
+                end = start + min(pool.CHUNK_ROWS, meta["rows"] - row) * row_bytes - 1
+                assert start // pool.GIB == end // pool.GIB
+    finally:
+        owner.runtime = None
+        owner.close(timeout=2)
+
+
+def test_sharded_pool_rejects_fewer_than_two_endpoints(pool_module):
+    for endpoints in ([], ["owner:1"]):
+        with pytest.raises(ValueError, match="at least two owners"):
+            pool_module.ShardedPoolClient(endpoints, "model", device="cpu")
+
+
+def test_config_requires_two_endpoints_when_using_a_list():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ascend_config.py"
+    module = ast.parse(source.read_text())
+    cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SharedEngramConfig")
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_validate")
+    method.decorator_list = []
+    namespace: dict[str, Any] = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    validate = namespace["_validate"]
+    config = types.SimpleNamespace(
+        endpoint=None, endpoints=["owner:1"], capacity=65536, listen_port=None, local_comm_res=None
+    )
+    with pytest.raises(ValueError, match="at least two owners"):
+        validate(config)
+    config.endpoints.append("other:2")
+    assert validate(config) is config
+    config.endpoints, config.endpoint = None, "owner:1"
+    assert validate(config) is config
+
+
+def test_partial_lease_close_blocks_new_mapping_and_allows_retry(pool_module):
+    events = []
+    pending = [True]
+
+    def close_secondary():
+        if pending[0]:
+            pending[0] = False
+            raise RuntimeError("lease acknowledgement lost")
+        events.append("secondary released")
+
+    client = object.__new__(pool_module.ShardedPoolClient)
+    client.closed = False
+    client._closing = False
+    client.views = []
+    client._packed_mapping = None
+    client.clients = [
+        types.SimpleNamespace(close=lambda: events.append("primary closed")),
+        types.SimpleNamespace(close=close_secondary),
+    ]
+    with pytest.raises(RuntimeError, match="acknowledgement lost"):
+        client.close()
+    with pytest.raises(RuntimeError, match="closed or closing"):
+        client.view("key", 0, 1, rows=1, width=1, dtype=torch.int8)
+    client.close()
+    assert client.closed and events[-1] == "secondary released"

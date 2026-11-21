@@ -17,6 +17,8 @@ def main():
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--library-path")
     parser.add_argument("--ready-file")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
     options = parser.add_mutually_exclusive_group()
     options.add_argument("--listen-port", type=int, choices=range(1, 65536), metavar="PORT")
     options.add_argument("--local-comm-res", help="Device communication resources JSON path")
@@ -42,6 +44,8 @@ def main():
         args.engine_endpoint,
         device=args.device,
         library_path=args.library_path,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
         listen_port=args.listen_port,
         local_comm_res=args.local_comm_res,
         fabric=args.fabric,
@@ -56,6 +60,7 @@ def main():
             generation=owner.generation,
             endpoint=args.endpoint,
             metadata=owner.metadata,
+            shard=owner.shard,
             table_bytes=sum(t.numel() for t in owner.tables.values()),
         )
         if args.ready_file:

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from .shared_host import MappedHostBuffer, MappingCleanupError, MemfabricRuntime
+from .shared_host import CHUNK_ROWS, GIB, MappedHostBuffer, MappingCleanupError, MemfabricRuntime
 
 SCHEMA = 2
 DTYPES = {"int8": torch.int8, "float32": torch.float32}
@@ -80,13 +80,42 @@ def _receive(wire):
     return value
 
 
+def _align_gib(size):
+    return (size + GIB - 1) // GIB * GIB
+
+
+def shard_range(rows, index, count):
+    chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
+    if type(index) is not int or type(count) is not int or count < 1 or not 0 <= index < count or chunks < count:
+        raise ValueError("invalid shared Engram shard layout")
+    return chunks * index // count * CHUNK_ROWS, min(chunks * (index + 1) // count * CHUNK_ROWS, rows)
+
+
 class SharedPoolOwner:
-    def __init__(self, endpoint, identity, *, device, store_url=None, world_size=65):
+    def __init__(
+        self,
+        endpoint,
+        identity,
+        *,
+        device,
+        store_url=None,
+        world_size=65,
+        shard_index=0,
+        shard_count=1,
+        generation=None,
+    ):
         if not 2 <= world_size <= 1024:
             raise ValueError("MemFabric world size must include the owner and consumers")
+        if type(shard_count) is not int or type(shard_index) is not int or not 0 <= shard_index < shard_count:
+            raise ValueError("invalid shared Engram shard layout")
+        if shard_count > 1 and (not store_url or not generation):
+            raise ValueError("sharded owners require a common store URL and generation")
+        if world_size <= shard_count:
+            raise ValueError("MemFabric world size must include all owners and consumers")
         host, port = parse_endpoint(endpoint)
         self.endpoint = endpoint
-        self.generation = uuid.uuid4().hex
+        self.shard_index, self.shard_count = shard_index, shard_count
+        self.generation = generation or uuid.uuid4().hex
         self.device = device
         self.runtime = None
         self.buffers = {}
@@ -116,6 +145,7 @@ class SharedPoolOwner:
             memfabric=dict(store_url=store_url, world_size=world_size),
             endpoint=[host, self._listener.getsockname()[1]],
             generation=self.generation,
+            shard=dict(index=shard_index, count=shard_count),
         )
         self._thread = threading.Thread(target=self._accept, daemon=True)
         self._thread.start()
@@ -166,7 +196,7 @@ class SharedPoolOwner:
                 # all consumers before terminating the owner generation.
                 print("ENGRAM_ORPHANED_LEASE owner memory retained", flush=True)
 
-    def add(self, key, rows, width, dtype):
+    def add(self, key, rows, width, dtype, *, total_rows=None, first_row=0, space_rows=None):
         if self.manifest["state"] != "loading" or key in self.buffers:
             raise ValueError("Cannot add to a published pool or duplicate a tensor")
         name = str(dtype).removeprefix("torch.")
@@ -175,18 +205,67 @@ class SharedPoolOwner:
         if self.runtime is None:
             settings = self.manifest["memfabric"]
             self.runtime = MemfabricRuntime.acquire(
-                self.generation, settings["store_url"], settings["world_size"], self.device, owner=True
+                self.generation, settings["store_url"], settings["world_size"], self.device, owner=self.shard_index == 0
             )
         object_id = len(self.buffers)
         try:
-            buffer = MappedHostBuffer(self.runtime, object_id, rows, width, dtype, owner=True)
+            buffer = MappedHostBuffer(self.runtime, object_id, rows, width, dtype, owner=True, space_rows=space_rows)
         except MappingCleanupError as exc:
             self.buffers[key] = exc.buffer
             raise
         self.buffers[key] = buffer
         self.manifest["tensors"][key] = dict(
-            rows=rows, width=width, dtype=name, object_id=object_id, owner_rank=self.runtime.rank
+            rows=rows,
+            width=width,
+            dtype=name,
+            object_id=object_id,
+            owner_rank=self.runtime.rank,
+            total_rows=total_rows if total_rows is not None else rows,
+            first_row=first_row,
+            space_rows=space_rows or rows,
         )
+        return buffer
+
+    def add_packed(self, specs):
+        """Allocate one rank contribution containing all logical tensors."""
+        if self.manifest["state"] != "loading" or self.buffers or self.shard_count < 2:
+            raise ValueError("Packed Engram requires an empty sharded owner")
+        metadata = {}
+        rank_bytes = space_bytes = 0
+        for key, total_rows, width, dtype in specs:
+            if key in metadata or dtype not in (torch.int8, torch.float32) or width <= 0:
+                raise ValueError("Invalid packed Engram tensor")
+            first, last = shard_range(total_rows, self.shard_index, self.shard_count)
+            chunks = (total_rows + CHUNK_ROWS - 1) // CHUNK_ROWS
+            max_rows = min(total_rows, ((chunks + self.shard_count - 1) // self.shard_count) * CHUNK_ROWS)
+            row_bytes = width * torch.empty((), dtype=dtype).element_size()
+            metadata[key] = dict(
+                rows=last - first,
+                width=width,
+                dtype=str(dtype).removeprefix("torch."),
+                object_id=0,
+                total_rows=total_rows,
+                first_row=first,
+                byte_offset=rank_bytes,
+            )
+            rank_bytes += _align_gib((last - first) * row_bytes)
+            space_bytes += _align_gib(max_rows * row_bytes)
+        if not metadata:
+            raise ValueError("Packed Engram requires at least one tensor")
+        settings = self.manifest["memfabric"]
+        self.runtime = MemfabricRuntime.acquire(
+            self.generation, settings["store_url"], settings["world_size"], self.device, owner=self.shard_index == 0
+        )
+        try:
+            buffer = MappedHostBuffer(self.runtime, 0, rank_bytes, 1, torch.int8, owner=True, space_rows=space_bytes)
+        except MappingCleanupError as exc:
+            self.buffers["__packed__"] = exc.buffer
+            raise
+        self.buffers["__packed__"] = buffer
+        for meta in metadata.values():
+            meta.update(owner_rank=self.runtime.rank, rank_bytes=rank_bytes, space_bytes=space_bytes)
+        self.manifest["packing"] = "byte-v1"
+        self.manifest["tensors"] = metadata
         return buffer
 
     def ready(self):
@@ -296,4 +375,168 @@ class SharedPoolClient:
             raise RuntimeError("Shared Engram release was not acknowledged")
         self._wire.close()
         self._conn.close()
+        self.closed = True
+
+
+class ShardedPoolSlice:
+    """Chunk pointers indexed from the global chunk containing the TP slice."""
+
+    def __init__(self, tensor, ptrs, row_offset, device):
+        self.tensor, self.ptrs, self.row_offset, self.device = tensor, ptrs, row_offset, device
+
+    def close(self):
+        if self.ptrs is not None:
+            with torch.npu.device(self.device):
+                torch.npu.synchronize()
+            self.ptrs = self.tensor = None
+
+
+class ShardedPoolClient:
+    def __init__(self, endpoints, identity, *, device):
+        if len(endpoints) < 2:
+            raise ValueError("sharded Engram requires at least two owners")
+        self.closed = False
+        self._closing = False
+        self.clients, self.views = [], []
+        self.device = device
+        self._packed_mapping = None
+        try:
+            for index, endpoint in enumerate(endpoints):
+                client = SharedPoolClient(endpoint, identity, device=device)
+                self.clients.append(client)
+                manifest = client.manifest
+                if manifest.get("shard") != {"index": index, "count": len(endpoints)}:
+                    raise ValueError("shared Engram owner shard layout mismatch")
+                if index and any(manifest[k] != self.clients[0].manifest[k] for k in ("generation", "memfabric")):
+                    raise ValueError("shared Engram owners use different MemFabric groups")
+            manifests = [client.manifest for client in self.clients]
+            keys = list(manifests[0]["tensors"])
+            if not keys or any(m.get("packing") != "byte-v1" or list(m["tensors"]) != keys for m in manifests):
+                raise ValueError("shared Engram owners have different packed tensor layouts")
+            ranks: set[int] = set()
+            for index, manifest in enumerate(manifests):
+                owner_ranks = {meta["owner_rank"] for meta in manifest["tensors"].values()}
+                if (
+                    len(owner_ranks) != 1
+                    or any(
+                        type(rank) is not int or not 0 <= rank < manifest["memfabric"]["world_size"]
+                        for rank in owner_ranks
+                    )
+                    or ranks.intersection(owner_ranks)
+                ):
+                    raise ValueError("shared Engram owners must have distinct ranks")
+                ranks.update(owner_ranks)
+                offset = capacity = 0
+                for key in keys:
+                    meta = manifest["tensors"][key]
+                    ref = manifests[0]["tensors"][key]
+                    if any(meta[k] != ref[k] for k in ("total_rows", "width", "dtype", "object_id", "space_bytes")):
+                        raise ValueError("shared Engram tensor layout mismatch")
+                    if (
+                        meta["object_id"] != 0
+                        or meta["dtype"] not in DTYPES
+                        or type(meta["width"]) is not int
+                        or meta["width"] <= 0
+                    ):
+                        raise ValueError("invalid packed Engram tensor metadata")
+                    first, last = shard_range(meta["total_rows"], index, len(endpoints))
+                    if (meta["first_row"], meta["rows"], meta["byte_offset"]) != (first, last - first, offset):
+                        raise ValueError("shared Engram row range or packed offset mismatch")
+                    row_bytes = meta["width"] * torch.empty((), dtype=DTYPES[meta["dtype"]]).element_size()
+                    chunks = (meta["total_rows"] + CHUNK_ROWS - 1) // CHUNK_ROWS
+                    max_rows = min(meta["total_rows"], ((chunks + len(endpoints) - 1) // len(endpoints)) * CHUNK_ROWS)
+                    offset += _align_gib((last - first) * row_bytes)
+                    capacity += _align_gib(max_rows * row_bytes)
+                if any(
+                    meta["rank_bytes"] != offset or meta["space_bytes"] != capacity
+                    for meta in manifest["tensors"].values()
+                ):
+                    raise ValueError("shared Engram packed capacity mismatch")
+            self._packed_spec = [(m["generation"], m["memfabric"], m["tensors"]) for m in manifests]
+        except BaseException:
+            rollback_shared_engram(self.close)
+            raise
+
+    def view(self, key, start, end, *, rows, width, dtype):
+        if self.closed or self._closing:
+            raise RuntimeError("Shared Engram client is closed or closing")
+        meta = self.clients[0].manifest["tensors"][key]
+        if (meta["total_rows"], meta["width"], meta["dtype"]) != (rows, width, str(dtype).removeprefix("torch.")):
+            raise ValueError("shared Engram tensor layout mismatch")
+        if not 0 <= start < end <= rows:
+            raise ValueError("invalid shared Engram slice")
+        pointers = []
+        aligned_start = start // CHUNK_ROWS * CHUNK_ROWS
+        primary = self.clients[0]
+        if primary.runtime is None:
+            settings = primary.manifest["memfabric"]
+            primary.runtime = MemfabricRuntime.acquire(
+                primary.manifest["generation"], settings["store_url"], settings["world_size"], self.device, owner=False
+            )
+        if self._packed_mapping is None:
+            # One process-wide BM object is shared by the layer clients.
+            with MemfabricRuntime._lock:
+                mapping = getattr(primary.runtime, "_packed_mapping", None)
+                if mapping is None:
+                    try:
+                        mapping = MappedHostBuffer(
+                            primary.runtime,
+                            0,
+                            meta["rank_bytes"],
+                            1,
+                            torch.int8,
+                            owner=False,
+                            owner_rank=meta["owner_rank"],
+                            space_rows=meta["space_bytes"],
+                        )
+                    except MappingCleanupError as exc:
+                        primary.buffers["__packed_cleanup__"] = exc.buffer
+                        raise
+                    primary.runtime._packed_mapping = mapping
+                    primary.runtime._packed_spec = self._packed_spec
+                    primary.runtime._packed_refs = 0
+                elif (
+                    primary.runtime._packed_spec != self._packed_spec
+                    or mapping.rows != meta["rank_bytes"]
+                    or mapping.space_size != _align_gib(meta["space_bytes"])
+                ):
+                    raise ValueError("shared Engram packed mapping layout mismatch")
+                primary.runtime._packed_refs += 1
+                self._packed_mapping = mapping
+        mapping = self._packed_mapping
+        for client in self.clients:
+            shard = client.manifest["tensors"][key]
+            first, last = shard["first_row"], shard["first_row"] + shard["rows"]
+            chunk_start, chunk_end = max(aligned_start, first), min(end, last)
+            for row in range(chunk_start, chunk_end, CHUNK_ROWS):
+                row_bytes = width * torch.empty((), dtype=dtype).element_size()
+                offset = shard["byte_offset"] + (row - first) * row_bytes
+                size = min(CHUNK_ROWS, chunk_end - row) * row_bytes
+                pointers.append(mapping.device_pointer(offset, size, owner_rank=shard["owner_rank"]))
+        tensor = torch.empty((end - start, width), dtype=dtype, device="meta")
+        view = ShardedPoolSlice(
+            tensor, torch.tensor(pointers, dtype=torch.int64, device=self.device), start - aligned_start, self.device
+        )
+        self.views.append(view)
+        return view
+
+    def close(self):
+        if self.closed:
+            return
+        self._closing = True
+        _close_all(self.views)
+        # Drop this layer's mapping reference before releasing any owner lease.
+        if self._packed_mapping is not None:
+            runtime = self.clients[0].runtime
+            assert runtime is not None
+            with MemfabricRuntime._lock:
+                if runtime._packed_refs == 1:
+                    self._packed_mapping.close()
+                    runtime._packed_mapping = None
+                    runtime._packed_spec = None
+                runtime._packed_refs -= 1
+                self._packed_mapping = None
+        if self.clients:
+            self.clients[0].close()
+            _close_all(self.clients[1:])
         self.closed = True

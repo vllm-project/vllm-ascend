@@ -1,0 +1,4 @@
+pr: 21246
+entries:
+  - category: feature
+    text: Added static multi-owner placement for shared DeepSeek V4.1 Engram tables on A2, A3, and A5.
