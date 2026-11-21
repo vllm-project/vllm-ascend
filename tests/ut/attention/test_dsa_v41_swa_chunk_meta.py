@@ -206,12 +206,22 @@ def test_segment_geometry_is_part_of_the_signature(monkeypatch):
     op = _install_op(monkeypatch, lambda *_args, **_kwargs: torch.zeros(4, dtype=torch.int32))
     stage_cache = dsa_v41._SwaChunkStageCache()
 
-    first = _plan(_swa_metadata(seqs=(10, 14)), _layer_table(0), stage_cache)
-    second = _plan(_swa_metadata(seqs=(10, 18)), _layer_table(0), stage_cache)
+    # A wider table keeps both absolute block ranges in bounds; the point of
+    # this test is the signature, not the table guard.
+    wide_table = torch.arange(1, 17, dtype=torch.int32).reshape(2, 8)
+    first = _plan(_swa_metadata(seqs=(10, 14)), wide_table, stage_cache)
+    second = _plan(_swa_metadata(seqs=(10, 18)), wide_table, stage_cache)
     _smla_metadata(stage_cache, first)
     _smla_metadata(stage_cache, second)
 
     assert op.call_count == 2
+
+
+def test_absolute_block_range_outside_the_table_fails_open():
+    stage_cache = dsa_v41._SwaChunkStageCache()
+
+    # The second row needs absolute blocks [3, 5) in a four-column table.
+    assert _plan(_swa_metadata(seqs=(10, 18)), _layer_table(0), stage_cache) is None
 
 
 def test_metadata_failure_fails_open_and_is_remembered(monkeypatch):
