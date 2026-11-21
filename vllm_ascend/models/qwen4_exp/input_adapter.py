@@ -18,7 +18,7 @@ import torch
 from vllm_ascend.ops.gbsa import generic_block_sparse_attention_metadata
 
 from .gbsa import GBSA_COMPRESS_RATIO, GBSA_PAGE_SIZE
-from .qsa_rope_prepare import prepare_qsa_rope_cache
+from .qsa_prepare import prepare_qsa_rope_cache
 
 
 def _tensor_storage_signature(tensor: torch.Tensor) -> tuple[object, ...]:

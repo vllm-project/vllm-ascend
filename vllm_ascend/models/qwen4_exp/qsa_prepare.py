@@ -1,8 +1,85 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Integer-only preparation for the Qwen4Exp GBSA input contract."""
+"""Qwen4Exp QSA preparation kernels used before and within model forward.
+
+Request- and step-level preparation lives here so it is visibly owned by the
+Qwen4Exp model instead of looking like a reusable Triton operator. The GBSA
+packing helpers at the bottom are layer-dependent compatibility helpers; they
+remain here until the non-prepared GBSA fallback is removed.
+"""
 
 import torch
 from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _prepare_qsa_rope_cache_kernel(
+    positions_ptr,
+    cache_ptr,
+    output_ptr,
+    position_stride_axis,
+    position_stride_token,
+    cache_stride_row,
+    cache_stride_col,
+    output_stride_row,
+    num_tokens: tl.constexpr,
+    cache_rows: tl.constexpr,
+    cache_width: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    axis = row // num_tokens
+    token = row % num_tokens
+    position = tl.load(positions_ptr + axis * position_stride_axis + token * position_stride_token)
+    position = tl.minimum(tl.maximum(position, 0), cache_rows - 1).to(tl.int64)
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < cache_width
+    values = tl.load(
+        cache_ptr + position * cache_stride_row + offsets * cache_stride_col,
+        mask=mask,
+        other=0.0,
+    )
+    tl.store(output_ptr + row * output_stride_row + offsets, values, mask=mask)
+
+
+def prepare_qsa_rope_cache(
+    positions: torch.Tensor,
+    cos_sin: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Clamp and gather QSA rotary rows into a persistent per-step buffer."""
+    if positions.ndim not in (1, 2) or (positions.ndim == 2 and positions.shape[0] != 3):
+        raise ValueError("QSA positions must have shape [tokens] or [3, tokens]")
+    if positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("QSA positions must use int32 or int64")
+    if cos_sin.ndim != 2 or cos_sin.shape[0] == 0 or cos_sin.stride(1) != 1:
+        raise ValueError("QSA rotary cache must be a non-empty row-major matrix")
+    expected_shape = (*positions.shape, cos_sin.shape[1])
+    if output.shape != expected_shape or not output.is_contiguous():
+        raise ValueError(f"QSA prepared rotary buffer must be contiguous with shape {expected_shape}")
+    if positions.device != cos_sin.device or output.device != cos_sin.device:
+        raise ValueError("QSA positions, rotary cache and output must share a device")
+    if positions.numel() == 0:
+        return
+
+    num_tokens = positions.shape[-1]
+    position_stride_axis = positions.stride(0) if positions.ndim == 2 else 0
+    position_stride_token = positions.stride(-1)
+    cache_width = cos_sin.shape[1]
+    _prepare_qsa_rope_cache_kernel[(positions.numel(),)](
+        positions,
+        cos_sin,
+        output,
+        position_stride_axis,
+        position_stride_token,
+        cos_sin.stride(0),
+        cos_sin.stride(1),
+        output.stride(-2),
+        num_tokens=num_tokens,
+        cache_rows=cos_sin.shape[0],
+        cache_width=cache_width,
+        BLOCK=triton.next_power_of_2(cache_width),
+    )
 
 
 @triton.jit
@@ -360,4 +437,5 @@ __all__ = [
     "prepare_qsa_gbsa_inputs",
     "prepare_qsa_gbsa_shared",
     "prepare_qsa_lengths",
+    "prepare_qsa_rope_cache",
 ]

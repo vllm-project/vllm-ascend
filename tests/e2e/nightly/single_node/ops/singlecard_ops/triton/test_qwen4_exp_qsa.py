@@ -8,14 +8,14 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.qwen4_exp.lightning_indexer import qsa_select_paged_tokens_lightning_v2
-from vllm_ascend.ops.triton.qwen4_exp.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
-from vllm_ascend.ops.triton.qwen4_exp.gate import qsa_sigmoid_mul_
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import (
+from vllm_ascend.models.qwen4_exp.qsa_prepare import (
     pack_qsa_gbsa_indices,
     prepare_qsa_gbsa_inputs,
     prepare_qsa_gbsa_shared,
     prepare_qsa_lengths,
 )
+from vllm_ascend.ops.triton.qwen4_exp.fia import QSAFIAMaskWorkspace, build_qsa_fia_mask
+from vllm_ascend.ops.triton.qwen4_exp.gate import qsa_sigmoid_mul_
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     pack_qsa_group_indices_npu,
     qsa_store_key_position_rows,
