@@ -765,7 +765,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         A grain is included only when one range covers it fully, so a TP shard
         cannot advertise another worker's unfinished blocks. Parent hashes stay
         on the global chain. ``block_size`` is this group's store grain, the
-        same span as ``token_ids``.
+        same span as ``token_ids``. ``group_idx`` selects the replication
+        factor the scheduler uses to wait for the other writers of this block.
         """
         group_block_size = self._get_block_size(group_id)
         if group_block_size <= 0 or token_len < group_block_size:
@@ -801,6 +802,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 lora_id=None,
                 medium="cpu",
                 lora_name=None,
+                group_idx=group_id,
             )
             stored_events.append(stored_event)
             logger.debug("Built kv cache event '%s'", stored_event)

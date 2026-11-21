@@ -940,6 +940,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 self.assertEqual(events[0].block_size, block_size)
                 self.assertEqual(events[0].token_ids, list(range(block_size)))
                 self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
+                self.assertEqual(events[0].group_idx, 0)
+                other_group = t._build_cpu_stored_events(req, 1, block_size, [(0, block_size)])
+                self.assertEqual(other_group[0].group_idx, 1)
 
     def test_store_job_lifecycle(self):
         t, _ = self._make_thread()
