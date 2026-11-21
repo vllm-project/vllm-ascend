@@ -31,6 +31,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    get_group_block_size,
+    infer_dcp_mismatch_info,
+    is_kv_save_role,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import (
     DSparkPrefixCache,
     DSparkPrefixKeys,
@@ -62,11 +67,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes i
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
-    infer_dcp_mismatch_info,
-    is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
@@ -944,9 +948,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._record_invalid_blocks_ids([block_id for _, _, block_id, _ in request_key_slots])
             for request, _, _, slot in request_key_slots:
                 if slot is None:
-                    request.load_last_block_key = None
+                    request.transfer.load_last_block_key = None
                 else:
-                    request.load_block_keys[slot] = None
+                    request.transfer.load_block_keys[slot] = None
             return
 
         results_by_key = dict(zip(keys, results, strict=True))
@@ -967,11 +971,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 continue
             self._record_invalid_blocks_ids([block_id])
             if slot is None:
-                request.load_last_block_key = None
+                request.transfer.load_last_block_key = None
             else:
-                request.load_block_keys[slot] = None
+                request.transfer.load_block_keys[slot] = None
         for request_identity, request in requests_by_id.items():
-            request.load_keys = request_load_keys[request_identity]
+            request.transfer.load_keys = request_load_keys[request_identity]
 
     def _process_save_for_layer_batch(
         self,
@@ -1008,8 +1012,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
             num_allocated_blocks = (
-                len(request.block_ids_by_group_np[group_id])
-                if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
+                len(request.transfer.block_ids_by_group_np[group_id])
+                if request.transfer.block_ids_by_group_np is not None
+                and group_id < len(request.transfer.block_ids_by_group_np)
                 else len(request.block_ids_by_group[group_id])
             )
             save_end_block = min(save_end_block, num_allocated_blocks)
@@ -1017,8 +1022,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if partial_block_index is not None and partial_block_index >= num_allocated_blocks:
                 partial_block_index = None
             group_store_mask = (
-                request.store_masks[group_id]
-                if request.store_masks is not None and group_id < len(request.store_masks)
+                request.transfer.store_masks[group_id]
+                if request.transfer.store_masks is not None and group_id < len(request.transfer.store_masks)
                 else None
             )
             block_runs = self._masked_block_runs_cached(
@@ -1204,7 +1209,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
-                populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
+                populated_slots = [
+                    index for index, key in enumerate(request.transfer.load_block_keys) if key is not None
+                ]
                 if not populated_slots:
                     continue
                 request_block_ranges.append(
@@ -1245,8 +1252,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 full_blocks = cached_full_blocks
                 partial_block_index = self._resolve_layerwise_load_partial(cached_tokens, block_size)
             partial_gva = (
-                request.partial_load_gva_per_group[group_id]
-                if group_id < len(request.partial_load_gva_per_group)
+                request.transfer.partial_load_gva_per_group[group_id]
+                if group_id < len(request.transfer.partial_load_gva_per_group)
                 else request.last_block_gva
             )
             if partial_gva is None or partial_gva <= 0:
@@ -1254,8 +1261,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
             group_load_mask = (
-                request.load_masks[group_id]
-                if request.load_masks is not None and group_id < len(request.load_masks)
+                request.transfer.load_masks[group_id]
+                if request.transfer.load_masks is not None and group_id < len(request.transfer.load_masks)
                 else None
             )
             block_runs = self._masked_block_runs_cached(
@@ -1465,7 +1472,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         else:
             num_local = self.num_layers
         for request in requests:
-            request.store_masks = self._compute_reachable_store_masks(request)
+            request.transfer.store_masks = self._compute_reachable_store_masks(request)
         group_requests = self._data_plane.prepare_sessions(requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
