@@ -40,10 +40,11 @@ class LauncherTests(unittest.TestCase):
     def capture(self, *extra, statuses=(0, 0)):
         workers = [mock.Mock(wait=mock.Mock(return_value=status)) for status in statuses]
         with (
+            mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base, *extra]),
             mock.patch.object(launcher.subprocess, "Popen", side_effect=workers) as popen,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            result = launcher.main(self.base + list(extra))
+            result = launcher.main()
         return result, popen.call_args_list, workers
 
     def test_fixed_interface_and_second_node_device_allocation(self):
@@ -76,15 +77,22 @@ class LauncherTests(unittest.TestCase):
             ["--dp-rank-start", "3"],
             ["--template", str(self.template.parent / "missing.sh")],
         ]:
-            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+            with (
+                self.subTest(extra=extra),
+                mock.patch.object(launcher.sys, "argv", ["launch_online_dp.py", *self.base, *extra]),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
                 with self.assertRaises(SystemExit) as caught:
-                    launcher.parse_args(self.base + extra)
+                    launcher.parse_args()
                 self.assertEqual(caught.exception.code, 2)
 
     def test_script_alias_and_dp1_default(self):
-        args = launcher.parse_args(
-            self.base
-            + [
+        with mock.patch.object(
+            launcher.sys,
+            "argv",
+            [
+                "launch_online_dp.py",
+                *self.base,
                 "--script",
                 str(self.template),
                 "--dp-size",
@@ -93,8 +101,9 @@ class LauncherTests(unittest.TestCase):
                 "-1",
                 "--dp-rank-start",
                 "0",
-            ]
-        )
+            ],
+        ):
+            args = launcher.parse_args()
         self.assertEqual(args.template, str(self.template))
         self.assertEqual(args.dp_size_local, 1)
 

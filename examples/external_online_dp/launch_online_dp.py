@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Launch one shell template per local DP rank.
-
-The template receives devices, API port, DP size, DP rank, DP address,
-DP RPC port, TP size, PCP size, and PP size, in that order.
-"""
+"""Launch one shell template per local DP rank."""
 
 import argparse
 import os
@@ -11,8 +7,8 @@ import subprocess
 import sys
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args():
+    parser = argparse.ArgumentParser()
     parser.add_argument("--dp-size", type=int, required=True, help="Global data parallel size.")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
     parser.add_argument("--pcp-size", type=int, default=1, help="Prefill context parallel size (default: 1).")
@@ -23,7 +19,7 @@ def parse_args(argv=None):
     parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
     parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
 
     if args.dp_size_local == -1:
         args.dp_size_local = args.dp_size
@@ -36,8 +32,8 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None):
-    args = parse_args(argv)
+def main():
+    args = parse_args()
     devices_per_rank = args.tp_size * args.pcp_size * args.pp_size
     processes = []
 
