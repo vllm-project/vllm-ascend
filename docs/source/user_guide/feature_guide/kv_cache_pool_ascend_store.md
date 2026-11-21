@@ -14,7 +14,7 @@ KV Cache supports the following three external storage backends, choose the stor
 
 | Scenario | Selection Guidance |
 | :--- | :--- |
-| Mooncake backend | Default backend. Mooncake is Moonshot AI's open-source distributed KVCache system for LLM inference; choose it when SSD Offload for extended KV capacity or multi-tenant quota management is needed. |
+| Mooncake backend | Default backend. Mooncake is Moonshot AI's open-source distributed KV Cache system for LLM inference; choose it when SSD Offload for extended KV capacity or multi-tenant quota management is needed. |
 | Memcache backend | Based on MemFabric; choose it when A3 HCCS high-speed interconnect for lower transfer latency, or layer-by-layer KV transfer (`use_layerwise`), is needed. |
 | Yuanrong backend | Based on openyuanrong-datasystem (an openEuler open-source distributed foundation for integrated training and inference); choose it when multi-node deployment, Remote H2D transfer, or openEuler ecosystem integration is needed. |
 
@@ -149,7 +149,7 @@ on the same instances that previously exported the environment variable.
     | `protocol` | str | No default | Yes | ascend | Must be set to `ascend` on NPU. |
     | `device_name` | str | "" (empty string) | No | Empty string | The ascend protocol does not use device names; leave empty. |
     | `master_server_address` | str | No default | Yes | <ip>:<port> | Master service IP and port. Can be overridden by the `MOONCAKE_MASTER` environment variable (takes precedence, useful for injecting the master address through Kubernetes). |
-    | `global_segment_size` | str | No default | Yes | Must align to 1 GB (1024 MB / 1048576 KB / 1073741824 B) | Registered memory size per card to the KV Pool. Can be overridden by the `MOONCAKE_GLOBAL_SEGMENT_SIZE` environment variable (takes precedence). |
+    | `global_segment_size` | str | No default | Yes | Must align to 1GB (1024MB / 1048576KB / 1073741824B) | Registered memory size per card to the KV Pool. Can be overridden by the `MOONCAKE_GLOBAL_SEGMENT_SIZE` environment variable (takes precedence). |
     | `preferred_segment` | bool | false | No | true / false | Whether to prefer storing KV on the local segment. |
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
     | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
@@ -387,7 +387,7 @@ on the same instances that previously exported the environment variable.
             "kv_role": "kv_consumer",
             "kv_load_failure_policy": "recompute",
             "kv_connector_extra_config": {
-                "lookup_rpc_port": "0",
+                "lookup_rpc_port": "'$LOOKUP_RPC_PORT'",
                 "backend": "mooncake",
                 "consumer_is_to_put": true,
                 "prefill_pp_size": 2,
@@ -404,7 +404,7 @@ on the same instances that previously exported the environment variable.
             "kv_role": "kv_consumer",
             "kv_load_failure_policy": "recompute",
             "kv_connector_extra_config": {
-                "lookup_rpc_port": "0",
+                "lookup_rpc_port": "'$LOOKUP_RPC_PORT'",
                 "backend": "mooncake",
                 "save_decode_cache": true
             }
@@ -509,7 +509,7 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 In Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
 
-**Low eviction watermark:** With a 100 GB DRAM pool, `eviction_high_watermark_ratio=0.5` triggers eviction at 50 GB. If the warmup working set exceeds this threshold, data can be evicted before asynchronous SSD writes finish, leaving the benchmark with a cold cache and a lower initial hit rate.
+**Low eviction watermark:** With a 100GB DRAM pool, `eviction_high_watermark_ratio=0.5` triggers eviction at 50GB. If the warmup working set exceeds this threshold, data can be evicted before asynchronous SSD writes finish, leaving the benchmark with a cold cache and a lower initial hit rate.
 
 To preserve warmup data under memory pressure, set `enable_ssd_offload=true` in `mooncake.json` and enable offload-on-evict on the master:
 
@@ -534,14 +534,14 @@ If startup reports `storage_path already held by another live client`, another c
 SSD disk usage control environment variables:
 
 ```shell
-# 800 GB total disk, 8 TP ranks, ~100 GB per rank
+# 800GB total disk, 8 TP ranks, ~100GB per rank
 export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((100 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
-export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
+export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1GB
 ```
 
-`MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` risk: If not aligned to 1 GB (A3 + FabricMem scenario), it may cause `adxl MallocMem` failures or `FileStorage init` segfaults. Always set to a multiple of 1 GB.
+`MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` risk: If not aligned to 1GB (A3 + FabricMem scenario), it may cause `adxl MallocMem` failures or `FileStorage init` segfaults. Always set to a multiple of 1GB.
 
 Note: `--max-num-batched-tokens` only chunks prefill compute; it does not reduce the memory required by `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`.
 
@@ -550,10 +550,10 @@ Note: `--max-num-batched-tokens` only chunks prefill compute; it does not reduce
 
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | int (bytes) | 1342177280 (1280 MB) | No | Must align to 1 GB when A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1` | Per-rank SSD read/write buffer size (bytes). Not configurable in mooncake.json. Increase when `BUFFER_OVERFLOW` occurs. |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | int (bytes) | 1342177280 (1.25GB) | No | Must align to 1GB when A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1` | Per-rank SSD read/write buffer size (bytes). Not configurable in mooncake.json. Increase when `BUFFER_OVERFLOW` occurs. |
 | `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | int (bytes) | 0 | No | Bytes; 0 means 90% of physical disk capacity | Eviction threshold (bytes). Set an explicit value to control disk usage precisely. |
 | `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | str | none | No | none / fifo / lru | SSD eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
-| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | int (bytes) | 2199023255552 (2 TB) | Strongly recommended to set explicitly | Must match actual disk capacity | Per-rank maximum disk usage reported to Mooncake master, aggregated by master across clients (roughly 2 TB x rank count). Default far exceeds real disk capacity; must be overridden. |
+| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | int (bytes) | 2199023255552 (2TB) | Strongly recommended to set explicitly | Must match actual disk capacity | Per-rank maximum disk usage reported to Mooncake master, aggregated by master across clients (roughly 2TB x rank count). Default far exceeds real disk capacity; must be overridden. |
 
 </details>
 
@@ -628,7 +628,7 @@ done
 #### Mooncake SSD Offload Parameter Tuning
 
 - Increase `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` when `BUFFER_OVERFLOW` occurs, but do not exceed the `Available KV cache memory` value in vLLM Worker logs. Use byte literals only (e.g., `10737418240`); `10G`/`10GB` is not supported.
-- On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` must be aligned to 1 GB (multiple of 1073741824); avoid unaligned values such as `1280MB`, `512MB`, or `1.5GB`. `local_buffer_size` in `mooncake.json` is not used under fabric mem mode.
+- On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` must be aligned to 1GB (multiple of 1073741824); avoid unaligned values such as `1280MB`, `512MB`, or `1.5GB`. `local_buffer_size` in `mooncake.json` is not used under fabric mem mode.
 - Fabric mem budget formula (per rank):
   
   ```text
@@ -642,7 +642,7 @@ done
   export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((100 * 1024 * 1024 * 1024))
   export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((100 * 1024 * 1024 * 1024))
   export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
-  export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
+  export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1GB
   ```
 
 - Host memory budget:
@@ -1210,7 +1210,7 @@ done
   maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO (GB) / number of DRAM-enabled local services))
   ```
 
-- Separated deployment recommended: 50 GB per process; other scenarios: 10 GB.
+- Separated deployment recommended: 50GB per process; other scenarios: 10GB.
 - To use L2.5 memory caching, increase `ubsio.mem.size_in_gb` within the limit and adjust [ubsio.wcache.evict_water_level](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level).
 
 ## Scenario 3: Yuanrong Backend
@@ -1392,7 +1392,7 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 | `coordinator_address` | str | No default | Option 1 | `<ip>:31511` | Coordinator address. |
 | `etcd_address` | str | No default | Option 2 | `<ip>:2379` | etcd address. |
 | `log_dir` | str | No default | No | Absolute path | Worker log directory, use absolute path. Create the directory and grant the worker process write permission before startup. |
-| `shared_memory_size_mb` | int | No default | Yes | Positive integer (MB) | Shared memory size (MB). Example: 40960 (40 GB). |
+| `shared_memory_size_mb` | int | No default | Yes | Positive integer (MB) | Shared memory size (MB). Example: 40960 (40GB). |
 | `arena_per_tenant` | int | No default | No | Positive integer | Shared memory arena count per tenant. Conservative starting point: 1. |
 | `enable_huge_tlb` | bool | No default | No | true / false | Use HugeTLB pages for shared memory. Reserve enough 2 MiB huge pages before starting the worker. |
 | `enable_fallocate` | bool | No default | No | true / false | Execute fallocate for shared memory file. Recommended false with HugeTLB. |
@@ -1416,7 +1416,8 @@ export DATASYSTEM_CLIENT_LOG_DIR="/var/log/yuanrong/client"
 export DS_ENABLE_EXCLUSIVE_CONNECTION=0
 export DS_ENABLE_REMOTE_H2D=0
 
-mkdir -p "${DATASYSTEM_CLIENT_LOG_DIR}"
+sudo mkdir -p "${DATASYSTEM_CLIENT_LOG_DIR}"
+sudo chown "$(id -u):$(id -g)" "${DATASYSTEM_CLIENT_LOG_DIR}"
 ```
 
 <details markdown="1">
@@ -1575,7 +1576,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 
 `lookup_rpc_port` identifies the local IPC endpoint used between the pooling scheduler process and the worker process. DP replicas within one vLLM service use separate IPC endpoints automatically. Independently launched services sharing the same RPC base directory must use different `lookup_rpc_port` values.
 
-**Note:** The Yuanrong backend normalizes KV keys before calling Datasystem. Supported ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing unsupported characters are rewritten to a maximum of 1024 characters with a hash suffix, so do not rely on the raw key string when debugging backend storage. No extra buffer pre-registration step is required.
+**Note:** The Yuanrong backend normalizes KV keys before calling Datasystem. Supported ASCII keys up to 1KB are preserved. Longer keys or keys containing unsupported characters are rewritten to a maximum of 1024 characters with a hash suffix, so do not rely on the raw key string when debugging backend storage. No extra buffer pre-registration step is required.
 
 The `kv_connector_extra_config` fields used in the script above are documented in [kv-transfer-config Common Parameters](#kv-transfer-config-common-parameters).
 
@@ -1705,7 +1706,7 @@ Public FAQ references:
 
 **Problem Description:** `adxl MallocMem` / `aclrtMapMem` reports `Invalid_Argument`. With SSD offload enabled, `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` allocation failure may cause `FileStorage init` segfault and abort vLLM startup.
 
-**Root Cause Analysis:** On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, each fabric mem allocation must be an integer multiple of 1 GB. Mooncake does not round sizes up, and the default 1280 MB (1.25 GB) is not aligned.
+**Root Cause Analysis:** On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, each fabric mem allocation must be an integer multiple of 1GB. Mooncake does not round sizes up, and the default 1.25GB is not aligned.
 
 **Resolution Steps:** For buffer alignment and fabric memory quota configuration, see "Tuning Recommendations - Mooncake SSD Offload Parameter Tuning".
 
