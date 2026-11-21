@@ -1,0 +1,4 @@
+pr: 22629
+entries:
+  - category: feature
+    text: Level-2 sleep now discards only weights allocations that contain exclusively parameters rewritten by a weight update. Non-parameter and mixed allocations are backed up and restored, and sleep_preserve_parameter_names continues to retain selected parameters.

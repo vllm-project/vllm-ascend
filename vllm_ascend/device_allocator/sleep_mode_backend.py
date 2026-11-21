@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 from vllm.device_allocator.sleep_mode_backend import SleepModeBackend, SleepModeBackendFactory
 from vllm.logger import init_logger
@@ -39,10 +39,11 @@ class CaMemBackend(SleepModeBackend):
         super().__init__()
         self._allocator = allocator or CaMemAllocator.get_instance
 
-    def suspend(self, level: int = 1) -> None:
+    def suspend(self, discardable: Collection[int] = ()) -> None:
+        # vLLM main passes discardable parameter storages; 0.33 still names the
+        # argument `level`, but NPUWorker.sleep is our caller on both lanes.
         self._state = "SUSPENDED"
-        offload_tags = ("weights",) if level == 1 else ()
-        self._allocator().sleep(offload_tags)
+        self._allocator().sleep(("weights", "runtime", "cudagraph"), discardable)
 
     def resume(self, tags: list[str] | None = None) -> None:
         self._state = "RESUMING"
