@@ -283,8 +283,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
-        is_draft_builder = (
-            self.model_config.runner_type == "draft"
+        is_excluded_builder = (
+            self.model_config.runner_type in ("draft", "pooling")
             or getattr(kv_cache_spec, "is_draft", False) is True
             or any(name.startswith("mtp.") for name in (layer_names or ()))
         )
@@ -315,7 +315,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             and self.decode_threshold > 1
             and not parallel_drafting
             and type(kv_cache_spec) is FullAttentionSpec
-            and not is_draft_builder
+            and not is_excluded_builder
             and not is_c8_kv_quant
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
             and (
@@ -323,6 +323,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 or get_current_hardware_profile().supports(HardwareCapability.SINGLE_QUERY_SPEC_VERIFY_FIA)
             )
         )
+        self._fia_index_cache: dict[Any, torch.Tensor] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -487,6 +488,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                     block_table,
                     num_actual_tokens,
                     common_attn_metadata.num_input_tokens,
+                    getattr(self, "_fia_index_cache", None),
                 )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
@@ -692,14 +694,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # for that path.
         self._layer_name: str | None = None
         self._is_draft_layer: bool = False
+        self._fia_index_cache: dict[Any, torch.Tensor] = {}
 
     def _allow_single_query_fia(self, attn_metadata: AscendMetadata, layer: Any = None) -> bool:
         raw_layer_name = getattr(layer, "layer_name", None) if layer is not None else None
         layer_name = raw_layer_name if isinstance(raw_layer_name, str) else ""
-        is_draft = (
+        is_excluded = (
             _EXTRA_CTX.is_draft_model is True
             or getattr(self, "_is_draft_layer", False) is True
-            or getattr(attn_metadata, "model_runner_type", "") == "draft"
+            or getattr(attn_metadata, "model_runner_type", "") in ("draft", "pooling")
             or (layer is not None and getattr(layer, "is_draft_layer", False) is True)
             or layer_name.startswith("mtp.")
         )
@@ -709,8 +712,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and getattr(self, "sinks", None) is None
             and getattr(self, "enable_c8_quant", False) is not True
             and getattr(self, "kv_cache_dtype", torch.bfloat16) in (torch.float16, torch.bfloat16, torch.float32)
-            and not is_draft
+            and not is_excluded
         )
+
+    def _single_query_fia_enabled(
+        self,
+        attn_metadata: AscendMetadata,
+        block_table: torch.Tensor | None,
+    ) -> bool:
+        expand_width = getattr(attn_metadata, "fia_max_expand_width", 0)
+        has_expand_width = (
+            isinstance(expand_width, int) and not isinstance(expand_width, bool) and expand_width > 1
+        )
+        return block_table is not None and has_expand_width and self._allow_single_query_fia(attn_metadata)
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1159,11 +1173,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # decode to be processed separately, regardless of the device
                 # generation or attention state. Outside batch-invariant mode,
                 # preserve the existing A5 behavior for performance optimization.
-                allow_single_query = self._allow_single_query_fia(attn_metadata)
-                expand_width = getattr(attn_metadata, "fia_max_expand_width", 0)
-                has_expand_width = (
-                    isinstance(expand_width, int) and not isinstance(expand_width, bool) and expand_width > 1
-                )
+                single_query_enabled = self._single_query_fia_enabled(attn_metadata, block_table)
                 if (
                     (
                         envs_vllm.VLLM_BATCH_INVARIANT
@@ -1171,7 +1181,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
                             and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                         )
-                        or (allow_single_query and block_table is not None and has_expand_width)
+                        or single_query_enabled
                     )
                     and attn_metadata.num_decodes > 0
                     and attn_metadata.num_prefills > 0
@@ -1186,12 +1196,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # max_query_len == 1 guarantees every request has a single
                 # query token; multi-token batches labeled DecodeOnly
                 # (spec-decode draft/verify) keep the mask, cf. #17948.
-                if allow_single_query:
+                if single_query_enabled:
                     q_ends, kv_lengths, fia_table = prepare_fia_layout(
                         attn_metadata,
                         attn_metadata.actual_seq_lengths_q,
                         actual_seq_lengths_kv,
                         block_table,
+                        getattr(self, "_fia_index_cache", None),
                     )
                 else:
                     q_ends, kv_lengths, fia_table = (
@@ -1201,7 +1212,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
                 is_decode = (
                     attn_metadata.attn_state == AscendAttentionState.DecodeOnly and attn_metadata.max_query_len == 1
-                ) or (allow_single_query and fia_table is not None and is_all_single_query(q_ends, num_tokens))
+                ) or (single_query_enabled and is_all_single_query(q_ends, num_tokens))
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1253,13 +1264,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # decode part
         if num_decode_tokens > 0:
-            allow_single_query = self._allow_single_query_fia(attn_metadata)
-            if allow_single_query:
+            single_query_enabled = self._single_query_fia_enabled(attn_metadata, block_table)
+            if single_query_enabled:
                 q_ends, kv_lengths, fia_table = prepare_fia_layout(
                     attn_metadata,
                     actual_seq_qlen[:num_decodes],
                     seq_lens_list[:num_decodes],
                     block_table[:num_decodes],
+                    getattr(self, "_fia_index_cache", None),
                 )
             else:
                 q_ends, kv_lengths, fia_table = (
@@ -1273,7 +1285,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # verification blocks as decodes too, and unexpanded multi-token
             # queries still need the causal mask (issue #16889, cf. #17948).
             decode_skips_mask = (num_decode_tokens == num_decodes) or (
-                allow_single_query and fia_table is not None and is_all_single_query(q_ends, num_decode_tokens)
+                single_query_enabled and is_all_single_query(q_ends, num_decode_tokens)
             )
             decode_out, _ = DeviceOperator.npu_fused_infer_attention_score(
                 query=query[:num_decode_tokens],

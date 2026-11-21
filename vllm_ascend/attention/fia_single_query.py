@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+_MAX_INDEX_CACHE_ENTRIES = 256
+
 
 def is_all_single_query(query_ends: Sequence[int], num_tokens: int) -> bool:
     """Return True iff query_ends partitions [0, num_tokens) into unit-width queries."""
@@ -38,12 +40,27 @@ def single_query_layout(
     return new_query_ends, new_kv_lengths, page_table_rows
 
 
-def _select_block_table_rows(block_table: torch.Tensor, rows: list[int]) -> torch.Tensor:
+def _select_block_table_rows(
+    block_table: torch.Tensor,
+    rows: list[int],
+    device_index_cache: dict[Any, torch.Tensor] | None = None,
+) -> torch.Tensor:
     if rows == list(range(len(rows))) and len(rows) <= block_table.shape[0]:
         return block_table[: len(rows)]
-    indices = torch.tensor(rows, dtype=torch.long)
-    if block_table.device.type != "cpu":
-        indices = indices.pin_memory().to(block_table.device, non_blocking=True)
+    if not isinstance(device_index_cache, dict):
+        device_index_cache = None
+    device = block_table.device
+    cache_key = (tuple(rows), device)
+    if device_index_cache is not None and cache_key in device_index_cache:
+        indices = device_index_cache[cache_key]
+    else:
+        indices = torch.tensor(rows, dtype=torch.long)
+        if device.type != "cpu":
+            indices = indices.pin_memory().to(device, non_blocking=True)
+        if device_index_cache is not None:
+            if len(device_index_cache) >= _MAX_INDEX_CACHE_ENTRIES:
+                device_index_cache.pop(next(iter(device_index_cache)))
+            device_index_cache[cache_key] = indices
     return block_table.index_select(0, indices)
 
 
@@ -52,6 +69,7 @@ def prepare_fia_layout(
     query_ends: list[int],
     kv_lengths: list[int],
     block_table: torch.Tensor | None,
+    device_index_cache: dict[Any, torch.Tensor] | None = None,
 ) -> tuple[list[int], list[int], torch.Tensor | None]:
     """Return unfolded TND FIA metadata for eager and piecewise paged attention."""
     raw_expand_width = getattr(metadata, "fia_max_expand_width", 0)
@@ -80,7 +98,7 @@ def prepare_fia_layout(
     if len(rows) == len(query_ends):
         result = (query_ends, kv_lengths, block_table)
     else:
-        result = (ends, lengths, _select_block_table_rows(block_table, rows))
+        result = (ends, lengths, _select_block_table_rows(block_table, rows, device_index_cache))
     metadata.fia_single_query = (cache_key, *result)
     return result
 
@@ -91,6 +109,7 @@ def prepare_graph_fia_layout(
     block_table: torch.Tensor,
     num_actual_tokens: int,
     num_input_tokens: int | None = None,
+    device_index_cache: dict[Any, torch.Tensor] | None = None,
 ) -> tuple[list[int], list[int], torch.Tensor]:
     """Unfold uniform, varlen, or short-extend decode-graph batches into single-query TND FIA rows."""
     target_tokens = num_input_tokens if num_input_tokens is not None else (query_ends[-1] if query_ends else 0)
@@ -125,5 +144,5 @@ def prepare_graph_fia_layout(
         lengths.extend([1] * pad_tail)
         rows.extend([0] * pad_tail)
         start = target_tokens
-    table = _select_block_table_rows(block_table, rows)
+    table = _select_block_table_rows(block_table, rows, device_index_cache)
     return list(range(1, start + 1)), lengths, table
