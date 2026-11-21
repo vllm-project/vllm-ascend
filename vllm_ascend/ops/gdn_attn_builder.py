@@ -918,37 +918,22 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     non_spec_sequence_indices,
                 )
                 non_spec_conv1d_cache_indices = non_spec_state_indices_tensor
-                spec_query_lens = torch.index_select(
-                    query_lens,
-                    0,
-                    spec_sequence_indices,
-                )
-                non_spec_query_lens = torch.index_select(
-                    query_lens,
-                    0,
-                    non_spec_sequence_indices,
-                )
+                query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+                spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
+                non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
 
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
-                torch.cumsum(
-                    spec_query_lens,
-                    dim=0,
-                    out=spec_query_start_loc[1:],
-                )
+                spec_query_start_loc[1:].copy_(torch.cumsum(spec_query_lens_cpu, dim=0), non_blocking=True)
                 non_spec_query_start_loc = torch.zeros(
                     query_lens.size(0) - num_spec_decodes + 1,
                     dtype=torch.int32,
                     device=query_start_loc.device,
                 )
-                torch.cumsum(
-                    non_spec_query_lens,
-                    dim=0,
-                    out=non_spec_query_start_loc[1:],
-                )
+                non_spec_query_start_loc[1:].copy_(torch.cumsum(non_spec_query_lens_cpu, dim=0), non_blocking=True)
 
             assert num_accepted_tokens is not None
             if num_prefills == 0 and num_decodes == 0:
