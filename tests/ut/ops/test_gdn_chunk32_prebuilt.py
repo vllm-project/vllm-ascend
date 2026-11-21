@@ -15,21 +15,100 @@
 
 """CPU-only regression tests for prebuilt A5 chunk32 descriptors."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 
 
 class NoIterationTuple(tuple):
     def __iter__(self):
         raise AssertionError("Per-layer adaptor must not rebuild chunk descriptors")
+
+
+@pytest.mark.parametrize(
+    "device_type,chunk32_enabled,chunk_size,use_exp2,kernel_l2norm,disable_recompute,state_v_first",
+    [
+        (AscendDeviceType.A2, False, 64, False, False, True, False),
+        (AscendDeviceType.A3, False, 64, False, False, True, False),
+        (AscendDeviceType.A5, True, 32, False, True, False, True),
+        (AscendDeviceType.A5, False, 64, True, True, True, True),
+    ],
+)
+@pytest.mark.parametrize("head_first", [False, True])
+def test_fla_kernel_contract_isolated_by_device_and_chunk_size(
+    device_type, chunk32_enabled, chunk_size, use_exp2, kernel_l2norm, disable_recompute, state_v_first, head_first
+):
+    """Catch chunk32 flags leaking into A2/A3 or the A5 chunk64 path."""
+    from vllm_ascend.device.device_op import get_device_adaptor
+
+    profile = get_hardware_profile(device_type)
+    if not chunk32_enabled:
+        profile = replace(profile, capabilities=profile.capabilities - {HardwareCapability.FLA_GDN_PREFILL_CHUNK32})
+    # Empty segments exercise compacted descriptors and state restoration.
+    cu = torch.tensor([0, 0, 33, 33, 98, 98], dtype=torch.int32)
+    q = torch.arange(98 * 2 * 4).reshape(1, 98, 2, 4).to(torch.bfloat16)
+    v = torch.arange(98 * 2 * 3).reshape(1, 98, 2, 3).to(torch.bfloat16)
+    if head_first:
+        q = q.transpose(1, 2).contiguous().transpose(1, 2)
+        v = v.transpose(1, 2).contiguous().transpose(1, 2)
+    # Non-square state dimensions expose accidental state-layout changes.
+    state = torch.arange(5 * 2 * 3 * 4).reshape(5, 2, 3, 4).float()
+    original_state = state.clone()
+    gate = torch.zeros(1, 98, 2)
+    raw_beta = torch.linspace(-2, 2, 196).reshape(1, 98, 2).to(torch.bfloat16)
+    beta = raw_beta if chunk32_enabled else raw_beta.float().sigmoid().to(v.dtype)
+    expected_output = v.clone()
+    fused = Mock(side_effect=lambda *args, **kw: (expected_output, kw["initial_state"] + 1000))
+    with (
+        patch("vllm_ascend.device.fla.get_current_hardware_profile", return_value=profile),
+        patch("vllm_ascend.device.device_op.get_current_hardware_profile", return_value=profile),
+        patch(
+            "vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd",
+            side_effect=lambda x: torch.nn.functional.normalize(x.float(), dim=-1).to(x.dtype),
+        ) as l2norm,
+    ):
+        metadata = _build_non_spec_chunked_prefill_metadata(
+            SimpleNamespace(), cu, torch.device("cpu"), build_device_metadata=False
+        )
+        output, final_state = get_device_adaptor().fla_gdn_prefill(q, q, v, gate, beta, state, 0.5, metadata, fused)
+
+    fused.assert_called_once()
+    args, kwargs = fused.call_args
+    assert kwargs["chunk_size"] == chunk_size
+    assert kwargs["use_exp2"] is use_exp2
+    assert kwargs["disable_recompute"] is disable_recompute
+    assert kwargs.get("use_beta_sigmoid_in_kernel", False) is chunk32_enabled
+    assert kwargs["use_qk_l2norm_in_kernel"] is kernel_l2norm
+    assert kwargs["state_v_first"] is state_v_first
+    assert kwargs["layout"] == ("BNSD" if device_type != AscendDeviceType.A5 or head_first else "BSND")
+    assert kwargs["cu_seqlens"] == (0, 33, 98)
+    assert metadata.chunk_indices_chunk64_host == (0, 0, 1, 0, 1, 1)
+    if chunk32_enabled:
+        assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk32_host
+        assert kwargs["chunk_indices"] == (0, 0, 0, 1, 1, 0, 1, 1, 1, 2)
+    else:
+        assert metadata.chunk_indices_chunk32_host is None
+        assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
+    torch.testing.assert_close(args[4], beta)
+    expected_kernel_state = original_state[[1, 3]]
+    if not state_v_first:
+        expected_kernel_state = expected_kernel_state.transpose(-1, -2).contiguous()
+    torch.testing.assert_close(kwargs["initial_state"], expected_kernel_state)
+    assert l2norm.call_count == (0 if kernel_l2norm else 2)
+    expected_state = original_state.clone()
+    expected_state[[1, 3]] += 1000
+    torch.testing.assert_close(output, expected_output)
+    torch.testing.assert_close(final_state, expected_state)
+    torch.testing.assert_close(state, original_state)
 
 
 class TestChunk32Prebuilt(TestCase):
