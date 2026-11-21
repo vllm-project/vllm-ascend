@@ -56,7 +56,7 @@
         \qquad out\_valid\_mask[b, 1 + col] = \mathbb{1}[valid]
         $$
 
-    其中 `PADDED_COLS = next_power_of_2(num_cols)` 是向量化扫描宽度，超出
+    其中 `PADDED_COLS = next_power_of_2(num_cols)` 是总扫描宽度，每次最多处理 `min(PADDED_COLS, COL_BLOCK_SIZE)` 列，超出
     `num_cols` 的 padding 列因 `valid = False` 不会被写入（见“约束说明”）。
 
 - 算法流程（单次 pass、逐行并行，`tl.program_id(0)` 即 batch 行索引）：
@@ -64,7 +64,7 @@
     1. 加载并写入第 0 列（采样 token，恒有效）。
     2. 通过 `expanded_idx_mapping` 解析该行对应的请求状态索引，读取其自定义
        token 数量 `num_custom`。
-    3. 根据 `num_custom` 是否大于 0 决定数据来源（自定义 token 或 top-k indices），
+    3. 按最多 4096 列分块循环，根据 `num_custom` 是否大于 0 决定数据来源（自定义 token 或 top-k indices），
        并据此确定有效列掩码 `valid`。
     4. 以掩码方式将 token（转为 INT64）写入 `[b, 1 : 1 + num_cols]`，同时将有效
        位置对应的 `out_valid_mask` 写为 1。
@@ -77,6 +77,8 @@
   Ascend NPU 上动态地址指针（`src` 需在运行时才能确定）导致的编译/执行问题。
   逻辑结果与上游完全一致，仅实现方式不同（对应源码中的注释
   “fix dynamic addr ptr by placing load inside the if-else block”）。
+
+- 候选列采用分块循环限制 UB 使用，默认 `COL_BLOCK_SIZE = 4096`；上游对应填充内核仍一次处理全部候选列。
 
 ## 参数说明
 
@@ -95,6 +97,7 @@
 | per_req_token_ids_stride | 属性 | `per_req_token_ids` 的 stride(0)。 | INT | - |
 | NUM_TOPK | 属性 | 常量，top-k 列数，通常等于 `num_logprobs`。 | constexpr INT | - |
 | PADDED_COLS | 属性 | 常量，向量化扫描宽度，取值 `next_power_of_2(num_cols)`，其中 `num_cols = max(num_logprobs, max_per_req_token_ids)`。 | constexpr INT | - |
+| COL_BLOCK_SIZE | 编译期属性 | 每次处理的候选列数上限，默认 4096；实际宽度不超过 PADDED_COLS。 | INT | - |
 
 ## 约束说明
 
