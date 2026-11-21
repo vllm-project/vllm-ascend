@@ -43,6 +43,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.fla import is_fla_gdn_chunk32_supported
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
@@ -58,6 +59,7 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
+    # FLA availability is independent of chunk32 hardware support.
     try:
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
     except ImportError:
@@ -868,12 +870,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     prefill_has_initial_state,
                 )
+                # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
+                # while decode and other prefill routes keep the processed beta.
+                # beta = sigmoid(b); dt_bias belongs only to the decay gate
+                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
+                beta_fla = beta_non_spec
+                if is_fla_gdn_chunk32_supported():
+                    beta_fla = b.unsqueeze(0)
+                    if spec_sequence_masks is not None:
+                        beta_fla = beta_fla.index_select(1, non_spec_token_indx)
+                    if split_non_spec:
+                        beta_fla = beta_fla[:, num_decode_tokens:]
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
-                    beta=beta_non_spec,
+                    beta=beta_fla,
                     initial_state=initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
