@@ -304,14 +304,6 @@ templates:
       - --additional-config
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
-test_content:
-  - spec_decode_acceptance
-acceptance_rate:
-  benchmark: acc_aime2025
-  # Provisional 3-position baseline (decode side sets num_speculative_tokens: 3);
-  # re-measure on NPU before enforcing.
-  baseline: [0.90, 0.78, 0.66]
-  tolerance: 0.05
 benchmarks:
   acc_aime2025:
     case_type: accuracy
@@ -347,3 +339,11 @@ benchmarks:
     request_rate: 1
     baseline: 792.58
     threshold: 0.95
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional 3-position baseline (decode side sets num_speculative_tokens: 3);
+  # re-measure on NPU before enforcing.
+  baseline: [0.90, 0.78, 0.66]
+  tolerance: 0.05

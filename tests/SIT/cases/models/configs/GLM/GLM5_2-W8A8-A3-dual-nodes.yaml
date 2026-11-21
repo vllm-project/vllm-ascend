@@ -64,14 +64,6 @@ deployment:
       --additional-config '{"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
-
-test_content:
-  - spec_decode_acceptance
-acceptance_rate:
-  benchmark: acc_aime2025
-  # Provisional per-position baseline; re-measure on NPU before enforcing.
-  baseline: [0.90, 0.78, 0.66]
-  tolerance: 0.05
 benchmarks:
   acc_aime2025:
     case_type: accuracy
@@ -104,3 +96,10 @@ benchmarks:
     request_rate: 0
     baseline: 55.988
     threshold: 0.97
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional per-position baseline; re-measure on NPU before enforcing.
+  baseline: [0.90, 0.78, 0.66]
+  tolerance: 0.05
