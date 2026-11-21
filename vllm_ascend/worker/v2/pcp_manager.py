@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import restore_sfa_pcp_prefill_classification
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -313,6 +314,8 @@ class AscendPCPManager(PCPManager):
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
         elif padded_num_reqs is not None:
             self._pad_uniform_query_start_loc(global_batch, local_batch)
+
+        restore_sfa_pcp_prefill_classification(self.vllm_config, global_batch, local_batch)
 
         actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         if local_batch.num_tokens == 0:

@@ -9,6 +9,23 @@ from typing import Any
 import torch
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.utils import enable_sfa
+
+
+def restore_sfa_pcp_prefill_classification(vllm_config: Any, global_batch: Any, local_batch: Any) -> None:
+    """Keep every shard of an SFA prefill on the same KV collective path."""
+    if not bool(global_batch.is_prefilling_np.any()) or not enable_sfa(vllm_config):
+        return
+    # A speculative lookahead shard can start beyond the prompt boundary.
+    # Its local cursor must not turn a global prefill into a replicated decode.
+    prefill_by_req_id = dict(zip(global_batch.req_ids, global_batch.is_prefilling_np))
+    for local_index, req_id in enumerate(local_batch.req_ids):
+        local_batch.is_prefilling_np[local_index] = prefill_by_req_id[req_id]
+    local_batch.has_prefill = bool(local_batch.is_prefilling_np.any())
+    if local_batch.has_prefill and hasattr(local_batch, "decode_graph_eligible"):
+        # Never re-enable a graph that was rejected for another reason.
+        local_batch.decode_graph_eligible = False
+
 
 def as_byte_view(x: torch.Tensor) -> torch.Tensor:
     """Return a byte view for FP8 tensors, preserving their bit patterns."""

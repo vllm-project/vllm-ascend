@@ -1,0 +1,7 @@
+pr: 22226
+entries:
+  - category: bugfix
+    text: >-
+      Fixed SFA models hanging when a short remaining prompt is processed with
+      speculative lookahead across PCP ranks. This includes GLM-5.3-Flash
+      configurations with DCP enabled and requires no configuration change.
