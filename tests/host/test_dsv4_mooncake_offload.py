@@ -460,9 +460,11 @@ def test_untrimmed_shared_window_saves_masked_live_page_for_continuation(ns):
     hashes = [b"a", b"b", b"c"]
     saved = ns["_save_entries"](worker, request, NS(), 0, hashes)
     assert saved == [("offload_v1:incarnation:384:0", 0), (b"c".hex(), 2)]
+    old_private_key = "offload_v1:incarnation:128:0"
     worker._offload_active_pages = {
-        ("request", "incarnation", 0): (384, {index: key for key, index in saved})
+        ("request", "incarnation", 0): (384, {0: old_private_key})
     }
+    saved[0] = old_private_key, 0
     assert ns["_load_entries"](worker, request, 0, hashes, request.store_masks[0]) == saved
 
 

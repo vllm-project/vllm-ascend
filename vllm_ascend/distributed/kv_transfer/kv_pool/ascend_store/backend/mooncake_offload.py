@@ -91,7 +91,19 @@ def _load_entries(worker, request, group, hashes, mask):
         checkpoint = active_pages.get(
             (request.req_id, request.layerwise_request_id, group)
         )
-    snapshot_start = worker._layerwise_load_snapshot_start(request, group, tokens)
+    overrides = {}
+    if checkpoint is not None:
+        endpoint, overrides = checkpoint
+        if endpoint != tokens:
+            raise ValueError(
+                "Mooncake offload has no committed version at the continuation endpoint "
+                f"(request={request.req_id}, incarnation={request.layerwise_request_id}, group={group}, "
+                f"checkpoint_endpoint={endpoint}, restore_endpoint={tokens})"
+            )
+    # For a DSV4 checkpoint, all private keys are explicit overrides.
+    snapshot_start = (
+        worker._layerwise_load_snapshot_start(request, group, tokens) if checkpoint is None else None
+    )
     entries = []
     first = _continuation_window_start(worker, group, tokens, size, request) if live_window else None
     for index in range(first or 0, end):
@@ -107,16 +119,8 @@ def _load_entries(worker, request, group, hashes, mask):
             if worker._group_reuses_buffer(group) or (mask is not None and index < len(mask) and mask[index]):
                 raise ValueError("Mooncake offload restore selected a required null block")
             continue
-        if checkpoint is not None:
-            endpoint, pages = checkpoint
-            if endpoint != tokens or index not in pages:
-                raise ValueError(
-                    "Mooncake offload has no committed version for a live continuation page "
-                    f"(request={request.req_id}, incarnation={request.layerwise_request_id}, group={group}, "
-                    f"checkpoint_endpoint={endpoint}, restore_endpoint={tokens}, "
-                    f"page_index={index}, page_present={index in pages})"
-                )
-            entries.append((pages[index], index))
+        if index in overrides:
+            entries.append((overrides[index], index))
             continue
         if snapshot_start is not None and index >= snapshot_start:
             key = snapshot_key(worker, request, group, index, spec.layerwise_snapshot_end_token)
@@ -332,12 +336,16 @@ def prepare_offload_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMe
         worker._check_layerwise_transfer_errors()
         _open_puts(worker, put_slots)
         aliases = getattr(worker, "_offload_private_aliases", {})
-        worker._offload_pending_pages = {
-            identity: (endpoint, {
-                index: aliases.get((*identity[:2], key), key) for index, key in pages.items()
-            })
-            for identity, (endpoint, pages) in pending.items()
-        }
+        # Public pages can be restored from their block hashes. Preserve
+        # private keys across chunks, including snapshots from older endpoints.
+        for identity, (endpoint, pages) in pending.items():
+            overrides = {}
+            for index, key in pages.items():
+                key = aliases.get((*identity[:2], key), key)
+                if "offload_v1:" in key:
+                    overrides[index] = key
+            pending[identity] = endpoint, overrides
+        worker._offload_pending_pages = pending
     except Exception:
         worker._layer_load_aborted.set()
         worker._finish_current_layerwise_load_sessions()
