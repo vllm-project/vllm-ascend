@@ -1987,10 +1987,18 @@ Select the tab for the target hardware.
     #### 5.3.2 Memcache KV Cache Pool
 
     This configuration extends the A3 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
-    Memcache KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
+    Memcache KV Cache Pool. `MooncakeConnectorV2` continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
     `MultiConnector`.
+
+    Use the same W4A8 checkpoint and A3 settings as [Section 5.2](#52-1p1d-pd-disaggregated-deployment):
+    Prefill DP4/PCP4/TP1 with EPLB, Decode DP16/TP1 with a 280-token budget and
+    40 sequences, and `weight_nz_mode: 2` on both roles. Both containers must
+    include `fastokens>=0.3.5` and start with `--ulimit memlock=-1`.
+    `MooncakeConnectorV2` uses its default non-layerwise pull mode; keep the
+    `AscendStoreConnector` child for pool access. Check connector port allocations
+    as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
     DeepSeek-V4.1-Flash does not support layerwise KV Cache Pool access because its
     CED hybrid-attention model structure is incompatible with layer-by-layer KV
@@ -2107,6 +2115,9 @@ Select the tab for the target hardware.
     ```shell
     #!/usr/bin/env bash
 
+    set -euo pipefail
+    ulimit -l unlimited
+
     unset https_proxy
     unset http_proxy
 
@@ -2121,11 +2132,12 @@ Select the tab for the target hardware.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
@@ -2134,14 +2146,21 @@ Select the tab for the target hardware.
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --prefill-context-parallel-size $8 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{
+            "window_size":64,
+            "step_interval":128,
+            "policy":"stair",
+            "num_redundant_experts":16
+        }' \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
@@ -2163,6 +2182,7 @@ Select the tab for the target hardware.
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
+            "weight_nz_mode":2,
             "enable_fused_mc2":2,
             "enable_flashcomm1":false,
             "multistream_overlap_shared_expert":false
@@ -2175,13 +2195,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config":{
                 "connectors":[
                     {
-                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_producer",
-                        "kv_port":"30000",
-                        "kv_connector_extra_config":{
-                            "prefill":{"dp_size":4,"tp_size":1},
-                            "decode":{"dp_size":16,"tp_size":1}
-                        }
+                        "kv_port":"30000"
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2210,6 +2226,9 @@ Select the tab for the target hardware.
     ```shell
     #!/usr/bin/env bash
 
+    set -euo pipefail
+    ulimit -l unlimited
+
     unset https_proxy
     unset http_proxy
 
@@ -2220,6 +2239,7 @@ Select the tab for the target hardware.
     MEMCACHE_CONFIG_DIR="<MEMCACHE_CONFIG_DIR>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
@@ -2227,7 +2247,7 @@ Select the tab for the target hardware.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Parameters required by the Memcache KV Cache Pool.
     export PYTHONHASHSEED=0
@@ -2236,19 +2256,19 @@ Select the tab for the target hardware.
 
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --prefill-context-parallel-size $8 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 512 \
-        --max-num-seqs 72 \
+        --max-num-batched-tokens 280 \
+        --max-num-seqs 40 \
         --async-scheduling \
         --block-size 128 \
         --no-enable-prefix-caching \
@@ -2271,13 +2291,9 @@ Select the tab for the target hardware.
             "kv_connector_extra_config":{
                 "connectors":[
                     {
-                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_connector":"MooncakeConnectorV2",
                         "kv_role":"kv_consumer",
-                        "kv_port":"30100",
-                        "kv_connector_extra_config":{
-                            "prefill":{"dp_size":4,"tp_size":1},
-                            "decode":{"dp_size":16,"tp_size":1}
-                        }
+                        "kv_port":"30100"
                     },
                     {
                         "kv_connector":"AscendStoreConnector",
@@ -2298,6 +2314,7 @@ Select the tab for the target hardware.
                 "enable_static_kernel":false
             },
             "enable_cpu_binding":true,
+            "weight_nz_mode":2,
             "multistream_overlap_shared_expert":true,
             "recompute_scheduler_enable":true
         }'
@@ -2315,16 +2332,18 @@ Select the tab for the target hardware.
     Wait until both standalone Memcache processes report successful initialization
     before starting the Decode engines. Then wait until every Decode engine reports
     `Application startup complete` before starting Prefill. After every Prefill engine is ready, start the proxy with the
-    same endpoint mapping described in [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+    same endpoint mapping and `--workers 4` setting described in
+    [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
 
-    Send the same request twice with a reusable prefix. Confirm that Prefill logs
-    show Memcache lookup, get, put, and hit activity, and that Decode logs still
-    show normal Prefill-to-Decode KV transfer.
+    Send a long prompt to populate the pool, then reuse its prefix with a
+    different suffix. Check all Prefill ranks for increased
+    `external_prefix_cache_hits_total` and successful Memcache get/load activity.
+    Confirm that Decode logs still show normal Prefill-to-Decode KV transfer.
 
     Key pooling parameters:
 
     - `MultiConnector` combines live P-to-D transfer through
-      `MooncakeHybridConnector` with persistent prefix reuse through
+      `MooncakeConnectorV2` with persistent prefix reuse through
       `AscendStoreConnector`.
     - `backend: "memcache"` selects Memcache as the KV Cache Pool backend.
     - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable
@@ -2336,11 +2355,19 @@ Select the tab for the target hardware.
 
 ### 5.4 1P1D Deployment with Mooncake KV Cache Pool
 
-This configuration extends the A2 1P1D deployment in [Section 5.2](#52-1p1d-pd-disaggregated-deployment) with a
-Mooncake KV Cache Pool. `MooncakeHybridConnector` continues to transfer KV
-cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
-cache in Mooncake. Both connectors are configured as children of
-`MultiConnector`.
+These configurations extend the A3 and A2 1P1D deployments in [Section 5.2](#52-1p1d-pd-disaggregated-deployment)
+with a Mooncake KV Cache Pool. A3 uses `MooncakeConnectorV2` in its default
+non-layerwise pull mode for Prefill-to-Decode KV transfer; A2 uses
+`MooncakeHybridConnector`. Both use `AscendStoreConnector` to store reusable
+KV cache in Mooncake, with the two connectors configured as children of
+`MultiConnector`. Select the same hardware tab for Prefill and Decode.
+
+The A3 scripts use the same W4A8 checkpoint and serving settings as
+[Section 5.2](#52-1p1d-pd-disaggregated-deployment): Prefill DP4/PCP4/TP1 with EPLB,
+Decode DP16/TP1 with a 280-token budget and 40 sequences, and
+`weight_nz_mode: 2` on both roles. Both A3 containers must include
+`fastokens>=0.3.5` and start with `--ulimit memlock=-1`. Check connector port
+allocations as described in the [KV transfer configuration guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#kv-transfer-config-common-parameters).
 
 DeepSeek-V4.1-Flash does not support layerwise KV Cache Pool access because its
 CED hybrid-attention model structure is incompatible with layer-by-layer KV
@@ -2377,10 +2404,18 @@ Configure the Prefill `mooncake.json`:
 ```
 
 Keep `ssd_offload_path` equal to `SSD_OFFLOAD_ROOT` in the Prefill launcher
-script below. The two Prefill DP engines run with PCP4, so each of the eight
-devices registers one pool client and contributes `24GB`, giving the pool
-about `192GB` of DRAM capacity. Configure the Decode `mooncake_d.json` with
-zero contributed capacity and SSD offload disabled:
+script below. Each Prefill device registers one pool client and contributes
+`24GB`; the total capacity depends on the hardware and Prefill topology:
+
+| Hardware | Prefill topology | Pool clients | Pool DRAM capacity |
+|----------|------------------|--------------|--------------------|
+| A3 | DP4/PCP4/TP1 | 16 | `384GB` |
+| A2 | DP2/PCP4/TP1 | 8 | `192GB` |
+
+Size `global_segment_size` for the host memory available after reserving space
+for the operating system, model loading, Engram offload, and staging buffers.
+Configure the Decode `mooncake_d.json` with zero contributed capacity and SSD
+offload disabled:
 
 ```json
 {
@@ -2426,110 +2461,227 @@ for example `/ssd_offload`. The script only runs `mkdir -p`: if the path points
 at the system disk, evicted objects are written there and can fill it, because
 each rank may cache up to `20GiB`.
 
-```shell
-#!/usr/bin/env bash
-set -euo pipefail
-unset https_proxy
-unset http_proxy
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
-NIC_NAME="<NETWORK_INTERFACE>"
-LOCAL_IP="<PREFILL_NODE_IP>"
-MODEL_PATH="<YOUR_MODEL_PATH>"
-MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
-SSD_OFFLOAD_ROOT="<SSD_OFFLOAD_ROOT>"
+=== "A3 series"
 
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export VLLM_USE_V2_MODEL_RUNNER=1
-export HCCL_INTRA_ROCE_ENABLE=1
-export VLLM_ENGINE_READY_TIMEOUT_S=36000
-export HCCL_CONNECT_TIMEOUT=1200
-export HCCL_BUFFSIZE=1024
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_RT_VISIBLE_DEVICES=$1
+    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
 
-# Parameters required by the Mooncake KV Cache Pool.
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
-# SSD tier: each Prefill rank offloads under $SSD_OFFLOAD_ROOT/rank_<rank>/.
-export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=21474836480
-export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=21474836480
-export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY="lru"
-export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
-mkdir -p "$SSD_OFFLOAD_ROOT"
+    ```shell
+    #!/usr/bin/env bash
 
-vllm serve "$MODEL_PATH" \
-    --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
-    --prefill-context-parallel-size $8 \
-    --enable-expert-parallel \
-    --seed 1024 \
-    --served-model-name dsv41 \
-    --max-model-len 1048576 \
-    --max-num-batched-tokens 4096 \
-    --max-num-seqs 16 \
-    --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
-    --trust-remote-code \
-    --block-size 128 \
-    --tokenizer-mode deepseek_v41 \
-    --reasoning-parser deepseek_v41 \
-    --tool-call-parser deepseek_v41 \
-    --enable-auto-tool-choice \
-    --safetensors-load-strategy lazy \
-    --gpu-memory-utilization 0.97 \
-    --quantization ascend \
-    --enforce-eager \
-    --swa-bounded-replay \
-    --enable-prefix-caching \
-    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-    --additional-config '{
-        "enable_cpu_binding":true,
-        "enable_fused_mc2":1,
-        "enable_flashcomm1":false,
-        "enable_shared_expert_dp":true
-    }' \
-    --kv-transfer-config '{
-        "kv_connector":"MultiConnector",
-        "kv_role":"kv_producer",
-        "kv_port":"30000",
-        "engine_id":"0",
-        "kv_connector_extra_config":{
-            "connectors":[
-                {
-                    "kv_connector":"MooncakeHybridConnector",
-                    "kv_role":"kv_producer",
-                    "kv_port":"30000",
-                    "kv_connector_extra_config":{
-                        "prefill":{"dp_size":2,"tp_size":1},
-                        "decode":{"dp_size":8,"tp_size":1}
+    set -euo pipefail
+    ulimit -l unlimited
+
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
+
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<PREFILL_NODE_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+    SSD_OFFLOAD_ROOT="<SSD_OFFLOAD_ROOT>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+
+    # Parameters required by the Mooncake KV Cache Pool.
+    export PYTHONHASHSEED=0
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
+    # SSD tier: each Prefill rank offloads under $SSD_OFFLOAD_ROOT/rank_<rank>/.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=21474836480
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=21474836480
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY="lru"
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    mkdir -p "$SSD_OFFLOAD_ROOT"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
+        --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{
+            "window_size":64,
+            "step_interval":128,
+            "policy":"stair",
+            "num_redundant_experts":16
+        }' \
+        --seed 1024 \
+        --served-model-name dsv41 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 16 \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --trust-remote-code \
+        --block-size 128 \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.9 \
+        --quantization ascend \
+        --enforce-eager \
+        --swa-bounded-replay \
+        --enable-prefix-caching \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "enable_cpu_binding":true,
+            "weight_nz_mode":2,
+            "enable_fused_mc2":2,
+            "enable_flashcomm1":false,
+            "multistream_overlap_shared_expert":false
+        }' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_producer",
+            "kv_port":"30000",
+            "engine_id":"0",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV2",
+                        "kv_role":"kv_producer",
+                        "kv_port":"30000"
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_producer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":"0",
+                            "use_layerwise":false
+                        }
                     }
-                },
-                {
-                    "kv_connector":"AscendStoreConnector",
-                    "kv_role":"kv_producer",
-                    "kv_connector_extra_config":{
-                        "lookup_rpc_port":"0",
-                        "backend":"mooncake",
-                        "use_layerwise":false
-                    }
-                }
-            ]
-        }
-    }'
-```
+                ]
+            }
+        }'
+    ```
 
-Start the two DP2/TP1/PCP4 Prefill engines with the launcher command from [Section 5.2.2.2](#5222-start-the-prefill-node) after all Decode engines are ready.
+    Start the four DP4/PCP4/TP1 Prefill engines with the launcher command from
+    [Section 5.2.1.2](#5212-start-the-prefill-node) after all Decode engines are ready.
+
+=== "A2 series"
+
+    ```shell
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<PREFILL_NODE_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+    SSD_OFFLOAD_ROOT="<SSD_OFFLOAD_ROOT>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_BUFFSIZE=1024
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
+    # Parameters required by the Mooncake KV Cache Pool.
+    export PYTHONHASHSEED=0
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake.json"
+    # SSD tier: each Prefill rank offloads under $SSD_OFFLOAD_ROOT/rank_<rank>/.
+    export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=21474836480
+    export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=21474836480
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY="lru"
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
+    mkdir -p "$SSD_OFFLOAD_ROOT"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv41 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 4096 \
+        --max-num-seqs 16 \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --trust-remote-code \
+        --block-size 128 \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.97 \
+        --quantization ascend \
+        --enforce-eager \
+        --swa-bounded-replay \
+        --enable-prefix-caching \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "enable_cpu_binding":true,
+            "enable_fused_mc2":1,
+            "enable_flashcomm1":false,
+            "enable_shared_expert_dp":true
+        }' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_producer",
+            "kv_port":"30000",
+            "engine_id":"0",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_role":"kv_producer",
+                        "kv_port":"30000",
+                        "kv_connector_extra_config":{
+                            "prefill":{"dp_size":2,"tp_size":1},
+                            "decode":{"dp_size":8,"tp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_producer",
+                        "kv_connector_extra_config":{
+                            "lookup_rpc_port":"0",
+                            "backend":"mooncake",
+                            "use_layerwise":false
+                        }
+                    }
+                ]
+            }
+        }'
+    ```
+
+    Start the two DP2/TP1/PCP4 Prefill engines with the launcher command from [Section 5.2.2.2](#5222-start-the-prefill-node) after all Decode engines are ready.
 
 #### 5.4.3 Start the Decode Node with Pooling
 
@@ -2537,120 +2689,238 @@ On the Decode node, save the following script as `run_dp_template.sh`. Set
 `LOCAL_IP`, `NIC_NAME`, `MODEL_PATH`, and
 `MOONCAKE_CONFIG_DIR` for the local environment.
 
-```shell
-#!/usr/bin/env bash
-set -euo pipefail
-unset https_proxy
-unset http_proxy
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
-export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
-NIC_NAME="<NETWORK_INTERFACE>"
-LOCAL_IP="<DECODE_NODE_IP>"
-MODEL_PATH="<YOUR_MODEL_PATH>"
-MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+=== "A3 series"
 
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_ENGINE_READY_TIMEOUT_S=36000
-export HCCL_CONNECT_TIMEOUT=1200
-export HCCL_BUFFSIZE=1800
-export HCCL_INTRA_ROCE_ENABLE=1
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_RT_VISIBLE_DEVICES=$1
+    Reuse `launch_online_dp.py` from [Section 5.2.1.1](#5211-prepare-the-dp-launcher).
 
-# Parameters required by the Mooncake KV Cache Pool.
-# Decode is a pure consumer: use mooncake_d.json (zero contributed capacity).
-export PYTHONHASHSEED=0
-export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake_d.json"
+    ```shell
+    #!/usr/bin/env bash
 
-vllm serve "$MODEL_PATH" \
-    --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
-    --prefill-context-parallel-size $8 \
-    --enable-expert-parallel \
-    --seed 1024 \
-    --served-model-name dsv41 \
-    --max-model-len 1048576 \
-    --max-num-batched-tokens 512 \
-    --max-num-seqs 72 \
-    --async-scheduling \
-    --block-size 128 \
-    --no-enable-prefix-caching \
-    --no-swa-bounded-replay \
-    --trust-remote-code \
-    --tokenizer-mode deepseek_v41 \
-    --reasoning-parser deepseek_v41 \
-    --tool-call-parser deepseek_v41 \
-    --enable-auto-tool-choice \
-    --safetensors-load-strategy lazy \
-    --gpu-memory-utilization 0.97 \
-    --kv-cache-memory-bytes 4600000000 \
-    --quantization ascend \
-    --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --kv-transfer-config '{
-        "kv_connector":"MultiConnector",
-        "kv_role":"kv_consumer",
-        "kv_port":"30100",
-        "engine_id":"1",
-        "kv_connector_extra_config":{
-            "connectors":[
-                {
-                    "kv_connector":"MooncakeHybridConnector",
-                    "kv_role":"kv_consumer",
-                    "kv_port":"30100",
-                    "kv_connector_extra_config":{
-                        "prefill":{"dp_size":2,"tp_size":1},
-                        "decode":{"dp_size":8,"tp_size":1}
+    set -euo pipefail
+    ulimit -l unlimited
+
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
+
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_BUFFSIZE=4096
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
+
+    # Parameters required by the Mooncake KV Cache Pool.
+    export PYTHONHASHSEED=0
+    # Decode is a pure consumer: use mooncake_d.json (zero contributed capacity).
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake_d.json"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv41 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 280 \
+        --max-num-seqs 40 \
+        --async-scheduling \
+        --block-size 128 \
+        --no-enable-prefix-caching \
+        --no-swa-bounded-replay \
+        --trust-remote-code \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.95 \
+        --quantization ascend \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_consumer",
+            "kv_port":"30100",
+            "engine_id":"1",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV2",
+                        "kv_role":"kv_consumer",
+                        "kv_port":"30100"
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":"0",
+                            "use_layerwise":false
+                        }
                     }
-                },
-                {
-                    "kv_connector":"AscendStoreConnector",
-                    "kv_role":"kv_consumer",
-                    "kv_connector_extra_config":{
-                        "lookup_rpc_port":"0",
-                        "backend":"mooncake",
-                        "use_layerwise":false
-                    }
-                }
-            ]
-        }
-    }' \
-    --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
-    --additional-config '{
-        "ascend_compilation_config":{
-            "enable_npugraph_ex":true,
-            "enable_static_kernel":false
-        },
-        "enable_cpu_binding":true,
-        "enable_flashcomm1":false,
-        "multistream_overlap_shared_expert":true,
-        "recompute_scheduler_enable":true
-    }'
-```
+                ]
+            }
+        }' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                "enable_npugraph_ex":true,
+                "enable_static_kernel":false
+            },
+            "enable_cpu_binding":true,
+            "weight_nz_mode":2,
+            "multistream_overlap_shared_expert":true,
+            "recompute_scheduler_enable":true
+        }'
+    ```
 
-Start the eight DP8/TP1 Decode engines with the launcher command from [Section 5.2.2.3](#5223-start-the-decode-node).
+    Start the sixteen DP16/TP1 Decode engines with the launcher command from
+    [Section 5.2.1.3](#5213-start-the-decode-node).
+
+=== "A2 series"
+
+    ```shell
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset https_proxy
+    unset http_proxy
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
+    export no_proxy="127.0.0.1,localhost,<PREFILL_NODE_IP>,<DECODE_NODE_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    LOCAL_IP="<DECODE_NODE_IP>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+    MOONCAKE_CONFIG_DIR="<MOONCAKE_CONFIG_DIR>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ENGINE_READY_TIMEOUT_S=36000
+    export HCCL_CONNECT_TIMEOUT=1200
+    export HCCL_BUFFSIZE=1800
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+
+    # Parameters required by the Mooncake KV Cache Pool.
+    # Decode is a pure consumer: use mooncake_d.json (zero contributed capacity).
+    export PYTHONHASHSEED=0
+    export MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_DIR/mooncake_d.json"
+
+    vllm serve "$MODEL_PATH" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --prefill-context-parallel-size $8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name dsv41 \
+        --max-model-len 1048576 \
+        --max-num-batched-tokens 512 \
+        --max-num-seqs 72 \
+        --async-scheduling \
+        --block-size 128 \
+        --no-enable-prefix-caching \
+        --no-swa-bounded-replay \
+        --trust-remote-code \
+        --tokenizer-mode deepseek_v41 \
+        --reasoning-parser deepseek_v41 \
+        --tool-call-parser deepseek_v41 \
+        --enable-auto-tool-choice \
+        --safetensors-load-strategy lazy \
+        --gpu-memory-utilization 0.97 \
+        --kv-cache-memory-bytes 4600000000 \
+        --quantization ascend \
+        --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --kv-transfer-config '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_consumer",
+            "kv_port":"30100",
+            "engine_id":"1",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeHybridConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_port":"30100",
+                        "kv_connector_extra_config":{
+                            "prefill":{"dp_size":2,"tp_size":1},
+                            "decode":{"dp_size":8,"tp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_connector_extra_config":{
+                            "lookup_rpc_port":"0",
+                            "backend":"mooncake",
+                            "use_layerwise":false
+                        }
+                    }
+                ]
+            }
+        }' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --additional-config '{
+            "ascend_compilation_config":{
+                "enable_npugraph_ex":true,
+                "enable_static_kernel":false
+            },
+            "enable_cpu_binding":true,
+            "enable_flashcomm1":false,
+            "multistream_overlap_shared_expert":true,
+            "recompute_scheduler_enable":true
+        }'
+    ```
+
+    Start the eight DP8/TP1 Decode engines with the launcher command from [Section 5.2.2.3](#5223-start-the-decode-node).
 
 #### 5.4.4 Startup and Verification
 
 Start the components in this order: Mooncake Master Service, Decode engines, Prefill engines, and then the PD proxy. The Mooncake Store clients are embedded in the vLLM processes; no standalone Store process is required for this configuration.
-Wait until the Mooncake master process reports successful initialization before starting the Decode engines and the Prefill engines. After every Prefill engine and every Decode engine is ready, start the proxy with the same endpoint mapping described in [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
+Wait until the Mooncake master process reports successful initialization, then
+start Decode. Wait until every Decode engine reports `Application startup complete`
+before starting Prefill. After every Prefill engine is ready, start the proxy for
+the selected hardware:
 
-Send the same request twice with a reusable prefix. Confirm that Prefill logs show Mooncake lookup, get, put, and hit activity, and that Decode logs still show normal Prefill-to-Decode KV transfer.
+- A3: use the four Prefill and sixteen Decode endpoints and `--workers 4` from
+  [Section 5.2.1.4](#5214-deploy-the-pd-proxy).
+- A2: use the two Prefill and eight Decode endpoints from
+  [Section 5.2.2.4](#5224-deploy-the-pd-proxy).
+
+Send a long prompt to populate the pool, then reuse its prefix with a different
+suffix. Check all Prefill ranks for increased `external_prefix_cache_hits_total`
+and successful Mooncake get/load activity. Confirm that Decode logs still show
+normal Prefill-to-Decode KV transfer.
 
 Key pooling parameters:
 
-- `MultiConnector` combines live P-to-D transfer through `MooncakeHybridConnector` with persistent prefix reuse through `AscendStoreConnector`.
+- `MultiConnector` combines live P-to-D transfer through `MooncakeConnectorV2` on A3 or `MooncakeHybridConnector` on A2 with persistent prefix reuse through `AscendStoreConnector`.
 - `backend: "mooncake"` selects Mooncake as the KV Cache Pool backend.
 - `use_layerwise: false` is required for DeepSeek-V4.1-Flash. Do not enable layerwise pooling for this model because its CED hybrid-attention structure is not supported by the layerwise path.
 - Prefill contributes the pool capacity (`global_segment_size` = `24GB` per rank) and enables SSD offload. Decode sets both `global_segment_size` and `local_buffer_size` to `0` and disables SSD offload, so it only reads the pool. Reserving pool DRAM on Decode can fail with `rtsHostRegister` out-of-memory errors and reduces the host memory available to the engines.
