@@ -350,7 +350,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         return make_config(kv_role, extra_config, block_size)
 
     def test_enable_lookup_role_defaults_and_overrides(self):
-        cases = (
+        cases: tuple[tuple[str, dict[str, bool], bool], ...] = (
             ("kv_producer", {}, True),
             ("kv_both", {}, True),
             ("kv_consumer", {}, False),
