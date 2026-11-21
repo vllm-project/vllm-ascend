@@ -36,7 +36,7 @@ def selector(monkeypatch):
         out.fill_(-1)
         out[positions >= 0] = 7
 
-    packing = ModuleType("vllm_ascend.ops.triton.qwen4_exp.qsa")
+    packing = ModuleType("vllm_ascend.models.qwen4_exp.ops.qsa")
     packing.__dict__.update(pack_qsa_group_indices_npu=Mock(side_effect=fake_pack))
     utilities = ModuleType("vllm.utils.torch_utils")
     utilities.__dict__.update(canonicalize_singleton_dim_strides=Mock(side_effect=lambda tensor: tensor))

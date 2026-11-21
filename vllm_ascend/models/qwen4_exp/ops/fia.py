@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen4Exp masks using aligned 32-bit writes for four-token QSA groups."""
+"""Model-local Qwen4Exp masks using aligned 32-bit QSA-group writes."""
 
 import torch
 from vllm.triton_utils import tl, triton

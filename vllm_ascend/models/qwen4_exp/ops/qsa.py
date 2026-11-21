@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused QSA support kernels used around the CANN LI-v2 and GBSA path."""
+"""Model-local fused QSA kernels around the CANN LI-v2 and GBSA path."""
 
 from __future__ import annotations
 

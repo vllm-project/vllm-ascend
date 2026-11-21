@@ -40,12 +40,6 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_store_cache_rows as qsa_store_cache_rows_fused,
-)
 from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
@@ -54,6 +48,12 @@ from .lightning_indexer import (
     QSACompressedIndexerMetadataProtocol,
     QSAIndexerMetadataProtocol,
     qsa_select_paged_tokens_lightning_v2,
+)
+from .ops.qsa import (
+    qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
+)
+from .ops.qsa import (
+    qsa_store_cache_rows as qsa_store_cache_rows_fused,
 )
 from .qsa_prepare import (
     prepare_qsa_gbsa_shared,

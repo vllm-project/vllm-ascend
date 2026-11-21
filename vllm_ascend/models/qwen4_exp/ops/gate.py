@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fused QSA output-gate activation for Ascend."""
+"""Model-local fused QSA output-gate activation for Ascend."""
 
 from __future__ import annotations
 

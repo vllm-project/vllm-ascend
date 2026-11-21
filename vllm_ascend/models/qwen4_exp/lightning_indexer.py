@@ -12,7 +12,7 @@ from typing import Protocol
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
-from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
+from .ops.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
 

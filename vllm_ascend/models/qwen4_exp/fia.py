@@ -134,7 +134,7 @@ def qsa_fia_attention(
     if query.device.type == "npu":
         # One process-local allocation is shared by all QSA layers and reused
         # across every query tile and scheduler step.
-        from vllm_ascend.ops.triton.qwen4_exp.fia import get_qsa_fia_mask_workspace
+        from .ops.fia import get_qsa_fia_mask_workspace
 
         mask_workspace = get_qsa_fia_mask_workspace(
             query.device,
@@ -147,7 +147,7 @@ def qsa_fia_attention(
         visible = visible_lens[start:end]
         if query.device.type == "npu":
             # Lazy import keeps model discovery and CPU semantic tests NPU-free.
-            from vllm_ascend.ops.triton.qwen4_exp.fia import build_qsa_fia_mask, copy_qsa_fia_output
+            from .ops.fia import build_qsa_fia_mask, copy_qsa_fia_output
 
             assert mask_workspace is not None
             atten_mask, has_selection = build_qsa_fia_mask(

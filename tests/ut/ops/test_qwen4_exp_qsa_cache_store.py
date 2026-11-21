@@ -18,7 +18,7 @@ except ImportError:
 if not torch.npu.is_available():
     raise SystemExit({_CHILD_EXIT_NO_DEVICE})
 
-from vllm_ascend.ops.triton.qwen4_exp.qsa import qsa_store_cache_rows
+from vllm_ascend.models.qwen4_exp.ops.qsa import qsa_store_cache_rows
 
 blocks = 5
 page_size = 8

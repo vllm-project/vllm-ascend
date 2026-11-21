@@ -17,7 +17,8 @@ from vllm_ascend.models.deepseek_v41.engram.npu import (
 )
 from vllm_ascend.models.host_offload import register_host_offload_owner
 from vllm_ascend.models.qwen4_exp.ple_quant import AscendPLEQuantizedEmbeddingMethod
-from vllm_ascend.ops.triton.qwen4_exp import ple_lookup, ple_lookup_quantized
+
+from .ops import ple_lookup, ple_lookup_quantized
 
 
 @Qwen4ExpPLEPinnedHostEmbedding.register_oot

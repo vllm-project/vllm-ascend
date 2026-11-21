@@ -12,7 +12,7 @@ import torch_npu  # noqa: F401
 from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 
 import vllm_ascend.models.qwen4_exp.model  # noqa: F401
-from vllm_ascend.ops.triton.qwen4_exp.hc import (
+from vllm_ascend.models.qwen4_exp.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,

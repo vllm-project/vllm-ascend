@@ -60,9 +60,9 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
         _source(path)
         for path in (
             "vllm_ascend/models/qwen4_exp/qsa.py",
-            "vllm_ascend/models/qwen4_exp/ops.py",
+            "vllm_ascend/models/qwen4_exp/ops/reference.py",
             "vllm_ascend/models/qwen4_exp/lightning_indexer.py",
-            "vllm_ascend/ops/triton/qwen4_exp/qsa.py",
+            "vllm_ascend/models/qwen4_exp/ops/qsa.py",
         )
     )
     assert ".item(" not in qsa_sources
