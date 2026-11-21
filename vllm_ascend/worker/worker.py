@@ -880,23 +880,13 @@ class NPUWorker(GPUWorker):
 
         initial = self.init_snapshot
         profiled = profile_result.after_profile
-        if profiled.free_memory > initial.free_memory:
-            raise ValueError(
-                "Error in memory profiling. Free NPU memory increased "
-                f"from {GiB(initial.free_memory)} GiB to {GiB(profiled.free_memory)} GiB. "
-                "Check whether another process released memory on this NPU during startup."
-            )
+        self._check_profile_free_memory(profiled.free_memory)
         if profiled.free_memory == initial.free_memory:
             # Model weights can fit in memory already reserved and reported as used
             # at initialization. Require the allocator to account for them.
             allocated_increase = profiled.torch_allocated - initial.torch_allocated
-            unused_initial_reserve = initial.torch_memory - initial.torch_allocated
-            if (
-                profiled.total_memory != initial.total_memory
-                or profiled.torch_memory != initial.torch_memory
-                or initial.torch_memory > initial.total_memory - initial.free_memory
-                or not 0 <= profile_result.weights_memory <= allocated_increase <= unused_initial_reserve
-                or profile_result.non_kv_cache_memory < allocated_increase
+            if not self._fits_initial_reserve(profiled, profile_result.weights_memory) or (
+                profile_result.non_kv_cache_memory < allocated_increase
             ):
                 raise ValueError(
                     "Error in memory profiling. "
@@ -921,6 +911,26 @@ class NPUWorker(GPUWorker):
             self.available_kv_cache_memory_bytes
         )
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
+
+    def _check_profile_free_memory(self, free_memory: int, source: str = "NPU") -> None:
+        initial_free = self.init_snapshot.free_memory
+        if free_memory > initial_free:
+            raise ValueError(
+                f"Error in memory profiling. Free {source} memory increased by {free_memory - initial_free} bytes "
+                f"from {format_gib(initial_free)} GiB to {format_gib(free_memory)} GiB. "
+                "Check whether another process released memory during startup."
+            )
+
+    def _fits_initial_reserve(self, profiled: MemorySnapshot, weights_memory: int) -> bool:
+        initial = self.init_snapshot
+        allocated_increase = profiled.torch_allocated - initial.torch_allocated
+        unused_reserve = initial.torch_memory - initial.torch_allocated
+        return (
+            profiled.total_memory == initial.total_memory
+            and profiled.torch_memory == initial.torch_memory
+            and initial.torch_memory <= initial.total_memory - initial.free_memory
+            and 0 <= weights_memory <= allocated_increase <= unused_reserve
+        )
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.

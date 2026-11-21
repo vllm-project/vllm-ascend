@@ -1,4 +1,4 @@
 pr: 18389
 entries:
   - category: bugfix
-    text: With HiSparse disabled, startup can proceed when free NPU memory stays unchanged during profiling and the model's allocation is accounted for. If memory reporting prevents automatic KV cache sizing, the startup error explains how to set a known-safe budget with `--kv-cache-memory-bytes`.
+    text: With HiSparse disabled, startup can proceed when free NPU memory stays unchanged during profiling and the model's allocation is accounted for. On 310P with dedicated HBM, sizing includes retained and transient allocations. In shared-memory mode, startup checks host available memory at both sampling points.

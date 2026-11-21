@@ -104,29 +104,31 @@ class NPUWorker310(NPUWorker):
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
 
-        free_gpu_memory = profile_result.after_profile.free_memory
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
-
-        # Divide the available memory by 2, to reserved more memory for other operators workspace and other cache
-        # This could avoid OOM with default gpu_memory_utilization
-        # The 310P RC device shares the host memory and device memory.
-        # Therefore, the space available for allocating KV cache and Mamba cache needs to be calculated
-        # based on the already occupied space of the system memory.
-
+        # Reserve half the remaining budget for operator workspaces and other caches.
         if is_rc_device():
+            # _init_device takes the RC baseline from host available memory.
             vm = psutil.virtual_memory()
-            self.available_kv_cache_memory_bytes = (self.requested_memory - (vm.total - vm.available)) // 2
+            self._check_profile_free_memory(vm.available, source="host")
+            non_kv_memory = vm.total - vm.available
         else:
-            self.available_kv_cache_memory_bytes = (self.requested_memory - profile_result.non_kv_cache_memory) // 2
+            profiled = profile_result.after_profile
+            self._check_profile_free_memory(profiled.free_memory)
+            non_kv_memory = profile_result.non_kv_cache_memory
+            if profiled.free_memory == self.init_snapshot.free_memory:
+                # Core's device delta is zero. Charge verified retained allocations
+                # as well as the transient peak before applying the workspace reserve.
+                if (
+                    not self._fits_initial_reserve(profiled, profile_result.weights_memory)
+                    or profile_result.transient_peak_headroom < 0
+                ):
+                    raise ValueError(
+                        "Error in memory profiling. Unchanged free NPU memory conflicts with the 310P "
+                        "allocator statistics. Check device memory reporting before sizing the KV cache."
+                    )
+                retained = profiled.torch_allocated - self.init_snapshot.torch_allocated
+                non_kv_memory = retained + profile_result.transient_peak_headroom
 
+        self.available_kv_cache_memory_bytes = (self.requested_memory - non_kv_memory) // 2
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )

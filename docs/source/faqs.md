@@ -166,8 +166,11 @@ If startup reports that free NPU memory stayed unchanged and automatic KV cache
 sizing failed, check whether the device or virtualization layer reports the
 actual memory used by the worker. HiSparse requires a drop in reported free
 memory to measure allocations retained after profiling. If you know the free
-memory available after model loading and warmup, you can set a conservative per-worker budget with
-`--kv-cache-memory-bytes`.
+memory available after model loading and warmup, the generic worker accepts a conservative per-worker budget with
+`--kv-cache-memory-bytes`. On 310P with dedicated HBM (EP), an unchanged
+reading requires consistent allocator counters. The budget accounts for both
+retained allocations and peak transient use before reserving half for
+workspaces. In shared-memory (RC) mode, both samples use host available memory.
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
