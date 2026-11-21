@@ -92,6 +92,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Optional process-shared disk cache for multimodal encoder outputs. When
+    # set to a directory, ViT outputs are saved there by mm_hash and reused by
+    # later requests/processes. Empty disables the cache (default).
+    "VLLM_ASCEND_MM_GLOBAL_CACHE_DIR": lambda: os.getenv("VLLM_ASCEND_MM_GLOBAL_CACHE_DIR", None),
+    # Capacity of the global multimodal embedding cache in GiB. Default: 16.
+    # This configuration is not sensitive.
+    "VLLM_ASCEND_MM_GLOBAL_CACHE_GB": lambda: int(os.getenv("VLLM_ASCEND_MM_GLOBAL_CACHE_GB", "16")),
 }
 
 # end-env-vars-definition
