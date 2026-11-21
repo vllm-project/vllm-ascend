@@ -205,3 +205,79 @@ def test_the_patch_is_applied_only_once():
         static_kernel.compile_static_kernel = original_compile_static_kernel
         acl_graph.compile_static_kernel = original_compile_static_kernel
         AclConcreteGraph.normalize_config = original_normalize_config
+
+
+def test_a_missing_config_object_does_not_add_the_cache_keys():
+    """The config object belongs to npugraph_ex, so read it defensively.
+
+    The patched ``normalize_config`` must not raise when the config object is
+    absent or does not carry the flag, and it must not add the cache keys in
+    that case. The upstream ``normalize_config`` reads the config object
+    itself, so it is stubbed out here to isolate the patched part.
+    """
+    from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
+
+    original_normalize_config = AclConcreteGraph.normalize_config
+    try:
+        with patch.object(AclConcreteGraph, "normalize_config", return_value={}):
+            _enable_cache()
+            converter = AclConcreteGraph.__new__(AclConcreteGraph)
+            converter._config = None
+            configs = AclConcreteGraph.normalize_config(converter)
+    finally:
+        AclConcreteGraph.normalize_config = original_normalize_config
+
+    assert "static_kernel_compile.use_cache_compile" not in configs
+
+
+def test_a_config_object_without_the_flag_does_not_add_the_cache_keys():
+    """A config object without the flag must not get the cache keys."""
+    from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
+
+    original_normalize_config = AclConcreteGraph.normalize_config
+    try:
+        with patch.object(AclConcreteGraph, "normalize_config", return_value={}):
+            _enable_cache()
+            converter = AclConcreteGraph.__new__(AclConcreteGraph)
+            converter._config = object()
+            configs = AclConcreteGraph.normalize_config(converter)
+    finally:
+        AclConcreteGraph.normalize_config = original_normalize_config
+
+    assert "static_kernel_compile.use_cache_compile" not in configs
+
+
+def test_the_compiler_falls_back_when_the_install_path_fails():
+    """A failure in the private install API must not fail the compilation."""
+    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+
+    original_compile_static_kernel = static_kernel.compile_static_kernel
+    _enable_cache()
+    try:
+        calls = []
+        config = {
+            "force_eager": True,
+            "static_kernel_compile": True,
+            "static_kernel_compile.use_cache_compile": True,
+            "static_kernel_compile.cann_version": "9.1.0",
+            "static_kernel_compile.compile_cache_dir": "/tmp/ascend_static_kernel",
+            "static_kernel_compile.deterministic": False,
+        }
+
+        def failing_install(*args, **kwargs):
+            raise RuntimeError("the private install API changed")
+
+        with (
+            patch.object(static_kernel, "_install_or_compile_static_kernel", failing_install),
+            patch.object(
+                static_kernel,
+                "_compile_static_kernel",
+                lambda *a, **k: calls.append("compile"),
+            ),
+        ):
+            acl_graph.compile_static_kernel(lambda *a, **k: None, config=config, build_dir="/tmp")
+    finally:
+        static_kernel.compile_static_kernel = original_compile_static_kernel
+        acl_graph.compile_static_kernel = original_compile_static_kernel
+
+    assert calls == ["compile"]

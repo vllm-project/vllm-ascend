@@ -207,9 +207,13 @@ def _enable_static_kernel_run_package_cache() -> None:
     original_normalize_config = AclConcreteGraph.normalize_config
 
     def normalize_config(self):
+        # The config object belongs to npugraph_ex, so read it defensively:
+        # a missing attribute must not break the compilation.
+        config_obj = getattr(self, "_config", None)
+        if config_obj is None or not getattr(config_obj, "static_kernel_compile", False):
+            return original_normalize_config(self)
         configs = original_normalize_config(self)
-        if self._config.static_kernel_compile:
-            configs.update(_static_kernel_cache_options())
+        configs.update(_static_kernel_cache_options())
         return configs
 
     normalize_config._vllm_ascend_static_kernel_cache = True
@@ -228,16 +232,25 @@ def _enable_static_kernel_run_package_cache() -> None:
 
     def compile_static_kernel(fx_func, *args, config=None, build_dir=None, **kwargs):
         if config is not None and config.get("static_kernel_compile.use_cache_compile", False):
-            static_kernel._install_or_compile_static_kernel(
-                fx_func,
-                *args,
-                cached_cann_version=config.get("static_kernel_compile.cann_version", None),
-                compile_cache_dir=config.get("static_kernel_compile.compile_cache_dir", None),
-                cached_deterministic=config.get("static_kernel_compile.deterministic", False),
-                config=config,
-                **kwargs,
-            )
-            return
+            try:
+                static_kernel._install_or_compile_static_kernel(
+                    fx_func,
+                    *args,
+                    cached_cann_version=config.get("static_kernel_compile.cann_version", None),
+                    compile_cache_dir=config.get("static_kernel_compile.compile_cache_dir", None),
+                    cached_deterministic=config.get("static_kernel_compile.deterministic", False),
+                    config=config,
+                    **kwargs,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                # The install path is a private npugraph_ex API. If it is
+                # gone or changed, fall back to compiling instead of failing
+                # the whole compilation.
+                logger.warning(
+                    "Failed to install the cached static kernel run package, falling back to compiling it: %s",
+                    exc,
+                )
         return original_compile_static_kernel(fx_func, *args, config=config, build_dir=build_dir, **kwargs)
 
     compile_static_kernel._vllm_ascend_static_kernel_cache = True
