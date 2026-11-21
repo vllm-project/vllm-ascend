@@ -118,6 +118,31 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+        self.routing_input_ids_buffer: torch.Tensor | None = None
+        self.is_routing_input_ids_producer = False
+
+    def _prepare_routing_input_ids(self, input_ids: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        comm_type = _EXTRA_CTX.moe_comm_type
+        buffer = self.routing_input_ids_buffer if comm_type == MoECommType.ALLGATHER else None
+        if buffer is not None and not self.is_routing_input_ids_producer:
+            return buffer[:num_tokens]
+
+        input_ids = input_ids.to(torch.int64)
+        if comm_type == MoECommType.ALLGATHER:
+            prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
+            input_ids = prepare_finalize.all_gather_input_ids(input_ids)
+        else:
+            input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
+            if input_ids.numel() != num_tokens:
+                # Match the TP chunk when communication has not already
+                # aligned the IDs with the local router rows.
+                input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
+        input_ids = torch.where(input_ids == -1, 0, input_ids)
+        if buffer is not None:
+            # The first consuming layer overwrites these rows on every call.
+            buffer[:num_tokens].copy_(input_ids)
+            return buffer[:num_tokens]
+        return input_ids
 
     def is_fused_supported(
         self,
@@ -160,20 +185,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             if self.tid2eid is not None or self.bias_vl is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
-                input_ids = input_ids.to(torch.int64)
+                input_ids = self._prepare_routing_input_ids(input_ids, router_logits.shape[0])
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
-                if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
-                    prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
-                    input_ids = prepare_finalize.all_gather_input_ids(input_ids)
-                else:
-                    input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
-                if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:
-                    # Native MoE SP chunks hidden states before MC2/All2All,
-                    # while their replace-allreduce paths retain full token
-                    # ids. Apply the identical TP chunk only when communication
-                    # has not already aligned ids with local router rows.
-                    input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
-                input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:
                 input_ids = None
                 tid2eid_ones = None
