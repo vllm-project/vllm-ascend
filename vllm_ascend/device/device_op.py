@@ -1330,7 +1330,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=act_quant_type,
-                scale_alg=get_dynamic_mx_quant_scale_alg(),
+                scale_alg=get_dynamic_mx_quant_scale_alg(dst_type=act_quant_type),
             )
 
         return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)

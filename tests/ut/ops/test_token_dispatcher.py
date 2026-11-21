@@ -623,6 +623,27 @@ class TestTokenDispatcherWithMC2(TestBase):
                 self.assertEqual(kwargs["comm_quant_mode"], expected)
                 self.assertIs(kwargs["expand_x"], hidden_states)
 
+    def test_mc2_init_keeps_qwen3_5_on_quant_mode_four(self):
+        qwen_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=["Qwen3_5MoeForConditionalGeneration"],
+                hf_text_config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+            ),
+            parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=1),
+        )
+        with (
+            patch(
+                "vllm_ascend.quantization.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_current_vllm_config", return_value=qwen_config),
+            patch(
+                "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
+            ),
+        ):
+            qwen_mc2 = TokenDispatcherWithMC2(top_k=2, num_experts=8, num_local_experts=4)
+        self.assertEqual(qwen_mc2.dynamic_mx_quant_scale_alg, 0)
+
 
 @pytest.mark.parametrize("prequantized", [False, True])
 def test_allgather_mxfp8_ceil_quantization(prequantized):
@@ -1036,6 +1057,9 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_current_device.return_value = "cpu"
 
         # Mock torch_npu.npu_dynamic_quant via DeviceOperator (production call site)
+        from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+        self._orig_a5_npu_dynamic_quant = A5DeviceAdaptor.npu_dynamic_quant
         patcher10 = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_dynamic_quant",
         )
@@ -1271,6 +1295,55 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         np.testing.assert_array_equal(input_splits, [4])
         np.testing.assert_array_equal(output_splits, [4])
         self.mock_repeat_interleave.assert_not_called()
+
+    def test_w4a4_mxfp4_all2all_on_qwen3_5_a5_uses_scale_alg_zero(self):
+        hidden_states = torch.randn(8, 32, dtype=torch.bfloat16)
+        topk_weights = torch.rand(8, 4)
+        topk_ids = torch.randint(0, 4, (8, 2)).long()
+        expert_map = torch.tensor([0, 1, 2, 3])
+        self.dispatcher.expert_ids_per_ep_rank = torch.tensor([0, 1], dtype=torch.int32)
+        self.dispatcher.local_expert_indices = [0, 1]
+        self.mock_npu_moe_token_permute.return_value = (torch.randn(16, 32, dtype=torch.bfloat16), torch.arange(16))
+
+        qwen_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=["Qwen3_5MoeForConditionalGeneration"],
+                hf_text_config=SimpleNamespace(model_type="qwen3_5_moe_text"),
+            )
+        )
+        import torch_npu
+
+        mxfp4_dtype = torch_npu.float4_e2m1fn_x2
+        quantized = torch.zeros(16, 16, dtype=torch.uint8)
+        scales = torch.ones(16, 1, 2, dtype=torch.uint8)
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.W4A4MXFP,
+            act_quant_type=mxfp4_dtype,
+        )
+        self.mock_npu_dynamic_quant.side_effect = self._orig_a5_npu_dynamic_quant
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch(
+                "vllm_ascend.quantization.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            patch("vllm.config.get_current_vllm_config", return_value=qwen_config),
+            patch("vllm.forward_context.is_forward_context_available", return_value=True),
+            patch(
+                "vllm.forward_context.get_forward_context",
+                return_value=SimpleNamespace(additional_kwargs={"dynamic_mx_quant_scale_alg": 1}),
+            ),
+            patch("torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scales), create=True) as mock_mx_quant,
+        ):
+            self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        mock_mx_quant.assert_called_once()
+        self.assertEqual(mock_mx_quant.call_args.kwargs["dst_type"], mxfp4_dtype)
+        self.assertEqual(mock_mx_quant.call_args.kwargs["scale_alg"], 0)
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):

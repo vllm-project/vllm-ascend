@@ -16,6 +16,7 @@ from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     enable_fa_quant,
     get_dynamic_mx_quant_scale_alg,
+    get_mc2_dynamic_mx_quant_scale_alg,
     maybe_auto_detect_quantization,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
@@ -47,16 +48,48 @@ class TestDynamicMxQuantScaleAlg(TestBase):
         mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 0)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_moe_config), 0)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_dense_config), 0)
 
+    @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
+    def test_uses_ceil_for_qwen3_5_text_model_types_only_on_a5(self, mock_profile):
+        for model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
+            with self.subTest(model_type=model_type):
+                config = self._config(None, model_type=model_type)
+                mock_profile.return_value = get_hardware_profile(AscendDeviceType.A5)
+                self.assertEqual(get_dynamic_mx_quant_scale_alg(config), 1)
+                mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
+                self.assertEqual(get_dynamic_mx_quant_scale_alg(config), 0)
+
+    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm.forward_context.is_forward_context_available", return_value=True)
     @patch(
         "vllm_ascend.quantization.utils.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
-    def test_uses_ceil_for_qwen3_5_text_model_types_on_a5(self, _mock_profile):
-        for model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
-            with self.subTest(model_type=model_type):
-                config = self._config(None, model_type=model_type)
-                self.assertEqual(get_dynamic_mx_quant_scale_alg(config), 1)
+    def test_non_fp8_dst_type_keeps_scale_alg_zero_on_a5(
+        self,
+        _mock_profile,
+        _mock_forward_context_available,
+        mock_forward_context,
+    ):
+        qwen35_moe_config = self._config("Qwen3_5MoeForConditionalGeneration")
+        mock_forward_context.return_value.additional_kwargs = {"dynamic_mx_quant_scale_alg": 1}
+        fp4_dtype = getattr(__import__("torch"), "float4_e2m1fn_x2", object())
+
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(qwen35_moe_config, dst_type=fp4_dtype), 0)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(dst_type=fp4_dtype), 0)
+
+    @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
+    def test_mc2_scale_alg_keeps_qwen3_5_on_default_comm_path(self, mock_profile):
+        minimax_config = self._config("MiniMaxM3SparseForCausalLM")
+        qwen35_moe_config = self._config("Qwen3_5MoeForConditionalGeneration")
+
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A5)
+        self.assertEqual(get_mc2_dynamic_mx_quant_scale_alg(minimax_config), 1)
+        self.assertEqual(get_mc2_dynamic_mx_quant_scale_alg(qwen35_moe_config), 0)
+
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
+        self.assertEqual(get_mc2_dynamic_mx_quant_scale_alg(minimax_config), 0)
 
     @patch(
         "vllm_ascend.quantization.utils.get_current_hardware_profile",

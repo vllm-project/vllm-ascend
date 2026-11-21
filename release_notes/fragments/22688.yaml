@@ -1,6 +1,6 @@
 pr: 22688
 entries:
   - category: bugfix
-    text: Fixed FP8 overflow clamping when serving Qwen3.5 block-FP8 and MXFP8 models on Ascend 950, preventing accuracy degradation and long-reasoning generation loops.
+    text: Use CEIL MXFP8 scale_alg for Qwen3.5 block-FP8 weight requantization and non-fused FP8 MX dynamic activation quantization on Ascend 950, avoiding E4M3 finite-max clamping without altering MC2 expert-parallel communication modes.
     model: Qwen3.5
     hardware: [950PR, 950DT]
