@@ -24,6 +24,7 @@
 """Inference-only MiniMaxM3 model."""
 
 from collections.abc import Iterable, MutableSequence, Sequence
+from importlib import import_module
 from itertools import islice
 from typing import Any
 
@@ -97,6 +98,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
+from vllm_ascend.ascend_config import SparseAttentionQuantConfig
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -117,6 +119,10 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
 )
 from vllm_ascend.ops.mmrs import SequenceParallelMMReduceScatterOp
+from vllm_ascend.ops.triton.msa.msa_m3_a8c4_cache import (
+    A8C4_PHYSICAL_HEAD_SIZE,
+    a8c4_cache_views,
+)
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -324,6 +330,22 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             prefix,
             vllm_config.model_config,
         )
+        self.use_a8c4 = SparseAttentionQuantConfig.from_vllm_config(vllm_config).enable_a8c4
+        if self.use_a8c4:
+            if (
+                self.head_dim != 128
+                or self.kv_cache_torch_dtype != torch.float8_e4m3fn
+                or vllm_config.model_config.dtype != torch.bfloat16
+            ):
+                raise ValueError("A8C4 requires logical D128, BF16 model activations and an FP8 cache")
+            if sparse_cfg["sparse_block_size"] != 128:
+                raise ValueError("A8C4 requires 128-token cache blocks")
+            bridge = import_module(
+                "cann_ops_transformer.ops.attention.generic_block_sparse_attention.generic_block_sparse_attention"
+            )
+            QuantMode = bridge.QuantMode
+            if not hasattr(QuantMode, "Q_FP8_PER_TENSOR_KV_FP4_PER_TOKEN_PER_GROUP"):
+                raise RuntimeError("A8C4 requires a CANN GBSA mode-8 PyTorch bridge with packed FP4 support")
         self.attn_backend = AscendMiniMaxM3SparseBackend
         self.impl = AscendMiniMaxM3SparseImpl(
             self.num_heads,
@@ -333,6 +355,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
+            use_a8c4=self.use_a8c4,
         )
         self.topk_blocks = sparse_cfg["sparse_topk_blocks"]
         self.sparse_block_size = sparse_cfg["sparse_block_size"]
@@ -364,8 +387,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         return FullAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
-            head_size=self.head_dim,
-            head_size_v=self.head_dim,
+            head_size=A8C4_PHYSICAL_HEAD_SIZE if self.use_a8c4 else self.head_dim,
+            head_size_v=A8C4_PHYSICAL_HEAD_SIZE if self.use_a8c4 else self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
@@ -390,15 +413,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         num_tokens = main_meta.num_actual_tokens
         k_insert = key[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
         v_insert = value[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
-        k_insert = _cast_for_cache(k_insert, key_cache)
-        v_insert = _cast_for_cache(v_insert, value_cache)
-        DeviceOperator.reshape_and_cache(
-            k_insert,
-            v_insert,
-            key_cache,
-            value_cache,
-            main_meta.slot_mapping[:num_tokens],
-        )
+        if key_cache.shape[-1] == 256 and key_cache.dtype == torch.float8_e4m3fn:
+            from vllm_ascend.ops.triton.msa.msa_m3_a8c4_cache import dual_cache_scatter
+
+            dual_cache_scatter(k_insert, v_insert, self.kv_cache, main_meta.slot_mapping[:num_tokens])
+        else:
+            k_insert = _cast_for_cache(k_insert, key_cache)
+            v_insert = _cast_for_cache(v_insert, value_cache)
+            DeviceOperator.reshape_and_cache(
+                k_insert, v_insert, key_cache, value_cache, main_meta.slot_mapping[:num_tokens]
+            )
 
         idx_cache = self.indexer.index_cache.kv_cache
         if isinstance(idx_cache, (tuple, list)):
@@ -524,6 +548,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_cache = self.indexer.index_cache.kv_cache
         if isinstance(index_cache, (tuple, list)):
             index_cache = index_cache[0]
+        extra_views = a8c4_cache_views(self.kv_cache) if self.use_a8c4 else None
+        extras = None
+        if extra_views is not None:
+            (key_cache, pk, sk, _), (value_cache, pv, sv, _) = extra_views
+            extras = (pk, pv, sk, sv)
         query, index_query = minimax_qknorm_rope_cache(
             qkv,
             self.rotary_emb.cos_sin_cache,
@@ -543,6 +572,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.num_idx_heads,
             self.q_norm.variance_epsilon,
             index_packed=index_qk,
+            a8c4_cache=extras,
+            query_fp8=extras is not None and main_meta.num_prefills == 0,
         )
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)

@@ -18,6 +18,7 @@ def make_layer():
     norm = SimpleNamespace(variance_epsilon=1e-6, weight=torch.zeros(128))
     return SimpleNamespace(
         use_dspark=False,
+        use_a8c4=False,
         indexer_proj=None,
         head_dim=128,
         idx_head_dim=128,

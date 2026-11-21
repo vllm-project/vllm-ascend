@@ -68,6 +68,84 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTI
 from vllm_ascend.utils import AscendDeviceType
 
 
+@pytest.mark.parametrize("enabled,physical_dim", [(False, 128), (True, 256)])
+def test_a8c4_cache_reservation_is_opt_in(enabled, physical_dim):
+    layer = SimpleNamespace(
+        use_a8c4=enabled,
+        num_kv_heads=1,
+        head_dim=128,
+        kv_cache_dtype="fp8",
+        kv_cache_torch_dtype=torch.float8_e4m3fn,
+    )
+    config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+    spec = MiniMaxM3SparseAttention.get_kv_cache_spec(layer, config)
+    assert spec.head_size == spec.head_size_v == physical_dim
+    assert spec.dtype == torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize("invalid_scales", [None, "wrong_dtype", "wrong_shape", "missing_v"])
+def test_a8c4_dispatch_requires_two_bf16_group_scales(mock_gbsa_ops, invalid_scales):
+    scales = torch.ones((2, 128, 1, 8), dtype=torch.bfloat16)
+    bad = {
+        None: None,
+        "wrong_dtype": (scales.float(), scales),
+        "wrong_shape": (scales[..., :4], scales),
+        "missing_v": (scales,),
+    }[invalid_scales]
+    with pytest.raises(TypeError, match="separate BF16 scales"):
+        minimax_m3_sparse_attn_decode_npu(
+            torch.zeros((8, 16, 128), dtype=torch.float8_e4m3fn),
+            torch.zeros((2, 2, 128, 1, 64), dtype=torch.uint8),
+            torch.zeros((1, 8, 1), dtype=torch.int32),
+            torch.zeros((1, 1), dtype=torch.int32),
+            torch.tensor([128], dtype=torch.int32),
+            1,
+            0.5,
+            torch.empty((8, 16, 128), dtype=torch.bfloat16),
+            8,
+            select_num_idx=torch.ones((1, 8), dtype=torch.int32),
+            dequant_scale=bad,
+            indices_are_sorted=True,
+        )
+
+
+def test_a8c4_dispatch_preserves_packed_views_and_reuses_mode8_metadata(mock_gbsa_ops):
+    metadata_op, attention_op = mock_gbsa_ops
+    query = torch.zeros((8, 16, 128), dtype=torch.float8_e4m3fn)
+    cache = torch.zeros((2, 2, 128, 1, 64), dtype=torch.uint8)
+    scales = tuple(torch.ones((2, 128, 1, 8), dtype=torch.bfloat16) for _ in range(2))
+    output = torch.empty((8, 16, 128), dtype=torch.bfloat16)
+    attention_op.return_value = (torch.ones_like(output), torch.empty(0))
+    metadata_cache = {}
+    for _ in range(2):
+        minimax_m3_sparse_attn_decode_npu(
+            query,
+            cache,
+            torch.zeros((1, 8, 1), dtype=torch.int32),
+            torch.zeros((1, 1), dtype=torch.int32),
+            torch.tensor([128], dtype=torch.int32),
+            1,
+            0.5,
+            output,
+            8,
+            select_num_idx=torch.ones((1, 8), dtype=torch.int32),
+            dequant_scale=scales,
+            gbsa_metadata_cache=metadata_cache,
+            indices_are_sorted=True,
+        )
+    assert metadata_op.call_count == 1
+    assert metadata_op.call_args.kwargs["quant_mode"] == 8
+    assert metadata_op.call_args.kwargs["softmax_precision"] == 0
+    call = attention_op.call_args
+    assert call.args[0].data_ptr() == query.data_ptr()
+    assert call.args[1].data_ptr() == cache[0].data_ptr()
+    assert call.kwargs["k_dequant_scale"] is scales[0]
+    assert call.kwargs["v_dequant_scale"] is scales[1]
+    assert call.kwargs["quant_mode"] == 8
+    assert call.kwargs["attention_out_dtype"] == torch.bfloat16
+    assert torch.all(output == 1)
+
+
 @pytest.mark.parametrize(
     ("device_type", "kv_dtype", "expected_precision"),
     [

@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 
+from vllm_ascend.ascend_config import SparseAttentionQuantConfig
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -68,6 +69,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_union import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.ops.triton.msa.msa_m3_a8c4_cache import a8c4_cache_views
 from vllm_ascend.utils import vllm_version_is
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
@@ -896,7 +898,9 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         }
         hardware_profile = get_current_hardware_profile()
         self.reuse_decode_gbsa_metadata = hardware_profile.supports(HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE)
-        self.decode_gbsa_kv_dtype = kv_cache_spec.dtype
+        self.decode_gbsa_kv_dtype = (
+            torch.uint8 if SparseAttentionQuantConfig.from_vllm_config(vllm_config).enable_a8c4 else kv_cache_spec.dtype
+        )
         self.decode_gbsa_configs: set[tuple[int, int, int, int]] = set()
         if (
             self.reuse_decode_gbsa_metadata
@@ -1116,6 +1120,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        use_a8c4: bool = False,
     ) -> None:
         if kv_cache_dtype.startswith("fp8") and not get_current_hardware_profile().supports(
             HardwareCapability.FP8_ATTENTION
@@ -1129,8 +1134,9 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
-        # Load optional native backends before graph capture.
-        self.use_union_attention = _can_use_union_attention(
+        self.use_a8c4 = use_a8c4
+        # The current Union path requires dense FP8 pages.
+        self.use_union_attention = not self.use_a8c4 and _can_use_union_attention(
             kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size
         )
 
@@ -1156,6 +1162,15 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
 
         num_decode_tokens = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
+        extra_views = a8c4_cache_views(kv_cache) if self.use_a8c4 else None
+        prefill_cache = kv_cache
+        decode_cache = kv_cache
+        fp4_scales = None
+        if extra_views is not None:
+            (k8, _, ks, k4), (v8, _, vs, v4) = extra_views
+            prefill_cache = (k8, v8)
+            decode_cache = (k4, v4)
+            fp4_scales = (ks, vs)
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
@@ -1179,7 +1194,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 )
             minimax_m3_sparse_attn_decode(
                 q[:num_decode_tokens],
-                kv_cache,
+                decode_cache,
                 decode_topk,
                 d.block_table,
                 d.seq_lens,
@@ -1189,7 +1204,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 d.decode_query_len,
                 block_size=self.block_size,
                 select_num_idx=decode_select_num_idx,
-                dequant_scale=self._dequant_scale,
+                dequant_scale=fp4_scales if fp4_scales is not None else self._dequant_scale,
                 cu_seqlens_q=d.cu_seqlens_q,
                 gbsa_metadata_cache=d.gbsa_metadata_cache,
                 indices_are_sorted=_USE_ASCENDC_INDEX_SCORE_DECODE or _TRITON_DECODE_SUPPORTS_SORTED_INDICES,
@@ -1203,7 +1218,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 assert p.union_gbsa_metadata is not None
                 minimax_m3_sparse_attn_union(
                     q[num_decode_tokens:],
-                    kv_cache,
+                    prefill_cache,
                     prefill_topk,
                     p.block_table,
                     p.cu_seqlens_q_int64,
@@ -1219,7 +1234,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
             else:
                 minimax_m3_sparse_attn(
                     q[num_decode_tokens:],
-                    kv_cache,
+                    prefill_cache,
                     prefill_topk,
                     p.block_table,
                     p.cu_seqlens_q,
