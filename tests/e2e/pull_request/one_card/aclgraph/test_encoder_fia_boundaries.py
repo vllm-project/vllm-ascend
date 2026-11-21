@@ -88,6 +88,8 @@ def test_encoder_fia_replays_changed_boundaries_in_the_same_8192_graph():
                 operation(
                     **dict(kwargs, actual_seq_lengths=ends, actual_seq_lengths_kv=ends, out=[eager_output, eager_lse])
                 )
+                # The eager reference and update task share scratch workspace.
+                capture_stream.synchronize()
                 output.fill_(float("nan"))
                 # Match the non-ENPU production order: replay waits for the update event.
                 graph.replay()
