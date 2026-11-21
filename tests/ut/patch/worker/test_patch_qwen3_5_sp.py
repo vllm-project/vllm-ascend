@@ -48,6 +48,14 @@ class TestEnableDenseSp:
             monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", env_value)
         assert not enable_dense_sp(_make_vllm_config(enable_flashcomm1=False))
 
+    @pytest.mark.parametrize("explicit,legacy", [(False, "1"), (True, "0"), ("false", "true")])
+    def test_explicit_switch_overrides_legacy(self, monkeypatch, explicit, legacy):
+        monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", legacy)
+        config = _make_vllm_config(enable_flashcomm1=explicit)
+        expected = explicit is True
+        assert enable_dense_sp(config) is expected
+        assert enable_sp(config) is expected
+
     def test_falsey_string_switch_stays_disabled(self, monkeypatch):
         monkeypatch.delenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", raising=False)
         config = _make_vllm_config()

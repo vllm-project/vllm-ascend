@@ -53,12 +53,12 @@ def _flashcomm_switch_enabled(vllm_config) -> bool:
     config-time resolution can never diverge.
     """
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    switch = additional_config.get("enable_flashcomm1", False)
+    if "enable_flashcomm1" not in additional_config:
+        return os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+    switch = additional_config["enable_flashcomm1"]
     if isinstance(switch, str):
         return switch.strip().lower() in ("1", "true")
-    if bool(switch):
-        return True
-    return os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+    return bool(switch)
 
 
 # Dense (non-MoE) model families that run sequence parallelism through the
