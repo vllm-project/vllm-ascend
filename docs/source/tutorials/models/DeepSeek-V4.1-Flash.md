@@ -2882,3 +2882,18 @@ For common environment, installation, and parameter issues, refer to the
 - The 950DT pooling example uses Memcache for storage and
   `MooncakeHybridConnector` for P-to-D KV transfer. Verify external pool
   hits as described in [Section 5.3.1.4](#5314-start-the-proxy-and-verify-pooling).
+
+
+### DSpark adaptive verification with PCP
+
+MRV2 supports DSpark `enable_adaptive_verification=true` with
+`--prefill-context-parallel-size` greater than one. Use
+`--decode-context-parallel-size 1` for the V4.1 replicated caches and the
+`FULL_DECODE_ONLY` graph mode required by adaptive verification.
+The DSpark checkpoint must provide a confidence head.
+
+Prefill is partitioned across PCP ranks. Adaptive decode verification runs
+replicated on each PCP rank, even when `pcp_shard_decode_requests` is enabled,
+so changing per-request draft budgets retain the captured graph layout.
+The V4.1 variable-length graph query bound is limited by the C2 state ring;
+wider verification queries use the existing graph fallback.

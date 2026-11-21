@@ -875,6 +875,15 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if (
+            batch_state is not None
+            and self.pcp_manager is not None
+            and self.adaptive_verification is not None
+            and scheduler_output.scheduled_spec_decode_tokens
+        ):
+            num_tokens = self.pcp_manager.sync_adaptive_budget(self.adaptive_verification)
+            batch_state = batch_state._replace(num_tokens=num_tokens)
+            uniform_token_count = None
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
@@ -1029,8 +1038,8 @@ class NPUModelRunner(GPUModelRunner):
                 batch_desc.cg_mode,
             )
 
-            # Non-fia backends skip padding query boundary when using adaptive verification
-            if self.use_fia:
+            # PCP also needs exact host boundaries for rank-local partitioning.
+            if self.use_fia or self.pcp_manager is not None:
                 self._sync_adaptive_fia_query_start_loc(
                     query_start_loc_np,
                     query_start_loc,
@@ -1162,10 +1171,20 @@ class NPUModelRunner(GPUModelRunner):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             # TODO: only populated for R-SWA (not supported yet).
             prompt_lens=prompt_lens,
+            max_query_len=batch_desc.max_query_len,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
+        if adaptive_verification_active and self.pcp_manager is not None:
+            # PCP partitions using host request widths. The scheduler widths
+            # are upper bounds; use the admitted device allocation mirrored
+            # above for FIA, including zero and partial verification budgets.
+            actual_widths = np.diff(query_start_loc_np[: num_reqs + 1]).copy()
+            input_batch.num_scheduled_tokens = actual_widths
+            input_batch.num_tokens = int(query_start_loc_np[num_reqs])
+            input_batch.is_padding = self.prepare_padding_mask(input_batch.num_tokens, num_tokens_after_padding)
+
         # vLLM main (#57980) dropped the module-level maybe_partition_pcp_batch
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
