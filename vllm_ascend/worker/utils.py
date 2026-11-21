@@ -19,6 +19,61 @@ from vllm.v1.worker.utils import (
 from vllm_ascend.utils import vllm_version_is
 
 
+def _copy_dense_pages_async(block_views: Sequence[torch.Tensor], copies: Sequence[KVCacheBlockCopy]) -> None:
+    """Submit consecutive dense cache segments in one stream-ordered batch."""
+    count = block_views[0].shape[0]
+    pairs = []
+    for copy in copies:
+        src, dst = copy.src_block_id, copy.dst_block_id
+        if not (-count <= src < count and -count <= dst < count):
+            raise IndexError("KV cache copy block index out of range")
+        pairs.append((src % count, dst % count))
+    overlaps = not {src for src, _ in pairs}.isdisjoint(dst for _, dst in pairs)
+    src_ptrs: list[int] = []
+    dst_ptrs: list[int] = []
+    sizes: list[int] = []
+    device = block_views[0].device
+    with torch.npu.device(device):
+        stream = torch.npu.current_stream()
+        if overlaps:
+            # Each segment's scatter is queued before the next gather.
+            # Only the largest segment needs scratch space.
+            max_page_size = max(view.numel() * view.element_size() for view in block_views) // count
+            scratch = torch.empty(len(pairs) * max_page_size, dtype=torch.uint8, device=device)
+            scratch.record_stream(stream)
+            scratch_base = scratch.data_ptr()
+        for blocks in block_views:
+            element_size = blocks.element_size()
+            size = blocks.numel() // count * element_size
+            if size == 0:
+                continue
+            stride = blocks.stride(0) * element_size
+            blocks.record_stream(stream)
+            base = blocks.data_ptr()
+            sources = [base + src * stride for src, _ in pairs]
+            destinations = [base + dst * stride for _, dst in pairs]
+            if overlaps:
+                # Snapshot each segment before writing it. Segments may alias,
+                # so preserve their original gather/scatter order on the stream.
+                scratch_ptrs = [scratch_base + i * size for i in range(len(pairs))]
+                src_ptrs.extend(sources + scratch_ptrs)
+                dst_ptrs.extend(scratch_ptrs + destinations)
+                sizes.extend([size] * (2 * len(pairs)))
+            else:
+                src_ptrs.extend(sources)
+                dst_ptrs.extend(destinations)
+                sizes.extend([size] * len(pairs))
+        if not sizes:
+            return
+        torch.ops._C_ascend.swap_blocks_batch(
+            torch.tensor(src_ptrs, dtype=torch.int64, device="cpu"),
+            torch.tensor(dst_ptrs, dtype=torch.int64, device="cpu"),
+            torch.tensor(sizes, dtype=torch.int64, device="cpu"),
+            2,
+        )
+        torch.autograd.graph.increment_version(block_view for block_view in block_views if block_view.numel())
+
+
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
     num_blocks: int,
@@ -102,6 +157,8 @@ def copy_kv_cache_blocks_inplace(
     cache_tensors = selected
 
     device = cache_tensors[0].device
+    use_native_copy = device.type == "npu" and hasattr(torch.ops._C_ascend, "swap_blocks_batch")
+    dense_block_views: list[torch.Tensor] = []
     for tensor in cache_tensors:
         assert tensor.device == device
         assert tensor.shape[0] % num_blocks == 0
@@ -119,9 +176,19 @@ def copy_kv_cache_blocks_inplace(
             stride=(tensor.stride(0) * kernel_blocks_per_block, tensor.stride(0), *tensor.stride()[1:]),
             storage_offset=tensor.storage_offset(),
         )
+        if use_native_copy and not blocks.requires_grad:
+            page = blocks[0]
+            if page.is_contiguous() and blocks.stride(0) >= page.numel():
+                dense_block_views.append(blocks)
+                continue
+        if dense_block_views:
+            _copy_dense_pages_async(dense_block_views, kv_cache_block_copies)
+            dense_block_views.clear()
         source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
         for index, copy in enumerate(kv_cache_block_copies):
             blocks[copy.dst_block_id].copy_(source_blocks[index])
+    if dense_block_views:
+        _copy_dense_pages_async(dense_block_views, kv_cache_block_copies)
 
 
 def _group_tensor_strides(
