@@ -31,7 +31,14 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
 )
+from vllm_ascend.attention.dsa_attn_kv_plan import write_dsa_cache
 from vllm_ascend.attention.indexer import AscendSFAIndexerCache
+from vllm_ascend.attention.quant_sparse_flash_mla import (
+    HIF8_QUANT_MODE,
+    SMLA_QUANT_METADATA_SIZE,
+    quant_sparse_flash_mla,
+    quant_sparse_flash_mla_metadata,
+)
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -98,7 +105,7 @@ TQ_TILE_SIZE = 128
 SFA_NOPE_PROLOG_SUPPORTED_DIMS = ((256, 512, 1536), (256, 512, 2048))
 
 
-def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length, *, hif8=False):
     """Derive the operator's core-split plan for one specific set of inputs.
 
     ``cu_seqlens_q`` and ``topk_length`` have to be the very tensors the
@@ -108,7 +115,7 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
     interface enforces the second half of that itself - with ori_mask_mode 0 and
     a non-zero ori_topk it rejects an absent ori_topk_length.
     """
-    return sparse_flash_mla_metadata(
+    kwargs = dict(
         num_heads_q=num_heads,
         num_heads_kv=1,
         head_dim=head_dim,
@@ -141,14 +148,15 @@ def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_l
         layout_kv="PA_BBND",
         has_ori_kv=True,
         has_cmp_kv=False,
-        device=str(metadata.seq_lens.device),
     )
+    if hif8:
+        return quant_sparse_flash_mla_metadata(quant_mode=HIF8_QUANT_MODE, **kwargs)
+    return sparse_flash_mla_metadata(device=str(metadata.seq_lens.device), **kwargs)
 
 
-def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
-    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length)
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk, cu_seqlens_q, topk_length, *, hif8=False):
+    generated = generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length, hif8=hif8)
     if generated.numel() != buffer.numel():
-        # The persistent buffer is sized by the operator's fixed [1024] contract.
         # A generated plan of any other size means this build does not match the
         # operator this buffer was allocated for; say so here rather than letting
         # copy_ decide.
@@ -172,9 +180,12 @@ def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch
         raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
 
 
-def sparse_mla(query, cache, indices, metadata, scale):
+def sparse_mla(query, cache, indices, metadata, scale, *, hif8_scales=None):
     """Attend to original latent KV, using the platform's NoPE operator."""
     cache = _view_cache_as_operator_pages(cache, metadata.block_size)
+    hif8 = hif8_scales is not None
+    if hif8 and metadata.smla_metadata is None:
+        raise RuntimeError("HIF8 sparse MLA requires a QuantSparseFlashMla metadata buffer.")
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -204,8 +215,16 @@ def sparse_mla(query, cache, indices, metadata, scale):
             sorted_indices.shape[-1],
             cu_seqlens_q,
             topk_length,
+            hif8=hif8,
         )
-        result = sparse_flash_mla(
+        attention_op = sparse_flash_mla
+        quant_kwargs = {}
+        if hif8_scales is not None:
+            q_scale_reciprocal, q_descale, kv_descale = hif8_scales
+            query = _hif8_quantize(query, q_scale_reciprocal)
+            attention_op = quant_sparse_flash_mla
+            quant_kwargs = {"q_descale": q_descale, "ori_kv_descale": kv_descale}
+        result = attention_op(
             query.contiguous(),
             ori_kv=cache,
             ori_sparse_indices=sorted_indices,
@@ -226,6 +245,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             layout_kv="PA_BBND",
             topk_value_mode=1,
             return_softmax_lse=False,
+            **quant_kwargs,
         )
     else:
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
@@ -249,6 +269,14 @@ def sparse_mla(query, cache, indices, metadata, scale):
     return result[0]
 
 
+def _hif8_quantize(x: torch.Tensor, scale_reciprocal: torch.Tensor) -> torch.Tensor:
+    # Multiply by the reciprocal of the ModelSlim descale. TorchNPU returns
+    # HIFLOAT8 as raw uint8 bytes, which are also the cache storage format.
+    # aclnnAscendQuantV3 requires the scale dtype to match x for HIFLOAT8
+    # output (bf16 x + fp32 scale is rejected with EZ0021), so cast here.
+    return torch_npu.npu_quantize(x.contiguous(), scale_reciprocal.to(x.dtype), None, torch_npu.hifloat8, -1, False)
+
+
 class SparseMLAMetadataState:
     """Persistent operator buffers for NoPE within the shared SFA builder.
 
@@ -256,7 +284,7 @@ class SparseMLAMetadataState:
     Pool construction and scoring remain outside operator dispatch.
     """
 
-    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None):
+    def __init__(self, kv_cache_spec, vllm_config, device, kernel_block_size=128, num_heads=None, *, hif8=False):
         block_size = kv_cache_spec.block_size
         if block_size <= 0 or block_size % kernel_block_size:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
@@ -284,7 +312,11 @@ class SparseMLAMetadataState:
                 if num_heads is None
                 else num_heads
             )
-            self.metadata_buffer = torch.empty(SMLA_METADATA_SIZE, dtype=torch.int32, device=device)
+            self.metadata_buffer = torch.empty(
+                SMLA_QUANT_METADATA_SIZE if hif8 else SMLA_METADATA_SIZE,
+                dtype=torch.int32,
+                device=device,
+            )
             self.length_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 1,
@@ -561,6 +593,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+        self.hif8 = getattr(kv_cache_spec, "cache_sparse_sfa_hif8", False)
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
@@ -736,7 +769,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     def _prepare_nope_metadata(self, metadata: AscendSFAMetadata, draft_index: int | None) -> None:
         if draft_index not in self.nope_states:
             self.nope_states[draft_index] = SparseMLAMetadataState(
-                self.kv_cache_spec, self.vllm_config, self.device, self.kernel_block_size
+                self.kv_cache_spec,
+                self.vllm_config,
+                self.device,
+                self.kernel_block_size,
+                hif8=self.hif8,
             )
         self.nope_states[draft_index].prepare(metadata)
 
@@ -925,6 +962,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.turboquant = TurboQuantLatent() if self.enable_sparse_sfa_turboquant else None
         self.preprocess_type = PreprocessType.NATIVE
 
+        # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe): the flag
+        # and the static per-tensor scales are picked up from the attention
+        # layer in process_weights_after_loading, once the weights are loaded.
+        self.enable_sparse_sfa_hif8 = False
+        self.hif8_q_descale: torch.Tensor | None = None
+        self.hif8_kv_descale: torch.Tensor | None = None
+        self.hif8_q_scale_reciprocal: torch.Tensor | None = None
+        self.hif8_kv_scale_reciprocal: torch.Tensor | None = None
+
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
@@ -1051,6 +1097,29 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self._parallel_o_proj is not None:
             self._parallel_o_proj.enable()
+
+        self._load_hif8_quant_scales()
+
+    def _load_hif8_quant_scales(self) -> None:
+        """Pick up the HIF8 C8 flag and the static per-tensor scales.
+
+        The quantization scheme stores the processed scales on the attention
+        layer (registered in the static forward context); the impl reads them
+        once the weights are loaded. Layers without the recipe keep the
+        disabled defaults from ``__init__``.
+        """
+        if self.layer_name is None:
+            return
+        layer = self.vllm_config.compilation_config.static_forward_context.get(self.layer_name)
+        if layer is None or not getattr(layer, "hif8_quant_layer", False):
+            return
+        if self.qk_rope_head_dim != 0 or self.kv_lora_rank != 512:
+            raise ValueError(f"{self.layer_name}: HIF8 sparse MLA requires NoPE and a 512-wide latent cache.")
+        self.enable_sparse_sfa_hif8 = True
+        self.hif8_q_descale = layer.hif8_q_descale
+        self.hif8_kv_descale = layer.hif8_kv_descale
+        self.hif8_q_scale_reciprocal = layer.hif8_q_scale_reciprocal
+        self.hif8_kv_scale_reciprocal = layer.hif8_kv_scale_reciprocal
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):
@@ -1421,13 +1490,24 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+            if self.enable_sparse_sfa_hif8:
+                # Per-tensor-quantize the latent KV to HIF8 with the layer's
+                # static scale; the cache holds the raw HIFLOAT8 bytes.
+                assert self.hif8_kv_scale_reciprocal is not None
+                values = _hif8_quantize(values, self.hif8_kv_scale_reciprocal)
             cache = kv_cache[0]
-            # The hybrid cache configuration keeps NoPE main KV pages packed.
-            torch_npu.npu_scatter_nd_update_(
-                cache.view(-1, self.kv_lora_rank),
-                slots[: values.shape[0]].view(-1, 1),
-                values.to(cache.dtype),
-            )
+            write_slots = slots[: values.shape[0]]
+            values = values.to(cache.dtype)
+            if cache.is_contiguous():
+                torch_npu.npu_scatter_nd_update_(
+                    cache.view(-1, self.kv_lora_rank),
+                    write_slots.view(-1, 1),
+                    values,
+                )
+            else:
+                # GLM-Next shares physical pages with recurrent state, whose
+                # padding can make the MLA block stride larger than its payload.
+                write_dsa_cache(cache, values, write_slots)
             return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1825,7 +1905,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             return self.turboquant.inverse(attn_out)
         if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
-            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
+            hif8_scales = None
+            if self.enable_sparse_sfa_hif8:
+                assert (
+                    self.hif8_q_scale_reciprocal is not None
+                    and self.hif8_q_descale is not None
+                    and self.hif8_kv_descale is not None
+                )
+                hif8_scales = (self.hif8_q_scale_reciprocal, self.hif8_q_descale, self.hif8_kv_descale)
+            return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale, hif8_scales=hif8_scales)
         if self.qk_rope_head_dim == 0:
             # Present packed NoPE cache with the logical page size used by its metadata.
             cache = kv_cache[0]

@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -79,6 +79,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    HIF8_C8_KV_CACHE_DTYPE,
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
@@ -173,7 +174,9 @@ class AscendMLAAttention(MLAAttention):
         if model_type == "kimi_linear":
             # Preserve the existing Kimi Linear cache head-count contract.
             storage_heads = spec.num_heads
-        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8 = self._get_kv_cache_format(spec)
+        head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8 = self._get_kv_cache_format(
+            spec
+        )
 
         # Preserve upstream metadata and apply all owner fields together.
         # Reuse the physical packing selected by the execution implementation.
@@ -185,22 +188,33 @@ class AscendMLAAttention(MLAAttention):
             ),
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
+            cache_sparse_sfa_hif8=use_sfa_hif8,
             store_on_host=(
                 not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,
+            kv_quant_mode=(
+                KVQuantMode.NONE
+                if spec.cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE and not use_sfa_hif8
+                else spec.kv_quant_mode
+            ),
         )
         return AscendMLAAttentionSpec(**values)
 
-    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool]:
+    def _get_kv_cache_format(self, spec: MLAAttentionSpec) -> tuple[int, torch.dtype, str | None, bool, bool, bool]:
         """Resolve cache dimensions, dtype and SFA flags from the execution format."""
         # Keep TurboQuant's existing precedence when both SFA switches are set.
         use_sfa_turboquant = getattr(self.impl, "enable_sparse_sfa_turboquant", False)
         use_sfa_c8 = not use_sfa_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
         use_packed_sfa = use_sfa_turboquant or use_sfa_c8
         use_fa_quant = getattr(self.impl, "fa_quant_layer", False)
+        # HIF8 C8 is per-layer (ModelSlim QK_HIF8_PER_TENSOR recipe) and never
+        # coexists with the packed C8/TurboQuant layouts or dense FA quant.
+        use_sfa_hif8 = (
+            not use_packed_sfa and not use_fa_quant and bool(getattr(self.impl, "enable_sparse_sfa_hif8", False))
+        )
         head_size = spec.head_size
         dtype = spec.dtype
         cache_dtype_str = spec.cache_dtype_str
@@ -217,8 +231,14 @@ class AscendMLAAttention(MLAAttention):
             head_size = self.impl.head_size + self.qk_rope_head_dim
             dtype = self.impl.dtype
             cache_dtype_str = None
+        elif use_sfa_hif8:
+            dtype = torch.uint8
+        elif cache_dtype_str == HIF8_C8_KV_CACHE_DTYPE:
+            # The global dtype does not select layers without a ModelSlim recipe.
+            dtype = self.impl.vllm_config.model_config.dtype
+            cache_dtype_str = "auto"
 
-        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8
+        return head_size, dtype, cache_dtype_str, use_sfa_turboquant, use_sfa_c8, use_sfa_hif8
 
 
 @dataclass
