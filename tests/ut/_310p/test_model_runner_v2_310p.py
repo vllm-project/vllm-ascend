@@ -94,6 +94,12 @@ def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 
 
+def test_config_accepts_data_parallelism() -> None:
+    config = _make_vllm_config()
+    config.parallel_config.data_parallel_size = 2
+    NPUModelRunner310V2._validate_config(config)
+
+
 @pytest.mark.parametrize(
     ("has_mamba", "uses_eagle_block_drop", "num_spec_tokens", "expected"),
     [
@@ -644,15 +650,22 @@ def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, s
     "setting",
     [
         "pipeline_parallel_size",
-        "data_parallel_size",
         "decode_context_parallel_size",
         "prefill_context_parallel_size",
     ],
 )
-def test_config_rejects_non_tp_parallelism(setting: str) -> None:
+def test_config_rejects_unsupported_parallelism(setting: str) -> None:
     config = _make_vllm_config()
     setattr(config.parallel_config, setting, 2)
-    with pytest.raises(NotImplementedError, match="only supports tensor parallelism"):
+    with pytest.raises(NotImplementedError, match=setting):
+        NPUModelRunner310V2._validate_config(config)
+
+
+def test_config_rejects_expert_parallelism_with_data_parallelism() -> None:
+    config = _make_vllm_config()
+    config.parallel_config.data_parallel_size = 2
+    config.parallel_config.enable_expert_parallel = True
+    with pytest.raises(NotImplementedError, match="Expert parallelism is not supported"):
         NPUModelRunner310V2._validate_config(config)
 
 
@@ -1423,6 +1436,39 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+
+def test_worker_binds_to_assigned_dp_device(monkeypatch) -> None:
+    from vllm_ascend._310p import worker_310p
+    from vllm_ascend.platform import NPUPlatform
+
+    worker = object.__new__(worker_310p.NPUWorker310)
+    worker.local_rank = 0
+    worker.parallel_config = SimpleNamespace(
+        assigned_physical_gpu_ids=[3],
+        distributed_executor_backend="mp",
+        data_parallel_size=1,
+        local_world_size=1,
+        nnodes_within_dp=1,
+        data_parallel_backend="mp",
+    )
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setattr("vllm_ascend.worker.worker.current_platform", NPUPlatform)
+    monkeypatch.setattr(worker_310p, "is_rc_device", lambda: False)
+    monkeypatch.setattr(worker, "_get_gpu_memory_utilization", lambda: 0.5)
+    monkeypatch.setattr(worker, "_init_worker_distributed_environment", MagicMock())
+    monkeypatch.setattr(worker, "model_config", SimpleNamespace(seed=42), raising=False)
+    monkeypatch.setattr(worker_310p, "set_random_seed", MagicMock())
+    snapshot = SimpleNamespace(total_memory=2000, free_memory=1000)
+    with (
+        patch.object(worker_310p, "MemorySnapshot", return_value=snapshot),
+        patch.object(torch.npu, "set_device") as set_device,
+        patch.object(torch.npu, "empty_cache"),
+        patch("vllm.platforms.interface._assigned_physical_gpu_ids", None),
+    ):
+        assert worker._init_device() == torch.device("npu:1")
+    set_device.assert_called_once_with(torch.device("npu:1"))
+    assert worker.local_rank == 0
 
 
 @pytest.mark.parametrize(

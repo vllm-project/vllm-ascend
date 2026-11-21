@@ -200,20 +200,17 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 
         parallel_config = vllm_config.parallel_config
-        # TODO: Restore data parallel support in the next 310P MRV2 iteration.
         # Pipeline and context parallelism remain unsupported on 310P.
         unsupported_parallel = {
             "pipeline_parallel_size": getattr(parallel_config, "pipeline_parallel_size", 1),
-            "data_parallel_size": getattr(parallel_config, "data_parallel_size", 1),
             "decode_context_parallel_size": getattr(parallel_config, "decode_context_parallel_size", 1),
             "prefill_context_parallel_size": getattr(parallel_config, "prefill_context_parallel_size", 1),
         }
         enabled = [name for name, size in unsupported_parallel.items() if size != 1]
         if enabled:
-            raise NotImplementedError(
-                f"310P model runner v2 only supports tensor parallelism; unsupported settings: {', '.join(enabled)}."
-            )
+            raise NotImplementedError(f"310P model runner v2 does not support: {', '.join(enabled)}.")
         if getattr(parallel_config, "enable_expert_parallel", False):
+            # 310P's MoeInitRoutingV2 rejects partial global expert ranges.
             raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
         if vllm_config.speculative_config is not None:
             spec = vllm_config.speculative_config
