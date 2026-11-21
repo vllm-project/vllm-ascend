@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.config import KVTransferConfig
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -13,10 +12,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseReuseLayout,
-    apply_layerwise_kv_cache_plan,
-)
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -87,21 +82,10 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
     monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: cache_kind == "sfa_c8")
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _: False)
-    if reuse_enabled:
-        layout = LayerwiseReuseLayout(
-            layers=(0, 1),
-            cache_layer_indices=dict(zip(names, (0, 1))),
-            kv_cache_tensors=tuple(config.kv_cache_tensors),
-            cache_view_sizes=dict.fromkeys(names, size),
-            prefetch_layer_map={1: (0,)} if zero_stride else {},
-            independent_layers=[],
-            num_prefetch_layers=1,
-            reused_cache_names=frozenset(names) if zero_stride else frozenset(),
-            draft_entry_names=frozenset(),
-        )
-        config = apply_layerwise_kv_cache_plan(
-            config, KVTransferConfig(kv_connector="AscendStoreConnector", kv_role="kv_producer"), layout
-        )
+    shares = reuse_enabled and zero_stride
+    view_sizes = {name: (config.num_blocks - 1) * max_page_size + spec.page_size_bytes for name, spec in specs.items()}
+    reuse_layout = SimpleNamespace(cache_view_sizes=view_sizes) if shares else None
+    monkeypatch.setattr(attn_utils, "get_layerwise_reuse_layout", lambda _: reuse_layout)
     layer = SimpleNamespace(get_attn_backend=lambda: SimpleNamespace(is_sparse=lambda: False))
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: dict.fromkeys(names, layer))
     allocations = []
@@ -112,17 +96,15 @@ def test_real_allocator_aliases_only_planned_slots(monkeypatch, reuse_enabled, z
 
     monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate)
     raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=torch.device("cpu"))
-    shares = reuse_enabled and zero_stride
-    assert len(allocations) == (1 if reuse_enabled else 2)
-    if reuse_enabled:
-        # Planned caches are physical byte views; reshape splits components later.
-        assert isinstance(raw[names[0]], torch.Tensor)
-        assert raw[names[0]].numel() == size
-        assert (raw[names[0]] is raw[names[1]]) == shares
-    else:
-        assert raw[names[0]] is not raw[names[1]]
+    assert len(allocations) == (1 if shares else 2)
+    if shares:
+        assert allocations == [size]
+        assert {name: tensor.numel() for name, tensor in raw.items()} == view_sizes
     first = raw[names[0]] if isinstance(raw[names[0]], torch.Tensor) else raw[names[0]][0]
     second = raw[names[1]] if isinstance(raw[names[1]], torch.Tensor) else raw[names[1]][0]
+    assert (first.data_ptr() == second.data_ptr()) == shares
     first.fill_(7)
-    assert torch.all(second == (7 if shares else 0))
+    shared_bytes = min(first.numel(), second.numel()) if shares else 0
+    assert torch.all(second[:shared_bytes] == 7)
+    assert torch.all(second[shared_bytes:] == 0)
     assert config.kv_cache_tensors[0].layers == names

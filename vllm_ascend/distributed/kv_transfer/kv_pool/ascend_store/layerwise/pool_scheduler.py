@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 from typing import Any
-from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -12,6 +11,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_backing_bytes,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -23,30 +25,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
-    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
-        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
-        if self.layerwise_offload and request_tuple is not None:
-            # Verifier rows have no corresponding input KV/state to snapshot.
-            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
-        if self.layerwise_offload and request_tracker.layerwise_request_id is None:
-            request_tracker.layerwise_request_id = uuid4().hex
-        meta = super()._build_req_meta(request_tracker, *args, **kwargs)
-        if meta is not None and self.layerwise_offload and request_tuple is not None:
-            request = request_tuple[0]
-            meta.needs_private_snapshot = not (
-                meta.target_token_len == meta.num_prompt_tokens
-                and not request.resumable
-                and request.num_output_tokens + 1 + (request.num_output_placeholders > 0) >= request.max_tokens
-            )
-        return meta
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         use_layerwise: bool,
         kv_cache_config: KVCacheConfig | None = None,
-        *,
-        layerwise_offload: bool = False,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
@@ -65,7 +48,9 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        self.layerwise_offload = self.use_layerwise_transfer and layerwise_offload
+        self.layerwise_offload = (
+            self.use_layerwise_transfer and get_layerwise_reuse_backing_bytes(kv_cache_config) is not None
+        )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -136,16 +121,12 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
-        if self.layerwise_offload and (
-            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
-        ):
-            # Probe the endpoint we can actually resume from. Trimming a full
-            # hit afterwards could select an earlier recurrent checkpoint that was
-            # never produced by chunked prefill.
-            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
-            if token_len <= 0:
-                return 0
         if self.cache_coordinator is not None:
+            if self.use_eagle:
+                final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+                token_len = min(token_len, final_block_start)
+                if token_len <= 0:
+                    return 0
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
             )

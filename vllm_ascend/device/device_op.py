@@ -575,6 +575,8 @@ class BaseDeviceAdaptor:
         enable_sparse_li_c8: bool,
         enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
+        *,
+        topk: int = 2048,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         if enable_sparse_li_c4:
@@ -599,7 +601,7 @@ class BaseDeviceAdaptor:
                 key_quant_mode=0,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
                 pre_tokens=INT64_MAX,
                 next_tokens=INT64_MAX,
@@ -614,7 +616,7 @@ class BaseDeviceAdaptor:
                 block_table=attn_metadata.block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
             )
         return topk_indices
@@ -1857,6 +1859,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         enable_sparse_li_c8: bool,
         enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
+        *,
+        topk: int = 2048,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
@@ -1892,7 +1896,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 num_heads_q=num_heads_q,
                 num_heads_k=1,
                 head_dim=head_dim,
-                topk=2048,
+                topk=topk,
                 quant_mode=5,
                 cu_seqlens_q=cu_seqlens_q,
                 seqused_k=seqused_k,
@@ -1915,7 +1919,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 weights_c4,
                 q_li_scale,
                 key_dequant_scale,
-                topk=2048,
+                topk=topk,
                 quant_mode=5,
                 cu_seqlens_q=cu_seqlens_q,
                 seqused_k=seqused_k,
@@ -1950,7 +1954,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     key_quant_mode=0,
                     layout_query="TND",
                     layout_key="PA_BSND",
-                    sparse_count=2048,
+                    sparse_count=topk,
                     sparse_mode=3,
                     pre_tokens=INT64_MAX,
                     next_tokens=INT64_MAX,
@@ -1965,7 +1969,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     block_table=attn_metadata.block_table,
                     layout_query="TND",
                     layout_key="PA_BSND",
-                    sparse_count=2048,
+                    sparse_count=topk,
                     sparse_mode=3,
                 )
         else:
@@ -1978,7 +1982,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 block_table=attn_metadata.block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
-                sparse_count=2048,
+                sparse_count=topk,
                 sparse_mode=3,
             )
         return topk_indices

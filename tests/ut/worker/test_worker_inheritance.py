@@ -9,6 +9,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm_ascend.utils import vllm_version_is
+
 # Remove an entry and its NPUWorker stub together only after validating the
 # inherited contract.
 UNVERIFIED_GPU_WORKER_METHODS = (
@@ -187,7 +189,8 @@ def construct_worker(setup, worker_class=None, cache_dtype="auto"):
     assert worker.is_driver_worker is True
     assert worker._sleep_saved_buffers == {}
     assert worker._sleep_saved_parameters == {}
-    assert worker._sleep_saved_draft_buffers == {}
+    if vllm_version_is("0.33.0"):
+        assert worker._sleep_saved_draft_buffers == {}
     assert worker.weight_transfer_engine is None
     assert worker._weight_update_active is False
     assert worker._weight_update_is_draft is False

@@ -109,6 +109,8 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, kv_
     register_all_kvcache_specs(None)
     init_none_hash(sha256)
     resolved_block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
+    # Match EngineCore initialization because the connector reads the cache config.
+    plan.hash_block_size = hash_size
     scheduler = Scheduler(
         config, plan, StructuredOutputManager(config), block_size=resolved_block_size, hash_block_size=hash_size
     )

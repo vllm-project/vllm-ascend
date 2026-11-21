@@ -8,11 +8,23 @@ from .test_kv_trace_runtime import message, reasons
 from .test_kv_trace_runtime import runtime_fixture as runtime_fixture
 
 
-def test_new_cached_and_resumed_messages(runtime):
+@pytest.mark.parametrize("release", [False, True])
+def test_new_cached_and_resumed_messages(runtime, monkeypatch, release):
+    monkeypatch.setattr(runtime.state_subject, "vllm_version_is", lambda _: release)
     runtime.state.bind(message())
-    runtime.state.bind(message(bindings={}, counts={"r": 1}, cached={"r": ([[2]], 128)}))
+    cached = message(bindings={}, counts={"r": 1}, cached={"r": ([[2]], 128)})
+    if not release:
+        del cached.scheduled_cached_reqs.resumed_req_ids
+    runtime.state.bind(cached)
     assert runtime.state.requests["r"] == ((1, 2),)
-    runtime.state.bind(message(bindings={}, counts={"r": 1}, cached={"r": ([[3]], 0)}, resumed={"r"}))
+    resumed = (
+        message(bindings={}, counts={"r": 1}, cached={"r": ([[3]], 0)}, resumed={"r"})
+        if release
+        else message(bindings={"r": [[3]]})
+    )
+    if not release:
+        del resumed.scheduled_cached_reqs.resumed_req_ids
+    runtime.state.bind(resumed)
     assert runtime.state.requests["r"] == ((3,),)
     assert not reasons(runtime)
 

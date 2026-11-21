@@ -471,7 +471,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread._handle_request(load_task)
 
         sync_events[0].synchronize.assert_called_once_with()
-        self.assertTrue(save_finished[0].is_set())  # Latched until every reuse reader finishes.
+        self.assertTrue(save_finished[0].is_set())
         self.assertTrue(load_finished[1].is_set())
 
     def test_source_save_failure_stops_receiver_wait(self):

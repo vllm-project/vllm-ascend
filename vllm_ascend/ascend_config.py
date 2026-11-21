@@ -49,8 +49,8 @@ def is_mega_moe_supported() -> bool:
 
     Always read _MEGA_MOE_SUPPORTED through this accessor instead of
     ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
+    when the worker config is published, and a direct import binds a stale
+    snapshot for the bool.
     """
     global _MEGA_MOE_SUPPORTED
     if _MEGA_MOE_SUPPORTED is None:
@@ -783,6 +783,7 @@ class AscendConfig:
     num_head_replica: int = 1
 
     # ---- private derived state (init=False) ----
+    _megamoe_supported: bool = dataclasses.field(default=False, init=False, repr=False)
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
@@ -800,16 +801,15 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
+            self._megamoe_supported = False
         elif self.enable_fused_mc2 in (2, 3):
             # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
             # with the shared expert fused into the operator.
             self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+            self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not self._megamoe_supported:
                 logger.warning_once(
                     "enable_fused_mc2=3 requires the cann_ops_transformer package; "
                     "MegaMoe (and its shared-expert fusion) will be disabled."
@@ -946,7 +946,7 @@ class AscendConfig:
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
-        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not self._megamoe_supported), (
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
@@ -956,7 +956,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -1908,7 +1908,7 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
-# Only marks synchronous draft construction/loading for platform validation.
+# Marks synchronous draft construction/loading for validation and config publication.
 # Nested scopes restore their caller's marker, including on failure.
 _DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
 
@@ -1972,9 +1972,11 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Do not reuse a cached config: let AscendConfig's normal nested
         # pydantic validation report the invalid sub-config input below.
         refresh = True
-    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG, _MEGA_MOE_SUPPORTED
+    is_draft = is_draft_config_context()
     if (
-        _ASCEND_CONFIG is not None
+        not is_draft
+        and _ASCEND_CONFIG is not None
         and not refresh
         and _is_ascend_config_initialized(_ASCEND_CONFIG)
         and _INIT_VLLM_CONFIG is vllm_config
@@ -2082,9 +2084,12 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
+    if is_draft:
+        return new_config
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
+        _MEGA_MOE_SUPPORTED = new_config._megamoe_supported
         # Publish the fully validated singleton before invalidating derived
         # process caches. The next runtime read rebuilds them from new_config;
         # failed construction leaves the previous singleton/cache untouched.

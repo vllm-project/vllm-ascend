@@ -395,6 +395,12 @@ void FusedSparseAttentionOverlapMlaTiling::GetWorkspaceSize()
         workspaceSize_ += 4 * 512 * (512 + 64) * 2 * actCoreNum;
         // Cached valid MTE2-size length, partition count, 512-byte-aligned length, sizeof(int32_t), AIV core count
         workspaceSize_ += 4 * 128 * 4 * (2 * actCoreNum); // 4: cached valid MTE2-size length; 128: partition count; 4: 512-byte-aligned length; 2: AIV core count
+        // helper handshake area, independently placed: done/credit rings, 64 slots x 8 int32 per core.
+        // Ported from poolingDSA yq/opt-all0908 (helper idle-core MergeKv assist): the
+        // kernel-side InitHelperSync places the rings right after the validSize area, so
+        // the workspace must cover 2 rings * actCoreNum * 64 slots * 8 int32. Without this
+        // extension the handshake rings would overlap the accumOut area.
+        workspaceSize_ += 2 * actCoreNum * 64 * 8 * 4;
     }
 
 }
