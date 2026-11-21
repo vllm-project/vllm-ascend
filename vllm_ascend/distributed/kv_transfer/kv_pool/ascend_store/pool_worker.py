@@ -1048,6 +1048,29 @@ class BaseKVPoolWorker(ABC):
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
 
+    @property
+    def group_tp_replication_factors(self) -> tuple[int, ...]:
+        """Per-group count of aggregated workers that do not report one block.
+
+        The output aggregator counts every PP, TP and PCP worker. A logical
+        block is complete when ``reports * factor >= num_workers``. PP stages
+        store different layers of the same block, so they stay in the report
+        count. ``put_step`` replicas and PCP ranks own different blocks, so
+        they multiply the factor. DCP, align-state, KVPP and sharded Mamba
+        keep the TP ranks that must all finish on the same blocks.
+        """
+        num_groups = max(1, self.num_kv_cache_groups)
+        return tuple(self._group_tp_replication_factor(group_id) for group_id in range(num_groups))
+
+    def _group_tp_replication_factor(self, group_id: int) -> int:
+        pcp_size = max(1, self.pcp_size)
+        if self.use_kvpp or group_id in self.sharded_mamba_group_ids:
+            return 1
+        align_state = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        if self.dcp_size > 1 or align_state:
+            return pcp_size
+        return max(1, self.put_step) * pcp_size
+
     @staticmethod
     def _replace_key_field(key: str, field: str, value: int) -> str:
         marker = f"@{field}:"
@@ -1831,6 +1854,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
+                        group_idx=0,
                     )
                 )
             if stored_events:
