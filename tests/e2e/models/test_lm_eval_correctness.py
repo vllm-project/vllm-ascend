@@ -49,9 +49,13 @@ def build_model_args(eval_config, tp_size):
     }
     for s in [
         "max_images",
+        "max_num_seqs",
+        "tokenizer_mode",
         "gpu_memory_utilization",
         "enable_expert_parallel",
         "tensor_parallel_size",
+        "data_parallel_size",
+        "pipeline_parallel_size",
         "enforce_eager",
         "enable_thinking",
         "quantization",

@@ -1,0 +1,27 @@
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
+model_type: "vllm"
+hardware: "Atlas A2 (4 x Ascend 910B2C 64 GiB; TP=4, DP=1, PP=1)"
+
+serve:
+  tensor_parallel_size: 4
+  data_parallel_size: 1
+  pipeline_parallel_size: 1
+  dtype: bfloat16
+  tokenizer_mode: deepseek_r1_distill_llama
+  max_model_len: 8192
+  max_num_seqs: 2
+  gpu_memory_utilization: 0.9
+  trust_remote_code: false
+  enforce_eager: false
+
+tasks:
+  - name: "ceval-valid_accountant"
+    metrics:
+      - name: "acc,none"
+        # Full 49-example validation set, 5-shot, original BF16 checkpoint.
+        value: 0.5510
+
+num_fewshot: 5
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: 1
