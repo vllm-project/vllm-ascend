@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import os
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
@@ -144,6 +145,37 @@ from vllm_ascend.worker.v2.utils import (
     prepare_v41_source_rope,
     torch_cuda_wrapper,
 )
+
+# Device error signatures that reach ``str(exc)`` when MC2 profiling fails.
+# The kernel assert text itself goes to device stdout, not to the exception.
+_MC2_PROFILE_FAILURE_MARKERS = (
+    "507035",
+    "vector core exception",
+    "fftsplus aivector error",
+)
+
+
+def _mc2_profile_hint(message: str, mc2_tokens_capacity: int) -> str | None:
+    """Return an actionable hint for an MC2 profiling failure.
+
+    The MC2 dispatch kernel asserts on the device when its HCCL window is
+    smaller than the window the dummy needs. Only a later device-side
+    vector-core failure surfaces, blamed on an unrelated operator, so the
+    profiling path explains the likely cause instead of leaving an opaque
+    device error.
+    """
+    if not any(marker in message for marker in _MC2_PROFILE_FAILURE_MARKERS):
+        return None
+    hccl_buffsize = os.environ.get("HCCL_BUFFSIZE", "<unset>")
+    return (
+        "MC2 profiling failed with a device-side vector-core failure "
+        "(for example, error code 507035). This usually means HCCL_BUFFSIZE "
+        f"is too small: the {mc2_tokens_capacity}-token MC2 dummy needs a "
+        "larger dispatch window than the configured "
+        f"HCCL_BUFFSIZE={hccl_buffsize} MiB provides. Raise HCCL_BUFFSIZE "
+        "(for example, 2048) and retry. Set ASCEND_LAUNCH_BLOCKING=1 to "
+        "surface the kernel assert that prints the required size."
+    )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -851,27 +883,37 @@ class NPUModelRunner(GPUModelRunner):
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         global_tokens = self.max_num_tokens
         profile_tokens = get_pcp_profile_num_tokens(self.vllm_config, self.max_num_tokens, self.max_num_reqs)
-        with override_mrv2_in_profile_run(True):
-            if (
-                mc2_tokens_capacity is not None
-                and profile_tokens > mc2_tokens_capacity
-                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
-                in {MoECommType.MC2, MoECommType.FUSED_MC2}
-            ):
-                # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
-                with disable_compilation(self.get_model()):
-                    self._dummy_run(
-                        mc2_tokens_capacity,
-                        skip_attn=True,
-                        skip_eplb=True,
-                        is_profile=True,
-                        **profile_kwargs,
-                    )
-            self.max_num_tokens = profile_tokens
-            try:
-                super().profile_run(**profile_kwargs)
-            finally:
-                self.max_num_tokens = global_tokens
+        mc2_profile_capacity: int | None = None
+        try:
+            with override_mrv2_in_profile_run(True):
+                if (
+                    mc2_tokens_capacity is not None
+                    and profile_tokens > mc2_tokens_capacity
+                    and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                    in {MoECommType.MC2, MoECommType.FUSED_MC2}
+                ):
+                    mc2_profile_capacity = mc2_tokens_capacity
+                    # Call-scoped bypass: skip_compiled would need ForwardContext plumbing.
+                    with disable_compilation(self.get_model()):
+                        self._dummy_run(
+                            mc2_tokens_capacity,
+                            skip_attn=True,
+                            skip_eplb=True,
+                            is_profile=True,
+                            **profile_kwargs,
+                        )
+                self.max_num_tokens = profile_tokens
+                try:
+                    super().profile_run(**profile_kwargs)
+                finally:
+                    self.max_num_tokens = global_tokens
+        except RuntimeError as exc:
+            if mc2_profile_capacity is None:
+                raise
+            hint = _mc2_profile_hint(str(exc), mc2_profile_capacity)
+            if hint is None:
+                raise
+            raise RuntimeError(hint) from exc
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
