@@ -96,6 +96,7 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
         if dtype == self._scale_dtype:
             # Each DP replica keeps its own ETP-local scale shard on its NPU.
             return torch.zeros((num_embeddings, embedding_dim), dtype=dtype, device=device)
+        table: HostUvaBuffer | SharedUvaBuffer
         if self._shared_group is None:
             table = HostUvaBuffer((num_embeddings, embedding_dim), dtype, device, "_host_table", self)
         else:
