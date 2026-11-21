@@ -456,7 +456,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce, quant_type)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -522,6 +522,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
 
+        pertoken_scale = None
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
 
@@ -531,6 +532,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
 
+            # Quantize each token on its owner before replicating it across
+            # PCP. Dispatch already accepts INT8 inputs with per-token scales,
+            # so this halves activation traffic and avoids replicated quantization.
+            # LoRA needs the original floating-point activations.
+            if quant_type == QuantType.W8A8 and self.lora_context is None and hidden_states.shape[0] > 0:
+                hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
                 dim=0,
@@ -539,13 +546,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if pertoken_scale is not None:
+                pertoken_scale = get_pcp_group().all_gather(pertoken_scale, dim=0)
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
             router_logits=router_logits,
             mc2_mask=None,
             padded_hidden_states_shape=None,
-            pertoken_scale=None,
+            pertoken_scale=pertoken_scale,
         )
 
     def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
