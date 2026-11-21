@@ -70,7 +70,7 @@ jobs:
         platforms: 'linux/amd64'
         context: .
         file: .github/workflows/dockerfiles/Dockerfile.lint
-        push: true
+        push: ${{ github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
@@ -85,7 +85,7 @@ jobs:
         platforms: 'linux/amd64'
         context: .
         file: .github/workflows/dockerfiles/Dockerfile.lint
-        push: true
+        push: ${{ github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
