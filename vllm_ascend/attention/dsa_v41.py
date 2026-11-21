@@ -921,6 +921,74 @@ class AscendDSAV41Impl:
         _PCP_STAGE_STEP["swa_capacity"] = int(cache.capacity_blocks)
         swa_metadata._pcp_swa_async = (staged[2], (staged[0], staged[1]), plan, rebuilt, has_compressed)
 
+    def _start_owner_long_kv_stage_async(self, attn, metadata):
+        """Launch the long-KV source copy on a side stream after the writes.
+
+        Mirrors ``_maybe_stage_owner_cmp_cache`` but issues the copy early:
+        ``_forward_attention`` only joins the done event before the kernel, so
+        the copy overlaps the indexer selection.  One launch per source group
+        and step (the memo below), decode/mixed/non-owner/overflow keep the
+        synchronous path.
+        """
+        if not self.role.has_long_context:
+            return
+        cmp_metadata = metadata.attention
+        if cmp_metadata is None or getattr(attn, "packed_cache_ops", None) is not None:
+            return
+        _pcp_stage_count("long_kv", "async_attempts")
+        if getattr(cmp_metadata, "num_prefills", 0) <= 0:
+            _pcp_stage_count("long_kv", "async_skipped_nonprefill")
+            return
+        if getattr(cmp_metadata, "num_decodes", 0) > 0:
+            _pcp_stage_count("long_kv", "async_skipped_mixed")
+            return
+        config = self.pcp_config
+        if not config.owner_stage:
+            _pcp_stage_count("long_kv", "async_skipped_config")
+            return
+        from vllm_ascend.attention.context_parallel.pcp_owner_stage import get_stage_cache
+        from vllm_ascend.attention.context_parallel.pcp_owner_vmm import owner_slab_for_tensor
+
+        source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
+        if source_cache is None:
+            _pcp_stage_count("long_kv", "async_skipped_config")
+            return
+        pointer = int(source_cache.data_ptr())
+        memo = getattr(cmp_metadata, "_pcp_stage_memo", None)
+        if memo is not None and memo[0] == pointer:
+            _pcp_stage_count("long_kv", "async_memo_hit")
+            return
+        if getattr(cmp_metadata, "_pcp_stage_async", None) is not None:
+            _pcp_stage_count("long_kv", "async_pending")
+            return
+        if owner_slab_for_tensor(source_cache) is None:
+            _pcp_stage_count("long_kv", "async_skipped_nonowner")
+            return
+        num_reqs = metadata.swa.num_reqs
+        block_table = cmp_metadata.block_table[:num_reqs]
+        seq_lens = cmp_metadata.cache_seq_lens[:num_reqs]
+        cache = get_stage_cache(source_cache.device, source_cache, budget_bytes=config.owner_stage_bytes)
+        start = torch.npu.current_stream().record_event()
+        timing = _timing_enter("stage_long_kv_issue", config.enable_timing)
+        staged = cache.stage_async(
+            source_cache,
+            block_table,
+            seq_lens=seq_lens,
+            block_size=getattr(cmp_metadata, "storage_block_size", None),
+            enable_timing=config.enable_timing,
+            start_event=start,
+        )
+        _timing_exit(timing)
+        if staged is None:
+            _pcp_stage_count("long_kv", "async_skipped_overflow")
+            return
+        cmp_metadata._pcp_stage_async = (pointer, (staged[0], staged[1]), staged[2])
+        _pcp_stage_count("long_kv", "async_ok")
+        _PCP_STAGE_STEP["long_kv_max_blocks"] = max(
+            _PCP_STAGE_STEP["long_kv_max_blocks"], int(cache.last_total_blocks)
+        )
+        _PCP_STAGE_STEP["long_kv_capacity"] = int(cache.capacity_blocks)
+
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
@@ -1325,15 +1393,25 @@ class AscendDSAV41Impl:
             cmp_topk = self.topology.index_topk
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
             timing = _timing_enter("stage", self.pcp_config.enable_timing)
-            staged = _maybe_stage_owner_cmp_cache(
-                source_cache,
-                cmp_block_table,
-                metadata.attention,
-                num_reqs,
-                self.pcp_config,
-                seq_lens=cmp_seq_lens,
-                block_size=getattr(metadata.attention, "storage_block_size", None),
-            )
+            pending = getattr(metadata.attention, "_pcp_stage_async", None)
+            if pending is not None and source_cache is not None and pending[0] == int(source_cache.data_ptr()):
+                metadata.attention._pcp_stage_async = None
+                wait_timing = _timing_enter("stage_long_kv_wait", self.pcp_config.enable_timing)
+                torch.npu.current_stream().wait_event(pending[2])
+                _timing_exit(wait_timing)
+                staged = pending[1]
+                metadata.attention._pcp_stage_memo = (pending[0], staged)
+                _pcp_stage_count("long_kv", "async_consumed")
+            else:
+                staged = _maybe_stage_owner_cmp_cache(
+                    source_cache,
+                    cmp_block_table,
+                    metadata.attention,
+                    num_reqs,
+                    self.pcp_config,
+                    seq_lens=cmp_seq_lens,
+                    block_size=getattr(metadata.attention, "storage_block_size", None),
+                )
             _timing_exit(timing)
             if staged is not None:
                 source_cache, cmp_block_table = staged

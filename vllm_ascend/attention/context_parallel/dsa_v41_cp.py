@@ -752,6 +752,7 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # before the kernel.  Every rank still issues its own writes and
         # collectives unchanged: only the copy moves streams.
         self._start_owner_swa_stage_async(attn, metadata)
+        self._start_owner_long_kv_stage_async(attn, metadata)
         projector._parallel_o_proj.all_gather_weights()
         return prepared
 
