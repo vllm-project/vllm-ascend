@@ -116,7 +116,7 @@ def reference_serve_args(
 # Reuse a startup reference only for the same model, memory, TP, logical device
 # and effective child-server environment. Transport and packing do not affect it.
 _REFERENCE_SIGNATURES: dict[
-    tuple[str, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
+    tuple[str, int, float, int, int, tuple[tuple[str, str], ...]], list[tuple[str, tuple[float, ...]]]
 ] = {}
 
 
@@ -141,6 +141,7 @@ def reference_signature(
     """
     cache_key = (
         case.id,
+        source.seed,
         gpu_memory_utilization,
         tensor_parallel_size,
         device_index,
