@@ -20,8 +20,28 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.linearnorm.qsa_rope_utils import validate_qsa_rope_positions
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
+
+
+def _validate_qsa_rope_positions(
+    positions: torch.Tensor,
+    cos_sin: torch.Tensor,
+    qkv: torch.Tensor,
+    rope_dim: int,
+) -> None:
+    """Validate inputs for gathering the full rotary cache in-kernel."""
+    if positions.ndim not in (1, 2) or (positions.ndim == 2 and positions.shape[0] != 3):
+        raise ValueError("QSA positions must have shape [tokens] or [3, tokens]")
+    if positions.dtype not in (torch.int32, torch.int64):
+        raise ValueError("QSA positions must use int32 or int64")
+    if positions.shape[-1] != qkv.shape[0]:
+        raise ValueError("QSA positions and QKV projection must have the same token count")
+    if positions.device != qkv.device or cos_sin.device != qkv.device:
+        raise ValueError("QSA positions, rotary cache and QKV projection must share a device")
+    if cos_sin.ndim != 2 or cos_sin.shape[0] == 0 or cos_sin.shape[1] != rope_dim:
+        raise ValueError("QSA full rotary cache must have shape [cache_rows, rope_dim]")
+    if cos_sin.stride(1) != 1:
+        raise ValueError("QSA full rotary cache must be contiguous in its last dimension")
 
 
 @triton.jit(
@@ -334,7 +354,7 @@ def _triton_split_qkv_rmsnorm_mrope(
     if rope_dim is None:
         rope_dim = head_size
     if positions is not None:
-        validate_qsa_rope_positions(positions, cos_sin, qkv, rope_dim)
+        _validate_qsa_rope_positions(positions, cos_sin, qkv, rope_dim)
         if not qkv.is_contiguous() or qkv.shape[1] != q_size + gate_size + 2 * kv_size:
             raise ValueError("QSA QKV projection must be packed and contiguous")
         if any(
