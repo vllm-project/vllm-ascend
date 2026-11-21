@@ -139,7 +139,15 @@ class Backend(ABC):
     def batch_get_key_info(self, keys: list[str], *, for_load: bool = False):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
 
-    def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
+    def batch_alloc(
+        self,
+        keys: list[str],
+        sizes: list[int],
+        lease_ttl_ms: int = 0,
+        session_ids: list[str] | None = None,
+    ) -> list[int]:
+        # session_ids (per-key request affinity) is a MemCache-only placement
+        # hint; backends without placement control ignore it.
         raise NotImplementedError(f"{type(self).__name__} does not support batch_alloc")
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
@@ -188,11 +196,20 @@ class Backend(ABC):
         raise NotImplementedError(f"{type(self).__name__} does not support batch_get_end")
 
     @abstractmethod
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> bool | list[bool] | None:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        session_ids: list[str] | None = None,
+    ) -> bool | list[bool] | None:
         """Store a batch, returning False for a detected backend failure.
 
         A per-key boolean list preserves partial-success information. ``None``
         remains valid for legacy backends that report failures by raising.
+        ``session_ids`` optionally carries one session id per key so backends
+        can co-locate the KV cache of the same request; backends without
+        placement control ignore it.
         """
         pass
 

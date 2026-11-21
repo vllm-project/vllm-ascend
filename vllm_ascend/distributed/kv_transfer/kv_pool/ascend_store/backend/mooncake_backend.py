@@ -712,7 +712,15 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        session_ids: list[str] | None = None,
+    ) -> list[bool] | bool:
+        # session_ids (per-key request affinity) is a MemCache-only placement
+        # hint; mooncake placement is governed by its own replicate config.
         self.ensure_initialized()
         assert self.store is not None
         try:

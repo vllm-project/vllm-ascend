@@ -2060,7 +2060,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         worker.configure_dspark_prefix_cache(DSparkPrefixKeys("checkpoint", pp_size=1, tp_size=1))
                     expected_groups = [0, 2] if paired else [0, 1, 2]
                     expected_keys = [f"llama-7b@{group}@h0@0" for group in expected_groups]
-                    worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl: [101] * len(keys)
+                    worker.m_store.batch_alloc.side_effect = lambda keys, sizes, ttl, session_ids=None: [101] * len(
+                        keys
+                    )
                     info = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
                     worker.m_store.batch_get_key_info.side_effect = lambda keys, info=info, **kwargs: [info] * len(keys)
                     worker.m_store.batch_add_lease.side_effect = lambda keys, ttl: [0] * len(keys)
@@ -2072,6 +2074,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                         [key for call in worker.m_store.batch_alloc.call_args_list for key in call.args[0]],
                         expected_keys,
                     )
+                    for call in worker.m_store.batch_alloc.call_args_list:
+                        self.assertEqual(call.args[3], ["r1"] * len(call.args[0]))
                     self.assertEqual([blocks.tolist() for blocks in save.block_ids_by_group_np], [[7], [8], [9]])
                     self.assertEqual(
                         [gvas.tolist() for gvas in save.block_gvas_by_group_np],
@@ -3103,7 +3107,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         # The committed block is skipped regardless of medium; only the
         # missing block is allocated fresh within this step and transferred.
-        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS)
+        worker.m_store.batch_alloc.assert_called_once_with([fresh_key], [64], LAYERWISE_READ_LEASE_TTL_MS, ["r1"])
         self.assertEqual(request.save_keys, [fresh_key])
         self.assertNotIn(committed_key, request.save_keys)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 0])
@@ -3136,7 +3140,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker._data_plane._alloc_gvas_for_save([request])
 
         # Fail open: an unreadable pool costs bandwidth, never the blocks.
-        worker.m_store.batch_alloc.assert_called_once_with([key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS)
+        worker.m_store.batch_alloc.assert_called_once_with(
+            [key0, key1], [64, 64], LAYERWISE_READ_LEASE_TTL_MS, ["r1", "r1"]
+        )
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202, 203])
 
     def test_allocation_sentinels_are_filtered_before_int64_conversion(self):
@@ -3540,7 +3546,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                         )
                         worker.kv_send_thread = send_thread
                         worker.m_store = MagicMock()
-                        worker.m_store.put.side_effect = lambda keys, addrs, sizes: [True] * len(keys)
+                        worker.m_store.put.side_effect = lambda keys, addrs, sizes, session_ids=None: [True] * len(keys)
                         req = ReqMeta(
                             req_id="r1",
                             token_len_chunk=8,
@@ -3557,6 +3563,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                         if expected_blocks:
                             keys = worker.m_store.put.call_args.args[0]
                             self.assertEqual(len(keys), 2 * len(expected_blocks))
+                            self.assertEqual(worker.m_store.put.call_args.args[3], ["r1"] * len(keys))
                             written.extend(keys)
                             events = worker.kv_send_thread.update_kv_event.call_args.args[0]
                             self.assertEqual(len(events), len(expected_blocks))

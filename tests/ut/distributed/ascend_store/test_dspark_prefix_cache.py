@@ -53,7 +53,7 @@ class _ByteBackend:
         self.calls.append(("info", tuple(keys), for_load))
         return [_KeyInfo(self.buffers[key], key in self.readable) if key in self.buffers else None for key in keys]
 
-    def batch_alloc(self, keys, sizes, ttl):
+    def batch_alloc(self, keys, sizes, ttl, session_ids=None):
         self.calls.append(("alloc", tuple(keys)))
         addresses = []
         for key, size in zip(keys, sizes, strict=True):
@@ -117,6 +117,7 @@ def _cache_case():
     }
     cache.register(tensors, {"draft.a": 0, "draft.b": 1}, [4, 4], num_blocks=6)
     request = SimpleNamespace(
+        req_id="draft-req-1",
         num_prompt_tokens=12,
         target_token_len=12,
         block_hashes=["h0", "h1", "h2"],
@@ -227,7 +228,7 @@ def test_mixed_ssd_hit_only_copies_and_publishes_owned_memory(ssd_index):
     memory_index = 1 - ssd_index
     keys = [cache.keys.make_key(f"h{index}", 2) for index in range(2)]
 
-    def allocate_mixed(requested, sizes, ttl):
+    def allocate_mixed(requested, sizes, ttl, session_ids=None):
         assert requested == keys
         gvas = [_SSD_HIT_GVA] * len(requested)
         gvas[memory_index] = allocate([requested[memory_index]], [sizes[memory_index]], ttl)[0]

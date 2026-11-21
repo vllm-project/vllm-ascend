@@ -1823,6 +1823,36 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
 
+    def test_put_with_session_ids_builds_replicate_config(self):
+        b = self._make_backend()
+        b.store.batch_put_from_layers.return_value = [0, 0]
+
+        self.assertEqual(b.put(["k1", "k2"], [[100], [200]], [[10], [20]], ["req-1", "req-1"]), [True, True])
+
+        args = b.store.batch_put_from_layers.call_args.args
+        self.assertEqual(args[0], ["k1", "k2"])
+        self.assertEqual(args[3], MmcDirect.COPY_L2G.value)
+        self.assertEqual(args[4].sessionIds, ["req-1", "req-1"])
+
+    def test_put_without_session_ids_keeps_legacy_call_shape(self):
+        b = self._make_backend()
+        b.store.batch_put_from_layers.return_value = [0]
+
+        self.assertEqual(b.put(["k1"], [[100]], [[10]]), [True])
+
+        self.assertEqual(
+            b.store.batch_put_from_layers.call_args.args,
+            (["k1"], [[100]], [[10]], MmcDirect.COPY_L2G.value),
+        )
+
+    def test_put_with_mismatched_session_ids_raises(self):
+        b = self._make_backend()
+
+        with self.assertRaises(ValueError):
+            b.put(["k1", "k2"], [[100], [200]], [[10], [20]], ["req-1"])
+
+        b.store.batch_put_from_layers.assert_not_called()
+
     def test_put_from(self):
         b = self._make_backend()
         b.store.put_from.return_value = 0
@@ -1855,6 +1885,45 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
+
+    def test_batch_alloc_with_session_ids_builds_replicate_config(self):
+        b = self._make_backend()
+        b.store.batch_alloc.return_value = [4096, 8192]
+
+        self.assertEqual(b.batch_alloc(["k1", "k2"], [64, 64], 500, ["req-1", "req-1"]), [4096, 8192])
+
+        args = b.store.batch_alloc.call_args.args
+        self.assertEqual(args[0], ["k1", "k2"])
+        self.assertEqual(args[1], [64, 64])
+        self.assertEqual(args[2], 1)
+        self.assertEqual(args[3], 500)
+        self.assertEqual(args[4].sessionIds, ["req-1", "req-1"])
+
+    def test_batch_alloc_without_session_ids_keeps_legacy_call_shape(self):
+        b = self._make_backend()
+        b.store.batch_alloc.return_value = [4096]
+
+        self.assertEqual(b.batch_alloc(["k1"], [64]), [4096])
+
+        self.assertEqual(b.store.batch_alloc.call_args.args, (["k1"], [64], 1, 0))
+
+    def test_batch_alloc_with_mismatched_session_ids_raises(self):
+        b = self._make_backend()
+
+        with self.assertRaises(ValueError):
+            b.batch_alloc(["k1", "k2"], [64, 64], 0, ["req-1"])
+
+        b.store.batch_alloc.assert_not_called()
+
+    def test_put_from_with_session_id_builds_replicate_config(self):
+        b = self._make_backend()
+        b.store.put_from.return_value = 0
+
+        self.assertEqual(b.put_from("k1", 100, 10, session_id="req-1"), 0)
+
+        args = b.store.put_from.call_args.args
+        self.assertEqual(args[:4], ("k1", 100, 10, MmcDirect.COPY_L2G.value))
+        self.assertEqual(args[4].sessionIds, ["req-1"])
 
 
 # =========================================================================

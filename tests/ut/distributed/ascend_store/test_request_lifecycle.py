@@ -70,7 +70,7 @@ class MemoryBackend(Backend):
     def check_address(self, addr, size):
         assert any(start <= addr and addr + size <= start + length for start, length in self.regions)
 
-    def put(self, keys, addrs, sizes):
+    def put(self, keys, addrs, sizes, session_ids=None):
         for key, row, lengths in zip(keys, addrs, sizes, strict=True):
             for addr, size in zip(row, lengths, strict=True):
                 self.check_address(addr, size)

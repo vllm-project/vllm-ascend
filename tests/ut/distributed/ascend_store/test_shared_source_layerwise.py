@@ -68,7 +68,7 @@ class MemoryGVAStore:
     def batch_is_readable(self, keys):
         return [key in self.published for key in keys]
 
-    def batch_alloc(self, keys, sizes, _ttl=0):
+    def batch_alloc(self, keys, sizes, _ttl=0, session_ids=None):
         result = []
         for key, size in zip(keys, sizes, strict=True):
             if key not in self.objects:

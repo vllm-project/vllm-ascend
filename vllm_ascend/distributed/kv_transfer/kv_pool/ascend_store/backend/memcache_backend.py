@@ -122,6 +122,21 @@ def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
     logger.info("Injected MF_DEVICE_UB_QOS=%d from kv_connector_extra_config.", qos)
 
 
+def _make_session_replicate_config(session_ids: list[str]) -> Any:
+    """Build a MemCache ReplicateConfig for request-affinity placement.
+
+    ``sessionIds`` is a per-key list; keys whose session id is non-empty are
+    placed on the node chosen for that session, co-locating the KV cache of
+    one request on the same machine. ``replicaNum`` and
+    ``preferredLocalServiceIDs`` keep their defaults (1 and empty).
+    """
+    from memcache_hybrid import ReplicateConfig  # type: ignore
+
+    config = ReplicateConfig()
+    config.sessionIds = list(session_ids)
+    return config
+
+
 class MemcacheBackend(Backend):
     layerwise_data_plane = "gva"
 
@@ -385,10 +400,27 @@ class MemcacheBackend(Backend):
                 raise BatchResultShapeError("batch_get_key_info returned invalid key metadata") from exc
         return readable
 
-    def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
-        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits."""
+    def batch_alloc(
+        self,
+        keys: list[str],
+        sizes: list[int],
+        lease_ttl_ms: int = 0,
+        session_ids: list[str] | None = None,
+    ) -> list[int]:
+        """Return GVAs, 0 for allocation failures, and UINT64_MAX for SSD hits.
+
+        ``session_ids`` carries one session id per key so MemCache places the
+        allocated objects of the same request on the same node; it must match
+        ``keys`` in length when provided. ``replicaNum`` stays 1, which is the
+        only value the session-affinity allocation contract allows.
+        """
+        if session_ids is not None and len(session_ids) != len(keys):
+            raise ValueError(f"session_ids must have the same length as keys: {len(session_ids)} != {len(keys)}")
         self.ensure_initialized()
         assert self.store is not None
+        if session_ids is not None:
+            config = _make_session_replicate_config(session_ids)
+            return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms, config)
         return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
@@ -449,11 +481,25 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
+        session_ids: list[str] | None = None,
     ) -> list[bool] | bool:
+        """Store a batch, optionally co-locating keys of the same request.
+
+        ``session_ids`` carries one session id per key (typically the request
+        id). When provided, MemCache places keys sharing a session id on the
+        same node so a request's KV cache is read back from one machine. It
+        must be ``None`` or match ``key`` in length; reads never need it.
+        """
+        if session_ids is not None and len(session_ids) != len(key):
+            raise ValueError(f"session_ids must have the same length as keys: {len(session_ids)} != {len(key)}")
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            if session_ids is not None:
+                config = _make_session_replicate_config(session_ids)
+                res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value, config)
+            else:
+                res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:
@@ -487,11 +533,24 @@ class MemcacheBackend(Backend):
         addr: int,
         size: int,
         direction: int = MmcDirect.COPY_L2G.value,
+        session_id: str | None = None,
     ) -> int | None:
+        """Store one object, optionally with a session-affinity placement.
+
+        ``session_id`` is the single session id for this single-key write
+        per the MemCache API contract; an empty string keeps the original
+        placement. Content-addressed objects shared across requests (e.g.
+        the EC embedding store) keep the default and use the original
+        placement.
+        """
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = self.store.put_from(key, addr, size, direction)
+            if session_id is not None:
+                config = _make_session_replicate_config([session_id])
+                res = self.store.put_from(key, addr, size, direction, config)
+            else:
+                res = self.store.put_from(key, addr, size, direction)
             if res != 0:
                 logger.error(
                     "Failed to put key %s. error_code=%s. Check memory and store capacity.",

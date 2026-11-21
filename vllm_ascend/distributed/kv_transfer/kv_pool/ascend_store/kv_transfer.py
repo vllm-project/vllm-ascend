@@ -953,7 +953,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+            # Request-affinity placement: every key in this batch belongs to
+            # the same request, so pass req_id as the per-key session id and
+            # MemCache co-locates the request's KV cache on one machine.
+            put_result = self.m_store.put(keys, addrs, sizes, [req_id] * len(keys))
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
