@@ -23,33 +23,24 @@ from collections.abc import Callable
 from vllm.device_allocator.sleep_mode_backend import SleepModeBackend, SleepModeBackendFactory
 from vllm.logger import logger
 
-from vllm_ascend.device_allocator.camem import CaMemAllocator, camem_available
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 
 
 class CaMemBackend(SleepModeBackend):
-    """Sleep-mode backend backed by the Ascend CaMem allocator.
+    """Default Ascend backend.
 
-    Level 1 offloads the weights pool; level 2 discards it. Ascend currently
-    creates only `weights` and `kv_cache` pools, so there are no runtime or
-    graph pools to offload at level 2.
+    Wraps the platform sleep-mode allocator, `CaMemAllocator` on Ascend.
+    Suspend offloads per-allocation between NPU and host.
     """
 
     def __init__(self, allocator: Callable[[], CaMemAllocator] | None = None) -> None:
         super().__init__()
         self._allocator = allocator or CaMemAllocator.get_instance
 
-    @classmethod
-    def is_supported(cls) -> bool:
-        return camem_available
-
     def suspend(self, level: int = 1) -> None:
-        if level not in (1, 2):
-            raise ValueError(f"Unsupported sleep level: {level}")
-
         self._state = "SUSPENDED"
         offload_tags = ("weights",) if level == 1 else ()
         self._allocator().sleep(offload_tags)
-        logger.info("CaMem backend suspended: level=%d, offload_tags=%s", level, offload_tags)
 
     def resume(self, tags: list[str] | None = None) -> None:
         self._state = "RESUMING"
