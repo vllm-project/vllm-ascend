@@ -1118,27 +1118,10 @@ class TestNPUPlatform(TestBase):
                     expected_max,
                 )
 
-    def test_apply_config_platform_defaults_respects_explicit_max(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.compilation_config.max_cudagraph_capture_size = 456
-        vllm_config.compilation_config.cudagraph_capture_sizes = None
-
-        self.platform.apply_config_platform_defaults(vllm_config)
-
-        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 456)
-
     def test_apply_config_platform_defaults_respects_explicit_sizes(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.compilation_config.max_cudagraph_capture_size = None
-        vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4]
-
-        self.platform.apply_config_platform_defaults(vllm_config)
-
-        self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
-        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
-
-    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self):
         for name, value in (
+            ("max_cudagraph_capture_size", 456),
+            ("cudagraph_capture_sizes", [1, 2, 4]),
             ("prefill_cudagraph_capture_token_sizes", [1, 3, 7]),
             ("max_prefill_cudagraph_capture_tokens", 7),
             ("decode_cudagraph_capture_request_sizes", [1, 3, 7]),
@@ -1152,8 +1135,10 @@ class TestNPUPlatform(TestBase):
                 config.compilation_config.cudagraph_capture_sizes = None
                 setattr(config.compilation_config, name, value)
                 self.platform.apply_config_platform_defaults(config)
-                self.assertIsNone(config.compilation_config.max_cudagraph_capture_size)
-                self.assertIsNone(config.compilation_config.reduced_cg_cap)
+                if name != "max_cudagraph_capture_size":
+                    self.assertIsNone(config.compilation_config.max_cudagraph_capture_size)
+                if name not in ("max_cudagraph_capture_size", "cudagraph_capture_sizes"):
+                    self.assertIsNone(config.compilation_config.reduced_cg_cap)
                 self.assertEqual(getattr(config.compilation_config, name), value)
 
     def test_setup_compile_backend_restores_off_stride_split_sizes(self):
@@ -1276,39 +1261,30 @@ class TestNPUPlatform(TestBase):
             assert desc.cg_mode == CUDAGraphMode.FULL
             assert (desc.num_reqs, desc.num_tokens) == (4, 24)
 
-    def test_setup_compile_backend_sizes_capacity_for_common_query_grid(self):
-        config = self.mock_main_graph_config(
-            tp_size=12,
-            max_num_seqs=1,
-            query_len=6,
-            capture_sizes=[6],
-            query_limits={4: 1, 6: 1},
+    def test_setup_compile_backend_common_query_grid_and_token_cap(self):
+        cases = (
+            (12, {4: 1, 6: 1}, None, {4: 6, 6: 6}, [6], [24, 36], CUDAGraphMode.FULL_DECODE_ONLY, 6),
+            (8, None, 20, {6: 0}, [], [], CUDAGraphMode.NONE, 4),
         )
-        self.run_compile_backend(config)
+        for tp_size, query_limits, token_cap, limits, request_sizes, capture_sizes, mode, capacity in cases:
+            with self.subTest(tp_size=tp_size, token_cap=token_cap):
+                config = self.mock_main_graph_config(
+                    tp_size=tp_size,
+                    max_num_seqs=1,
+                    query_len=6,
+                    capture_sizes=[6],
+                    query_limits=query_limits,
+                    max_decode_tokens=token_cap,
+                )
+                self.run_compile_backend(config)
 
-        assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 6, 6: 6}
-        assert config.scheduler_config.max_num_seqs == 6
-        assert config.scheduler_config.max_num_active_seqs == 1
-        assert config.compilation_config.decode_cudagraph_capture_request_sizes == [6]
-        assert config.compilation_config.cudagraph_capture_sizes == [24, 36]
-
-    def test_setup_compile_backend_drops_decode_tier_below_aligned_token_cap(self):
-        config = self.mock_main_graph_config(
-            tp_size=8,
-            max_num_seqs=1,
-            query_len=6,
-            capture_sizes=[6],
-            max_decode_tokens=20,
-        )
-        self.run_compile_backend(config)
-
-        assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {6: 0}
-        assert config.compilation_config.decode_cudagraph_capture_request_sizes == []
-        assert config.compilation_config.cudagraph_capture_sizes == []
-        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-        # The graph cap must not shrink eager fallback buffers or admission.
-        assert config.scheduler_config.max_num_seqs == 4
-        assert config.scheduler_config.max_num_active_seqs == 1
+                assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == limits
+                assert config.compilation_config.decode_cudagraph_capture_request_sizes == request_sizes
+                assert config.compilation_config.cudagraph_capture_sizes == capture_sizes
+                assert config.compilation_config.cudagraph_mode == mode
+                # The graph cap must not shrink eager fallback buffers or admission.
+                assert config.scheduler_config.max_num_seqs == capacity
+                assert config.scheduler_config.max_num_active_seqs == 1
 
     def test_setup_compile_backend_aligns_adaptive_varlen_grid(self):
         from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager

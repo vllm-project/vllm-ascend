@@ -322,31 +322,28 @@ class TestUtils(TestBase):
 
     def test_mrv2_padding_plan_aligns_uniform_requests(self):
         plan = utils.MRV2PaddingPlan(token_alignment=8)
-
-        self.assertEqual(plan.request_alignment(query_len=1), 8)
-        self.assertEqual(plan.request_alignment(query_len=2), 4)
-        self.assertEqual(plan.request_alignment(query_len=4), 2)
-        self.assertEqual(plan.common_request_alignment((2, 4)), 4)
-        self.assertEqual(plan.align_requests(3, query_len=2), 4)
-        self.assertEqual(plan.align_batch_tokens(6, num_reqs=3, uniform_query_len=2), 8)
-        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=None), 4)
-        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=20), 0)
-        self.assertEqual(plan.limit_aligned_requests(1, query_len=6, max_tokens=24), 4)
-        # A one-token draft graph still needs a complete TP-aligned request
-        # tier.  A smaller graph cap must select eager execution instead of
-        # admitting a partial four-rank shard.
-        self.assertEqual(plan.limit_aligned_requests(1, query_len=1, max_tokens=3), 0)
-        self.assertEqual(plan.align_query_limits({4: 1, 6: 1}), {4: 4, 6: 4})
+        cases = (
+            (plan.request_alignment, (1,), {}, 8),
+            (plan.request_alignment, (2,), {}, 4),
+            (plan.request_alignment, (4,), {}, 2),
+            (plan.common_request_alignment, ((2, 4),), {}, 4),
+            (plan.align_requests, (3,), {"query_len": 2}, 4),
+            (plan.align_batch_tokens, (6,), {"num_reqs": 3, "uniform_query_len": 2}, 8),
+            (plan.limit_aligned_requests, (1,), {"query_len": 6, "max_tokens": None}, 4),
+            (plan.limit_aligned_requests, (1,), {"query_len": 6, "max_tokens": 20}, 0),
+            (plan.limit_aligned_requests, (1,), {"query_len": 6, "max_tokens": 24}, 4),
+            # A sub-alignment cap must select eager rather than a partial shard.
+            (plan.limit_aligned_requests, (1,), {"query_len": 1, "max_tokens": 3}, 0),
+            (plan.align_query_limits, ({4: 1, 6: 1},), {}, {4: 4, 6: 4}),
+        )
+        for function, args, kwargs, expected in cases:
+            with self.subTest(function=function.__name__, args=args, kwargs=kwargs):
+                self.assertEqual(function(*args, **kwargs), expected)
 
         composite_plan = utils.MRV2PaddingPlan(token_alignment=12)
-        self.assertEqual(
-            composite_plan.align_query_limits({4: 1, 6: 1}),
-            {4: 6, 6: 6},
-        )
-        self.assertEqual(
-            composite_plan.align_query_limits({4: 1, 6: 1}, max_tokens=30),
-            {4: 6, 6: 0},
-        )
+        for max_tokens, expected in ((None, {4: 6, 6: 6}), (30, {4: 6, 6: 0})):
+            with self.subTest(max_tokens=max_tokens):
+                self.assertEqual(composite_plan.align_query_limits({4: 1, 6: 1}, max_tokens), expected)
 
     def test_mrv2_decode_query_lens_uses_main_resolver(self):
         resolver = mock.Mock(return_value={3: 8, 5: 16})
