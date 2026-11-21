@@ -10,8 +10,9 @@ import torch.distributed as dist
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
@@ -56,6 +57,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
+from vllm_ascend.models.deepseek_v4.decode_row_shard import (
+    DecodeIndexerRowPlan,
+    make_decode_indexer_row_plan,
+    make_graph_decode_indexer_row_plan,
+)
+from vllm_ascend.models.deepseek_v4.decode_row_shard_graph import (
+    GraphDecodeIndexerState,
+    allocate_graph_decode_indexer_state,
+    refresh_graph_decode_indexer_inputs,
+)
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -102,6 +113,7 @@ else:
 SAS_METADATA_BUFFER_SIZE = 1024
 SPARSE_FLASH_MLA_METADATA_BUFFER_SIZE = 2048
 QLI_METADATA_BUFFER_SIZE = 1024
+MIN_DSV4_DECODE_INDEXER_TP_SHARD_REQUESTS = 8
 
 
 class OProjBufferPool:
@@ -471,6 +483,23 @@ def _get_dsa_role_builder(role: str):
     return builder_cls
 
 
+@dataclass(frozen=True)
+class AscendDSADecodeRowShard:
+    plan: DecodeIndexerRowPlan
+    request_ids: torch.Tensor
+    query_rows: torch.Tensor
+    restore_rows: torch.Tensor
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+    qli_cu_seqlens_q: torch.Tensor
+    qli_seqused_k: torch.Tensor
+    qli_cmp_residual_k: torch.Tensor
+    qli_metadata: torch.Tensor
+    max_seqlen_k: int
+
+
+
+
 @dataclass
 class AscendDSAReqMetadata:
     """Unified metadata for all requests in one attention invocation."""
@@ -496,6 +525,7 @@ class AscendDSAReqMetadata:
     qli_cu_seqlens_q: torch.Tensor = None
     qli_seqused_k: torch.Tensor = None
     qli_cmp_residual_k: torch.Tensor = None
+    decode_row_shard: AscendDSADecodeRowShard | GraphDecodeIndexerState | None = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
     attn_mask: torch.Tensor | None = None
@@ -904,6 +934,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         self.qli_seqused_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+        # Builder-owned buffers keep the metadata executor's event key stable.
+        # Plans are immutable and cached only for encountered eager batch layouts.
+        self.decode_row_shard_qli_metadata_buffer = torch.zeros_like(self.qli_metadata_buffer)
+        self.decode_row_shard_seq_lens = torch.zeros_like(self.qli_seqused_k)
+        self.decode_row_shard_k = torch.zeros_like(self.qli_seqused_k)
+        self.decode_row_shard_residual_k = torch.zeros_like(self.qli_cmp_residual_k)
+        self.decode_row_shard_graph_states: dict[tuple[int, int], GraphDecodeIndexerState] = {}
+        self.decode_row_shard_plans: dict[
+            tuple[int, int], tuple[DecodeIndexerRowPlan, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = {}
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         # DSpark triton fast-path state: exact per-request query count (set by
@@ -1113,6 +1153,240 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_kv=max_seqlen_kv,
         )
 
+    def _prepare_decode_row_shard(
+        self,
+        common: AscendCommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor | None,
+        num_actual_reqs: int | None,
+        full_graph_mode: bool,
+    ) -> AscendDSADecodeRowShard | GraphDecodeIndexerState | None:
+        """Use live eager layouts or fixed MRV2 FULL_DECODE_ONLY buckets."""
+        if (
+            self.model_config.hf_config.model_type != "deepseek_v4"
+            or self.compressor_ratio != 4
+            or not getattr(get_ascend_config(), "enable_dsv4_decode_indexer_tp_shard", False)
+        ):
+            return None
+        if full_graph_mode:
+            return self._prepare_fullgraph_decode_row_shard(common, num_actual_reqs)
+        if num_actual_reqs is None:
+            return None
+
+        parallel = self.vllm_config.parallel_config
+        tp_size = get_tensor_model_parallel_world_size()
+        if (
+            self.model_config.hf_config.model_type != "deepseek_v4"
+            or self.compressor_ratio != 4
+            or tp_size < 2
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or getattr(get_ascend_config(), "enable_dsa_cp", False)
+            or not self.model_config.enforce_eager
+            or full_graph_mode
+            or self.num_prefills != 0
+            or not common.causal
+            or self.num_decodes != num_actual_reqs
+            or common.num_reqs != num_actual_reqs
+            or self.num_decode_tokens != self.num_actual_tokens
+            or num_actual_reqs < max(MIN_DSV4_DECODE_INDEXER_TP_SHARD_REQUESTS, tp_size)
+        ):
+            return None
+        speculative = self.speculative_config
+        if speculative is not None and (
+            speculative.method not in ("mtp", "dspark") or getattr(speculative, "enable_adaptive_verification", False)
+        ):
+            return None
+
+        if seq_lens_cpu is None:
+            seq_lens_cpu = getattr(common, "_seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                seq_lens_cpu = getattr(common, "seq_lens_cpu", None)
+            if seq_lens_cpu is None and self.common_ratio_to_sas_metadata is not None:
+                seq_lens_cpu = self.common_ratio_to_sas_metadata.get("seq_lens_cpu")
+        if seq_lens_cpu is None:
+            # Do not introduce a device-to-host synchronization just to shard.
+            return None
+
+        starts = common.query_start_loc_cpu[: num_actual_reqs + 1]
+        # Read only CPU scalars; the device query offsets can be asynchronous.
+        if starts.device.type != "cpu" or seq_lens_cpu.device.type != "cpu":
+            return None
+        if starts.numel() != num_actual_reqs + 1 or int(starts[0].item()) != 0:
+            return None
+        query_lens = starts[1:] - starts[:-1]
+        rows_per_request = int(query_lens[0].item())
+        if (
+            not 1 <= rows_per_request <= self.decode_threshold
+            or not bool((query_lens == rows_per_request).all())
+            or num_actual_reqs * rows_per_request != self.num_actual_tokens
+            or (speculative is None and rows_per_request != 1)
+        ):
+            return None
+        key = (num_actual_reqs, rows_per_request)
+        cached = self.decode_row_shard_plans.get(key)
+        if cached is None:
+            plan = make_decode_indexer_row_plan(
+                num_actual_reqs, rows_per_request, tp_size, get_tensor_model_parallel_rank()
+            )
+            cached = (
+                plan,
+                torch.tensor(plan.request_ids, dtype=torch.int64, device=self.device),
+                torch.tensor(plan.query_rows, dtype=torch.int64, device=self.device),
+                torch.tensor(plan.restore_rows, dtype=torch.int64, device=self.device),
+                torch.arange(len(plan.request_ids) + 1, dtype=torch.int32, device=self.device) * rows_per_request,
+            )
+            self.decode_row_shard_plans[key] = cached
+        plan, request_ids, query_rows, restore_rows, cu_q = cached
+        local_reqs = len(plan.request_ids)
+        local_lengths_cpu = seq_lens_cpu[list(plan.request_ids)]
+        return AscendDSADecodeRowShard(
+            plan=plan,
+            request_ids=request_ids,
+            query_rows=query_rows,
+            restore_rows=restore_rows,
+            block_table=self.block_table.index_select(0, request_ids),
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            qli_cu_seqlens_q=cu_q,
+            qli_seqused_k=self.decode_row_shard_k[:local_reqs],
+            qli_cmp_residual_k=self.decode_row_shard_residual_k[:local_reqs],
+            qli_metadata=self.decode_row_shard_qli_metadata_buffer,
+            max_seqlen_k=int(local_lengths_cpu.max().item()) // 4,
+        )
+
+    def _prepare_fullgraph_decode_row_shard(
+        self, common: AscendCommonAttentionMetadata, num_actual_reqs: int | None
+    ) -> GraphDecodeIndexerState | None:
+        """Refresh a stable graph bucket outside capture/replay on the main stream.
+
+        The MRV2 V4 builder has graph-external QLI metadata producers.
+        V4.1's captured producer protocol and MRV1 are intentionally excluded.
+        A captured bucket cannot fall back based on a later live request count.
+        """
+        if num_actual_reqs is None:
+            return None
+        parallel = self.vllm_config.parallel_config
+        speculative = self.speculative_config
+        if (
+            self.model_config.hf_config.model_type != "deepseek_v4"
+            or self.compressor_ratio != 4
+            or not self.vllm_config.use_v2_model_runner
+            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or getattr(get_ascend_config(), "enable_dsa_cp", False)
+            or DeviceOperator.get_dsa_indexer_quant_mode() != 2
+            or not common.causal
+        ):
+            return None
+        if speculative is not None and (
+            speculative.method not in ("mtp", "dspark")
+            or getattr(speculative, "enable_adaptive_verification", False)
+            or getattr(speculative, "num_speculative_tokens_per_batch_size", None) is not None
+        ):
+            return None
+        rows_per_request = 1 if speculative is None else speculative.num_speculative_tokens + 1
+        tp_size = get_tensor_model_parallel_world_size()
+        plan = make_graph_decode_indexer_row_plan(
+            common.num_input_tokens,
+            rows_per_request,
+            tp_size,
+            get_tensor_model_parallel_rank(),
+            MIN_DSV4_DECODE_INDEXER_TP_SHARD_REQUESTS,
+        )
+        if plan is None:
+            return None
+        # These checks must not silently select another Python branch for an
+        # existing graph. FULL dispatch promised this exact uniform layout.
+        starts = common.query_start_loc_cpu[: common.num_reqs + 1]
+        if (
+            common.num_reqs != plan.num_requests
+            or starts.device.type != "cpu"
+            or starts.numel() != plan.num_requests + 1
+            or int(starts[0].item()) != 0
+            or not bool(((starts[1:] - starts[:-1]) == rows_per_request).all())
+            or self.num_prefills != 0
+            or self.num_actual_tokens != num_actual_reqs * rows_per_request
+        ):
+            raise RuntimeError("FULL decode row-shard layout changed; disable sharding or recapture compatible graphs")
+        if self._device_metadata_enabled:
+            raise RuntimeError("Graph row sharding requires the MRV2 V4 graph-external metadata protocol")
+        key = (common.num_input_tokens, rows_per_request)
+        state = self.decode_row_shard_graph_states.get(key)
+        if state is None:
+            state = allocate_graph_decode_indexer_state(
+                plan,
+                self.block_table[: plan.num_requests],
+                num_heads=self.model_config.hf_config.index_n_heads,
+                head_dim=self.model_config.hf_config.index_head_dim,
+                topk=self.model_config.hf_config.index_topk,
+                max_model_len=self.model_config.max_model_len,
+                metadata_size=QLI_METADATA_BUFFER_SIZE,
+            )
+            self.decode_row_shard_graph_states[key] = state
+        elif state.plan != plan:
+            raise RuntimeError("Captured TP graph plan changed; restart and recapture")
+        refresh_graph_decode_indexer_inputs(state, self.seq_lens, self.block_table, num_actual_reqs)
+        tiling = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+            num_heads_q=self.model_config.hf_config.index_n_heads,
+            num_heads_k=1,
+            head_dim=self.model_config.hf_config.index_head_dim,
+            topk=self.model_config.hf_config.index_topk,
+            quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+            cu_seqlens_q=state.qli_cu_seqlens_q,
+            seqused_k=state.qli_seqused_k,
+            cmp_residual_k=state.qli_cmp_residual_k,
+            batch_size=len(plan.request_ids),
+            max_seqlen_q=rows_per_request,
+            max_seqlen_k=state.max_seqlen_k,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=4,
+            device=str(self.device),
+        )
+        state.qli_metadata.copy_(tiling)
+        logger.info_once(
+            "DSV4 decode indexer FULL graph bucket prepared: TP=%d, padded_requests=%d, live_requests=%d, "
+            "rows_per_request=%d, rank=%d, local_slots=%d",
+            plan.tp_size,
+            plan.num_requests,
+            num_actual_reqs,
+            plan.rows_per_request,
+            plan.tp_rank,
+            len(plan.request_ids),
+        )
+        return state
+
+    def _build_decode_row_shard_qli_metadata(self, shard: AscendDSADecodeRowShard) -> None:
+        """Refresh local lengths and tiling on the metadata producer stream."""
+        local_reqs = len(shard.plan.request_ids)
+        local_seq_lens = self.decode_row_shard_seq_lens[:local_reqs]
+        seq_lens = shard.seq_lens
+        if seq_lens.dtype != torch.int32:
+            seq_lens = seq_lens.to(torch.int32)
+        torch.index_select(seq_lens, 0, shard.request_ids, out=local_seq_lens)
+        torch.div(local_seq_lens, 4, rounding_mode="floor", out=shard.qli_seqused_k)
+        torch.remainder(local_seq_lens, 4, out=shard.qli_cmp_residual_k)
+        tiling = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+            num_heads_q=self.model_config.hf_config.index_n_heads,
+            num_heads_k=1,
+            head_dim=self.model_config.hf_config.index_head_dim,
+            topk=self.model_config.hf_config.index_topk,
+            quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
+            cu_seqlens_q=shard.qli_cu_seqlens_q,
+            seqused_k=shard.qli_seqused_k,
+            cmp_residual_k=shard.qli_cmp_residual_k,
+            batch_size=local_reqs,
+            max_seqlen_q=shard.plan.rows_per_request,
+            max_seqlen_k=shard.max_seqlen_k,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=4,
+            device=str(self.device),
+        )
+        shard.qli_metadata.copy_(tiling)
+
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
         if self.compressor_ratio > 1 and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
@@ -1268,7 +1542,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         req.start_pos = self._build_start_positions(req)
         AscendDSAAttentionMetadataBuilder._build_attention_query(self, common_attn_metadata, req, limits)
         if self.compressor_ratio == 4:
-            AscendDSAIndexerMetadataBuilder._build_indexer_query(self, req, limits)
+            decode_row_shard = self._prepare_decode_row_shard(
+                common_attn_metadata,
+                seq_lens_cpu,
+                req.num_actual_reqs,
+                full_graph_mode,
+            )
+            req.decode_row_shard = decode_row_shard
+            AscendDSAIndexerMetadataBuilder._build_indexer_query(self, req, limits, decode_row_shard)
         if self.compressor_ratio > 1:
             AscendDSAAttentionMetadataBuilder._build_compressed_cache(self, common_attn_metadata, req, full_graph_mode)
         else:
@@ -2063,17 +2344,56 @@ class AscendDSAIndexerMetadataBuilder(AscendDSAAttentionMetadataBuilder):
         can_use_rope_cache: bool = True,
         formatted_slot_mapping: torch.Tensor | None = None,
     ) -> AscendDSAReqMetadata:
+        
         req = self._new_req_metadata(common_attn_metadata, num_actual_reqs, cos, sin)
         if build_query:
             limits = self._prepare_query_inputs(
-                common_attn_metadata, req, seq_lens_cpu, can_use_rope_cache, full_graph_mode
+                common_attn_metadata,
+                req,
+                seq_lens_cpu,
+                can_use_rope_cache,
+                full_graph_mode,
             )
-            self._build_indexer_query(req, limits)
+            decode_row_shard = self._prepare_decode_row_shard(
+                common_attn_metadata,
+                seq_lens_cpu,
+                req.num_actual_reqs,
+                full_graph_mode,
+            )
+            req.decode_row_shard = decode_row_shard
+            self._build_indexer_query(req, limits, decode_row_shard)
         if update_cache:
             self._build_compressed_cache(common_attn_metadata, req, full_graph_mode)
         return req
 
-    def _build_indexer_query(self, req: AscendDSAReqMetadata, limits: tuple[int, int]) -> None:
+    def _build_indexer_query(self,req: AscendDSAReqMetadata,limits: tuple[int, int],
+                             decode_row_shard: AscendDSADecodeRowShard | GraphDecodeIndexerState | None = None,) -> None:
+        req.decode_row_shard = decode_row_shard
+        if decode_row_shard is not None:
+            # Sharded indexer consumes its own QLI metadata.
+            req.qli_metadata = None
+            req.qli_cu_seqlens_q = None
+            req.qli_seqused_k = None
+            req.qli_cmp_residual_k = None
+            # Full graph metadata was prepared outside graph capture.
+            if isinstance(decode_row_shard, GraphDecodeIndexerState):
+                return
+            def build_decode_row_shard_qli_metadata() -> None:
+                self._build_decode_row_shard_qli_metadata(
+                    decode_row_shard
+                )
+            if self._device_metadata_enabled:
+                self._device_metadata_tasks = (
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.INDEXER,
+                        build_decode_row_shard_qli_metadata,
+                        id(decode_row_shard.qli_metadata),
+                    ),
+                    *self._device_metadata_tasks,
+                )
+            else:
+                self._build_decode_row_shard_qli_metadata(decode_row_shard)
+            return  
         metadata_cache = self.common_ratio_to_sas_metadata
         assert metadata_cache is not None
         max_seqlen_q, max_seqlen_kv = limits
