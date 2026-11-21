@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import ctypes
 import mmap
+import os
 import threading
 from bisect import bisect_right
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
+from enum import Enum, auto
+from typing import Any, TypeVar
 
 from vllm.logger import logger
 
@@ -18,6 +20,20 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import Buff
 
 # Each direction owns a bounded buffer; network waits never serialize PUT and GET.
 _HOST_STAGING_BYTES = 64 * 1024 * 1024
+# Mooncake's Store API reports TRANSFER_FAIL for both a completed failure and
+# an expired batch wait. Older bindings may return a generic error (-1).
+_UNCONFIRMED_TRANSFER_CODES = frozenset({-800, -1})
+_Result = TypeVar("_Result")
+
+
+class _StoreState(Enum):
+    OPEN = auto()
+    DRAINING = auto()
+    CLOSED = auto()
+
+
+class _StoreUnavailableError(RuntimeError):
+    pass
 
 
 class _HostStaging:
@@ -35,8 +51,12 @@ class _HostStaging:
 class MooncakeHostStaging:
     """Stage Host transfers in DDR and pass device buffers directly to the Store SDK."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, close_store: Callable[[], None]) -> None:
         self.store = store
+        self._close_store = close_store
+        self._store_state_changed = threading.Condition()
+        self._active_store_calls = 0
+        self._store_state = _StoreState.OPEN
         self._host_ranges: dict[int, int] = {}
         self._host_bases: list[int] = []
         self._registered: list[int] = []
@@ -72,6 +92,8 @@ class MooncakeHostStaging:
         self._registered.append(ptr)
 
     def unregister(self) -> None:
+        if self._store_state is _StoreState.CLOSED:
+            return
         failures = []
         for ptr in reversed(self._registered):
             try:
@@ -92,6 +114,56 @@ class MooncakeHostStaging:
         self._registered.clear()
         self._recv.buffer.close()
         self._send.buffer.close()
+
+    def _call_store(self, call: Callable[[], _Result], *, transfer: bool = False) -> _Result:
+        with self._store_state_changed:
+            if self._store_state is not _StoreState.OPEN:
+                raise _StoreUnavailableError("Mooncake Store disabled after an unconfirmed KV transfer")
+            self._active_store_calls += 1
+        transfer_unconfirmed = False
+        try:
+            return call()
+        except Exception:
+            transfer_unconfirmed = transfer
+            raise
+        finally:
+            with self._store_state_changed:
+                self._active_store_calls -= 1
+                if transfer_unconfirmed:
+                    self._store_state = _StoreState.DRAINING
+                if self._store_state is _StoreState.DRAINING:
+                    if self._active_store_calls == 0:
+                        # The owner closes the Store's Ascend Direct engine.
+                        # Keep all staging and Indexer buffers live until that
+                        # call returns, including buffers used by concurrent
+                        # GET and PUT calls on this worker.
+                        try:
+                            self._close_store()
+                        except Exception:
+                            logger.exception("Mooncake Store could not drain transfers; terminating worker")
+                            os._exit(1)
+                        self._store_state = _StoreState.CLOSED
+                        self._store_state_changed.notify_all()
+                    else:
+                        self._store_state_changed.wait_for(lambda: self._store_state is _StoreState.CLOSED)
+
+    def exists(self, keys: list[str]) -> list[int]:
+        try:
+            return self._call_store(lambda: self.store.batch_is_exist(keys))
+        except _StoreUnavailableError:
+            return [0] * len(keys)
+
+    def remove_all(self) -> None:
+        self._call_store(lambda: self.store.remove_all(force=True))
+
+    def _transfer_batch(self, operation: str, keys: list[str], submit: Callable[[], list[int]]) -> list[int]:
+        def checked_submit() -> list[int]:
+            codes = require_aligned_batch_results(operation, keys, submit())
+            if _UNCONFIRMED_TRANSFER_CODES.intersection(codes):
+                raise RuntimeError(f"{operation}: Store returned with transfer completion unconfirmed")
+            return codes
+
+        return self._call_store(checked_submit, transfer=True)
 
     def _validate_host_key(self, addrs: list[int], sizes: list[int]) -> int:
         if not addrs or len(addrs) != len(sizes):
@@ -155,8 +227,8 @@ class MooncakeHostStaging:
         return result
 
     def _put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], config: Any) -> list[bool]:
-        codes = require_aligned_batch_results(
-            "Mooncake bulk PUT", keys, self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
+        codes = self._transfer_batch(
+            "Mooncake bulk PUT", keys, lambda: self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
         )
         return [rc == 0 for rc in codes]
 
@@ -182,8 +254,8 @@ class MooncakeHostStaging:
         return results
 
     def _get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int]:
-        codes = require_aligned_batch_results(
-            "Mooncake bulk GET", keys, self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+        codes = self._transfer_batch(
+            "Mooncake bulk GET", keys, lambda: self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
         )
         # Unlike MemCache, Mooncake returns a byte count on GET. A short read
         # must fail the import; otherwise the coordinator could publish partial KV.

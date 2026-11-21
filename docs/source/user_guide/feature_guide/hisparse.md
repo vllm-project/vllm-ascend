@@ -108,8 +108,13 @@ Mooncake, use an Ascend Direct client and matching master, set
 UB setup, use `ASCEND_GLOBAL_RESOURCE_CONFIG='{}'` and
 `ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`. Budget an extra 128 MiB of DDR
 per worker for its separate Host Source send and receive buffers. The Indexer slab
-transfers directly. Set `MC_TRANSFER_TIMEOUT` (seconds) to more than twice
-`ASCEND_TRANSFER_TIMEOUT` (milliseconds) after converting to the same unit.
+transfers directly. Unset `ASCEND_USE_ASYNC_TRANSFER` to use synchronous
+Ascend Direct transport. Mooncake enables async transport whenever this variable
+is present, including when it is set to `0`. After converting to milliseconds, twice
+`ASCEND_TRANSFER_TIMEOUT` must be strictly below both `MC_TRANSFER_TIMEOUT`
+and the Store's 60-second batch deadline. If the Store cannot confirm transfer
+completion, the worker drains and closes that Store before returning the
+failure and disables further transfers on that client.
 
 To use MemCache instead, set `backend` to `memcache` and use the
 `host_tcp` protocol in its local configuration. Keep `load_async=true` on
@@ -117,6 +122,8 @@ either backend. This combination does not support external PD transport,
 layerwise transfer, or Mooncake FabricMem or SSD modes.
 If you enable `save_decode_cache`, keep `eager_host_mirror=true` so each
 completed Decode block reaches Host memory before AscendStore saves it.
+With `kv_load_failure_policy=recompute`, a failed external import resumes
+from local compute and skips further external lookups for that request.
 
 Pool keys use the `hisparse-v4` namespace and include the target and draft
 checkpoint identities, revisions and page layout. Upgrading from an earlier

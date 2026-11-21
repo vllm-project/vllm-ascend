@@ -50,6 +50,8 @@ MOONCAKE_LAYERWISE_CLIENT_METHODS = (
     "batch_get_session_end",
 )
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+# TransferEngineOperationState::wait_for_completion in Mooncake v0.3.13.
+_MOONCAKE_STORE_BATCH_TIMEOUT_MS = 60_000
 
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
@@ -596,16 +598,21 @@ class MooncakeBackend(Backend):
         if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM") == "1" or config.enable_ssd_offload or config.enable_ssd_prefetch:
             raise ValueError("HiSparse with Mooncake requires a DDR Store without FabricMem or SSD spilling/prefetch")
 
-        # A premature outer timeout can leave writes to the reusable staging
-        # buffer in flight. Allow both attempts of the inner Ascend transfer.
-        outer_timeout_ms = 1000 * int(os.getenv("MC_TRANSFER_TIMEOUT", "30"))
-        inner_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
-        if inner_timeout_ms <= 0 or outer_timeout_ms <= 2 * inner_timeout_ms:
+        # Mooncake enables async transfer whenever the variable is present.
+        if "ASCEND_USE_ASYNC_TRANSFER" in os.environ:
             raise ValueError(
-                "HiSparse with Mooncake requires MC_TRANSFER_TIMEOUT (seconds) to be strictly greater "
-                f"than twice ASCEND_TRANSFER_TIMEOUT (milliseconds): {outer_timeout_ms}ms <= "
-                f"2 * {inner_timeout_ms}ms. Increase MC_TRANSFER_TIMEOUT to cover both inner attempts "
-                "and prevent reuse of a buffer with an outstanding transfer."
+                "HiSparse with Mooncake requires synchronous Ascend Direct transfers. Unset ASCEND_USE_ASYNC_TRANSFER."
+            )
+        # Ascend Direct can retry a transfer once within the Store deadline.
+        configured_timeout_ms = 1000 * int(os.getenv("MC_TRANSFER_TIMEOUT", "30"))
+        ascend_attempt_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
+        store_timeout_ms = min(configured_timeout_ms, _MOONCAKE_STORE_BATCH_TIMEOUT_MS)
+        if ascend_attempt_timeout_ms <= 0 or 2 * ascend_attempt_timeout_ms >= store_timeout_ms:
+            raise ValueError(
+                "HiSparse with Mooncake requires twice ASCEND_TRANSFER_TIMEOUT to be below both "
+                f"MC_TRANSFER_TIMEOUT and the Store's 60s batch deadline: "
+                f"ASCEND_TRANSFER_TIMEOUT={ascend_attempt_timeout_ms}ms, "
+                f"MC_TRANSFER_TIMEOUT={configured_timeout_ms}ms"
             )
 
     def _register_buffers_with_host_staging(self, buffers: list[BufferDescriptor]) -> None:
@@ -615,7 +622,7 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake mixed bulk buffers are already registered")
         self.ensure_initialized()
         assert self.store is not None
-        staging = MooncakeHostStaging(self.store)
+        staging = MooncakeHostStaging(self.store, self._close_store)
         self._host_staging = staging
         try:
             staging.register(buffers)
@@ -626,22 +633,26 @@ class MooncakeBackend(Backend):
                 logger.exception("Mooncake mixed bulk registration rollback raised")
             raise
 
+    def _close_store(self) -> None:
+        if self.store is not None:
+            rc = self.store.close()
+            if rc not in (None, 0):
+                raise RuntimeError(f"Mooncake Store shutdown failed: status={rc}")
+            self.store = None
+            self._store_initialized = False
+
     def close(self) -> None:
         staging = self._host_staging
-        store = self.store
         try:
             if staging is not None:
                 staging.unregister()
         finally:
             # This backend owns the Store. If deregistration failed, shut its
             # engine down before releasing memory it may still have registered.
-            if store is not None:
-                store.close()
+            self._close_store()
             if staging is not None:
                 staging.close()
             self._host_staging = None
-            self.store = None
-            self._store_initialized = False
 
     def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
         if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
@@ -665,6 +676,8 @@ class MooncakeBackend(Backend):
             global_te.register_buffer(ptrs, sizes)
 
     def exists(self, keys: list[str]) -> list[int]:
+        if self._host_staging is not None:
+            return self._host_staging.exists(keys)
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MooncakeBackend.exists called before store initialization; treating %d keys as missing.",
@@ -678,6 +691,9 @@ class MooncakeBackend(Backend):
 
     def remove_all(self) -> None:
         """Delete every object on the Mooncake master. The client stays open."""
+        if self._host_staging is not None:
+            self._host_staging.remove_all()
+            return
         if not self._store_initialized or self.store is None:
             return
         self.store.remove_all(force=True)

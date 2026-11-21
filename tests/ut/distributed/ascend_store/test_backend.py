@@ -801,6 +801,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._use_fabric_mem = False
             backend._use_store_independent_te = False
             backend._prefetch_conf = SsdPrefetchConf.disabled()
+            backend._host_staging = None
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
             return backend
