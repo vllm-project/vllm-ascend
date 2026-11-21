@@ -1,7 +1,7 @@
 """Regression tests for SFA KV-offload attention metadata."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -14,12 +14,94 @@ from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadMetadataBuilder,
     AscendSFAOffloadMetadata,
 )
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.attention.sfa_v1 import (  # noqa: E402
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    AscendSFAMetadataBuilder,
+    PreprocessType,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (  # noqa: E402
     FSA_EXTERNAL_PLAN_READY_MARKER,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
     FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT,
 )
+
+
+@pytest.mark.parametrize(
+    ("selective", "shared", "base_type", "expected"),
+    [
+        (True, False, PreprocessType.PROLOG_V3, PreprocessType.PROLOG_V3),
+        (True, True, PreprocessType.PROLOG_V3, PreprocessType.PROLOG_V3),
+        (True, True, PreprocessType.MLAPO, None),
+        (False, True, PreprocessType.PROLOG_V3, None),
+    ],
+)
+def test_selective_preprocess_routes_only_prolog_v3(selective, shared, base_type, expected):
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    impl.layer_name = "model.layers.3.self_attn"
+    impl.vllm_config = SimpleNamespace(use_v2_model_runner=True, cache_config=SimpleNamespace(block_size=128))
+    impl.fused_qkv_a_proj = None
+    impl.enable_sparse_sfa_c8 = False
+    impl.qk_rope_head_dim = 64
+    cfg = SimpleNamespace(selective_offload=selective, is_host_layer=lambda _: shared)
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=cfg),
+        ),
+        patch.object(AscendSFAImpl, "_fused_preprocess_type", return_value=base_type),
+        patch.object(AscendSFAImpl, "_try_enable_type", return_value=True),
+    ):
+        assert impl._resolve_preprocess_type(torch.bfloat16) is (expected or PreprocessType.NATIVE)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_selective_prolog_uses_paged_cache_or_tail_and_queues_writeback(shared):
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    impl.layer_name = "model.layers.3.self_attn"
+    logical_slots = torch.tensor([127, -1], dtype=torch.int64)
+    tail_slots = torch.tensor([383, -1], dtype=torch.int64)
+    tail_rows = torch.tensor([[0, 0], [-1, -1]])
+    md = SimpleNamespace(
+        attn_state=AscendAttentionState.DecodeOnly,
+        num_prefills=0,
+        num_decodes=1,
+        selective_tail_rows=tail_rows,
+        selective_tail_slots=tail_slots,
+    )
+    paged_cache = (torch.empty(4, 128, 1, 4), torch.empty(4, 128, 1, 2))
+    manager = SimpleNamespace(
+        block_size=128,
+        topk_buffers_k=[torch.empty(2, 384, 1, 4)],
+        topk_buffers_v=[torch.empty(2, 384, 1, 2)],
+        _get_offload_layer_id=lambda _: 0,
+        queue_selective_tail_writeback=Mock(),
+    )
+    cfg = SimpleNamespace(selective_offload=True, is_host_layer=lambda _: shared)
+    result = object()
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_ascend_config",
+            return_value=SimpleNamespace(sparse_kv_offload_config=cfg),
+        ),
+        patch("vllm_ascend.attention.sfa_kv_offload.get_sparse_kv_offload_manager", return_value=manager),
+        patch.object(AscendSFAImpl, "_sfa_preprocess_prolog_v3", return_value=result) as prolog,
+    ):
+        assert impl._sfa_preprocess_prolog_v3(None, paged_cache, None, None, logical_slots, attn_metadata=md) is result
+
+    _, cache, _, _, slots = prolog.call_args.args
+    if shared:
+        assert slots is tail_slots
+        assert [x.data_ptr() for x in cache] == [
+            manager.topk_buffers_k[0].data_ptr(),
+            manager.topk_buffers_v[0].data_ptr(),
+        ]
+        assert [x.shape for x in cache] == [(6, 128, 1, 4), (6, 128, 1, 2)]
+        manager.queue_selective_tail_writeback.assert_called_once_with(impl.layer_name, logical_slots, tail_rows)
+    else:
+        assert slots is logical_slots
+        assert cache is paged_cache
+        manager.queue_selective_tail_writeback.assert_not_called()
 
 
 def _make_boundary_decode_metadata():

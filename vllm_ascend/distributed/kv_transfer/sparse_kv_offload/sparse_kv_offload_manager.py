@@ -2353,22 +2353,22 @@ class SparseKVOffloadManager:
             keys.fill_(-1)
             request.fill_(-1)
 
+    def _selective_tail_positions(self, slots, tail_rows):
+        rows = slots.numel()
+        host_slots = slots.reshape(-1).to(torch.int64)
+        tail_slot, first = tail_rows[:rows].unbind(-1)
+        valid = (tail_slot >= 0) & (host_slots >= 0)
+        safe_slots = host_slots.clamp_min(0)
+        offset = safe_slots % self.block_size
+        tail_base = tail_slot.clamp_min(0) * self.selective_row_stride + self.topk_buffer_size
+        return valid, safe_slots, offset, tail_base, first
+
     def write_selective_tail(self, layer_name, slots, tail_rows, k, v, device_slots=None):
         layer_id = self._get_offload_layer_id(layer_name)
         k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
         rows = slots.numel()
-
-        def tail_positions():
-            host_slots = slots.reshape(-1).to(torch.int64)
-            tail_slot, first = tail_rows[:rows].unbind(-1)
-            valid = (tail_slot >= 0) & (host_slots >= 0)
-            safe_slots = host_slots.clamp_min(0)
-            offset = safe_slots % self.block_size
-            tail_base = tail_slot.clamp_min(0) * self.selective_row_stride + self.topk_buffer_size
-            return valid, safe_slots, offset, tail_base, first
-
         if device_slots is None:
-            valid, _, offset, tail_base, _ = tail_positions()
+            valid, _, offset, tail_base, _ = self._selective_tail_positions(slots, tail_rows)
             device_slots = torch.where(valid, tail_base + offset, -1)
         torch_npu.npu_scatter_pa_kv_cache(
             key=k.reshape(rows, 1, k_cache.shape[-1]).contiguous(),
@@ -2378,10 +2378,16 @@ class SparseKVOffloadManager:
             slot_mapping=device_slots,
             cache_mode="Norm",
         )
+        self.queue_selective_tail_writeback(layer_name, slots, tail_rows)
+
+    def queue_selective_tail_writeback(self, layer_name, slots, tail_rows):
+        layer_id = self._get_offload_layer_id(layer_name)
+        k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
+        rows = slots.numel()
 
         def submit():
             # Build stream-local temporaries from the persistent step metadata.
-            valid, safe_slots, offset, tail_base, first = tail_positions()
+            valid, safe_slots, offset, tail_base, first = self._selective_tail_positions(slots, tail_rows)
             start = first.clamp_min(0)
             host_base = safe_slots - offset + start
             source = tail_base + start

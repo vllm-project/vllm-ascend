@@ -96,6 +96,7 @@ def test_shared_tail_write_uses_precomputed_slots(monkeypatch):
         topk_buffers_v=[torch.zeros(2, 256, 2)],
         block_size=128,
         tp_rank=1,
+        queue_selective_tail_writeback=Mock(),
     )
     slots = torch.tensor([128, -1])
     device_slots = torch.tensor([256, -1])
@@ -105,3 +106,36 @@ def test_shared_tail_write_uses_precomputed_slots(monkeypatch):
         manager, "layer", slots, object(), torch.zeros(2, 4), torch.zeros(2, 2), device_slots=device_slots
     )
     assert scatter.call_args.kwargs["slot_mapping"] is device_slots
+    manager.queue_selective_tail_writeback.assert_called_once()
+
+
+def test_fused_tail_writeback_queues_only_full_block(monkeypatch):
+    context = SimpleNamespace()
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager.get_forward_context",
+        lambda: context,
+    )
+    manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager._get_offload_layer_id = lambda _: 0
+    manager.block_size = 128
+    manager.selective_row_stride = 256
+    manager.topk_buffer_size = 128
+    manager.topk_buffers_k = [torch.zeros(2, 256, 1, 4)]
+    manager.topk_buffers_v = [torch.zeros(2, 256, 1, 2)]
+    manager.gvas_k_bases = [65536]
+    manager.gvas_v_bases = [131072]
+    manager.token_size_bytes_k = 16
+    manager.token_size_bytes_v = 8
+    manager.d2h_src_ptrs_npu = torch.zeros(4, dtype=torch.int64)
+    manager.d2h_dst_ptrs_npu = torch.zeros(4, dtype=torch.int64)
+    manager.d2h_lengths_npu = torch.zeros(4, dtype=torch.int32)
+    manager._submit_current_kv_writeback = Mock()
+
+    manager.queue_selective_tail_writeback("layer", torch.tensor([255, 256]), torch.tensor([[0, 0], [1, 0]]))
+    manager._submit_current_kv_writeback.assert_not_called()
+    (submit,) = context._selective_tail_writebacks
+    submit()
+    assert manager.d2h_lengths_npu.tolist() == [2048, 0, 1024, 0]
+    assert manager.d2h_src_ptrs_npu[0] == manager.topk_buffers_k[0].data_ptr() + 128 * 16
+    assert manager.d2h_dst_ptrs_npu[0] == 65536 + 128 * 16
+    manager._submit_current_kv_writeback.assert_called_once_with(torch.device("cpu"), 2, tail=True)

@@ -31,7 +31,6 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
-from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -599,11 +598,54 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.fused_overlap_last_req_ids: torch.Tensor | None = None
         self._fused_overlap_selection_capacity: tuple[int, int, int, int] | None = None
 
-    def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
-        logger.warning_once(
-            "Sparse KV offload requires the native SFA preprocessing path; sfa_prolog_v3/mlapo is disabled."
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        config = get_ascend_config().sparse_kv_offload_config
+        if not config.selective_offload or not self.vllm_config.use_v2_model_runner or self.layer_name is None:
+            return None
+        if config.is_host_layer(self.layer_name) and (
+            self.vllm_config.cache_config.block_size != LIM_CACHE_BLOCK_SIZE
+            or self.enable_sparse_sfa_c8
+            or self.qk_rope_head_dim == 0
+        ):
+            return None
+        preprocess = super()._fused_preprocess_type()
+        return PreprocessType.PROLOG_V3 if preprocess is PreprocessType.PROLOG_V3 else None
+
+    def _sfa_preprocess_prolog_v3(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: AscendSFAMetadata | None = None,
+    ):
+        config = get_ascend_config().sparse_kv_offload_config
+        layer_name = self._offload_layer_name()
+        if not config.is_host_layer(layer_name):
+            return super()._sfa_preprocess_prolog_v3(
+                hidden_states, kv_cache, cos, sin, slot_mapping, attn_metadata=attn_metadata
+            )
+        metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
+        if not self._is_decode_only(metadata):
+            _check_device_kv_cache_exist()
+        tail_slots = metadata.selective_tail_slots
+        tail_rows = metadata.selective_tail_rows
+        assert tail_slots is not None and tail_rows is not None
+        manager = get_sparse_kv_offload_manager()
+        layer_id = manager._get_offload_layer_id(layer_name)
+        k_cache = manager.topk_buffers_k[layer_id]
+        v_cache = manager.topk_buffers_v[layer_id]
+        tail_cache = (
+            k_cache.view(-1, manager.block_size, 1, k_cache.shape[-1]),
+            v_cache.view(-1, manager.block_size, 1, v_cache.shape[-1]),
         )
-        return PreprocessType.NATIVE
+        result = super()._sfa_preprocess_prolog_v3(
+            hidden_states, tail_cache, cos, sin, tail_slots, attn_metadata=metadata
+        )
+        manager.queue_selective_tail_writeback(layer_name, slot_mapping, tail_rows)
+        return result
 
     @staticmethod
     def _cpu_cache_pair(manager, layer_name: str):

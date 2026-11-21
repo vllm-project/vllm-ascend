@@ -6,3 +6,6 @@ entries:
   - category: performance
     text: Reduced selective KV Decode overhead with persistent free slots and timestamp LRU, lazy selected-page validation, reuse of validated hot slots and per-request token markers, stable request metadata, CPU-precomputed tail slots, and independent Host staging for each TP rank and shared layer.
     hardware: [A3]
+  - category: performance
+    text: Enabled eligible selective KV offload Decode layers to use MLA Prolog V3, with fused KV writes into the shared layers' device tail blocks.
+    hardware: [A5]
