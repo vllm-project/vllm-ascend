@@ -1,0 +1,383 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Regression tests for the gathered HND full-graph FIA replay contract.
+
+PR #22649 review (Liuchenbing-2026): under full_graph_fia the head-major
+(HND/LBHNC) KV-cache read gathers the referenced blocks into compact
+buffers and captures FIA against them plus a sequential remapped_table
+(constant content: 0 .. num_rows * table_width - 1, plus one padding row).
+Replay used to rebind the FIA block_table input to the raw physical
+metadata.block_tables, which indexes out of the compact gathered buffer
+(wrong blocks, or OOB once a physical id >= the gathered row count).
+
+These tests pin the fixed contract:
+
+1. FIAParamProvider.resolve emits no block_table override for gathered
+   captures, so the captured remapped table stays bound at replay (while
+   the default NHD layout keeps rebinding the physical table).
+2. full_graph_fia registers the provider with the remapped flag and
+   retains the remapped table strongly: UpdatableGraph.register_task wraps
+   the capture kwargs with weak_ref_tensors, which do not keep the storage
+   alive.
+3. The captured gather covers the replay-time synthetic padding request
+   via one extra gathered slot holding physical block 0 and one extra
+   remapped row mapping to that slot.
+4. The eager path is unchanged: no padding row outside graph capture.
+
+The tests run on CPU tensors only (no NPU device or torch_npu ops are
+executed; the torch_npu symbols referenced by full_graph_fia are stubbed).
+"""
+
+import weakref
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+import torch
+
+import vllm_ascend.attention.attention_v1 as attention_v1
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackendImpl,
+    AscendAttentionState,
+    FIAParamProvider,
+)
+
+NUM_BLOCKS = 7
+NUM_KV_HEADS = 2
+BLOCK_SIZE = 4
+HEAD_DIM = 8
+NUM_HEADS = 4
+
+# Physical ids deliberately include values >= rows * table_width (the
+# gathered buffer holds rows * table_width + 1 slots): with the pre-fix
+# raw-table rebinding these ids would read out of the compact buffer.
+PHYSICAL_TABLE = torch.tensor([[3, 6], [0, 2]], dtype=torch.int32)
+NUM_ROWS, TABLE_WIDTH = PHYSICAL_TABLE.shape
+NUM_GATHERED = NUM_ROWS * TABLE_WIDTH
+
+
+def _make_backend():
+    backend = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    backend.key_cache = torch.arange(NUM_BLOCKS * NUM_KV_HEADS * BLOCK_SIZE * HEAD_DIM, dtype=torch.float32).reshape(
+        NUM_BLOCKS, NUM_KV_HEADS, BLOCK_SIZE, HEAD_DIM
+    )
+    backend.value_cache = torch.full((NUM_BLOCKS, NUM_KV_HEADS, BLOCK_SIZE, HEAD_DIM), 7.0)
+    backend.use_bnsd_kv_cache = True
+    backend.sliding_window = None
+    backend.num_heads = NUM_HEADS
+    backend.num_kv_heads = NUM_KV_HEADS
+    backend.head_size = HEAD_DIM
+    backend.scale = 0.5
+    backend.enable_c8_quant = False
+    backend.sinks = None
+    backend.kv_cache_dtype = torch.float32
+    backend._layer_name = "layer0"
+    backend._use_layer_aware_fia_graph_replay = False
+    backend._use_max_workspace_for_fia_graph = False
+    # Production __init__ allocates this; __new__ bypasses __init__.
+    backend._gathered_pa_read_strong_refs = []
+    return backend
+
+
+def _make_metadata(block_tables):
+    return SimpleNamespace(
+        attn_state=AscendAttentionState.DecodeOnly,
+        block_tables=block_tables,
+        seq_lens_list=[3, 2],
+        seq_lens=torch.tensor([3, 2], dtype=torch.int32),
+        actual_seq_lengths_q=[1, 1],
+        num_actual_tokens=2,
+        causal=True,
+        attn_mask=None,
+        max_query_len=1,
+    )
+
+
+def _expected_token_major(cache, flat_ids):
+    return cache.index_select(0, flat_ids).permute(0, 2, 1, 3).reshape(flat_ids.numel(), BLOCK_SIZE, -1)
+
+
+def _run_full_graph_fia(backend, block_tables, capturing=True):
+    """Drive the real full_graph_fia with stubbed NPU symbols.
+
+    Returns the recorded (operation, weakly-ref'd kwargs, provider) triple
+    exactly as UpdatableGraph.register_task would have stored it.
+    """
+    stub = SimpleNamespace(
+        _npu_fused_infer_attention_score_get_max_workspace=Mock(return_value=torch.empty(8, dtype=torch.int8)),
+        npu_fused_infer_attention_score=SimpleNamespace(out=Mock()),
+    )
+    recorder = {}
+
+    def fake_register_task(operation, kwargs, provider):
+        from vllm_ascend.utils import weak_ref_tensors
+
+        recorder["operation"] = operation
+        recorder["kwargs"] = weak_ref_tensors(kwargs)
+        recorder["provider"] = provider
+
+    extra_ctx = SimpleNamespace(capturing=capturing, is_draft_model=False)
+    query = torch.zeros(2, NUM_HEADS, HEAD_DIM)
+    output = torch.empty(2, NUM_HEADS * HEAD_DIM)
+    metadata = _make_metadata(block_tables)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(attention_v1, "torch_npu", stub)
+        mp.setattr(attention_v1, "register_task", fake_register_task)
+        mp.setattr(attention_v1, "_EXTRA_CTX", extra_ctx)
+        backend.full_graph_fia(query, None, None, metadata, output)
+    assert recorder, "full_graph_fia must register an FIA task under capture"
+    return recorder
+
+
+class TestProviderResolveContract:
+    def test_gathered_capture_does_not_rebind_block_table(self):
+        """The review's core complaint: replay keeps the remapped table."""
+        provider = FIAParamProvider(
+            "layer0",
+            None,
+            is_draft_model=False,
+            is_non_pa=False,
+            block_table_is_remapped=True,
+        )
+        raw_table = torch.full((2, 2), 99, dtype=torch.int32)
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1, 1],
+                    seq_lens_list=[3, 2],
+                    block_tables=raw_table,
+                    max_query_len=1,
+                )
+            }
+        )
+        assert "block_table" not in params, (
+            "gathered HND captures must not rebind the FIA block table to raw physical ids at replay"
+        )
+        assert params["actual_seq_lengths"] == [1, 1]
+        assert params["actual_seq_lengths_kv"] == [3, 2]
+
+    def test_gathered_draft_capture_does_not_rebind_block_table(self):
+        provider = FIAParamProvider(
+            "layer0",
+            None,
+            is_draft_model=True,
+            is_non_pa=False,
+            block_table_is_remapped=True,
+        )
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1],
+                    seq_lens_list=[4],
+                    block_tables=torch.zeros(1, 2, dtype=torch.int32),
+                    max_query_len=1,
+                )
+            }
+        )
+        assert "block_table" not in params
+
+    def test_default_layout_still_rebinds_physical_block_table(self):
+        provider = FIAParamProvider("layer0", None, is_non_pa=False)
+        raw_table = torch.zeros(2, 2, dtype=torch.int32)
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1, 1],
+                    seq_lens_list=[3, 2],
+                    block_tables=raw_table,
+                    max_query_len=1,
+                )
+            }
+        )
+        assert params["block_table"] is raw_table
+
+    def test_non_pa_capture_still_rebinds_to_none(self):
+        provider = FIAParamProvider("layer0", None, is_non_pa=True)
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1],
+                    seq_lens_list=[1],
+                    block_tables=None,
+                    max_query_len=1,
+                )
+            }
+        )
+        assert params["block_table"] is None
+
+    def test_sliding_window_default_layout_still_omits_block_table(self):
+        provider = FIAParamProvider("layer0", 512)
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1],
+                    seq_lens_list=[9],
+                    block_tables=torch.zeros(1, 2, dtype=torch.int32),
+                    max_query_len=1,
+                )
+            }
+        )
+        assert "block_table" not in params
+
+
+class TestFullGraphCapture:
+    def test_capture_registers_remapped_provider_and_table(self):
+        backend = _make_backend()
+        recorder = _run_full_graph_fia(backend, PHYSICAL_TABLE.clone())
+
+        provider = recorder["provider"]
+        assert provider.block_table_is_remapped is True
+
+        remapped = recorder["kwargs"]["block_table"]
+        # Sequential mapping over the compact gather buffers plus one
+        # padding row whose entries point at the extra gathered slot.
+        assert remapped.shape == (NUM_ROWS + 1, TABLE_WIDTH)
+        assert remapped.dtype == PHYSICAL_TABLE.dtype
+        assert remapped[:NUM_ROWS].flatten().tolist() == list(range(NUM_GATHERED))
+        assert remapped[NUM_ROWS].tolist() == [NUM_GATHERED] * TABLE_WIDTH
+
+        # The gathered buffers hold the physical blocks referenced by the
+        # captured table (plus physical block 0 for the padding request):
+        # FIA reading gathered[remapped[r, c]] must observe cache[table[r, c]].
+        flat_ids = PHYSICAL_TABLE.reshape(-1).to(torch.int64).clamp(min=0)
+        extended_ids = torch.cat([flat_ids, flat_ids.new_zeros(1)])
+        assert torch.equal(recorder["kwargs"]["key"], _expected_token_major(backend.key_cache, extended_ids))
+        assert torch.equal(recorder["kwargs"]["value"], _expected_token_major(backend.value_cache, extended_ids))
+        gathered_key = recorder["kwargs"]["key"]
+        for r in range(NUM_ROWS):
+            for c in range(TABLE_WIDTH):
+                slot = int(remapped[r, c])
+                # FIA reads gathered[remapped[r, c]]: it must observe the
+                # token-major view of the physical block table[r, c].
+                physical_slot = torch.tensor([int(PHYSICAL_TABLE[r, c])], dtype=torch.int64)
+                assert torch.equal(
+                    gathered_key[slot],
+                    _expected_token_major(backend.key_cache, physical_slot)[0],
+                )
+
+    def test_replay_keeps_remapped_table_bound(self):
+        """End-to-end replay contract: resolved params never replace the
+        captured remapped table with raw physical ids."""
+        backend = _make_backend()
+        recorder = _run_full_graph_fia(backend, PHYSICAL_TABLE.clone())
+        provider = recorder["provider"]
+        captured_block_table = recorder["kwargs"]["block_table"]
+
+        # A later step with different, raw physical ids.
+        next_table = torch.tensor([[5, 4], [1, 6]], dtype=torch.int32)
+        params = provider.resolve(
+            {
+                "layer0": SimpleNamespace(
+                    actual_seq_lengths_q=[1, 1],
+                    seq_lens_list=[6, 5],
+                    block_tables=next_table,
+                    max_query_len=1,
+                )
+            }
+        )
+        # GraphUpdateTask.bind semantics: {**captured_kwargs, **params}.
+        runtime_kwargs = {**recorder["kwargs"], **params}
+        assert runtime_kwargs["block_table"] is captured_block_table
+        # ... and the (constant) remapped content still addresses the
+        # compact buffer sequentially, not the physical pool.
+        assert runtime_kwargs["block_table"].flatten().tolist()[:NUM_GATHERED] == list(range(NUM_GATHERED))
+
+    def test_remapped_table_strong_ref_outlives_capture_scope(self):
+        """register_task weak-refs the capture kwargs; the backend must own
+        the remapped table's storage for the graph's lifetime."""
+        backend = _make_backend()
+        recorder = _run_full_graph_fia(backend, PHYSICAL_TABLE.clone())
+        remapped = recorder["kwargs"]["block_table"]
+        keeper = weakref.ref(remapped)
+
+        strong_refs = getattr(backend, "_gathered_pa_read_strong_refs", None)
+        assert strong_refs, (
+            "backend must retain the captured remapped table strongly "
+            "(UpdatableGraph.register_task wraps capture kwargs with "
+            "weak_ref_tensors)"
+        )
+        assert any(ref is remapped for ref in strong_refs)
+
+        del recorder, remapped  # the capture frame (and its locals) goes away
+        assert keeper() is not None, "backend strong ref must keep the table alive"
+        backend._gathered_pa_read_strong_refs.clear()
+        assert keeper() is None
+
+    def test_v2_path_retains_remapped_table(self):
+        """FIAV2ParamProvider never resolves a block_table override, so the
+        strong reference is the only replay-safety net there."""
+        backend = _make_backend()
+        query = torch.zeros(2, NUM_HEADS, HEAD_DIM)
+        output = torch.empty(2, NUM_HEADS * HEAD_DIM)
+        stub = SimpleNamespace(
+            _npu_fused_infer_attention_score_v2_get_max_workspace=Mock(return_value=torch.empty(8, dtype=torch.int8)),
+            npu_fused_infer_attention_score_v2=SimpleNamespace(out=Mock()),
+        )
+        recorder = {}
+
+        def fake_register_task(operation, kwargs, provider):
+            recorder["kwargs"] = kwargs
+            recorder["provider"] = provider
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1, "torch_npu", stub)
+            mp.setattr(attention_v1, "register_task", fake_register_task)
+            mp.setattr(
+                attention_v1,
+                "_EXTRA_CTX",
+                SimpleNamespace(capturing=True, is_draft_model=False),
+            )
+            backend.full_graph_fia_v2(query, None, None, _make_metadata(PHYSICAL_TABLE.clone()), output)
+        strong_refs = getattr(backend, "_gathered_pa_read_strong_refs", None)
+        assert strong_refs and strong_refs[-1] is recorder["kwargs"]["block_table"]
+
+
+class TestMaterializePaddingRow:
+    def test_capture_adds_padding_row_for_synthetic_request(self):
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                attention_v1,
+                "_EXTRA_CTX",
+                SimpleNamespace(capturing=True),
+            )
+            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone())
+        assert remapped.shape == (NUM_ROWS + 1, TABLE_WIDTH)
+        assert key.shape[0] == NUM_GATHERED + 1
+        assert value.shape[0] == NUM_GATHERED + 1
+        # The extra gathered slot is physical block 0 (the padding request
+        # points at the null block, mirroring the physical-side padding).
+        zero_ids = torch.zeros(1, dtype=torch.int64)
+        assert torch.equal(
+            key[NUM_GATHERED],
+            _expected_token_major(backend.key_cache, zero_ids)[0],
+        )
+
+    def test_eager_path_unchanged_no_padding_row(self):
+        backend = _make_backend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                attention_v1,
+                "_EXTRA_CTX",
+                SimpleNamespace(capturing=False),
+            )
+            key, value, remapped = backend._materialize_bnsd_pa_read(PHYSICAL_TABLE.clone())
+        assert remapped.shape == (NUM_ROWS, TABLE_WIDTH)
+        assert key.shape[0] == NUM_GATHERED
+        assert remapped.flatten().tolist() == list(range(NUM_GATHERED))
+
+
+class TestGatheredLayoutHelper:
+    @pytest.mark.parametrize(
+        ("layout", "expected"),
+        [("NHD", False), ("HND", True), ("LBHNC", True)],
+    )
+    def test_helper_mirrors_backend_layout_choice(self, layout, expected):
+        helper = getattr(attention_v1, "full_graph_fia_uses_gathered_kv_read", None)
+        assert helper is not None, (
+            "draft speculators need the shared layout helper to mirror the "
+            "backend's capture-time FIA block-table binding"
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(attention_v1.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout)
+            assert helper() is expected

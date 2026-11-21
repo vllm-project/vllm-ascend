@@ -1327,7 +1327,15 @@ class TestBnsdPaReadGather(unittest.TestCase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_capture_mode_gathers_full_table(self, mock_ctx):
-        """Capture uses the same full-width gather as eager (static shape)."""
+        """Capture uses the same full-width gather as eager, plus one padding row.
+
+        Graph replay can grow the FIA batch by one synthetic padding request
+        beyond the captured request rows (AscendAttentionMetadataBuilder.build
+        appends it when a padded FULL-graph decode query exceeds the last
+        cumulative query length). The gather then carries one extra slot of
+        physical block 0 and one extra remapped row pointing at it, mirroring
+        the physical-side padding ("the dummy request points at block 0").
+        """
         mock_ctx.return_value = MagicMock(capturing=True)
         impl = self._make_impl()
         impl.key_cache = self._make_bnsd_cache()
@@ -1336,8 +1344,10 @@ class TestBnsdPaReadGather(unittest.TestCase):
 
         key, _, remapped = impl._materialize_bnsd_pa_read(block_table)
 
-        self.assertEqual(key.shape[0], block_table.numel())
-        self.assertEqual(remapped.tolist(), [[0, 1], [2, 3]])
+        self.assertEqual(key.shape[0], block_table.numel() + 1)
+        self.assertEqual(remapped.tolist(), [[0, 1], [2, 3], [4, 4]])
+        # The padding slot gathers physical block 0 (the null block).
+        self.assertEqual(key[remapped[2, 0], 0, 0].item(), 0)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_fia_params_routes_bnsd_through_the_gather(self, mock_ctx):

@@ -70,6 +70,18 @@ _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
+def full_graph_fia_uses_gathered_kv_read() -> bool:
+    """Whether captured full-graph FIA tasks read a gathered (HND) KV cache.
+
+    Draft speculators build FIA task-update parameters outside the attention
+    backend (SharedSource updates), so they must mirror the backend's
+    capture-time binding: when the HND gather is active, the captured FIA
+    block table is the constant sequential remapped table over the compact
+    gather buffers, and replay must not rebind it to the raw physical table.
+    """
+    return envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND")
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -476,6 +488,19 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    # True when the registered FIA task was captured against the gathered
+    # HND (head-major) KV read: the kernel then indexes the compact
+    # (num_rows * table_width [+1], block_size, num_kv_heads * head_dim)
+    # gather buffers through the captured sequential remapped table, whose
+    # content is constant across replays (the captured arange rewrites it on
+    # every replay). Replay must NOT rebind that input to
+    # metadata.block_tables: raw physical block ids address the full KV
+    # pool, not the compact gathered buffer (wrong blocks, or out of bounds
+    # once a physical id >= the gathered row count). The physical table the
+    # captured gather consumes is the runner's persistent block-table
+    # buffer, refreshed in place every step, so replaying the captured
+    # gather already reads the current ids.
+    block_table_is_remapped: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -484,8 +509,9 @@ class FIAParamProvider:
             params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": None if self.is_non_pa else metadata.block_tables,
             }
+            if not self.block_table_is_remapped:
+                params["block_table"] = None if self.is_non_pa else metadata.block_tables
         else:
             params = {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
@@ -608,6 +634,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        # Full-graph FIA tasks captured against the gathered HND KV read must
+        # keep their remapped block table alive for the graph's lifetime:
+        # UpdatableGraph.register_task wraps the capture kwargs with
+        # weak_ref_tensors, so without an owner the storage would be freed
+        # back to the graph pool and the replay-side rebind would pass a
+        # dead weak tensor into the FIA op (see the PR #22649 review).
+        self._gathered_pa_read_strong_refs: list[torch.Tensor] = []
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -659,6 +692,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             0 if self.sliding_window else SWA_INT_MAX,
         )
 
+    def _retain_gathered_pa_read_table(self, block_table: torch.Tensor | None) -> bool:
+        """Whether ``block_table`` is the gathered HND read's remapped table.
+
+        When it is, the captured FIA task must keep this exact tensor bound:
+        its content is the constant sequential mapping into the compact
+        gather buffers, and no replay-time parameter replaces it. Retain a
+        strong reference because ``UpdatableGraph.register_task`` wraps the
+        capture kwargs with ``weak_ref_tensors``, which do not keep the
+        storage alive.
+        """
+        if block_table is None or not self.use_bnsd_kv_cache:
+            return False
+        self._gathered_pa_read_strong_refs.append(block_table)
+        return True
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -669,6 +717,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer=None,
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        # For the gathered HND read, ``block_table`` is the sequential
+        # remapped table over the compact gather buffers; the strong
+        # reference kept by the helper below survives register_task's
+        # weak_ref_tensors wrapping of the capture kwargs.
+        block_table_is_remapped = self._retain_gathered_pa_read_table(block_table)
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -753,6 +806,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                block_table_is_remapped=block_table_is_remapped,
             ),
         )
         return output, num_tokens
@@ -766,6 +820,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        # FIAV2ParamProvider never resolves a block_table override, so the
+        # captured remapped table stays bound at replay; keep it alive the
+        # same way as the v1 path.
+        self._retain_gathered_pa_read_table(block_table)
         actual_seq_lengths_kv = attn_metadata.seq_lens
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -908,15 +966,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # 0 is safe. Gather the full table width (see the docstring: no
         # device-side dedup, so no host synchronization).
         flat_ids = block_table.reshape(-1).to(torch.int64).clamp(min=0)
-        gathered_ids = flat_ids
-        remapped = torch.arange(flat_ids.numel(), device=flat_ids.device)
+        num_gathered = flat_ids.numel()
+        remapped = torch.arange(num_gathered, device=flat_ids.device)
         block_size = self.key_cache.shape[2]
 
         def to_token_major(cache: torch.Tensor) -> torch.Tensor:
             # (U, H, block, D) -> (U, block, H * D); the reshape copies once.
-            return cache.index_select(0, gathered_ids).permute(0, 2, 1, 3).reshape(gathered_ids.numel(), block_size, -1)
+            return cache.index_select(0, flat_ids).permute(0, 2, 1, 3).reshape(flat_ids.numel(), block_size, -1)
 
         remapped_table = remapped.reshape(num_rows, table_width).to(block_table.dtype)
+        if _EXTRA_CTX.capturing:
+            # Graph replay can grow the FIA batch by one synthetic padding
+            # request beyond the captured request rows (see
+            # AscendAttentionMetadataBuilder.build: a padded FULL-graph
+            # decode query tensor can exceed the last cumulative query
+            # length, so build() appends a final synthetic request with KV
+            # len 1). The physical-side padding points that request at block
+            # 0; mirror it in the gathered world by appending one extra
+            # gathered slot holding physical block 0 and one extra remapped
+            # row mapping every entry to that slot. Rows are read by the
+            # kernel only up to each request's seq len, so the padding row
+            # is read as a single block-0 entry and nothing else touches it.
+            remapped_table = torch.cat(
+                [remapped_table, remapped_table.new_full((1, table_width), num_gathered)],
+                dim=0,
+            )
+            flat_ids = torch.cat([flat_ids, flat_ids.new_zeros(1)])
         return to_token_major(self.key_cache), to_token_major(self.value_cache), remapped_table
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
