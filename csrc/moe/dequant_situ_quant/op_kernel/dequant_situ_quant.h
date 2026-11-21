@@ -740,6 +740,11 @@ public:
         rowLen_ = static_cast<int64_t>(tilingData_->rowLen);
         inputWidth_ = static_cast<int64_t>(tilingData_->inputWidth);
         outputWidth_ = static_cast<int64_t>(tilingData_->outputWidth);
+        tileWidth_ = outputWidth_;
+        if constexpr (!std::is_same_v<XType, int32_t>) {
+            tileWidth_ = static_cast<int64_t>(tilingData_->baseColLen);
+        }
+        currentCols_ = outputWidth_ < tileWidth_ ? outputWidth_ : tileWidth_;
         expertNum_ = static_cast<int64_t>(tilingData_->expertNum);
         usedCoreNum_ = static_cast<int64_t>(tilingData_->usedCoreNum);
         hasBias_ = tilingData_->dequantBiasIsEmpty == 0;
@@ -764,9 +769,9 @@ public:
         yGm_.SetGlobalBuffer((__gm__ int8_t*)y, rowLen_ * outputWidth_);
         scaleGm_.SetGlobalBuffer((__gm__ float*)scale, rowLen_);
 
-        const int64_t inputBytes = inputWidth_ * static_cast<int64_t>(sizeof(XType));
+        const int64_t inputBytes = 2 * tileWidth_ * static_cast<int64_t>(sizeof(XType));
         const int64_t paramBytes = inputWidth_ * static_cast<int64_t>(sizeof(float));
-        const int64_t outputBytes = outputWidth_ * static_cast<int64_t>(sizeof(int8_t)) + 32;
+        const int64_t outputBytes = tileWidth_ * static_cast<int64_t>(sizeof(int8_t)) + 32;
         pipe_->InitBuffer(xQueue_, 1, inputBytes);
         if constexpr (std::is_same_v<XType, int32_t>) {
             pipe_->InitBuffer(weightScaleQueue_, 1, paramBytes);
@@ -774,10 +779,10 @@ public:
                 pipe_->InitBuffer(biasQueue_, 1, paramBytes);
             }
         } else {
-            pipe_->InitBuffer(dequantBuf_, inputWidth_ * static_cast<int64_t>(sizeof(float)));
+            pipe_->InitBuffer(dequantBuf_, 2 * tileWidth_ * static_cast<int64_t>(sizeof(float)));
         }
         pipe_->InitBuffer(outQueue_, 1, outputBytes);
-        pipe_->InitBuffer(tmpBuf_, inputWidth_ * static_cast<int64_t>(sizeof(float)));
+        pipe_->InitBuffer(tmpBuf_, 2 * tileWidth_ * static_cast<int64_t>(sizeof(float)));
     }
 
     __aicore__ inline void Process()
@@ -828,6 +833,12 @@ private:
 
         for (int64_t localRow = 0; localRow < localRows; ++localRow) {
             const int64_t rowIdx = firstRow + localRow;
+            if constexpr (!std::is_same_v<XType, int32_t>) {
+                if (outputWidth_ > tileWidth_) {
+                    ProcessTiledRow(rowIdx);
+                    continue;
+                }
+            }
             CopyInRow(rowIdx);
             ComputeRow(rowIdx);
             CopyOutRow(rowIdx);
@@ -861,24 +872,77 @@ private:
 
     __aicore__ inline void CopyInRow(int64_t rowIdx)
     {
-        const uint32_t inputBytes = static_cast<uint32_t>(inputWidth_ * sizeof(XType));
-        DataCopyExtParams params{1, inputBytes, 0, 0, 0};
         DataCopyPadExtParams<XType> padParams{false, 0, 0, 0};
         LocalTensor<XType> xLocal = xQueue_.AllocTensor<XType>();
-        DataCopyPad(xLocal, xGm_[rowIdx * inputWidth_], params, padParams);
+        if constexpr (std::is_same_v<XType, int32_t>) {
+            DataCopyExtParams params{1, static_cast<uint32_t>(inputWidth_ * sizeof(XType)), 0, 0, 0};
+            DataCopyPad(xLocal, xGm_[rowIdx * inputWidth_], params, padParams);
+        } else {
+            // A tile must contain matching columns from BOTH halves of
+            // [gate | up], not adjacent slices of the concatenated row.
+            DataCopyExtParams params{1, static_cast<uint32_t>(currentCols_ * sizeof(XType)), 0, 0, 0};
+            DataCopyPad(xLocal, xGm_[rowIdx * inputWidth_ + colOffset_], params, padParams);
+            DataCopyPad(xLocal[tileWidth_],
+                        xGm_[rowIdx * inputWidth_ + outputWidth_ + colOffset_], params, padParams);
+        }
         xQueue_.EnQue(xLocal);
     }
 
     __aicore__ inline void ComputeRow(int64_t rowIdx)
     {
         LocalTensor<XType> xLocal = xQueue_.DeQue<XType>();
+        LocalTensor<float> situ = ComputeSiTU(xLocal, rowIdx);
+        LocalTensor<float> temp = tmpBuf_.Get<float>();
+        DynamicQuant(situ, temp);
+        xQueue_.FreeTensor(xLocal);
+    }
+
+    __aicore__ inline void ProcessTiledRow(int64_t rowIdx)
+    {
+        float rowMax = 0.0f;
+        for (colOffset_ = 0; colOffset_ < outputWidth_; colOffset_ += tileWidth_) {
+            currentCols_ = outputWidth_ - colOffset_ < tileWidth_ ? outputWidth_ - colOffset_ : tileWidth_;
+            CopyInRow(rowIdx);
+            LocalTensor<XType> xLocal = xQueue_.DeQue<XType>();
+            LocalTensor<float> situ = ComputeSiTU(xLocal, rowIdx);
+            LocalTensor<float> temp = tmpBuf_.Get<float>();
+            const float tileMax = ComputeAbsMax(situ, temp);
+            rowMax = tileMax > rowMax ? tileMax : rowMax;
+            xQueue_.FreeTensor(xLocal);
+        }
+        float scaleValue = rowMax * K3_DYNAMIC_QUANT_FACTOR;
+        if (scaleValue <= 0.0f) {
+            scaleValue = 1.0f;
+        }
+        // Recompute bounded tiles; do not keep a whole FP32 row in UB.
+        for (colOffset_ = 0; colOffset_ < outputWidth_; colOffset_ += tileWidth_) {
+            currentCols_ = outputWidth_ - colOffset_ < tileWidth_ ? outputWidth_ - colOffset_ : tileWidth_;
+            CopyInRow(rowIdx);
+            LocalTensor<XType> xLocal = xQueue_.DeQue<XType>();
+            LocalTensor<float> situ = ComputeSiTU(xLocal, rowIdx);
+            LocalTensor<float> temp = tmpBuf_.Get<float>();
+            QuantizeWithScale(situ, temp, scaleValue);
+            xQueue_.FreeTensor(xLocal);
+            CopyOutRow(rowIdx);
+        }
+        colOffset_ = 0;
+        currentCols_ = tileWidth_;
+    }
+
+    __aicore__ inline LocalTensor<float> ComputeSiTU(LocalTensor<XType>& xLocal, int64_t rowIdx)
+    {
         LocalTensor<float> xLocalF32;
         if constexpr (std::is_same_v<XType, int32_t>) {
             xLocalF32 = xLocal.template ReinterpretCast<float>();
         } else {
             xLocalF32 = dequantBuf_.Get<float>();
         }
-        Cast(xLocalF32, xLocal, RoundMode::CAST_NONE, inputWidth_);
+        if constexpr (std::is_same_v<XType, int32_t>) {
+            Cast(xLocalF32, xLocal, RoundMode::CAST_NONE, inputWidth_);
+        } else {
+            Cast(xLocalF32, xLocal, RoundMode::CAST_NONE, currentCols_);
+            Cast(xLocalF32[tileWidth_], xLocal[tileWidth_], RoundMode::CAST_NONE, currentCols_);
+        }
         PipeBarrier<PIPE_V>();
         if constexpr (std::is_same_v<XType, int32_t>) {
             const float activationScale = activationScaleGm_.GetValue(rowIdx);
@@ -893,75 +957,86 @@ private:
         }
 
         LocalTensor<float> temp = tmpBuf_.Get<float>();
-        int64_t gateOffset = (activateLeft_ == 1) ? 0 : outputWidth_;
-        int64_t upOffset = (activateLeft_ == 1) ? outputWidth_ : 0;
+        int64_t gateOffset = (activateLeft_ == 1) ? 0 : tileWidth_;
+        int64_t upOffset = (activateLeft_ == 1) ? tileWidth_ : 0;
 
         LocalTensor<float> gate = xLocalF32[gateOffset];
         LocalTensor<float> up = xLocalF32[upOffset];
         LocalTensor<float> sigmoid = temp;
-        LocalTensor<float> ones = temp[outputWidth_];
+        LocalTensor<float> ones = temp[tileWidth_];
 
-        Adds(sigmoid, gate, 0.0f, outputWidth_);
+        Adds(sigmoid, gate, 0.0f, currentCols_);
         PipeBarrier<PIPE_V>();
-        Muls(gate, gate, 1.0f / beta_, outputWidth_);
+        Muls(gate, gate, 1.0f / beta_, currentCols_);
         PipeBarrier<PIPE_V>();
-        Tanh(gate, gate, outputWidth_);
+        Tanh(gate, gate, currentCols_);
         PipeBarrier<PIPE_V>();
-        Muls(gate, gate, beta_, outputWidth_);
+        Muls(gate, gate, beta_, currentCols_);
         PipeBarrier<PIPE_V>();
 
-        Muls(sigmoid, sigmoid, -1.0f, outputWidth_);
+        Muls(sigmoid, sigmoid, -1.0f, currentCols_);
         PipeBarrier<PIPE_V>();
-        Exp(sigmoid, sigmoid, outputWidth_);
+        Exp(sigmoid, sigmoid, currentCols_);
         PipeBarrier<PIPE_V>();
-        Adds(sigmoid, sigmoid, 1.0f, outputWidth_);
+        Adds(sigmoid, sigmoid, 1.0f, currentCols_);
         PipeBarrier<PIPE_V>();
-        Duplicate<float>(ones, 1.0f, outputWidth_);
+        Duplicate<float>(ones, 1.0f, currentCols_);
         PipeBarrier<PIPE_V>();
-        Div(sigmoid, ones, sigmoid, outputWidth_);
+        Div(sigmoid, ones, sigmoid, currentCols_);
         PipeBarrier<PIPE_V>();
-        Mul(gate, gate, sigmoid, outputWidth_);
+        Mul(gate, gate, sigmoid, currentCols_);
         PipeBarrier<PIPE_V>();
 
         if (linearBeta_ > 0.0f) {
-            Muls(up, up, 1.0f / linearBeta_, outputWidth_);
+            Muls(up, up, 1.0f / linearBeta_, currentCols_);
             PipeBarrier<PIPE_V>();
-            Tanh(up, up, outputWidth_);
+            Tanh(up, up, currentCols_);
             PipeBarrier<PIPE_V>();
-            Muls(up, up, linearBeta_, outputWidth_);
+            Muls(up, up, linearBeta_, currentCols_);
             PipeBarrier<PIPE_V>();
         }
-        Mul(gate, gate, up, outputWidth_);
+        Mul(gate, gate, up, currentCols_);
         PipeBarrier<PIPE_V>();
 
-        DynamicQuant(gate, temp);
-        xQueue_.FreeTensor(xLocal);
+        return gate;
+    }
+
+    __aicore__ inline float ComputeAbsMax(LocalTensor<float>& situ, LocalTensor<float>& temp)
+    {
+        Abs(temp, situ, currentCols_);
+        PipeBarrier<PIPE_V>();
+        ComputeReduceMax(temp);
+        PipeBarrier<PIPE_V>();
+        event_t eventVToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVToS);
+        WaitFlag<HardEvent::V_S>(eventVToS);
+        const float maxValue = temp.GetValue(0);
+        // Finish the scalar read before a later tile overwrites tmpBuf_.
+        event_t eventSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSToV);
+        WaitFlag<HardEvent::S_V>(eventSToV);
+        return maxValue;
     }
 
     __aicore__ inline void DynamicQuant(LocalTensor<float>& situ, LocalTensor<float>& temp)
     {
-        Abs(temp, situ, outputWidth_);
-        PipeBarrier<PIPE_V>();
-        ComputeReduceMax(temp);
-        PipeBarrier<PIPE_V>();
-        WholeReduceMax(temp, temp, K3_MASK_FP32, 1, K3_MASK_BLK_STRIDE, 1, K3_MASK_BLK_STRIDE,
-                       ReduceOrder::ORDER_ONLY_VALUE);
-        PipeBarrier<PIPE_V>();
-
-        event_t eventVToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVToS);
-        WaitFlag<HardEvent::V_S>(eventVToS);
-        float scaleValue = temp.GetValue(0) * K3_DYNAMIC_QUANT_FACTOR;
+        float scaleValue = ComputeAbsMax(situ, temp) * K3_DYNAMIC_QUANT_FACTOR;
         if (scaleValue <= 0.0f) {
             scaleValue = 1.0f;
         }
-        Muls(situ, situ, 1.0f / scaleValue, outputWidth_);
+        QuantizeWithScale(situ, temp, scaleValue);
+    }
+
+    __aicore__ inline void QuantizeWithScale(
+        LocalTensor<float>& situ, LocalTensor<float>& temp, float scaleValue)
+    {
+        Muls(situ, situ, 1.0f / scaleValue, currentCols_);
         PipeBarrier<PIPE_V>();
 
         LocalTensor<float> outLocal = outQueue_.AllocTensor<float>();
         LocalTensor<int8_t> yLocal = outLocal.ReinterpretCast<int8_t>();
-        // Scale is packed after int8 data, aligned to float boundary
-        int64_t scaleIdx = (outputWidth_ + static_cast<int64_t>(sizeof(float)) - 1) / sizeof(float);
+        // BF16 tileWidth is a multiple of 64, so scale DMA is 32B aligned.
+        int64_t scaleIdx = (tileWidth_ + static_cast<int64_t>(sizeof(float)) - 1) / sizeof(float);
         LocalTensor<float> scaleLocal = outLocal[scaleIdx];
         Duplicate<float>(scaleLocal, scaleValue, 1);
         PipeBarrier<PIPE_V>();
@@ -971,8 +1046,8 @@ private:
 
     __aicore__ inline void ComputeReduceMax(const LocalTensor<float>& temp)
     {
-        const uint32_t vectorCycles = static_cast<uint32_t>(outputWidth_ / K3_MASK_FP32);
-        const uint32_t remainder = static_cast<uint32_t>(outputWidth_ % K3_MASK_FP32);
+        const uint32_t vectorCycles = static_cast<uint32_t>(currentCols_ / K3_MASK_FP32);
+        const uint32_t remainder = static_cast<uint32_t>(currentCols_ % K3_MASK_FP32);
 
         if (vectorCycles > 1) {
             BinaryRepeatParams repeatParams;
@@ -989,7 +1064,7 @@ private:
             Max(temp, temp[vectorCycles * K3_MASK_FP32], temp, remainder, 1, {1, 1, 1, 0, 8, 0});
             PipeBarrier<PIPE_V>();
         }
-        uint32_t mask = vectorCycles > 0 ? K3_MASK_FP32 : outputWidth_;
+        uint32_t mask = vectorCycles > 0 ? K3_MASK_FP32 : currentCols_;
         WholeReduceMax(temp, temp, mask, 1, K3_MASK_BLK_STRIDE, 1, K3_MASK_BLK_STRIDE,
                        ReduceOrder::ORDER_ONLY_VALUE);
     }
@@ -997,15 +1072,15 @@ private:
     __aicore__ inline void CastFloatToInt8(
         const LocalTensor<float>& src, LocalTensor<float>& temp, LocalTensor<int8_t>& dst)
     {
-        LocalTensor<int32_t> tempInt32 = temp[outputWidth_].ReinterpretCast<int32_t>();
-        Cast(tempInt32, src, RoundMode::CAST_RINT, outputWidth_);
+        LocalTensor<int32_t> tempInt32 = temp[tileWidth_].ReinterpretCast<int32_t>();
+        Cast(tempInt32, src, RoundMode::CAST_RINT, currentCols_);
         PipeBarrier<PIPE_V>();
         SetDeqScale((half)1.0f);
 
         LocalTensor<half> tempHalf = temp.ReinterpretCast<half>();
-        Cast(tempHalf, tempInt32, RoundMode::CAST_ROUND, outputWidth_);
+        Cast(tempHalf, tempInt32, RoundMode::CAST_ROUND, currentCols_);
         PipeBarrier<PIPE_V>();
-        Cast(dst, tempHalf, RoundMode::CAST_TRUNC, outputWidth_);
+        Cast(dst, tempHalf, RoundMode::CAST_TRUNC, currentCols_);
         PipeBarrier<PIPE_V>();
     }
 
@@ -1013,13 +1088,15 @@ private:
     {
         LocalTensor<float> outLocal = outQueue_.DeQue<float>();
         LocalTensor<int8_t> yLocal = outLocal.ReinterpretCast<int8_t>();
-        int64_t scaleIdx = (outputWidth_ + static_cast<int64_t>(sizeof(float)) - 1) / sizeof(float);
+        int64_t scaleIdx = (tileWidth_ + static_cast<int64_t>(sizeof(float)) - 1) / sizeof(float);
         LocalTensor<float> scaleLocal = outLocal[scaleIdx];
 
-        DataCopyExtParams yParams{1, static_cast<uint32_t>(outputWidth_ * sizeof(int8_t)), 0, 0, 0};
-        DataCopyPad(yGm_[rowIdx * outputWidth_], yLocal, yParams);
-        DataCopyExtParams scaleParams{1, static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
-        DataCopyPad(scaleGm_[rowIdx], scaleLocal, scaleParams);
+        DataCopyExtParams yParams{1, static_cast<uint32_t>(currentCols_ * sizeof(int8_t)), 0, 0, 0};
+        DataCopyPad(yGm_[rowIdx * outputWidth_ + colOffset_], yLocal, yParams);
+        if (colOffset_ == 0) {
+            DataCopyExtParams scaleParams{1, static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
+            DataCopyPad(scaleGm_[rowIdx], scaleLocal, scaleParams);
+        }
         outQueue_.FreeTensor(outLocal);
     }
 
@@ -1029,6 +1106,9 @@ private:
     int64_t rowLen_ = 0;
     int64_t inputWidth_ = 0;
     int64_t outputWidth_ = 0;
+    int64_t tileWidth_ = 0;
+    int64_t currentCols_ = 0;
+    int64_t colOffset_ = 0;
     int64_t expertNum_ = 0;
     int64_t usedCoreNum_ = 0;
     uint32_t activateLeft_ = 1;
