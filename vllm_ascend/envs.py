@@ -36,6 +36,11 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Align AscendStore suffix-window saves. Boolean 0/1, default 0; not sensitive.
+    "VLLM_ASCEND_KVPOOL_WINDOW_BASE": lambda: os.getenv("VLLM_ASCEND_KVPOOL_WINDOW_BASE", "0") == "1",
+    # Log window-base decisions (does not change save policy). Boolean 0/1,
+    # default 1; not sensitive.
+    "VLLM_ASCEND_KVPOOL_WINDOW_BASE_OBS": lambda: os.getenv("VLLM_ASCEND_KVPOOL_WINDOW_BASE_OBS", "1") == "1",
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
