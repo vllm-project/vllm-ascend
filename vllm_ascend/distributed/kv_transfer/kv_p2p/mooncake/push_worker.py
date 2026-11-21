@@ -563,8 +563,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         elif is_circular_kv_cache_spec(spec):
             if len(local_blocks) != 1 or len(remote_blocks) != 1:
                 raise ValueError("Circular Push requires one state block per request")
-            if not local_blocks[0] or not remote_blocks[0]:
-                raise ValueError("Required circular state block is not resident")
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
             remote_scale = pp.block_size_scales[remote_index][0]
             if local_scale != remote_scale:
@@ -574,8 +572,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         else:
             local_scale = self.transfer_metadata.block_size_scales[local_index][0]
             remote_scale = pp.block_size_scales[remote_index][0]
-            if self._is_dsv4 and (local_scale, remote_scale) != (1, 1):
-                raise ValueError("DSV4 Push requires one physical page per logical block")
             block_size = self.transfer_metadata.layer_block_sizes[local_index] // local_scale
             if block_size != pp.layer_block_sizes[remote_index] // remote_scale:
                 raise ValueError("Push requires equal P/D kernel block sizes")
