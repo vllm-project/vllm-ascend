@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -795,13 +796,25 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._failed_external_load_req_ids: set[str] = set()
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        if connector_output.failed_recving and has_hisparse_cache_layout(self.kv_cache_config):
+            for request_id in self._async_loading_req_ids & connector_output.failed_recving:
+                request_and_blocks = self._unfinished_requests.get(request_id)
+                if request_and_blocks is not None and not request_and_blocks[0].is_finished():
+                    self._failed_external_load_req_ids.add(request_id)
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
             self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+
+    def request_finished_all_groups(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._failed_external_load_req_ids.discard(request.request_id)
+        return super().request_finished_all_groups(request, block_ids)
 
     def has_pending_push_work(self) -> bool:
         return self._in_flight_save_blocks.has_pending_work()
@@ -822,6 +835,10 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+        # Core may reschedule the request with zero computed tokens after an
+        # import failure. A key can still be visible to lookup while GET fails.
+        if request.request_id in self._failed_external_load_req_ids:
+            return None
         prompt_token_len = len(request.prompt_token_ids)
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.

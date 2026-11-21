@@ -71,6 +71,70 @@ options with:
 These options select KV-cache quantization independently of model-weight
 quantization; keep the weight-quantization options required by the model.
 
+### Combining HiSparse with AscendStore
+
+Use the whole-block AscendStore pool on a single Ascend 950 node with
+colocated Prefill and Decode. HiSparse continues to own the Host Source and the NPU Resident
+and Hot buffers. AscendStore saves and restores the transferable Host Source
+and NPU Indexer pages; Resident and Hot pages stay in HiSparse.
+
+Keep the attention options above and replace the transfer configuration with:
+
+```json
+{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "connectors": [
+      {
+        "kv_connector": "HiSparseConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"host_pool_gib": 4}
+      },
+      {
+        "kv_connector": "AscendStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"backend": "mooncake", "load_async": true}
+      }
+    ]
+  }
+}
+```
+
+See [KV Cache Pool](kv_cache_pool_ascend_store.md) for Store setup. For
+Mooncake, use an Ascend Direct client and matching master, set
+`protocol=ascend` in the Mooncake configuration, and set
+`ASCEND_GLOBAL_RESOURCE_CONFIG` for the Store-owned transfer engine. On an A5
+UB setup, use `ASCEND_GLOBAL_RESOURCE_CONFIG='{}'` and
+`ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`. Budget an extra 128 MiB of DDR
+per worker for its separate Host Source send and receive buffers. The Indexer slab
+transfers directly. Unset `ASCEND_USE_ASYNC_TRANSFER` to use synchronous
+Ascend Direct transport. Mooncake enables async transport whenever this variable
+is present, including when it is set to `0`. After converting to milliseconds, twice
+`ASCEND_TRANSFER_TIMEOUT` must be strictly below both `MC_TRANSFER_TIMEOUT`
+and the Store's 60-second batch deadline. If the Store cannot confirm transfer
+completion, the worker drains and closes that Store before returning the
+failure and disables further transfers on that client.
+
+To use MemCache instead, set `backend` to `memcache` and use the
+`host_tcp` protocol in its local configuration. Keep `load_async=true` on
+either backend. This combination does not support external PD transport,
+layerwise transfer, or Mooncake FabricMem or SSD modes.
+Use exactly one HiSparseConnector and one AscendStoreConnector, with
+`prefill_context_parallel_size=1`. Set `eager_host_mirror=true` even for
+Prefill-only saves. A single-token chunk can follow the Decode path before
+a later Prefill chunk publishes the full block from Host memory.
+With `kv_load_failure_policy=recompute`, a failed external import resumes
+from local compute and skips further external lookups for that request.
+
+AscendStore keys for HiSparse use the `hisparse-ascendstore-v1` namespace.
+This version identifies the external pool key format. The keys include the
+target and draft checkpoint identities, resolved revisions, dummy-weight mode,
+effective model configurations (including RoPE settings), and page layout. If the Hub revision
+resolver is unavailable, pin the checkpoint commit when sharing a persistent
+pool. Use a versioned directory when replacing local weights in a persistent
+pool. Files overwritten in place keep the same model path.
+
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss

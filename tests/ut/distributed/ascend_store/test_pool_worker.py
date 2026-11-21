@@ -20,7 +20,7 @@ import threading
 import unittest
 from itertools import product
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -37,7 +37,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     AscendStoreConnector,
     create_kv_pool_worker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import BufferDescriptor
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+    HiSparseDraftHostMirrorSaveHook,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
@@ -1029,9 +1034,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.layer_load_finished_events = [threading.Event()]
         worker.kv_recv_thread = MagicMock()
         worker.external_slot_release_waiter = MagicMock()
-        worker._submit_ready_layer_loads = MagicMock()
-
-        worker.wait_for_layer_load()
+        with patch.object(worker, "_submit_ready_layer_loads"):
+            worker.wait_for_layer_load()
 
         worker.external_slot_release_waiter.assert_called_once_with(0)
 
@@ -1546,7 +1550,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 worker._transfer_threads_started = True
                 worker.register_kv_caches({"layer.0": container((cache, empty_rope))})
 
-                worker.m_store.register_buffer.assert_called_once_with([cache.data_ptr()], [64])
+                worker.m_store.register_buffer.assert_called_once_with(
+                    [BufferDescriptor(address=cache.data_ptr(), size_bytes=64)]
+                )
                 self.assertEqual(worker.kv_caches_base_addr, [cache.data_ptr()])
                 self.assertEqual(worker.group_kv_caches_base_addr[0], [cache.data_ptr()])
                 self.assertEqual(worker.group_block_len[0], [16])
@@ -1565,10 +1571,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertIs(result[0], cache)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
-    def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread, event):
+    def test_transfer_threads_use_grouped_block_sizes(self, send_thread, recv_thread):
         worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
         worker.grouped_block_size = [128, 128, 128, 128, 8, 32]
 
@@ -1578,20 +1583,85 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         self.assertIsNone(send_thread.call_args.kwargs["worker"])
         self.assertIsNone(recv_thread.call_args.kwargs["worker"])
-        event.return_value.wait.assert_called()
+        for thread in (send_thread.return_value, recv_thread.return_value):
+            thread.ready_event.wait.assert_called_once_with()
+            thread.raise_if_failed.assert_called_once_with()
+
+    def test_receive_startup_failure_releases_sender_and_allows_retry(self):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        error = RuntimeError("cannot bind receiver to device")
+        worker.m_store.set_device.side_effect = [None, error]
+        errors = []
+
+        def start_threads():
+            try:
+                worker._start_kv_transfer_threads()
+            except Exception as exc:
+                errors.append(exc)
+
+        registration = threading.Thread(target=start_threads, daemon=True)
+        registration.start()
+        try:
+            registration.join(timeout=5)
+            self.assertFalse(registration.is_alive(), "registration hung on the failed receiver")
+            self.assertEqual(len(errors), 1)
+            self.assertIs(errors[0].__cause__, error)
+            self.assertFalse(worker._transfer_threads_started)
+            self.assertFalse(worker.kv_send_thread.is_alive())
+            self.assertFalse(worker.kv_recv_thread.is_alive())
+
+            worker.m_store.set_device.side_effect = None
+            worker._start_kv_transfer_threads()
+            self.assertTrue(worker._transfer_threads_started)
+            self.assertTrue(worker.kv_send_thread.is_alive())
+            self.assertTrue(worker.kv_recv_thread.is_alive())
+        finally:
+            if registration.is_alive() and worker.kv_recv_thread is not None:
+                worker.kv_recv_thread.ready_event.set()
+                registration.join(timeout=5)
+            worker.shutdown()
 
     def test_register_kv_caches_initializes_layerwise_memcache(self):
         worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
-        fake_cache = MagicMock()
-        fake_cache.shape = [100, 16, 8, 64]
-        fake_cache.element_size.return_value = 2
-        fake_cache.data_ptr.return_value = 10000
+        cache = torch.empty((4, 16, 2, 8), dtype=torch.float16)
         worker._transfer_threads_started = True
 
-        worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+        worker.register_kv_caches({"layer.0": cache})
 
         worker.m_store.ensure_initialized.assert_called_once_with()
-        worker.m_store.register_buffer.assert_called_once()
+        worker.m_store.register_buffer.assert_called_once_with(
+            [BufferDescriptor(address=cache.data_ptr(), size_bytes=cache.nbytes)]
+        )
+
+    def test_layerwise_shutdown_joins_threads_before_releasing_store(self):
+        worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
+        lifecycle = MagicMock()
+        worker.kv_send_thread = lifecycle.sender
+        worker.kv_recv_thread = lifecycle.receiver
+        worker.kv_send_thread.is_alive.return_value = True
+        worker.kv_recv_thread.is_alive.return_value = True
+        worker.m_store = lifecycle.store
+        worker.m_store.batch_remove_lease.return_value = 0
+        worker._step_load_keys.add("key")
+
+        worker.shutdown()
+        worker.shutdown()
+
+        self.assertFalse(worker._step_load_keys)
+        self.assertEqual(
+            lifecycle.mock_calls,
+            [
+                call.sender.stop(),
+                call.receiver.stop(),
+                call.sender.is_alive(),
+                call.sender.join(),
+                call.receiver.is_alive(),
+                call.receiver.join(),
+                call.store.batch_remove_lease(["key"]),
+                call.store.close(),
+            ],
+        )
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker(extra_config={"load_async": False})
@@ -1679,14 +1749,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             kv_role="kv_consumer",
             extra_config={"backend": "mooncake", "load_async": True},
         )
-        recv_thread = MagicMock()
-
-        def create_recv_thread(*args, **kwargs):
-            args[6].set()
-            return recv_thread
-
-        recv_thread_cls.side_effect = create_recv_thread
-
         worker._start_kv_transfer_threads()
 
         kwargs = recv_thread_cls.call_args.kwargs
@@ -1722,6 +1784,181 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.request_queue.join.assert_called_once_with()
         self.assertIs(worker._previous_save_batch, save_batch)
 
+    def test_hisparse_waits_for_draft_host_bytes_before_bulk_save(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
+
+        from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
+
+        source = HiSparseConnector.__new__(HiSparseConnector)
+
+        trace: list[str | bytes] = []
+        host_bytes = bytearray([37, 0])
+        draft_resident_bytes = bytes([91])
+        page_transfer = object()
+        draft_ready_event = MagicMock()
+        host_ready_event = object()
+        compute_stream = MagicMock()
+        send_event = MagicMock()
+        mirror = SimpleNamespace(
+            _draft_mirror_pending=True,
+            _draft_layers=(1,),
+            _dma_submitted=False,
+            _post_forward_transfers=[page_transfer],
+            host_write_event=host_ready_event,
+        )
+
+        def enqueue_mirror(layers, *, ready_event):
+            self.assertEqual(layers, (1,))
+            self.assertIs(ready_event, draft_ready_event)
+            trace.append("enqueue draft copy")
+            mirror._dma_submitted = True
+
+        def wait_for_host(event):
+            self.assertIs(event, host_ready_event)
+            trace.append("wait for draft copy")
+
+        def record_save_event():
+            trace.append("record save event")
+
+        def publish(requests):
+            self.assertIs(requests[0].current_event, send_event)
+            # The background sender synchronizes the save event before PUT.
+            requests[0].current_event.synchronize()
+            trace.append(bytes(host_bytes))
+
+        def synchronize_save_event():
+            if "wait for draft copy" in trace:
+                host_bytes[1:] = draft_resident_bytes
+
+        draft_ready_event.record.side_effect = lambda stream: trace.append("record draft event")
+        compute_stream.wait_event.side_effect = wait_for_host
+        send_event.record.side_effect = record_save_event
+        send_event.synchronize.side_effect = synchronize_save_event
+        mirror._enqueue_row_dma = enqueue_mirror
+        source.connector_worker = mirror
+
+        stores = []
+        send_threads = []
+        for _ in range(2):
+            worker = self._make_worker()
+            send = MagicMock(spec=KVCacheStoreSendingThread)
+            send.request_queue = MagicMock()
+            send.add_save_batch.side_effect = publish
+            worker.kv_send_thread = send
+            send_threads.append(send)
+            store = AscendStoreConnector.__new__(AscendStoreConnector)
+            store.can_put = True
+            store.use_layerwise = False
+            store.connector_worker = worker
+            meta = AscendConnectorMetadata(set(), set())
+            meta.add_request(
+                ReqMeta(req_id="r1", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
+            )
+            store._connector_metadata = meta
+            stores.append(store)
+
+        connector = AscendMultiConnector.__new__(AscendMultiConnector)
+        # The parent prepares the shared Host mirror once before either Store saves.
+        connector._connectors = [stores[0], source, stores[1]]
+        connector._configure_draft_host_mirror_save_hook()
+
+        with (
+            patch.object(host_mirror.torch.accelerator, "current_stream", return_value=compute_stream),
+            patch.object(host_mirror.torch, "Event", return_value=draft_ready_event),
+            patch.object(host_mirror.torch, "npu", create=True) as npu,
+        ):
+            npu.Event.return_value = send_event
+            connector.wait_for_save()
+            first_step_trace = trace.copy()
+            # A step without draft tokens must still allow the same two Stores
+            # to PUT, with no duplicate wait or draft DMA.
+            trace.clear()
+            connector.wait_for_save()
+            empty_step_trace = trace.copy()
+            # A later step must mirror its new bytes before either Store reads.
+            trace.clear()
+            draft_resident_bytes = bytes([113])
+            mirror._draft_mirror_pending = True
+            connector.wait_for_save()
+
+        self.assertEqual(draft_ready_event.record.call_args_list, [call(compute_stream), call(compute_stream)])
+        for send in send_threads:
+            self.assertEqual(send.request_queue.join.call_count, 3)
+            self.assertEqual(send.raise_if_failed.call_count, 3)
+        self.assertEqual(
+            first_step_trace,
+            [
+                "record draft event",
+                "enqueue draft copy",
+                "wait for draft copy",
+                "record save event",
+                bytes([37, 91]),
+                "record save event",
+                bytes([37, 91]),
+            ],
+        )
+        self.assertEqual(empty_step_trace, ["record save event", bytes([37, 91])] * 2)
+        self.assertEqual(trace, first_step_trace[:3] + ["record save event", bytes([37, 113])] * 2)
+        self.assertFalse(mirror._draft_mirror_pending)
+        self.assertFalse(mirror._dma_submitted)
+        self.assertEqual(mirror._post_forward_transfers, [page_transfer])
+
+    def test_hisparse_bulk_save_records_event_without_draft_dma(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import draft_host_mirror as host_mirror
+
+        worker = self._make_worker()
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.request_queue = MagicMock()
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                mirror = SimpleNamespace(
+                    _draft_mirror_pending=pending,
+                    _draft_layers=(1,),
+                    _enqueue_row_dma=MagicMock(),
+                    _dma_submitted=False,
+                    host_write_event=object(),
+                )
+                store = SimpleNamespace(has_pending_bulk_save=lambda: True)
+                save_hook = HiSparseDraftHostMirrorSaveHook(mirror, [store])
+                req = ReqMeta(req_id="r1", token_len_chunk=16, block_ids=[1], block_hashes=["h0"], can_save=True)
+                meta = AscendConnectorMetadata(set(), set())
+                meta.add_request(req)
+                with (
+                    patch.object(host_mirror.torch.accelerator, "current_stream") as current_stream,
+                    patch.object(host_mirror.torch, "Event") as event,
+                    patch.object(host_mirror.torch, "npu", create=True) as npu,
+                ):
+                    save_hook.flush_host_mirror_if_needed()
+                    worker.wait_for_save(meta)
+
+                if pending:
+                    mirror._enqueue_row_dma.assert_called_once_with((1,), ready_event=event.return_value)
+                    event.return_value.record.assert_called_once_with(current_stream.return_value)
+                else:
+                    mirror._enqueue_row_dma.assert_not_called()
+                    current_stream.assert_not_called()
+                current_stream.return_value.wait_event.assert_not_called()
+                npu.Event.return_value.record.assert_called_once_with()
+                self.assertIs(req.current_event, npu.Event.return_value)
+                self.assertFalse(mirror._draft_mirror_pending)
+
+    def test_hisparse_bulk_save_rejects_incompatible_core_worker(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.draft_host_mirror import (
+            finish_draft_host_mirror_for_save,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires Core's _draft_mirror_pending flag"):
+            finish_draft_host_mirror_for_save(SimpleNamespace())
+        with self.assertRaisesRegex(RuntimeError, "requires Core's pending draft layers and row DMA hook"):
+            finish_draft_host_mirror_for_save(SimpleNamespace(_draft_mirror_pending=True, _draft_layers=(1,)))
+        enqueue = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "requires Core's DMA submission flag and Host write event"):
+            finish_draft_host_mirror_for_save(
+                SimpleNamespace(_draft_mirror_pending=True, _draft_layers=(1,), _enqueue_row_dma=enqueue)
+            )
+        enqueue.assert_not_called()
+
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
@@ -1736,7 +1973,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
+        mirror = SimpleNamespace(_draft_mirror_pending=True)
+        store = SimpleNamespace(has_pending_bulk_save=lambda: False)
+        save_hook = HiSparseDraftHostMirrorSaveHook(mirror, [store])
+        save_hook.flush_host_mirror_if_needed()
         worker.wait_for_save(meta)
+        self.assertTrue(mirror._draft_mirror_pending)
         worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_called_once_with()
@@ -1878,8 +2120,8 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker = self._make_worker(kv_role="kv_consumer")
         worker.load_async = True
 
-        recv_thread = MagicMock()
-        recv_thread.get_and_clear_finished_requests.return_value = {"r1"}
+        recv_thread = MagicMock(spec=KVCacheStoreRecvingThread)
+        recv_thread.get_and_clear_receive_results.return_value = ({"r1"}, {"r1"})
         worker.kv_recv_thread = recv_thread
         worker.kv_send_thread = None
 
@@ -1888,13 +2130,15 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
-        recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
+        recv_thread.get_and_clear_receive_results.assert_called_once_with(loading_req_ids, set())
+        self.assertEqual(worker.get_failed_requests(), {"r1"})
+        recv_thread.get_and_clear_failed_requests.assert_not_called()
 
         recv_thread.reset_mock()
-        recv_thread.get_and_clear_finished_requests.return_value = set()
+        recv_thread.get_and_clear_receive_results.return_value = (set(), set())
         meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
         worker.get_finished(set(), meta)
-        recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
+        recv_thread.get_and_clear_receive_results.assert_called_once_with(set(), {"r_preempted"})
 
     def test_get_finished_layerwise_send_thread(self):
         worker = self._make_worker(kv_role="kv_producer")
@@ -3383,10 +3627,9 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 self.assertEqual(worker.effective_tp_size, 4)
                 self.assertEqual(worker.num_sub_keys, expected_sub_keys)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
-    def test_transfer_threads_receive_worker_when_tp_mismatch(self, send_thread, recv_thread, event):
+    def test_transfer_threads_receive_worker_when_tp_mismatch(self, send_thread, recv_thread):
         worker = self._make_worker(
             tp_size=2,
             kv_role="kv_consumer",
@@ -3403,7 +3646,6 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
         self.assertIs(send_thread.call_args.kwargs["worker"], worker)
         self.assertIs(recv_thread.call_args.kwargs["worker"], worker)
-        event.return_value.wait.assert_called()
 
     def test_start_load_kv_sync_dispatches_tp_mismatch_reader(self):
         worker = self._make_strided_worker()

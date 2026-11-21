@@ -27,6 +27,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_staging import MooncakeHostStaging
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
+    BufferDescriptor,
+    MemoryLocation,
+    buffer_arrays,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -44,6 +50,8 @@ MOONCAKE_LAYERWISE_CLIENT_METHODS = (
     "batch_get_session_end",
 )
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+# TransferEngineOperationState::wait_for_completion in Mooncake v0.3.13.
+_MOONCAKE_STORE_BATCH_TIMEOUT_MS = 60_000
 
 
 def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
@@ -424,6 +432,7 @@ class MooncakeBackend(Backend):
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
+        self._host_staging: MooncakeHostStaging | None = None
         self._prefetch_conf = SsdPrefetchConf.disabled()
 
         if not self._lazy_init:
@@ -431,7 +440,9 @@ class MooncakeBackend(Backend):
             self._store_initialized = True
 
     def ensure_initialized(self):
-        if self._store_initialized:
+        # Host staging registers with an already initialized Store. After a
+        # transfer timeout its closed client must stay disabled for this worker.
+        if self._store_initialized or self._host_staging is not None:
             return
 
         with self._store_init_lock:
@@ -581,24 +592,94 @@ class MooncakeBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
-    def register_buffer(self, ptrs: list[int], lengths: list[int]):
+    @classmethod
+    def validate_hisparse_colocated_config(cls) -> None:
+        config = MooncakeStoreConfig.load_from_env()
+        if config.protocol != "ascend" or not os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG"):
+            raise ValueError("HiSparse with Mooncake requires protocol=ascend and a Store-owned transfer engine")
+        if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM") == "1" or config.enable_ssd_offload or config.enable_ssd_prefetch:
+            raise ValueError("HiSparse with Mooncake requires a DDR Store without FabricMem or SSD spilling/prefetch")
+
+        # Mooncake enables async transfer whenever the variable is present.
+        if "ASCEND_USE_ASYNC_TRANSFER" in os.environ:
+            raise ValueError(
+                "HiSparse with Mooncake requires synchronous Ascend Direct transfers. Unset ASCEND_USE_ASYNC_TRANSFER."
+            )
+        # Ascend Direct can retry a transfer once within the Store deadline.
+        configured_timeout_ms = 1000 * int(os.getenv("MC_TRANSFER_TIMEOUT", "30"))
+        ascend_attempt_timeout_ms = int(os.getenv("ASCEND_TRANSFER_TIMEOUT", "10000"))
+        store_timeout_ms = min(configured_timeout_ms, _MOONCAKE_STORE_BATCH_TIMEOUT_MS)
+        if ascend_attempt_timeout_ms <= 0 or 2 * ascend_attempt_timeout_ms >= store_timeout_ms:
+            raise ValueError(
+                "HiSparse with Mooncake requires twice ASCEND_TRANSFER_TIMEOUT to be below both "
+                f"MC_TRANSFER_TIMEOUT and the Store's 60s batch deadline: "
+                f"ASCEND_TRANSFER_TIMEOUT={ascend_attempt_timeout_ms}ms, "
+                f"MC_TRANSFER_TIMEOUT={configured_timeout_ms}ms"
+            )
+
+    def _register_buffers_with_host_staging(self, buffers: list[BufferDescriptor]) -> None:
+        if not self._use_store_independent_te:
+            raise RuntimeError("Mooncake mixed bulk registration requires a Store-owned transfer engine")
+        if self._host_staging is not None:
+            raise RuntimeError("Mooncake mixed bulk buffers are already registered")
+        self.ensure_initialized()
+        assert self.store is not None
+        staging = MooncakeHostStaging(self.store, self._close_store)
+        self._host_staging = staging
+        try:
+            staging.register(buffers)
+        except Exception:
+            try:
+                self.close()
+            except Exception:
+                logger.exception("Mooncake mixed bulk registration rollback raised")
+            raise
+
+    def _close_store(self) -> None:
+        if self.store is not None:
+            rc = self.store.close()
+            if rc not in (None, 0):
+                raise RuntimeError(f"Mooncake Store shutdown failed: status={rc}")
+            self.store = None
+            self._store_initialized = False
+
+    def close(self) -> None:
+        staging = self._host_staging
+        try:
+            if staging is not None:
+                staging.unregister()
+        finally:
+            # This backend owns the Store. If deregistration failed, shut its
+            # engine down before releasing memory it may still have registered.
+            self._close_store()
+            if staging is not None:
+                staging.close()
+            self._host_staging = None
+
+    def register_buffer(self, buffers: list[BufferDescriptor]) -> None:
+        if any(buffer.memory_location is MemoryLocation.HOST for buffer in buffers):
+            self._register_buffers_with_host_staging(buffers)
+            return
+        ptrs, sizes = buffer_arrays(buffers)
         if self._use_store_independent_te or self._prefetch_conf.use_dict_setup:
             assert self.store is not None
-            for ptr, length in zip(ptrs, lengths):
-                ret = self.store.register_buffer(ptr, length)
+            for ptr, size in zip(ptrs, sizes):
+                ret = self.store.register_buffer(ptr, size)
                 if ret != 0:
                     logger.error(
                         "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
                         ptr,
-                        length,
+                        size,
                         ret,
                     )
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
-            global_te.register_buffer(ptrs, lengths)
+            global_te.register_buffer(ptrs, sizes)
 
     def exists(self, keys: list[str]) -> list[int]:
+        if self._host_staging is not None:
+            return self._host_staging.exists(keys)
         if self._lazy_init and not self._store_initialized:
             logger.debug(
                 "MooncakeBackend.exists called before store initialization; treating %d keys as missing.",
@@ -612,6 +693,9 @@ class MooncakeBackend(Backend):
 
     def remove_all(self) -> None:
         """Delete every object on the Mooncake master. The client stays open."""
+        if self._host_staging is not None:
+            self._host_staging.remove_all()
+            return
         if not self._store_initialized or self.store is None:
             return
         self.store.remove_all(force=True)
@@ -712,7 +796,21 @@ class MooncakeBackend(Backend):
             raise RuntimeError("Mooncake client does not support batch_get_session_end")
         return int(method(keys))
 
-    def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[bool] | bool:
+    def put(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ) -> list[bool] | bool:
+        if memory_location is not None:
+            if self._host_staging is not None:
+                return self._host_staging.put(
+                    keys, addrs, sizes, self._build_replicate_config(), memory_location=memory_location
+                )
+            if memory_location is MemoryLocation.HOST:
+                raise RuntimeError("Mooncake Host buffers have not been registered")
         self.ensure_initialized()
         assert self.store is not None
         try:
@@ -746,7 +844,19 @@ class MooncakeBackend(Backend):
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
             return False
 
-    def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+    def get(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        memory_location: MemoryLocation | None = None,
+    ):
+        if memory_location is not None:
+            if self._host_staging is not None:
+                return self._host_staging.get(keys, addrs, sizes, memory_location=memory_location)
+            if memory_location is MemoryLocation.HOST:
+                raise RuntimeError("Mooncake Host buffers have not been registered")
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "

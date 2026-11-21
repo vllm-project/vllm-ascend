@@ -35,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
 )
@@ -147,7 +148,31 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.save_decode_cache = extra_config.get("save_decode_cache", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
+        if has_hisparse_cache_layout(kv_cache_config):
+            incompatibilities = []
+            if self.use_layerwise or self.kv_role != "kv_both":
+                incompatibilities.append("requires whole-block transfers with kv_role=kv_both")
+            if not extra_config.get("load_async", False):
+                # HiSparse publishes imported Host Source pages on receive completion.
+                incompatibilities.append("requires load_async=true")
+            # A one-token prefill chunk may take the decode path. A later
+            # prefill PUT can publish that row before the deferred page copy.
+            hisparse_config = vllm_config.attention_config.hisparse_config
+            if hisparse_config is None or not hisparse_config.eager_host_mirror:
+                incompatibilities.append("requires eager_host_mirror=true for all whole-block saves")
+            try:
+                pool_backend_class = get_backend_class(self.backend_name)
+                if pool_backend_class is None:
+                    raise ValueError(f"unknown pool backend {self.backend_name!r}")
+                pool_backend_class.validate_hisparse_colocated_config()
+            except (ValueError, OSError, NotImplementedError) as error:
+                incompatibilities.append(str(error))
+            if incompatibilities:
+                raise ValueError(
+                    "HiSparse with AscendStore has incompatible configuration:\n- " + "\n- ".join(incompatibilities)
+                )
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
@@ -155,9 +180,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
         )
         self.supports_composite_kv_saves = self.supports_composite_kv_loads
-        self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "save_decode_cache", False
-        )
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or self.consumer_is_to_put or self.save_decode_cache
         if (
             self.kv_role == "kv_consumer"
@@ -464,6 +486,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
             worker.save_kv_layer(self._get_connector_metadata())
 
+    def has_pending_bulk_save(self) -> bool:
+        """Let the parent order Host mirroring before this connector's save hook."""
+        return (
+            self.can_put
+            and not self.use_layerwise
+            and any(request.can_save for request in self._get_connector_metadata().requests)
+        )
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
@@ -495,8 +525,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
         failed = self.connector_worker.get_failed_requests()
-        if self.connector_worker.load_async and not self.use_layerwise:
-            done_recving |= failed
         return KVConnectorTransferResults(
             finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
         )

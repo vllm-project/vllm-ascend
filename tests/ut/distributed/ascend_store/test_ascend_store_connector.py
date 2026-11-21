@@ -179,7 +179,7 @@ class TestAscendStoreConnector(unittest.TestCase):
                     connector.get_transfer_results(set())
                 results.assert_called_once_with(
                     finished_sending=set(),
-                    finished_recving=set() if layerwise else {"r1"},
+                    finished_recving=set(),
                     failed_recving={"r1"},
                 )
 

@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -23,6 +24,14 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+@dataclass(kw_only=True)
+class AlignedKVCacheTensor(KVCacheTensor):
+    """Allocator padding carried explicitly through copies of the base descriptor."""
+
+    logical_size: int
+    alignment: int
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:

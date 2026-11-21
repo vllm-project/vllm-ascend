@@ -2810,6 +2810,32 @@ def _run_get_kv_cache_spec(monkeypatch, vllm_config, spec) -> dict:
     return attn_utils.get_kv_cache_spec(vllm_config)
 
 
+def test_hisparse_group_resolution_registers_worker_indexer_spec(monkeypatch):
+    pytest.importorskip("vllm.v1.hisparse.backend")
+    from vllm.platforms import current_platform
+    from vllm.v1 import kv_cache_spec_registry
+    from vllm.v1.hisparse import binding
+
+    from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
+
+    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_KVCACHESPEC_LIST", {})
+    monkeypatch.setattr(kv_cache_spec_registry, "_REGISTRY_ROLE_MANAGERS", {})
+    monkeypatch.setattr(current_platform, "register_custom_kv_cache_specs", lambda _: register_ascend_kv_cache_specs())
+    cfg = _c8_mxfp_vllm_config(cache_dtype="auto")
+    cfg.attention_config.hisparse_config = object()
+    indexer = AscendSFAIndexerCacheSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+
+    def resolve(_, specs, __):
+        assert kv_cache_spec_registry.KVCacheSpecRegistry.get_uniform_type_base_spec(indexer) is FullAttentionSpec
+        return specs
+
+    monkeypatch.setattr(binding, "resolve_hisparse_specs", resolve)
+    monkeypatch.setattr(attn_utils, "get_ascend_config", lambda: SimpleNamespace(enable_sparse_sfa_c8=False))
+    resolved = _run_get_kv_cache_spec(monkeypatch, cfg, indexer)["attn"]
+    assert isinstance(resolved, AscendSFAIndexerCacheSpec)
+    assert resolved.page_size_bytes == indexer.page_size_bytes
+
+
 @pytest.mark.parametrize("head_size_v", [64, 128])
 def test_get_kv_cache_spec_rewrites_c8_mxfp_spec(monkeypatch, head_size_v):
     spec = _run_get_kv_cache_spec(monkeypatch, _c8_mxfp_vllm_config(), _plain_full_attention_spec(head_size_v))["attn"]

@@ -52,7 +52,8 @@ class MemoryRangeStore:
     def set_device(self):
         pass
 
-    def register_buffer(self, ptrs, lengths):
+    def register_buffer(self, buffers):
+        lengths = [buffer.size_bytes for buffer in buffers]
         assert all(length > 0 for length in lengths)
 
     def validate_layerwise_support(self):
