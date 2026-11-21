@@ -42,6 +42,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for Ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `expert_offload_config`             | dict | `{}`    | Exact expert weight offload for Model Runner V2. See [expert offload configuration](#expert-offload-configuration) for memory requirements and prefill behavior. |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or UT/E2E test case. |
 | `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
@@ -77,6 +78,34 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+<span id="expert-offload-configuration"></span>**expert_offload_config**
+
+`expert_offload_config` keeps target routed-expert weights in host memory and
+maintains a bounded set of resident experts on the NPU. Offload is disabled by
+default and requires a supported MXFP4 or MXFP8 quantization scheme on Ascend 950
+(A5), with Model Runner V2 and single-worker execution. Use eager execution or
+compilation mode `NONE` with `FULL_DECODE_ONLY` graphs.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Enable exact expert weight offload. |
+| `num_device_experts` | int or null | `None` | Resident expert slots per layer. Required when enabled; must satisfy `top_k <= num_device_experts < num_experts`. |
+
+Prefill and mixed batches use two reusable full-layer expert buffers on the NPU.
+Experts already resident on the device are copied into these buffers locally;
+only missing experts are transferred from the host. After each layer submits its
+MoE computation, the next layer's weights can be prefetched on a separate stream.
+The two buffers are reused across layers and remain available after decode graph
+capture and replay. Decode batches that exceed resident capacity use a synchronous
+full-layer fallback.
+
+Compared with a single full-layer buffer, this reserves one additional complete
+expert layer, including weights, scales, and native format padding. Both buffers
+are included in model memory accounting before KV-cache sizing. Allow for this
+extra memory when choosing `num_device_experts` or an explicit KV-cache budget;
+there is no separate switch for prefill buffering. The weight transfer changes
+preserve expert routing and require no new configuration keys.
 
 <span id="runtime_guard"></span>**runtime_guard**
 

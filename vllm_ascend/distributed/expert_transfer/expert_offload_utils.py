@@ -114,7 +114,7 @@ def prepare_batch(runner: NPUModelRunner, batch_state) -> None:
     expert_offload_manager = get_manager(getattr(runner, "model", None))
     if expert_offload_manager is not None:
         # Dummy batches have no request state and use the full expert pool.
-        expert_offload_manager.has_prefill = batch_state is None or batch_state.has_prefill
+        expert_offload_manager.set_batch_phase(batch_state is None or batch_state.has_prefill)
 
 
 def prepare_graph_capture(graph_manager: ModelAclGraphManager, needs_capture: Callable[[], bool]) -> None:

@@ -177,6 +177,8 @@ def test_acl_graph_replay_updates_nz_slots(expert_bundle, monkeypatch):
 class _ExpertOffloadAudit(TypedDict):
     steps: list[dict[str, bool | int | str]]
     replays: int
+    prefill_layers: int
+    prefill_after_replay: int
 
 
 class ExpertOffloadAuditWorker:
@@ -190,8 +192,19 @@ class ExpertOffloadAuditWorker:
         assert manager is not None
         if action == "install":
             assert manager.bindings
-            audit: _ExpertOffloadAudit = {"steps": [], "replays": 0}
+            audit: _ExpertOffloadAudit = {"steps": [], "replays": 0, "prefill_layers": 0, "prefill_after_replay": 0}
             runner._expert_offload_test_audit = audit
+            pipeline = manager.prefill_pipeline
+            assert pipeline is not None
+            prepare_layer = pipeline.prepare
+
+            def observed_prefill(binding):
+                audit["prefill_layers"] += 1
+                if audit["replays"]:
+                    audit["prefill_after_replay"] += 1
+                return prepare_layer(binding)
+
+            pipeline.prepare = observed_prefill
             prepare = runner._prepare_inputs_impl
 
             def observed_prepare(scheduler_output, batch_req_state, batch_desc):
@@ -217,6 +230,12 @@ class ExpertOffloadAuditWorker:
         snapshot = {
             "steps": list(audit["steps"]),
             "replays": audit["replays"],
+            "prefill_layers": audit["prefill_layers"],
+            "prefill_after_replay": audit["prefill_after_replay"],
+            "pool_addresses": [
+                {name: tensor.data_ptr() for name, tensor in pool.tensors.items()}
+                for pool in manager.prefill_pipeline.pools
+            ],
             "capture_sizes": list(runner.cudagraph_manager.capture_sizes),
             "layer_names": [binding.layer_name for binding in bindings],
             "loaded": all(binding.host_store.prepared for binding in bindings),
@@ -353,6 +372,11 @@ def test_checkpoint_prefill_graph_decode_capacity_fallback_and_cleanup(tiny_chec
         assert before["loaded"] and len(before["layer_names"]) == 2
         assert set(before["capture_sizes"]) == {1, 2}
         assert after["addresses"] == before["addresses"]
+        assert len(before["pool_addresses"]) == 2
+        assert before["pool_addresses"][0] != before["pool_addresses"][1]
+        assert after["pool_addresses"] == before["pool_addresses"]
+        assert after["prefill_layers"] > 0
+        assert after["prefill_after_replay"] > 0
         assert after["replays"] > 0
         assert any(step["prefill"] for step in after["steps"])
         assert any(not step["prefill"] and step["mode"] == "FULL" for step in after["steps"])
