@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# runtime_config"
-msgstr "# runtime_config"
+msgid "# Runtime Configuration"
+msgstr "# 运行时配置"
 
 msgid ""
 "JSON schema for Runtime Guard. Default path: "
@@ -53,9 +53,6 @@ msgstr ""
 msgid "## Top-level keys"
 msgstr "## 顶层键"
 
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
-
 msgid "| `actions` | object | see below | Default incident actions |"
 msgstr "| `actions` | object | 见下文 | 默认事件动作 |"
 
@@ -84,9 +81,6 @@ msgstr ""
 msgid "## actions"
 msgstr "## actions"
 
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
-
 msgid ""
 "| `defaults.on_trigger` | list[str] | `[\"report\"]` | Actions when a "
 "detector section omits `on_trigger` |"
@@ -101,9 +95,6 @@ msgstr "有效的动作名称：`report`、`dump_kv`。ActionQueue 容量是固�
 
 msgid "## dump"
 msgstr "## dump"
-
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
 
 msgid ""
 "| `auto_max_times` | int | `0` | Max auto `dump_kv` captures per process "
@@ -159,9 +150,6 @@ msgstr "手动 dump / 手动触发会跳过自动配额和冷却。需要 `runti
 msgid "## report"
 msgstr "## report"
 
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
-
 msgid ""
 "| `save_sensitive_info` | bool | `false` | Persist prompt/output token ids "
 "**and** decode them to text |"
@@ -205,9 +193,6 @@ msgstr ""
 
 msgid "## ascend_log"
 msgstr "## ascend_log"
-
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
 
 msgid "| `level` | str | `\"INFO\"` | Base Ascend log level |"
 msgstr "| `level` | str | `\"INFO\"` | 基础昇腾日志级别 |"
@@ -268,9 +253,6 @@ msgstr ""
 msgid "### spec_acceptance"
 msgstr "### spec_acceptance"
 
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
-
 msgid "| `window` | int | `10` | Rolling window size |"
 msgstr "| `window` | int | `10` | 滚动窗口大小 |"
 
@@ -293,9 +275,6 @@ msgstr "每请求 INFO 短日志节流是固定的内部间隔（2 秒），不�
 
 msgid "### token_repeat"
 msgstr "### token_repeat"
-
-msgid "| Key | Type | Default | Description |"
-msgstr "| Key | Type | Default | Description |"
 
 msgid "| `window` | int | `32` | Sliding content window |"
 msgstr "| `window` | int | `32` | 滑动内容窗口 |"
@@ -410,3 +389,32 @@ msgid ""
 msgstr ""
 "- [Runtime Guard 功能指南](../feature_guide/runtime_guard.md)\n"
 "- 设计 / 运维（分析分支）：`docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`"
+
+msgid ""
+"| `metrics` | object | see below | Ascend-owned MS Service Metric level |"
+msgstr "| `metrics` | object | 见下文 | 昇腾自有的 MS Service Metric 级别 |"
+
+msgid "## metrics"
+msgstr "## metrics"
+
+msgid ""
+"| `level` | str \\| int | `\"basic\"` | Active level for Ascend-owned MS "
+"Service Metric handlers: `basic` or `detail` (also `0`–`1`). `basic` keeps "
+"only low-overhead metrics on; `detail` additionally enables per-step and "
+"other more expensive metrics. Applied in this process on startup and on each"
+" accepted hot-reload, same moments as `ascend_log`. See "
+"[ms_service_metric.md](../ms_service_metric.md) for the level-picking rule "
+"and the file/endpoint channel warning. |"
+msgstr ""
+"| `level` | str \\| int | `\"basic\"` | 昇腾自有的 MS Service Metric "
+"处理器的生效级别：`basic` 或 `detail`（也可用 `0`–`1`）。`basic` 仅开启低开销指标；`detail` "
+"还会额外启用逐步指标及其他开销更高的指标。该配置在进程启动时以及每次接受热重载时应用，应用时机与 `ascend_log` "
+"相同。级别选择规则以及文件/端点通道警告请参见 [ms_service_metric.md](../ms_service_metric.md)。 |"
+
+msgid ""
+"Handlers record a metric when its declared level is less than or equal to "
+"this value. Metrics emitted by `ms_service_metric.provider_handlers` are not"
+" gated here."
+msgstr ""
+"当指标声明的级别小于或等于该值时，处理器才会记录该指标。由 `ms_service_metric.provider_handlers` "
+"上报的指标不受此限制。"

@@ -33,10 +33,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
     AutoRegressiveAclGraphManager,
 )
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     torch_gather_wrapper,
 )
 
@@ -50,6 +50,12 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     metadata construction and the CUDA-graph manager (ACL FULL graphs with
     UpdatableGraph attention-parameter updates on replay).
     """
+
+    if not vllm_version_is("0.33.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -105,22 +111,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        # Step3p5MTP set has_own_lm_head to True in v0.32.0, so here we
-        # add keep_own_heads to make sure that each layer's share_head stays independent.
-        # When v0.32.0 is supported, this can be removed.
         self.draft_vllm_config = self._create_draft_vllm_config()
-        keep_own_heads = getattr(self.draft_model_config.hf_config, "model_type", "") == "step3p5_mtp"
-        if keep_own_heads and vllm_version_is("0.31.0"):
-            import vllm.v1.worker.gpu.spec_decode.eagle.utils as _eagle_utils
-
-            _orig_should_share = _eagle_utils._should_share
-
-            def _keep_checkpoint_mtp_heads(eagle, flag, draft, target):
-                if flag == "has_own_lm_head":
-                    return False
-                return _orig_should_share(eagle, flag, draft, target)
-
-            _eagle_utils._should_share = _keep_checkpoint_mtp_heads
         return load_eagle_model(target_model, self.draft_vllm_config)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -132,15 +123,20 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY if cudagraph_mode.has_full_cudagraphs() else CUDAGraphMode.NONE
             )
+        decode_query_lens = (
+            self.num_speculative_steps + 1
+            if vllm_version_is("0.33.0")
+            else self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
+        )
         self.cudagraph_manager = AutoRegressiveAclGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            decode_query_lens,
         )
         # The Ascend manager needs this speculator to rebuild draft metadata
         # and FIA graph-update params on replay (mirrors
-        # AscendAutoRegressiveSpeculator.init_cudagraph_manager).
+        # AscendTargetDependentARSpeculator.init_cudagraph_manager).
         self.cudagraph_manager.speculator = self
         self.cudagraph_manager.update_stream = self.update_stream
         # Backend class used to select the replay parameter-update path.
@@ -206,10 +202,10 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        draft_attn_metadata: dict,
+        draft_attn_metadata: dict | list[dict],
         is_draft_model_prefill: bool,
     ) -> list[dict]:
-        """Per-layer FIA parameters for the UpdatableGraph task update.
+        """Per-layer attention parameters for the UpdatableGraph task update.
 
         Every attention task registered at capture time matches its update
         parameters by layer name and requires exactly one entry (see
@@ -217,14 +213,27 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         layer. All layers share the same batch-level values because the
         three module forwards reuse one metadata.
         """
+        # AutoRegressiveAclGraphManager passes every draft step's metadata,
+        # while the 310P replay override passes only the first step's dict.
+        # All modules reuse one metadata, so either way the first step works.
+        if isinstance(draft_attn_metadata, list):
+            draft_attn_metadata = draft_attn_metadata[0]
         fia_params = []
         for layer_name, metadata in draft_attn_metadata.items():
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None:
+                block_table = decode_metadata.block_table
+            else:
+                decode_metadata = metadata
+                block_table = metadata.block_tables
             fia_params.append(
                 {
                     "layer_name": layer_name,
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
+                    "actual_seq_lengths": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": decode_metadata.seq_lens_list,
+                    "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
+                    "actual_seq_kvlen": decode_metadata.seq_lens_list,
+                    "block_table": block_table,
                 }
             )
         return fia_params

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import vllm_version_is
@@ -16,20 +17,14 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 
-# vLLM #19364 renamed the plain draft-model speculator to `standalone_ar` on
-# main; the release lane (v0.31.0) still ships it as `draft_model` with
-# `PlainDraftModelSpeculator`.
-if vllm_version_is("0.31.0"):
-    from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (  # type: ignore[import-not-found]
-        PlainDraftModelSpeculator as StandaloneARSpeculator,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
-        StandaloneARSpeculator,
-    )
-
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
+    if not vllm_version_is("0.33.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
+
     def _build_attn_metadata(
         self,
         num_reqs: int,
@@ -42,12 +37,10 @@ class AscendStandaloneARSpeculator(StandaloneARSpeculator):
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         draft_seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound
-        if step == 0:
-            # TODO: Remove this workaround once upstream includes the correction
-            # token in the standalone AR prefill sequence-length bound.
-            # Draft prefill appends the target's correction token to the
-            # expanded query, so the upstream builder must receive target
-            # length + 1. Keep the input batch's bounds unchanged.
+        if step == 0 and vllm_version_is("0.33.0"):
+            # #60989 includes the correction token before calling this builder
+            # on main. Only release still needs the extra prefill token here.
+            # Keep the input batch's bounds unchanged.
             draft_seq_lens_cpu_upper_bound = (seq_lens_cpu_upper_bound[:num_reqs] + 1).clamp(max=self.max_model_len)
 
         num_tokens = int(query_start_loc_np[-1])

@@ -271,8 +271,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
 === "A2 Series / A3 Series"
 
-    Run the following script to execute online inference with up to 135168 context length on 1 A3 Series (64GB x 16).
-
     ```shell
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
@@ -309,7 +307,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --safetensors-load-strategy lazy \
       --gpu-memory-utilization 0.90 \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --dtype float16 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
       --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
@@ -322,7 +319,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `HCCL_BUFFSIZE=1024` sets the HCCL communication buffer size for this example.
     - `--enable-expert-parallel` enables expert parallelism for MoE layers.
     - `--safetensors-load-strategy lazy` uses lazy loading for Safetensors model weights.
-    - `--dtype float16` selects FP16 for this deployment example.
+    - The example keeps the model's native `bfloat16` dtype (from the model config, no `--dtype` override is needed). `float16` is required only on Atlas 300I DUO.
     - `--max-model-len 135168` sets the maximum input plus output length for a single request. Ensure enough KV cache is available for the required context length.
     - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
     - `--max-num-batched-tokens 4096` limits the number of tokens processed in one scheduler step. Increase it only after checking prefill throughput and activation memory usage.
@@ -365,9 +362,21 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use `--speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
+    - To enable MTP speculative decoding, use `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting `num_speculative_tokens` to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
+
+**Service Verification:**
+
+Loading the model weights and capturing graphs can take time, especially when static kernel generation is enabled in the 950DT example. Startup duration depends on storage speed and the selected configuration. Use the health check below to confirm that the service is ready.
+
+Use the API port configured in the selected deployment command. For example, check the 950DT deployment from its serving node or container on port `8000`:
+
+```shell
+curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/health
+```
+
+For other deployments, use their configured API port. The Atlas 300I DUO example listens on `127.0.0.1:8080`, so run its check on the serving node or container. A healthy service returns HTTP `200`. If the check fails, inspect the startup log for errors and wait for initialization to finish. After the health check passes, use [Section 6](#6-functional-verification) to verify that the model generates a response.
 
 ## 6 Functional Verification
 
@@ -392,10 +401,13 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details. After execution, you can get the accuracy result of `Qwen3.6-35B-A3B-w8a8`.
 
-| dataset | version | metric | mode | vllm-api-general-chat |
-| ------- | ------- | ------ | ---- | --------------------- |
-| mmmu | - | accuracy | gen | 83.3 |
-| gpqa | - | accuracy | gen | 83.3 |
+For MMMU, follow the [AISBench MMMU dataset guide](https://github.com/AISBench/benchmark/blob/master/ais_bench/benchmark/configs/datasets/mmmu/README_en.md)
+to download [AI-ModelScope/MMMU](https://modelscope.cn/datasets/AI-ModelScope/MMMU/summary) into `ais_bench/datasets/mmmu`.
+
+| dataset | metric | mode | hardware | vllm-api-general-chat |
+| ------- | ------ | ---- | -------- | --------------------- |
+| mmmu | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
+| gpqa | accuracy | gen | 1 A3 series (64GB x 16) node | 83.3 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
@@ -417,31 +429,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### 8.2 Using vLLM Benchmark
 
-Run performance evaluation of `Qwen3.6-35B-A3B-w8a8` as an example. Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-
-There are three `vllm bench` subcommands:
-
-- `latency`: benchmark the latency of a single batch of requests.
-- `serve`: benchmark online serving throughput.
-- `throughput`: benchmark offline inference throughput.
-
-Take `serve` as an example:
-
-```shell
-export VLLM_USE_MODELSCOPE=True
-
-vllm bench serve \
-  --model Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
-  --served-model-name qwen3.6 \
-  --dataset-name random \
-  --random-input 200 \
-  --num-prompts 200 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./
-```
-
-After several minutes, you can get the performance evaluation result.
+Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -488,7 +476,7 @@ Recommended tuning order:
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
-| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
+| Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 

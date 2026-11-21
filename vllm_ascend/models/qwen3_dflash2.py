@@ -4,10 +4,7 @@ from torch import nn
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
-)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -20,8 +17,15 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
-from vllm_ascend.models.qwen3_dspark import align_draft_weights
+from vllm_ascend.models.quarot_utils import align_draft_weights
+from vllm_ascend.ops.vocab_parallel_embedding import (
+    VocabParallelMode,
+    gather_lm_head_hidden_states,
+    gather_lm_head_outputs,
+)
 from vllm_ascend.utils import get_rotation_path
+
+_MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
 
 def _grouped_conv(
@@ -41,7 +45,9 @@ def _grouped_conv(
         position = position & (block_size - 1)
     else:
         position = position % block_size
-    for tap in range(1, taps):
+    # Taps outside the current query block cannot contribute. Skipping them
+    # also keeps single-request short drafts from padding beyond the input.
+    for tap in range(1, min(taps, block_size)):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
         output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
     return output.flatten(-2)
@@ -56,6 +62,7 @@ class DFlashGroupedConv(nn.Module):
         block_size: int,
         params_dtype: torch.dtype,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         if hidden_size % group_size:
@@ -73,7 +80,7 @@ class DFlashGroupedConv(nn.Module):
             2 * taps * self.num_groups,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "kernel_projection"),
             return_bias=False,
         )
@@ -127,6 +134,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             group_size=int(draft_config["conv_group_size"]),
             block_size=1 + speculative_config.num_speculative_tokens,
             params_dtype=vllm_config.model_config.dtype,
+            quant_config=quant_config,
         )
         self.attention_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "attention_conv"))
         self.mlp_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "mlp_conv"))
@@ -175,6 +183,8 @@ def _score_edges(
     return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
 
 
+# Context-free calls bypass any internal ACLGraphWrapper's capture/replay.
+# Compiled device operations still participate in an active outer draft capture.
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -247,9 +257,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
-        # Draft load uses set_model_tag("eagle_head"); without a distinct tag the
-        # selector's @support_torch_compile backend shares that npugraph cache and
-        # unpacks the draft graph (67 values) with the selector's 9 inputs.
+        # The selector has different inputs from the draft backbone, so it
+        # must use a separate compilation cache namespace.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(
                 hidden_size=self.config.hidden_size,
@@ -262,6 +271,56 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().embed_input_ids(input_ids) * self.input_embedding_scale
+
+
+def _maybe_gather_lm_head_hidden_states(
+    hidden_states: torch.Tensor,
+    lm_head: nn.Module,
+    capacity: int,
+) -> torch.Tensor:
+    """Gather request rows only for fine-grained LM-head TP."""
+    if getattr(lm_head, "parallel_mode", None) is VocabParallelMode.FINE_GRAINED:
+        return gather_lm_head_hidden_states(hidden_states, capacity)
+    return hidden_states
+
+
+def _gather_lm_head_candidates(
+    values: torch.Tensor,
+    ids: torch.Tensor,
+    lm_head: nn.Module,
+    num_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collect vocabulary-shard candidates and return each owner's global TopK."""
+    top_k = values.shape[-1]
+    parallel_mode = getattr(lm_head, "parallel_mode", VocabParallelMode.STANDARD)
+    if parallel_mode is VocabParallelMode.REPLICATED or (
+        parallel_mode is VocabParallelMode.STANDARD and get_tensor_model_parallel_world_size() == 1
+    ):
+        return values, ids
+    # Interleave scores and IDs for one exchange when FP32 preserves both.
+    # Larger IDs and FP64 scores retain their own dtype in separate exchanges.
+    packed = (
+        values.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and lm_head.num_embeddings_padded <= _MAX_EXACT_FP32_TOKEN_ID
+    )
+    # Packed scores and IDs complete this TP column's candidates in one exchange.
+    output_gather_group = getattr(lm_head, "output_gather_group", None)
+    if packed:
+        score_dtype = values.dtype
+        pairs = torch.stack((values.float(), ids.float()), dim=-1)
+        pairs = gather_lm_head_outputs(pairs, parallel_mode, output_gather_group)
+        values = pairs[..., 0].to(score_dtype)
+        ids = pairs[..., 1].to(torch.int64)
+    else:
+        values = gather_lm_head_outputs(values, parallel_mode, output_gather_group)
+        ids = gather_lm_head_outputs(ids, parallel_mode, output_gather_group)
+    if parallel_mode is VocabParallelMode.FINE_GRAINED:
+        values, ids = values[:num_rows], ids[:num_rows]
+    # Global TopK over the union of each resident vocabulary shard's TopK.
+    if values.shape[-1] > top_k:
+        values, selected = torch.topk(values, top_k, dim=-1)
+        ids = ids.gather(-1, selected)
+    return values, ids
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
@@ -278,6 +337,9 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.final_logit_softcapping = softcap if softcap > 0 else None
+        self.lmhead_tp_candidate_capacity = (
+            vllm_config.scheduler_config.max_num_seqs * vllm_config.speculative_config.num_speculative_tokens
+        )
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         if get_rotation_path(vllm_config) is None:
@@ -291,6 +353,10 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
             raise ValueError("DFlash2 requires an unquantized target LM head for candidate TopK.")
 
         selector = self.model.candidate_selector
+        num_rows = hidden_states.shape[0]
+        hidden_states = _maybe_gather_lm_head_hidden_states(
+            hidden_states, self.lm_head, self.lmhead_tp_candidate_capacity
+        )
         logits = self.lm_head.quant_method.apply(self.lm_head, hidden_states, bias=None)
         num_pad = self.lm_head.shard_indices.num_org_vocab_padding
         if num_pad > 0:
@@ -298,11 +364,7 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         values, ids = torch.topk(logits, selector.top_k, dim=-1)
         ids = ids.to(torch.int64) + self.lm_head.shard_indices.org_vocab_start_index
 
-        if get_tensor_model_parallel_world_size() > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
-            values, selected = torch.topk(values, selector.top_k, dim=-1)
-            ids = ids.gather(-1, selected)
+        values, ids = _gather_lm_head_candidates(values, ids, self.lm_head, num_rows)
 
         values = values.float() * self.output_multiplier
         if self.final_logit_softcapping is not None:

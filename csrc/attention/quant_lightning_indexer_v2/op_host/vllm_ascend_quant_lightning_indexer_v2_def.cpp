@@ -20,17 +20,19 @@ class VllmAscendQuantLightningIndexerV2 : public OpDef {
 public:
     explicit VllmAscendQuantLightningIndexerV2(const char *name) : OpDef(name)
     {
-        this->Input("q").ParamType(REQUIRED).DataType({ge::DT_INT8}).FormatList({ge::FORMAT_ND}).AutoContiguous();
-        this->Input("k").ParamType(REQUIRED).DataType({ge::DT_INT8}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
-        this->Input("w").ParamType(REQUIRED).DataType({ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        // Arch22 default signatures: legacy empty BF16 scores, or native FP32
+        // local scores. Arch35 overrides these signatures below.
+        this->Input("q").ParamType(REQUIRED).DataType({ge::DT_INT8, ge::DT_INT8}).FormatList({ge::FORMAT_ND}).AutoContiguous();
+        this->Input("k").ParamType(REQUIRED).DataType({ge::DT_INT8, ge::DT_INT8}).FormatList({ge::FORMAT_ND}).IgnoreContiguous();
+        this->Input("w").ParamType(REQUIRED).DataType({ge::DT_FLOAT16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND}).AutoContiguous();
         this->Input("q_descale")
             .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_FLOAT16})
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("k_descale")
             .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_FLOAT16})
+            .DataType({ge::DT_FLOAT16, ge::DT_FLOAT16})
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("cu_seqlens_q")
@@ -78,8 +80,15 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
+        // DCP (Decode Context Parallel, 解码上下文并行): 每请求本次 Q 片段的全局 exclusive 上界 C。
+        // Device Tensor, 避免每轮把全局边界同步回 CPU; 非 DCP 场景不传。
+        this->Input("causal_seqlens_kv_global")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT32})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
-        this->Output("sparse_values").ParamType(REQUIRED).DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND});
+        this->Output("sparse_values").ParamType(REQUIRED).DataType({ge::DT_BF16, ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
         this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Attr("topk").AttrType(REQUIRED).Int(2048);       // 2048: 筛选前2048个作为输出index
         this->Attr("quant_mode").AttrType(REQUIRED).Int(1);    // 1: per-token-head
@@ -94,6 +103,11 @@ public:
         this->Attr("candidate_block_size").AttrType(OPTIONAL).Int(8);        // 候选块大小(位置数)
         this->Attr("key_stride0").AttrType(OPTIONAL).Int(0);                 // A11: key 第0维 stride (0=紧凑; aclnn 动态调用下 tiling 拿不到 tensor stride, 由 csrc 自动传入)
         this->Attr("key_dequant_scale_stride0").AttrType(OPTIONAL).Int(0);   // A11: k_scale 第0维 stride
+        // ---- DCP (Decode Context Parallel, 解码上下文并行) ----
+        this->Attr("enable_dcp").AttrType(OPTIONAL).Bool(false);             // 开启 CP 位置语义
+        this->Attr("cp_world").AttrType(OPTIONAL).Int(1);                    // P: CP 组大小
+        this->Attr("cp_rank").AttrType(OPTIONAL).Int(0);                     // r: 当前 rank
+        this->Attr("cp_kv_cache_interleave_size").AttrType(OPTIONAL).Int(1); // S: 每 S 个 token 轮换 rank
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)

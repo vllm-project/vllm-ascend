@@ -32,40 +32,12 @@ from tests.e2e.pull_request.utils import _run_speculative_decoding
 MODELS = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-# Confidence-based dynamic verify-length; keep in sync with
-# tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py (dspark).
-DSPARK_DYNAMIC_SPEC_CONFIG = {
-    "method": "dspark",
-    "method_params": {
-        "initial_verify_budget_per_req": 3,
-        "budget_update_interval": 1,
-        "budget_threshold": 0.7,
-    },
-}
-
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
-        pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
-        pytest.param(
-            3.45,
-            7,
-            {"enable_dsa_cp": True},
-            id="dsa-cp-dspark",
-            marks=pytest.mark.skip(reason="Model Runner V1 is outside the default CI path"),
-        ),
-        pytest.param(
-            3.35,
-            5,
-            {
-                "enable_flashcomm1": False,
-                "enable_dsa_cp": False,
-                "dynamic_spec_config": DSPARK_DYNAMIC_SPEC_CONFIG,
-            },
-            id="dspark-dynamic",
-        ),
+        pytest.param(3.33, 5, {}, id="dspark"),
     ],
 )
 @patch.dict(

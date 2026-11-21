@@ -1,0 +1,7 @@
+pr: 22200
+entries:
+  - category: bugfix
+    text: >-
+      Fixed an inference hang when
+      `finegrained_tp_config.embedding_tensor_parallel_size` is greater than 1,
+      some data-parallel ranks are idle, and MRV2 uses multimodal or prompt embeddings.

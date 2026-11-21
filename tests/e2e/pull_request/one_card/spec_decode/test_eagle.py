@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from transformers import AutoTokenizer
 from vllm import SamplingParams
@@ -11,21 +9,9 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import BASELINES, MODELS, calculate_acceptance_per_pos
+from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 256
-
-
-def test_qwen3_vl_eagle(
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-    vl_model_name: str,
-):
-    with VllmRunner(
-        vl_model_name,
-        max_model_len=1024,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as ref_llm:
-        ref_llm.model.chat(test_prompts, sampling_config)
 
 
 @pytest.mark.parametrize("method", MODELS.keys())
@@ -82,7 +68,7 @@ def test_qwen_eagle3_acceptance(
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
         "draft_tensor_parallel_size": draft_tensor_parallel_size,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        **({"disable_padded_drafter_batch": disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}),
         "model": spec_model_name,
     }
     if dynamic_num_speculative_tokens is not None:

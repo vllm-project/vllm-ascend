@@ -12,7 +12,6 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
-from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
@@ -20,17 +19,15 @@ MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 def allow_guidance_tokenizer(monkeypatch) -> None:
     """Accept the dummy tokenizer for the guidance backend.
 
-    vLLM main gates the guidance backend on
-    ``GuidanceBackend.is_tokenizer_supported``; the release lane (v0.31.0)
-    has no such check. The tests pass ``tokenizer=object()``, so make main
-    accept it.
+    Both supported vLLM lanes gate the guidance backend on
+    ``GuidanceBackend.is_tokenizer_supported``. The tests pass
+    ``tokenizer=object()``, so make the backend accept it.
     """
-    if not vllm_version_is("0.31.0"):
-        monkeypatch.setattr(
-            backend_guidance.GuidanceBackend,
-            "is_tokenizer_supported",
-            staticmethod(lambda tokenizer: True),
-        )
+    monkeypatch.setattr(
+        backend_guidance.GuidanceBackend,
+        "is_tokenizer_supported",
+        staticmethod(lambda tokenizer: True),
+    )
 
 
 class FakeBackend:

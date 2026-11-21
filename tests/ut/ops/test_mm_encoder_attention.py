@@ -1,9 +1,12 @@
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.vllm import get_cached_compilation_config
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.mm_encoder_attention import (
@@ -113,6 +116,54 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
     def setUp(self):
         self._install_vllm_config_mock()
         self._install_fia_mocks(capture=False)
+
+    def test_cpu_metadata_factory_and_eager_fia(self):
+        # Exercise the upstream OOT dispatch too: calling only the Ascend
+        # override would miss an accidental fallback to async_tensor_h2d.
+        boundaries = np.array([0, 3, 10, 12], dtype=np.int32)
+        with (
+            patch(
+                "vllm.model_executor.layers.attention.mm_encoder_attention.maybe_get_oot_by_class",
+                return_value=AscendMMEncoderAttention,
+            ),
+            patch(
+                "vllm.model_executor.layers.attention.mm_encoder_attention.async_tensor_h2d",
+                side_effect=AssertionError("FIA sequence metadata must stay on CPU"),
+            ),
+        ):
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                AttentionBackendEnum.TORCH_SDPA, boundaries, 1152, 4, torch.device("meta")
+            )
+        self.assertEqual(cu_seqlens.device.type, "cpu")
+        self.assertEqual(cu_seqlens.dtype, torch.int32)
+        boundaries[1] = 99
+        self.assertEqual(cu_seqlens.tolist(), [0, 3, 10, 12])
+        layer = self._make_layer(head_size=72)
+        query = torch.randn(1, 12, 4, 72)
+        layer.forward_oot(query, query, query, cu_seqlens=cu_seqlens)
+        self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12])
+
+    def test_cpu_metadata_accepts_none_and_copies_tensor(self):
+        backend = AttentionBackendEnum.TORCH_SDPA
+        device = torch.device("meta")
+        self.assertIsNone(AscendMMEncoderAttention.maybe_recompute_cu_seqlens(backend, None, 1152, 4, device))
+        boundaries = torch.tensor([0, 4, 8], dtype=torch.int32)
+        result = AscendMMEncoderAttention.maybe_recompute_cu_seqlens(backend, boundaries, 1152, 4, device)
+        boundaries[1] = 7
+        torch.testing.assert_close(result, torch.tensor([0, 4, 8], dtype=torch.int32))
+
+    def test_cpu_metadata_preserves_empty_and_padded_boundaries(self):
+        for endpoints in ([], [0], [0, 4, 8, 8]):
+            with self.subTest(endpoints=endpoints):
+                result = AscendMMEncoderAttention.maybe_recompute_cu_seqlens(
+                    AttentionBackendEnum.TORCH_SDPA,
+                    np.array(endpoints, dtype=np.int32),
+                    1152,
+                    4,
+                    torch.device("meta"),
+                )
+                self.assertEqual(result.device.type, "cpu")
+                self.assertEqual(result.tolist(), endpoints)
 
     def test_forward_oot_basic(self):
         layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=128)

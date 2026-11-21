@@ -2,70 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
-from vllm_ascend.patch.platform import patch_kv_cache_utils as cache_patch
+from vllm_ascend.core import kv_cache_config_builder
 
 
-@pytest.mark.parametrize("use_fallback", [False, True])
-def test_packed_groups_use_matching_eagle_annotation_api(use_fallback):
-    config = SimpleNamespace()
-    specs = {"layer": object()}
-    groups = [object()]
-
-    def annotate(config_arg, specs_arg, groups_arg, *, use_trailing_layer_fallback):
-        assert use_trailing_layer_fallback is use_fallback
-
-    predicate = MagicMock(return_value=use_fallback)
-    annotator = MagicMock(side_effect=annotate)
-    warning = MagicMock()
-    upstream = SimpleNamespace(
-        _annotate_eagle_groups=annotator,
-        _warn_if_unannotated_eagle_mamba=warning,
-        _uses_trailing_mtp_layers=predicate,
+def test_packed_groups_leave_eagle_annotation_to_upstream():
+    """Ascend grouping never tags draft groups; get_kv_cache_configs does."""
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
     )
-    with (
-        patch.object(cache_patch, "_kv_cache_planning", upstream),
-        patch.object(cache_patch, "vllm_version_is", lambda version: version == "0.31.0"),
-        patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
-        patch.object(cache_patch, "group_cache_specs", return_value=specs),
-        patch.object(cache_patch, "make_cache_groups", return_value=groups),
-    ):
-        assert cache_patch._ascend_get_packed_kv_cache_groups(config, specs) is groups
-
-    predicate.assert_called_once_with(config)
-    assert annotator.call_args.args == (config, specs, groups)
-    warning.assert_called_once_with(config, groups)
-
-
-def test_packed_groups_skip_eagle_annotation_on_main():
-    """The version gate leaves the API main no longer ships untouched.
-
-    vLLM #42309 drops ``_annotate_eagle_groups``/``_uses_trailing_mtp_layers``
-    from main and annotates EAGLE groups in ``get_kv_cache_configs`` instead.
-    The packed-group hook must therefore stay hands-off on the main lane even
-    when the live module exposes the helpers.
-    """
-    config = SimpleNamespace()
     specs = {"layer": object()}
-    groups = [object()]
-    annotator = MagicMock()
-    warning = MagicMock()
-    upstream = SimpleNamespace(
-        _annotate_eagle_groups=annotator,
-        _warn_if_unannotated_eagle_mamba=warning,
-        _uses_trailing_mtp_layers=MagicMock(),
-    )
+    groups = [KVCacheGroupSpec(layer_names=["layer"], kv_cache_spec=specs["layer"])]
     with (
-        patch.object(cache_patch, "_kv_cache_planning", upstream),
-        patch.object(cache_patch, "vllm_version_is", lambda version: False),
-        patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
-        patch.object(cache_patch, "group_cache_specs", return_value=specs),
-        patch.object(cache_patch, "make_cache_groups", return_value=groups),
+        patch.object(kv_cache_config_builder, "is_deepseek_v41_cache", return_value=True),
+        patch.object(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", return_value=None),
+        patch.object(kv_cache_config_builder, "group_cache_specs", return_value=specs),
+        patch.object(kv_cache_config_builder, "make_cache_groups", return_value=groups),
     ):
-        assert cache_patch._ascend_get_packed_kv_cache_groups(config, specs) is groups
+        assert kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs) is groups
 
-    annotator.assert_not_called()
-    warning.assert_not_called()
+    # ``is_eagle_group`` only exists on the lanes that annotate EAGLE groups.
+    assert not any(getattr(group, "is_eagle_group", False) for group in groups)

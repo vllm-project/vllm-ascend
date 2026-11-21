@@ -42,8 +42,8 @@ KV Cache supports the following three external storage backends, choose the stor
 
     | Category | Constraints |
     | :--- | :--- |
-    | Software Dependencies | • Requires `memfabric-hybrid` and `memcache-hybrid` (SSD Cache needs `memcache_hybrid >= 1.2.0`).<br>• Layerwise support requires `memcache_hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
-    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of MemCache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
+    | Software Dependencies | • Requires `memfabric-hybrid >= 1.3.0` and `memcache-hybrid >= 1.3.0`.<br>• On A3, using `device_sdma` protocol requires LingQu Computing Network >= 1.5. |
+    | Deployment | Supports both the PD Disaggregation and PD-Mixed scenarios. [Separated deployment of Memcache and vLLM](#Memcache-and-vLLM-Separated-Deployment) is supported only on A3. |
 
 === "Yuanrong backend"
 
@@ -61,6 +61,26 @@ Pool objects written by the older contiguous-range implementation are incompatib
 For non-layerwise complete-block transfers, adjacent MLA components sharing one backing storage are coalesced into one descriptor per physical page, or one descriptor per logical block when the pages have no gaps. Padding is never copied. Layerwise transfers, partial-chunk configurations, align-state groups, decode-cache saving, TP mismatch, DCP and KVPP retain the component-segment fallback. Registration logs report each coalesced layer and its descriptor count.
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
+
+### Prefix Cache Retention
+
+Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.
+The Ascend hybrid HBM coordinator and AscendStore scheduler/worker use the parsed
+configuration. The former `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` environment variable
+was removed from vLLM and no longer configures retention.
+
+| Value | Sliding-window / Mamba checkpoint retention |
+| :--- | :--- |
+| `0` (upstream default) | Retain checkpoints required for prompt replay, without periodic checkpoints. |
+| Positive integer, e.g. `4096` | Also retain periodic checkpoints; the interval must be a multiple of the scheduler block size. |
+| `None` | Retain all reachable checkpoints densely. |
+
+Full-attention groups retain their dense prefix-cache behavior. The setting controls
+checkpoint retention, not the configured HBM or external pool capacity. To preserve
+dense retention when upgrading from the stale environment-variable reader, explicitly
+pass `--prefix-cache-retention-interval None`; omitting the argument selects `0`.
+To migrate an intended interval of `4096`, pass `--prefix-cache-retention-interval 4096`
+on the same instances that previously exported the environment variable.
 
 ## Scenario 1: Mooncake Backend
 
@@ -90,10 +110,10 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     ldd --version
     ```
 
-2. Install Mooncake:
+2. The vllm-ascend Docker images install Mooncake. Verify the installation:
 
     ```shell
-    python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
+    python3 -m pip show mooncake-transfer-engine-npu
     ```
 
 #### Step 2: Configure mooncake.json and Start mooncake_master
@@ -111,7 +131,7 @@ This bulk fast path uses physical-page-major object contents instead of the prev
         "protocol": "ascend",
         "device_name": "",
         "master_server_address": "<master_ip>:50088",
-        "global_segment_size": "1GB",
+        "global_segment_size": "30GB",
         "preferred_segment": false,
         "prefer_alloc_in_same_node": true,
         "enable_ssd_offload": false,
@@ -134,9 +154,24 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     | `prefer_alloc_in_same_node` | bool | true | No | true / false | Whether to prefer allocating KV on the same node. |
     | `enable_ssd_offload` | bool | false | No | true / false | Whether to enable SSD offload. Environment variables are not supported. |
     | `ssd_offload_path` | str | No default | Required when SSD offload enabled | Absolute path | Absolute path for SSD offload data storage (for example, /nvme/mooncake_offload). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symlinks, and paths containing `..` are rejected. |
+    | `enable_ssd_prefetch` | bool | false | No | true / false | Master switch for SSD-to-DRAM prefetch on exist queries. Implemented by [Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); the idea comes from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213). When true, `batch_is_exist` passes `ExistOptions(prefetch_to_memory=True)` so Mooncake promotes SSD-only objects into DRAM during the cache probe. Requires `enable_ssd_offload=true` and a Mooncake build that exposes `ExistOptions`. If `ExistOptions` is missing, prefetch is disabled and a warning is logged. |
+    | `ssd_prefetch_cooldown_sec` | int | omitted | No | Integer seconds; 0 disables | DRAM-pressure backoff. After promotion fails with `NO_AVAILABLE_HANDLE`, prefetch pauses for this many seconds so eviction and offload can free DRAM. Mooncake's built-in default is 5 when this field is omitted. vLLM-Ascend forwards it only when `mooncake.json` sets it. |
+    | `ssd_prefetch_dedup_ttl_sec` | int | omitted | No | Integer seconds; 0 disables | Per-key trigger dedup TTL. The same key is prefetched at most once per this period, which suppresses duplicate probes across TP ranks. Mooncake's built-in default is 30 when this field is omitted. Forwarded only when set. |
     | `tenant_id` | str | default | No | String | Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. |
 
     </details>
+
+    SSD offload and SSD prefetch are separate. After `enable_ssd_offload` is true, add the following fields to the same `mooncake.json` to prefetch SSD-only objects back into DRAM on exist. Semantics match [Mooncake SSD prefetch](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/store/ssd-prefetch.md) ([Mooncake PR 4272](https://github.com/kvcache-ai/Mooncake/pull/4272); concept from [RFC 2213](https://github.com/kvcache-ai/Mooncake/issues/2213)):
+
+    ```json
+    {
+        "enable_ssd_prefetch": true,
+        "ssd_prefetch_cooldown_sec": 5,
+        "ssd_prefetch_dedup_ttl_sec": 30
+    }
+    ```
+
+    `ssd_prefetch_cooldown_sec` and `ssd_prefetch_dedup_ttl_sec` are forwarded to `MooncakeDistributedStore.setup()` only when the field is present in `mooncake.json`. Omitting a field leaves Mooncake's default (5 seconds and 30 seconds). When `mooncake.json` sets any prefetch knob, the connector uses the config-dict form of `setup()`; that overload cannot take an engine, so the store creates its own TransferEngine instead of sharing the global one. On a Mooncake build without `ExistOptions`, the knobs are not passed and prefetch stays off.
 
 2. Start `mooncake_master` (only needs to run on one node):
 
@@ -238,7 +273,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
         # parameters required for kv pool and Mooncake
         export PYTHONHASHSEED=0
         export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         if [ "$ROLE" == "prefill" ]; then
             KV_ROLE="kv_producer"
@@ -402,7 +436,6 @@ This bulk fast path uses physical-page-major object contents instead of the prev
     # parameters required for kv pool and Mooncake
     export PYTHONHASHSEED=0
     export MOONCAKE_CONFIG_PATH="<config_dir>/mooncake.json"
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     echo "Starting vLLM on Series: $HARDWARE_SERIES"
 
@@ -474,7 +507,7 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 #### Step 5: MooncakeStore SSD Offload (Embedded Real Client Mode)
 
-In Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
+In Embedded Real Client mode, Mooncake is embedded in vLLM. When vLLM starts, `AscendStoreConnector`/`MooncakeBackend` automatically calls `MooncakeDistributedStore.setup()` using the settings in `mooncake.json`, with no separate `mooncake_client` process required.
 
 **Low eviction watermark:** With a 100 GB DRAM pool, `eviction_high_watermark_ratio=0.5` triggers eviction at 50 GB. If the warmup working set exceeds this threshold, data can be evicted before asynchronous SSD writes finish, leaving the benchmark with a cold cache and a lower initial hit rate.
 
@@ -628,15 +661,6 @@ For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, perform a warm-up phase bef
 
 ### Configuration Examples
 
-<details markdown="1">
-<summary>MemCache DP Initialization Synchronization</summary>
-
-For the `memcache` backend, `memcache_dp_init_barrier` defaults to `true`. After successful store initialization, workers in a DP group synchronize through the CPU process group before continuing to NPU work such as graph capture. This keeps earlier workers from proceeding while peers are still initializing MemCache channels. DP size 1, metadata-only scheduler clients, and stores using lazy initialization skip this synchronization.
-
-Set the same value on every rank in the DP group. With `MultiConnector`, place this boolean in the `AscendStoreConnector` child's `kv_connector_extra_config`. To disable it, add `"memcache_dp_init_barrier": false` alongside `"backend": "memcache"`. No environment variable is needed. Lazy initialization can be triggered independently by requests on each DP rank, so it never enters the DP barrier. If a backend cannot honor a lazy initialization request and initializes eagerly instead, the startup barrier still applies.
-
-</details>
-
 #### Environment Preparation
 
 1. Verify that `hccn.conf` exists in the environment. When using Docker, mount it into the container:
@@ -729,9 +753,11 @@ Set the same value on every rank in the DP group. With `MultiConnector`, place t
 
 #### Step 2: Software Installation
 
+The Memcache backend requires both `memcache-hybrid >= 1.3.0` and `memfabric-hybrid >= 1.3.0`.
+
 ```shell
-pip install memfabric-hybrid
-pip install memcache-hybrid
+pip install "memfabric-hybrid>=1.3.0"
+pip install "memcache-hybrid>=1.3.0"
 ```
 
 #### Step 3: Configure Memcache Config File
@@ -1038,9 +1064,9 @@ The `kv_connector_extra_config` fields used in the scripts above are documented 
 
 #### Step 6: Memcache and vLLM Separated Deployment {: #Memcache-and-vLLM-Separated-Deployment }
 
-This deployment mode runs MemCache and vLLM in different processes (distinct from vLLM PD disaggregation). In the default co-located mode, vLLM loads the model weights before the KV connector initializes MemCache, so MemCache may not be able to reserve sufficient memory from the remaining available space. Starting a standalone MemCache process before vLLM allows MemCache to reserve a larger memory pool.
+This deployment mode runs Memcache and vLLM in different processes (distinct from vLLM PD disaggregation). In the default co-located mode, vLLM loads the model weights before the KV connector initializes Memcache, so Memcache may not be able to reserve sufficient memory from the remaining available space. Starting a standalone Memcache process before vLLM allows Memcache to reserve a larger memory pool.
 
-Prepare two LocalService configuration files with the same connection and protocol settings: the configuration used by the vLLM process does not contribute DRAM (`dram.size = 0GB`), and the configuration used by the standalone MemCache process specifies the amount of DRAM to contribute. Set `ock.mmc.local_service.max.dram.size` to accommodate the maximum `dram.size` used by the LocalService processes.
+Prepare two LocalService configuration files with the same connection and protocol settings: the configuration used by the vLLM process does not contribute DRAM (`dram.size = 0GB`), and the configuration used by the standalone Memcache process specifies the amount of DRAM to contribute. Set `ock.mmc.local_service.max.dram.size` to accommodate the maximum `dram.size` used by the LocalService processes.
 
 Steps:
 
@@ -1078,7 +1104,7 @@ ock.mmc.local_service.dram.size = 0GB
 ock.mmc.local_service.max.dram.size = 1024GB
 ```
 
-##### mmc-local-standalone.conf (used by the standalone MemCache process)
+##### mmc-local-standalone.conf (used by the standalone Memcache process)
 
 ```ini
 ock.mmc.meta_service_url = tcp://<meta_service_ip>:5000
@@ -1104,7 +1130,7 @@ maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO 
 
 For example, if `200` GB is available to UBS IO and four local services have DRAM enabled, the upper limit is `50` GB per process. If the calculated upper limit is less than `5`, free more node memory or reduce the number of DRAM-enabled local services.
 
-For the scenario of separate deployment of MemCache, it is recommended to configure a single process with `50` GB. In other scenarios, the recommended value is `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [ubsio.wcache.evict_water_level](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
+For the scenario of separate deployment of Memcache, it is recommended to configure a single process with `50` GB. In other scenarios, the recommended value is `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [ubsio.wcache.evict_water_level](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
 
 For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
 
@@ -1381,7 +1407,7 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 
 </details>
 
-#### Step 4: Configure Environment Variables and `yuanrong.json`
+#### Step 4: Configure Environment Variables and yuanrong.json
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1547,7 +1573,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 }'
 ```
 
-`lookup_rpc_port` is the RPC port used between the pooling scheduler process and the worker process. Each instance must use a unique port value.
+`lookup_rpc_port` identifies the local IPC endpoint used between the pooling scheduler process and the worker process. DP replicas within one vLLM service use separate IPC endpoints automatically. Independently launched services sharing the same RPC base directory must use different `lookup_rpc_port` values.
 
 **Note:** The Yuanrong backend normalizes KV keys before calling Datasystem. Supported ASCII keys up to 1024 bytes are preserved. Longer keys or keys containing unsupported characters are rewritten to a maximum of 1024 characters with a hash suffix, so do not rely on the raw key string when debugging backend storage. No extra buffer pre-registration step is required.
 
@@ -1557,7 +1583,7 @@ Expected output: vLLM starts successfully, OpenAI API service is ready.
 
 ### Verification
 
-Refer to the verification operations in Steps 1–5 of Configuration Examples.
+Refer to the verification operations in Steps 1-5 of Configuration Examples.
 
 ### Tuning
 
@@ -1579,7 +1605,7 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `Parameter` | Type | Default | Required | Value Range | Description |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kv_load_failure_policy` | str | fail | No | recompute / fail | Behavior when KV loading fails: `recompute` rolls back and recomputes (does not yet support hybrid attention models like DeepSeekV4, Qwen 3.5), `fail` terminates the request. When using MultiConnector, configure on the top-level `kv-transfer-config`. |
-| `lookup_rpc_port` | str | No default | Yes | Unique port number (e.g., "0", "1") | RPC port between pooling scheduler and worker processes. Each instance must use a unique port. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
+| `lookup_rpc_port` | str | No default | Yes | Distinct service identifier (e.g., "0", "1") | Local IPC identifier between pooling scheduler and worker processes. DP replicas within a service are isolated automatically; independently launched services sharing the RPC base directory need unique values. The legacy name `mooncake_rpc_port` is deprecated; use `lookup_rpc_port`. |
 | `load_async` | bool | false | No | true / false | Whether to enable asynchronous loading. |
 | `backend` | str | mooncake | No | mooncake / memcache / yuanrong | KV Pool storage backend. |
 | `consumer_is_to_put` | bool | false | No | true / false | Whether Decode node puts KV Cache into KV Pool. |
@@ -1589,6 +1615,8 @@ Refer to the verification operations in Steps 1–5 of Configuration Examples.
 | `prefill_pp_size` | int | 1 | Required when Prefill PP + consumer writes | Positive integer | Prefill PP size. |
 | `prefill_pp_layer_partition` | str | No default | No | Comma-separated layer numbers, e.g., "30,31" | Prefill PP layer partition. If not configured, layers are evenly divided by `prefill_pp_size`. |
 | `qos_priority` | int | 0 | No | [0, 4] (integer, larger = higher priority) | KV Pool transfer QoS priority. |
+
+**NOTE:** When using `AscendStoreConnector` together with `MooncakeConnector` (V1) or `MooncakeConnectorV2`, the current TCP port allocations may still overlap ports reserved by other workers or components. This includes V1 worker handshake ports and V2 scheduler control ports. Distinct DP indices do not guarantee disjoint TCP port ranges; check these allocations against worker and component port reservations before deployment. `lookup_rpc_port` only identifies the local IPC endpoint and does not resolve these TCP port conflicts.
 
 ### ASCEND_GLOBAL_RESOURCE_CONFIG
 
@@ -1660,7 +1688,7 @@ Public FAQ references:
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
 
-### Issue 2: `SEGMENT_NOT_FOUND` (SSD Offload)
+### Issue 2: SEGMENT_NOT_FOUND (SSD Offload)
 
 **Problem Description:** Client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FOUND`. The rank's SSD Offload stops until the segment is registered again.
 
@@ -1679,15 +1707,15 @@ Public FAQ references:
 
 **Root Cause Analysis:** On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, each fabric mem allocation must be an integer multiple of 1 GB. Mooncake does not round sizes up, and the default 1280 MB (1.25 GB) is not aligned.
 
-**Resolution Steps:** For buffer alignment and fabric memory quota configuration, see "Tuning Recommendations - Mooncake SSD Offload Parameter Tuning".
+**Resolution Steps:** For buffer alignment and fabric memory quota configuration, see "Tuning - Mooncake SSD Offload Parameter Tuning".
 
-### Issue 4: `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` Too Small (`BUFFER_OVERFLOW`)
+### Issue 4: MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES Too Small (BUFFER_OVERFLOW)
 
 **Problem Description:** SSD reads fail with `BUFFER_OVERFLOW` (`error_code=-10`) during `FileStorage::AllocateBatch`, and vLLM may fail when `kv_load_failure_policy=fail`.
 
 **Root Cause Analysis:** With `enable_ssd_offload=true`, Mooncake allocates a separate per-rank SSD read/write buffer. This buffer is independent of `global_segment_size` in `mooncake.json` — increasing the segment does not fix `BUFFER_OVERFLOW`.
 
-**Resolution Steps:** For how to increase the buffer and how to verify after tuning, see "Tuning Recommendations - Mooncake SSD Offload Parameter Tuning".
+**Resolution Steps:** For how to increase the buffer and how to verify after tuning, see "Tuning - Mooncake SSD Offload Parameter Tuning".
 
 ### Issue 5: Memcache Related Issues
 
@@ -1703,3 +1731,18 @@ Note the following when enabling KV Pool for DSv4. Other historical known issues
 ### Issue 7: AscendStore KV Pool Known Issues (v0.23.0)
 
 For the v0.23.0 AscendStore KV Pool known issues, see [vllm-ascend issue #12390](https://github.com/vllm-project/vllm-ascend/issues/12390).
+
+### Issue 8: Lazy Init for KV Pool with Fabric Memory and Specific Models
+
+On HDK versions earlier than 26.1, when fabric memory is enabled (`ASCEND_ENABLE_USE_FABRIC_MEM=1`) and running one of the affected model families below, the vLLM service hangs during startup with the KV Pool enabled. Lazy store initialization defers the store setup so the service starts normally.
+
+When lazy init is enabled, the store is not created during backend construction. Instead, it is set up on the first `put()` call and guarded by a lock, so later `put()` calls reuse the same store. Before the first `put()`, `exists()` treats keys as missing so the first store request can reach `put()`; pool lookups that happen before initialization therefore report a miss and the affected requests fall back to recompute once — a safe degradation, not an error.
+
+Lazy initialization is requested automatically — no configuration is needed — for the following model families when the Mooncake/Memcache backend runs under fabric memory:
+
+| Model family | When lazy init is requested |
+| :--- | :--- |
+| DeepSeek V4 compressed models (checkpoint carries `compress_ratios`) | `ASCEND_ENABLE_USE_FABRIC_MEM=1` (fabric memory enabled) |
+| GLM-5.x sparse-indexer (SFA) models with an int8 or fp8 KV cache | `ASCEND_ENABLE_USE_FABRIC_MEM=1` + packed C8 KV cache path active. On v0.26-based releases this path is enabled by `c8_enable_reshape_optim`; on newer releases it is the native default for int8/fp8 KV cache dtype and the switch no longer exists. |
+
+All other models — dense models, and sparse-indexer models with other KV cache dtypes — keep the previous eager store setup unchanged.

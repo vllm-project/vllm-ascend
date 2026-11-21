@@ -23,27 +23,30 @@ from unittest.mock import MagicMock, patch
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise import kv_transfer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerSendingThread,
-    KVTransferThread,
     LayerBatchBuilder,
     _build_range_debug_payload,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBlockRange,
+    LayerRangeReqMeta,
+    LayerTransferTask,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerBlockRange,
-    LayerRangeReqMeta,
-    LayerTransferTask,
     LoadSpec,
     ReqMeta,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 # isort: on
 
@@ -192,13 +195,16 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
     @staticmethod
-    def _make_worker() -> KVPoolWorker:
-        worker = KVPoolWorker.__new__(KVPoolWorker)
+    def _make_worker() -> LayerwiseKVPoolWorker:
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        worker.sharded_mamba_group_ids = set()
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
         worker.dcp_size = 1
+        worker.dcp_rank = 0
         worker.tp_rank = 0
         worker.pp_rank = 0
+        worker.pcp_rank = 0
         worker.put_step = 1
         worker.dcp_size = 1
         worker.group_uses_align_state = [False]
@@ -210,8 +216,8 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.head_or_tp_rank = 0
         worker.metadata = [KeyMetadata("model", 0, 0, 0)]
         worker.backend_name = "mooncake"
-        worker.layerwise_protocol = mooncake_layerwise
-        worker.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+        worker.layerwise_backend = mooncake_backend.MooncakeBackend
+        worker.layerwise_keys = worker.layerwise_backend.bind_layerwise_keys(
             vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1)),
             kv_cache_config=None,
             model_name=worker.model_name,
@@ -219,6 +225,9 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             grouped_block_size=worker.grouped_block_size,
         )
         worker.use_block_key_layerwise = True
+        worker.layerwise_data_plane = "block_key"
+        worker.block_key_hybrid = False
+        worker._data_plane = make_data_plane(worker)
         worker.layerwise_offload = False
         worker.independent_layers = []
         worker.page_size_bytes = 60
@@ -245,7 +254,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 16, can_load=True),
         )
 
-        worker._prepare_layerwise_put_session(request)
+        worker._data_plane._prepare_single_put_session(request)
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
@@ -260,7 +269,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 63, can_load=True, kvpool_store_skip_tokens=64),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(len(slots), 4)
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
@@ -282,7 +291,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             is_last_chunk=False,
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
         worker.layer_load_tasks = [[]]
         worker._process_load_for_layer_batch([request], 0)
 
@@ -302,7 +311,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 32, can_load=True),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(
             request.load_block_keys,

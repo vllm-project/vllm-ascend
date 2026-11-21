@@ -1,0 +1,11 @@
+pr: 21508
+entries:
+  - category: feature
+    text: >-
+      Added INT8 and MXFP8 quantized all-reduce support on Atlas A5 for
+      large BF16 collectives.
+      Enable it with quantized_all_reduce_config.enable=true in
+      --additional-config; the feature is disabled by default.
+      When enabled, quantized_all_reduce_config.quant_dtype defaults
+      to mxfp8 on A5 and int8 on A2; A5 users can explicitly select int8.
+    hardware: [A5]
