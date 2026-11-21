@@ -277,8 +277,8 @@ class NPUWorker(GPUWorker):
         # the allocator backs them up instead of discarding them.
         return dict(model.named_parameters())
 
-    def _ascend_discardable_parameters(self, model: nn.Module) -> set[int]:
-        """0.33 fallback; mirrors GPUWorker._discardable_parameters on main."""
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        """Storage of the parameters the weight update rewrites."""
         storage = {
             name: parameter.untyped_storage().data_ptr()
             for name, parameter in self._get_sleep_parameters(model).items()
@@ -299,11 +299,6 @@ class NPUWorker(GPUWorker):
                 "to keep them."
             )
         return set(storage.values()) - preserved
-
-    def _discardable_parameters(self, model: nn.Module) -> set[int]:
-        if hasattr(GPUWorker, "_discardable_parameters"):
-            return super()._discardable_parameters(model)
-        return self._ascend_discardable_parameters(model)
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
