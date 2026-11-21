@@ -2,13 +2,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import torch
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
 )
 
-from vllm_ascend.patch.platform import patch_kv_cache_utils
+from vllm_ascend.core import kv_cache_config_builder
 
 
 def _ordinary_specs() -> dict[str, KVCacheSpec]:
@@ -22,18 +23,27 @@ def _ordinary_specs() -> dict[str, KVCacheSpec]:
     return {"model.layers.0.self_attn": ordinary}
 
 
+def _ordinary_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        kv_transfer_config=None,
+    )
+
+
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")))
+    vllm_config = _ordinary_config()
     expected = [Mock(spec=KVCacheGroupSpec)]
     upstream_grouping = Mock(return_value=expected)
     monkeypatch.setattr(
-        patch_kv_cache_utils,
-        "_orig_get_kv_cache_groups",
+        DefaultKVCacheConfigBuilder,
+        "get_kv_cache_groups",
         upstream_grouping,
     )
 
-    actual = patch_kv_cache_utils._get_ascend_kv_cache_groups(
+    actual = kv_cache_config_builder.AscendKVCacheConfigBuilder().get_kv_cache_groups(
         vllm_config,
         specs,
     )
@@ -53,26 +63,23 @@ def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
     expected = SimpleNamespace()
     upstream_planner = Mock(return_value=expected)
     monkeypatch.setattr(
-        patch_kv_cache_utils,
-        "_orig_get_kv_cache_config_from_groups",
+        kv_cache_config_builder,
+        "_upstream_get_kv_cache_config_from_groups",
         upstream_planner,
     )
     monkeypatch.setattr(
-        patch_kv_cache_utils,
+        kv_cache_config_builder,
         "_is_deepseek_v4_groups",
         lambda _: False,
     )
     monkeypatch.setattr(
-        patch_kv_cache_utils,
+        kv_cache_config_builder,
         "_get_glm5_next_cache_layout",
         lambda _: None,
     )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
-        kv_transfer_config=None,
-    )
 
-    actual = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(
+    vllm_config = _ordinary_config()
+    actual = kv_cache_config_builder.get_ascend_kv_cache_config_from_groups(
         vllm_config,
         groups,
         available_memory=123456,

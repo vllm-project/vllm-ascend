@@ -66,7 +66,7 @@ def mtp_model(rfork_helpers, tensor_runtime, monkeypatch):
     layer.shared_head = torch.nn.Module()
     layer.shared_head.head = torch.nn.Linear(2, 2, bias=False)
     model.model.layers = torch.nn.ModuleDict({"3": layer})
-    monkeypatch.setattr(tensor_runtime.tensor_layout, "is_tensor_on_transfer_device", lambda _tensor: True)
+    monkeypatch.setattr(tensor_runtime.weight_state, "is_tensor_on_transfer_device", lambda _tensor: True)
     return SimpleNamespace(model=model)
 
 

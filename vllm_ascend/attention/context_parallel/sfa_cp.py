@@ -14,6 +14,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
+    get_cp_max_num_reqs,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     _index_select_kv_blocks,
@@ -22,7 +23,6 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     build_sfa_dcp_replicated_slot_mapping,
     get_sfa_dcp_local_block_table,
     get_sfa_dcp_max_local_block_table_cols,
-    get_sfa_max_num_reqs,
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
@@ -125,7 +125,7 @@ class AscendSFADCPMetadataBuilder(
         # while decode requests remain one local row. A mixed batch can
         # therefore require up to twice max_num_seqs rows on each PCP rank.
         # Full-graph FIA padding can append one additional dummy request.
-        max_num_reqs = get_sfa_max_num_reqs(vllm_config)
+        max_num_reqs = get_cp_max_num_reqs(vllm_config)
         self.dcp_local_seq_lens_buf = torch.empty(
             max_num_reqs,
             dtype=torch.int32,

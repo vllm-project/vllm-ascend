@@ -1,0 +1,63 @@
+name: Publish Daily Issue
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Daily round identity passed by the main workflow'
+        required: true
+        type: string
+      case_name:
+        description: 'Failed Daily case name'
+        required: true
+        type: string
+      run_url:
+        description: 'Failed case execution link'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  resolve-daily-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.identity.outputs.run_id }}
+    steps:
+      - name: Resolve the Daily run identity
+        id: identity
+        shell: bash
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          if [[ ! "$REQUEST_ID" =~ ^daily-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid Daily round identity"
+            exit 1
+          fi
+          echo "run_id=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+  update-issue:
+    needs: resolve-daily-run
+    # Serialize lookup/create/append across every attempt of the same Daily run.
+    concurrency:
+      group: daily-issue-${{ needs.resolve-daily-run.outputs.run_id }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Create or incrementally update the Daily Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/workflows/scripts/update_daily_issue.py

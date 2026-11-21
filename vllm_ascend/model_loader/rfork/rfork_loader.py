@@ -568,8 +568,8 @@ def _iter_ascend_moe_quant_methods(model: Module) -> Iterator[Any]:
         if not isinstance(module, AscendMoERunner):
             continue
 
-        # AscendMoERunner exposes the routed experts' method via private _quant_method.
-        quant_method = getattr(module, "_quant_method", None)
+        # Accept both attribute spellings across baselines.
+        quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
         if quant_method is None or id(quant_method) in seen_quant_methods:
             continue
 

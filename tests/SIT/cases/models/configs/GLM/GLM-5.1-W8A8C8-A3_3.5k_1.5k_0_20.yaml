@@ -45,7 +45,8 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --kv-cache-dtype int8
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
@@ -78,7 +79,8 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --kv-cache-dtype int8
+      --additional-config '{"enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "enable_flashcomm1": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf_TPOT20:
@@ -90,5 +92,5 @@ benchmarks:
     max_out_len: 1500
     batch_size: 8
     request_rate: 0
-    baseline: 321.4576
+    baseline: 224.2545
     threshold: 0.97

@@ -305,7 +305,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
 Key Parameter Descriptions:
 
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
+- `--max-model-len` specifies the maximum context length — that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--data-parallel-size` sets the global number of data parallel ranks, while `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure them together according to the deployment topology and available NPUs.
@@ -345,7 +345,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ### 5.2 PD Separation Deployment
 
-We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
+We recommend using Mooncake for deployment: [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
 
 In the standard single-node deployment mode, Prefill (prompt processing) and Decode (token generation) tasks run on the same set of NPUs. This can lead to two issues:
 
@@ -1224,7 +1224,7 @@ The following sections describe multi-node PD separation deployment on Atlas 800
 
 ### 5.3 KV Cache Pool Deployment {: #53-memcache-kv-cache-pool-deployment }
 
-This section provides PD separation deployment examples with a KV Cache Pool for cross-engine KV cache reuse. The 950DT and A3 examples use the MemCache backend, while the A2 examples cover both Mooncake and MemCache. Each hardware tab describes backend and storage configuration, Prefill and Decode startup steps, and KV cache reuse verification.
+This section provides PD separation deployment examples with a KV Cache Pool for cross-engine KV cache reuse. The 950DT and A3 examples use the Memcache backend, while the A2 examples cover both Mooncake and MemCache. Each hardware tab describes backend and storage configuration, Prefill and Decode startup steps, and KV cache reuse verification.
 
 === "950DT products"
 
@@ -1234,7 +1234,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     Reuse the shared `launch_online_dp.py` from [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment). Save the pooled templates below as `run_prefill_memcache.sh` and `run_decode_memcache.sh`, and select them with `--script`. These templates use `MultiConnector` and the required Memcache environment variables.
 
-    For backend configuration and parameter descriptions, refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+    For backend configuration and parameter descriptions, refer to [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
     1. <a id="5321-prerequisites-and-memcache-configuration"></a>**Prerequisites and MemCache Configuration**
 
@@ -1506,7 +1506,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
             Wait until the Prefill API endpoint and all four Decode API endpoints are healthy, then start the proxy using the configuration from [the 950DT PD deployment example](#524-950dt-series-pd-separation-deployment). Send a generation request to `<proxy_ip>:1999` as described in [Section 6](#6-functional-verification). Confirm that the response contains generated text.
 
-            To verify KV Cache Pool reuse, send an initial request to warm up the cache, then send another request with the same identical token prefix. Check the Prefill logs for KV Pool lookup/get/put operations and cache-hit information. An HTTP 200 response alone does not confirm KV Cache Pool reuse. For details,refer to [KV Cache Pool (Ascend Store)](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
+            To verify KV Cache Pool reuse, send an initial request to warm up the cache, then send another request with the same identical token prefix. Check the Prefill logs for KV Pool lookup/get/put operations and cache-hit information. An HTTP 200 response alone does not confirm KV Cache Pool reuse. For details,refer to [Memcache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend).
 
     Key pooling parameters:
 
@@ -1523,13 +1523,13 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
     | Role | DP | TP | PCP | NPU dies | HTTP ports |
     | --- | --- | --- | --- | --- | --- |
-    | Prefill | 2 | 1 | 8 | 16 | 7100-7101 |
-    | Decode | 16 | 1 | 1 | 16 | 7100-7115 |
+    | Prefill | 2 | 1 | 8 | 16 | 7100–7101 |
+    | Decode | 16 | 1 | 1 | 16 | 7100–7115 |
 
     The deployment follows the same Memcache service setup as
     [DeepSeek-V4.1-Flash](DeepSeek-V4.1-Flash.md#5321-prepare-the-memcache-services),
     while all non-pooling options and the parallel layout follow the
-    [A3 series](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
+    [the A3 PD deployment example](#a3-series-pd-separation-deployment-with-dspark) tab in Section 5.2. `MooncakeHybridConnector`
     continues to transfer KV
     cache from Prefill to Decode, while `AscendStoreConnector` stores reusable KV
     cache in Memcache. Both connectors are configured as children of
@@ -1666,7 +1666,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
         python3 memcache_standalone.py
         ```
 
-        Wait for `Successfully initialized Memcache` before starting vLLM. vLLM processes continue to use `mmc-local.conf`, not the standalone configuration. Follow [Enable Memcache SSD Cache](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) for SDK requirements, storage ownership and capacity constraints. Verify real cache restore and backend hit activity; enabling an SSD flag or seeing HTTP 200 alone does not prove three-level cache reuse.
+        Wait for `Successfully initialized Memcache` before starting vLLM. vLLM processes continue to use `mmc-local.conf`, not the standalone configuration. Follow [Memcache SSD instructions](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-7-enable-memcache-ssd-cache) for SDK requirements, storage ownership and capacity constraints. Verify real cache restore and backend hit activity; enabling an SSD flag or seeing HTTP 200 alone does not prove three-level cache reuse.
 
     2. <a id="532-start-the-prefill-node-with-pooling"></a>**Start the Prefill Node with Pooling**
 
@@ -1911,7 +1911,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
             --dp-address "<PREFILL_NODE_IP>" --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
-        Each Prefill DP rank uses eight consecutive NPU dies: 0-7 and 8-15.
+        Each Prefill DP rank uses eight consecutive NPU dies: 0–7 and 8–15.
         Each Decode DP rank uses one die. `--dp-address` is the master IP of its own
         role; Prefill and Decode use separate DP groups.
 
@@ -2522,7 +2522,7 @@ This section provides PD separation deployment examples with a KV Cache Pool for
 
 ## 6 Functional Verification
 
-This section verifies basic inference functionality for all deployment modes. For Memcache pooled PD deployments, also verify external KV Cache Pool reuse using the [A3 startup and verification steps](#534-startup-and-verification) or the “Start the Proxy and Verify KV Cache Pool Reuse” step in the [950DT example](#54-950dt-single-node-pd-separation-deployment).
+This section verifies basic inference functionality for all deployment modes. For Memcache pooled PD deployments, also verify external KV Cache Pool reuse using the [A3 startup and verification steps](#534-startup-and-verification) or the "Start the Proxy and Verify KV Cache Pool Reuse" step in the [950DT example](#54-950dt-single-node-pd-separation-deployment).
 
 Once your server is started, you can query the model with input prompts:
 

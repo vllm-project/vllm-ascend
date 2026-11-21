@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL, URLSearchParams } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
@@ -12,7 +12,8 @@ import { assertInstallationAdapter, checkScenario, installationFor } from "./asc
 
 const DEFAULT_RECIPES = fileURLToPath(new URL("../", import.meta.url));
 const hash = (text) => createHash("sha256").update(text).digest("hex");
-const identity = (f) => JSON.stringify([f.model, f.hardware, f.variant, f.strategy, f.role, f.code, f.severity, f.message, f.evidence]);
+const identity = (f) => JSON.stringify([f.model, f.hardware, f.variant, f.strategy, f.preset, f.point,
+  f.role, f.code, f.severity, f.message, f.evidence]);
 export function compareFindings(current, baseline = null, warningsAsErrors = false) {
   const previous = new Set((baseline || []).map(identity));
   const now = new Set(current.map(identity));
@@ -41,9 +42,9 @@ function indexedYaml(dir) {
   return files;
 }
 function workersFor(result) {
-  if (result.deployType === "pd_cluster") return ["prefill", "decode"].map((role) => ({ role, ...result[role] }));
-  if (result.deployType === "multi_node") return [{ role: "head", argv: result.headArgv, env: result.env },
-    ...(result.workerArgvs || []).map((argv, i) => ({ role: `worker-${i + 1}`, argv, env: result.env }))];
+  if (result.deploy_type === "pd_cluster") return ["prefill", "decode"].map((role) => ({ role, ...result[role] }));
+  if (result.deploy_type === "multi_node") return [{ role: "head", argv: result.head_argv, env: result.env },
+    ...(result.worker_argvs || []).map((argv, i) => ({ role: `worker-${i + 1}`, argv, env: result.env }))];
   return [{ role: "server", argv: result.argv, env: result.env }];
 }
 function normalize(value) {
@@ -54,7 +55,7 @@ function normalize(value) {
 }
 
 function inspectSource(recipes, content, tools, options, allowEmpty = false) {
-  const { readYaml, synth, taxonomy, strategies } = tools;
+  const { readYaml, synth, taxonomy, strategies, rendering, presets } = tools;
   const expectationFile = options["pd-expectations"] || path.join(recipes, "validation/pd-expectations.json");
   const expectations = fs.existsSync(expectationFile) ? JSON.parse(fs.readFileSync(expectationFile, "utf8")) : {};
   if (options["pd-expectations"] && !fs.existsSync(expectationFile)) throw new Error("Explicit PD expectation file is missing");
@@ -79,19 +80,74 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
     const assembledFile = assembled.get(hfId);
     if (!assembledFile) throw new Error(`No assembled recipe for ${hfId}`);
     const recipe = readYaml(assembledFile);
+    recipe.hf_id = hfId;
     snapshot.inputs.push({ model: hfId,
       ...(models.has(hfId) ? { recipe_sha256: hash(fs.readFileSync(models.get(hfId))) } : {}),
       ...(overlays.has(hfId) ? { overlay_sha256: hash(fs.readFileSync(overlays.get(hfId))) } : {}),
       assembled_sha256: hash(fs.readFileSync(assembledFile)) });
     const before = snapshot.results.length;
-    const sourceError = (code, message) => snapshot.findings.push({ model: hfId, code, severity: "error", message,
+    const sourceError = (code, message, context = {}) => snapshot.findings.push({ model: hfId, ...context, code, severity: "error", message,
       fix: "Review the declared hardware/strategy selection and renderer compatibility." });
+    const checked = new Set();
+    const checkSelection = (variantKey, strategyName, hw, nodes, preset, point) => {
+      const context = { model: hfId, hardware: hw, variant: variantKey, strategy: strategyName,
+        preset: preset || null, point: point || null };
+      try {
+        const query = new URLSearchParams({ hardware: hw, variant: variantKey, strategy: strategyName });
+        const selectedPreset = presets.resolvePresetKey(recipe, hw, strategyName, preset, variantKey);
+        const configured = presets.effectivePreset(recipe.presets?.[selectedPreset], point);
+        if (strategies[strategyName]?.deploy_type === "multi_node") query.set("nodes", String(configured?.select?.nodes ?? nodes));
+        if (preset) query.set("preset", preset);
+        if (point) query.set("point", point);
+        const { selection } = rendering.resolveSelection(recipe, query, strategies, taxonomy);
+        if (selection.hardware !== hw || selection.variant !== variantKey || selection.strategy !== strategyName) {
+          throw new Error(`Builder adjusted the requested hardware/variant/strategy: ${JSON.stringify(selection.adjusted)}`);
+        }
+        // resolveSelection applies builder defaults; strict rendering also reports
+        // invalid preset edits instead of swallowing a synthesis failure.
+        const result = rendering.renderCommand(recipe, variantKey, strategyName, hw, selection.nodes,
+          selection.features, strategies, taxonomy, selection.pd, selection.kv_offload,
+          preset || undefined, point || undefined, true, { modes: selection.modes, frontend: selection.frontend,
+            pdRouter: selection.pd_router, linked: new Set(query.keys()) });
+        if (!result) throw new Error("No structured rendering");
+        context.preset = result.preset || "baseline";
+        context.point = result.preset_point || null;
+        if (preset && context.preset !== preset || point && context.point !== point) {
+          throw new Error("The declared preset/point was not applied");
+        }
+        const key = JSON.stringify(context);
+        if (checked.has(key)) return;
+        checked.add(key);
+        const workers = workersFor(result);
+        if (!workers.length || workers.some((w) => !Array.isArray(w.argv) || !w.argv.length)) {
+          throw new Error("No structured worker argv");
+        }
+        const profile = taxonomy.hardware_profiles[hw];
+        const mounted = presets.withPreset(recipe, context.preset, hw, strategyName, { variantKey, point: context.point });
+        const installation = installationFor(mounted, variantKey, hw,
+          synth.computeDockerMeta(mounted, mounted.variants[variantKey], profile, hw), synth, profile);
+        const router = ({ vllm: "vllm-router", ascend: "ascend-proxy" })[result.pd_router] || result.pd_router;
+        const findings = checkScenario({ profile, deployType: result.deploy_type, installation, workers, router,
+          // Legacy expectations describe the previously checked baseline. A
+          // tuned preset may deliberately choose a different router/connector.
+          expectedPD: context.preset === "baseline" ? expectations[hfId]?.[hw]?.[variantKey] : undefined });
+        snapshot.results.push({ ...context, frontend: selection.frontend, nodes: result.node_count,
+          pdNodes: result.deploy_type === "pd_cluster" ? { prefill: result.prefill.nodes, decode: result.decode.nodes } : null,
+          router, installation, workers, findings,
+          status: findings.some((f) => f.severity === "error") ? "fail" : findings.length ? "warning" : "pass" });
+        snapshot.findings.push(...findings.map((f) => ({ ...context, ...f })));
+      } catch (error) {
+        sourceError("SOURCE_RENDER", error.message, context);
+      }
+    };
     for (const [variantKey, variant] of Object.entries(recipe.variants || {})) {
       if (options.variant && options.variant !== variantKey) continue;
       for (const hw of synth.listCompatibleHardware(taxonomy.hardware_profiles, variant, recipe)) {
         if (options.hardware && options.hardware !== hw) continue;
         const profile = taxonomy.hardware_profiles[hw];
         if (profile.brand !== "Huawei" || profile.generation !== "npu") continue;
+        // Match the builder and JSON API's restricted-profile visibility gate.
+        if (profile.restricted && !(hw in (recipe.meta?.hardware || {}))) continue;
         for (const strategyName of synth.effectiveCompatibleStrategies(recipe)) {
           if (options.strategy && options.strategy !== strategyName) continue;
           if (!synth.isStrategySupportedOnHardware(recipe, strategyName, profile, hw)) continue;
@@ -106,23 +162,35 @@ function inspectSource(recipes, content, tools, options, allowEmpty = false) {
             Math.ceil(synth.variantVramMinimumGb(variant, hw) / (profile.vram_gb || Infinity)));
           const nodes = strategy.deploy_type === "multi_node" ? Math.max(2, minNodes) : strategy.deploy_type === "pd_cluster" ? 2 : 1;
           if (nodes > synth.MAX_NODES) { snapshot.skipped.push({ ...context, reason: "Exceeds renderer node limit" }); continue; }
-          const pdNodes = strategy.deploy_type === "pd_cluster" ? {
-            prefill: Math.max(minNodes, synth.pdRoleNodes(recipe, "prefill", profile, hw) ?? 1),
-            decode: Math.max(minNodes, synth.pdRoleNodes(recipe, "decode", profile, hw) ?? 1),
-          } : null;
-          const result = synth.resolveCommand(recipe, variantKey, strategyName, hw, [], strategies, taxonomy,
-            [], nodes, pdNodes, {}, null, null, "python", null, "http", null, "baseline");
-          const workers = workersFor(result);
-          if (!workers.length || workers.some((w) => !Array.isArray(w.argv) || !w.argv.length)) {
-            sourceError("SOURCE_RENDER", `No structured worker argv for ${hw}/${variantKey}/${strategyName}`); continue;
+          checkSelection(variantKey, strategyName, hw, nodes);
+        }
+      }
+    }
+    // Presets are authored configurations, including opt-in presets and points
+    // that the default selection never activates. Do not silently omit them.
+    for (const [presetKey, preset] of Object.entries(recipe.presets || {})) {
+      const hw = preset.hardware;
+      const profile = taxonomy.hardware_profiles[hw];
+      if (profile?.brand !== "Huawei" || profile.generation !== "npu") continue;
+      if (profile.restricted && !(hw in (recipe.meta?.hardware || {}))) continue;
+      if (options.hardware && options.hardware !== hw) continue;
+      const variants = preset.variants?.length ? preset.variants : Object.keys(recipe.variants || {});
+      for (const variantKey of variants) {
+        if (options.variant && options.variant !== variantKey) continue;
+        const variant = recipe.variants?.[variantKey] || {};
+        if (!preset.variants?.length && !synth.listCompatibleHardware(taxonomy.hardware_profiles, variant, recipe).includes(hw)) continue;
+        for (const strategyName of preset.strategy ? [preset.strategy] : synth.effectiveCompatibleStrategies(recipe)) {
+          if (options.strategy && options.strategy !== strategyName) continue;
+          const strategy = strategies[strategyName];
+          if (!preset.strategy && (!strategy || !synth.isStrategySupportedOnHardware(recipe, strategyName, profile, hw)
+            || !synth.isStrategyReachable(recipe, strategyName, strategy.deploy_type, profile.gpu_count, hw)
+            || strategy.deploy_type === "single_node" && !synth.fitsSingleNode(profile, variant, hw))) continue;
+          const points = Object.keys(preset.points || {});
+          for (const point of points.length ? points : [undefined]) {
+            const effective = presets.effectivePreset(preset, point);
+            const nodes = effective.select?.nodes ?? Math.max(2, synth.nodesForStrategy(recipe, strategyName, profile.gpu_count, hw));
+            checkSelection(variantKey, strategyName, hw, nodes, presetKey, point);
           }
-          const installation = installationFor(recipe, variantKey, hw,
-            synth.computeDockerMeta(recipe, variant, profile, hw), synth, profile);
-          const findings = checkScenario({ profile, deployType: result.deployType, installation, workers,
-            router: result.orchestrator, expectedPD: expectations[hfId]?.[hw]?.[variantKey] });
-          snapshot.results.push({ ...context, nodes, pdNodes, installation, workers, findings,
-            status: findings.some((f) => f.severity === "error") ? "fail" : findings.length ? "warning" : "pass" });
-          snapshot.findings.push(...findings.map((f) => ({ ...context, ...f })));
         }
       }
     }
@@ -158,11 +226,13 @@ export async function run(options) {
     overrides[name] = path.resolve(override.slice(equal + 1));
   }
   const synth = await import(pathToFileURL(path.join(renderer, "src/lib/command-synthesis.js")).href);
+  const rendering = await import(pathToFileURL(path.join(renderer, "src/lib/recipe-render.js")).href);
+  const presets = await import(pathToFileURL(path.join(renderer, "src/lib/recipe-presets.js")).href);
   assertInstallationAdapter(synth);
   const taxonomy = readYaml(path.join(renderer, "taxonomy.yaml"));
   const strategies = Object.fromEntries(["strategies", "kv_store"].flatMap((dir) =>
     yamlFiles(path.join(renderer, dir)).map((file) => { const spec = readYaml(file); return [spec.name, spec]; })));
-  const tools = { readYaml, synth, taxonomy, strategies };
+  const tools = { readYaml, synth, taxonomy, strategies, rendering, presets };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ascend-recipe-check-"));
   const id = randomUUID();
   const channels = { [`ascend-head-${id}`]: recipes, ...(baseline ? { [`ascend-base-${id}`]: baseline } : {}) };
@@ -197,9 +267,10 @@ export async function run(options) {
     const comparison = compareFindings(head.findings, baseline ? snapshots[1].findings : null, options["warnings-as-errors"]);
     const report = { version: 1, created_at: new Date().toISOString(), renderer_sha: sha,
       mode: baseline ? "no-new-errors" : "strict", provenance: provenance[0], baseline_provenance: provenance[1] || null,
-      coverage: "Huawei standalone recipes and overlays; baseline preset, features off, Python frontend requested with inherited environment preserved; minimum multi-node topology. No model execution.",
-      limitations: ["No tuned presets, feature combinations or exhaustive topology enumeration.",
-        "Inherited VLLM_USE_RUST_FRONTEND may still enable Rust; frontend compatibility is not verified.",
+      coverage: "Huawei standalone recipes and overlays; builder defaults plus every declared Ascend preset/point, with effective images, features and frontend. Installation fallbacks and missing independent PD expectations are warnings. No model execution.",
+      limitations: ["No exhaustive feature combinations, baseline opt-outs or topology enumeration.",
+        "Legacy PD expectations apply to baseline only; declared presets use official strict rendering and structural checks.",
+        "Inherited VLLM_USE_RUST_FRONTEND is preserved; runtime frontend compatibility is not verified.",
         "Multi-node/PD local device capacity and runtime/package/image compatibility are not verified.",
         "Known errors retained from the PR target branch remain errors, but do not block no-new-errors mode."],
       ...head, comparison };
@@ -224,12 +295,12 @@ export function markdownReport(report, limit = Infinity) {
   const lines = ["# Ascend recipe configuration checks", "", `Renderer: \`${report.renderer_sha}\`; mode: **${report.mode}**.`, "",
     `Models: ${report.summary.models}; configurations: ${report.summary.scenarios}; new errors: ${report.summary.new_errors}; existing errors: ${report.summary.existing_errors}; blocking: ${report.summary.blocking}.`, "",
     "A successful no-new-errors check does not mean every configuration is valid or NPU-tested.", "",
-    "| Category | Model | Hardware / variant / strategy | Rule | Finding |", "| --- | --- | --- | --- | --- |"];
+    "| Category | Severity | Model | Hardware / variant / strategy / preset / point | Rule | Finding |", "| --- | --- | --- | --- | --- | --- |"];
   let shown = 0;
   for (const [category, findings] of [["New", report.comparison.additions], ["Existing", report.comparison.existing], ["Resolved", report.comparison.resolved]]) {
     for (const f of findings) {
       if (shown++ >= limit) continue;
-      lines.push(`| ${category} | ${safeCell(f.model)} | ${safeCell([f.hardware, f.variant, f.strategy].filter(Boolean).join(" / "))} | ${safeCell(f.code)} | ${safeCell(f.message)} |`);
+      lines.push(`| ${category} | ${safeCell(f.severity)} | ${safeCell(f.model)} | ${safeCell([f.hardware, f.variant, f.strategy, f.preset, f.point].filter(Boolean).join(" / "))} | ${safeCell(f.code)} | ${safeCell(f.message)} |`);
     }
   }
   if (shown > limit) lines.push("", `Showing ${limit} findings; download the configuration report artifact for the full list.`);
