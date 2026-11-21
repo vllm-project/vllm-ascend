@@ -361,6 +361,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
             kv_transfer_config=types.SimpleNamespace(
                 kv_role=role,
                 kv_port=31000 if role == "kv_producer" else 32000,
+                kv_connector_extra_config=extra_config,
                 get_from_extra_config=extra_config.get,
             ),
             model_config=types.SimpleNamespace(

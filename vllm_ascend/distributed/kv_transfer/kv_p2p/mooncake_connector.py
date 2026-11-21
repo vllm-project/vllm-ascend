@@ -64,7 +64,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    PD_QOS_DEFAULT,
     RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
@@ -2230,7 +2229,7 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
+        inject_qos(vllm_config.kv_transfer_config.kv_connector_extra_config)
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,
             device_name=device_name,

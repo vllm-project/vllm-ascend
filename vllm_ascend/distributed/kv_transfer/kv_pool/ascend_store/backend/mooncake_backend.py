@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import moo
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
+    QOS_WARNING_THRESHOLD,
     Backend,
     BatchResultShapeError,
     parse_qos_from_extra_config,
@@ -250,6 +251,13 @@ def _validate_store_qos() -> None:
             f"Invalid store QoS {qos!r} in ASCEND_GLOBAL_RESOURCE_CONFIG "
             f"(store.comm_resource_config.qos): QoS must be an integer in "
             f"[{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+    if qos > QOS_WARNING_THRESHOLD:
+        logger.warning(
+            "QoS %d in ASCEND_GLOBAL_RESOURCE_CONFIG (store.comm_resource_config.qos) exceeds %d. "
+            "Verify that the transfer backend and switch are configured for this priority.",
+            qos,
+            QOS_WARNING_THRESHOLD,
         )
 
 
