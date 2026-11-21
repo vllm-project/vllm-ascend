@@ -63,6 +63,17 @@ vllm serve /path/to/model \
 Increase `--tensor-parallel-size` when each stage should use a TP group. For
 example, `TP4 PP2` requires eight visible NPUs.
 
+### Ascend 310P
+
+On 310P, Model Runner V2 supports two pipeline stages on one node for text
+generation. Use multiprocessing (`--distributed-executor-backend mp`).
+Speculative decoding and combinations with data, expert, or context
+parallelism are outside the supported scope.
+
+When using `FULL_DECODE_ONLY`, choose capture sizes from the observed PP
+microbatches. For example, two 16-request microbatches use a 16-request graph
+instead of padding each replay to the total concurrency of 32.
+
 ### Two-Node Deployment with Multiprocessing
 
 The multiprocessing (MP) backend can start a PP deployment across two nodes

@@ -46,6 +46,7 @@ from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
+from vllm_ascend._310p.worker.v2.pp import PPHandler310
 from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
     expand_idx_mapping_cpu,
@@ -168,6 +169,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
         self._attn_kv_storage_ptrs: set[int] = set()
 
+    def _configure_pp_handler(self) -> None:
+        assert self.pp_handler is not None
+        torch.distributed.destroy_process_group(self.pp_handler.broadcast_group)
+        self.pp_handler = PPHandler310(self.max_num_reqs)
+
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
         super().load_model(load_dummy_weights, *args, **kwargs)
         if self.ascend_config.multistream_overlap_shared_expert:
@@ -200,10 +206,12 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 
         parallel_config = vllm_config.parallel_config
+        pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+        if pp_size > 1 and (pp_size != 2 or parallel_config.nnodes != 1):
+            raise NotImplementedError("310P pipeline parallelism currently supports two stages on one node.")
         # TODO: Restore data parallel support in the next 310P MRV2 iteration.
-        # Pipeline and context parallelism remain unsupported on 310P.
+        # Context parallelism remains unsupported on 310P.
         unsupported_parallel = {
-            "pipeline_parallel_size": getattr(parallel_config, "pipeline_parallel_size", 1),
             "data_parallel_size": getattr(parallel_config, "data_parallel_size", 1),
             "decode_context_parallel_size": getattr(parallel_config, "decode_context_parallel_size", 1),
             "prefill_context_parallel_size": getattr(parallel_config, "prefill_context_parallel_size", 1),
@@ -211,11 +219,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         enabled = [name for name, size in unsupported_parallel.items() if size != 1]
         if enabled:
             raise NotImplementedError(
-                f"310P model runner v2 only supports tensor parallelism; unsupported settings: {', '.join(enabled)}."
+                f"310P model runner v2 does not support these parallel settings: {', '.join(enabled)}."
             )
         if getattr(parallel_config, "enable_expert_parallel", False):
             raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
         if vllm_config.speculative_config is not None:
+            if pp_size > 1:
+                raise NotImplementedError("310P pipeline parallelism does not support speculative decoding.")
             spec = vllm_config.speculative_config
             # Bare objects (UT fixtures) and non-MTP methods are out of scope.
             method = getattr(spec, "method", None)
@@ -424,6 +434,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             is_prefilling_np=is_prefilling_np,
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
+            max_seq_len_np=self.req_states.max_seq_len[idx_mapping_np] if self.use_pp and batch_has_prefill else None,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
@@ -1413,6 +1424,24 @@ class NPUModelRunner310V2(NPUModelRunner):
         draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
+        if not self.is_last_pp_rank:
+            # Gloo returns host data from a prior batch, with freed rows marked -1.
+            idx_mapping_np = idx_mapping.numpy()
+            _post_update_cpu(
+                idx_mapping_np,
+                None,
+                self.req_states,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                update_computed=False,
+            )
+            valid = (idx_mapping >= 0) & (num_sampled > 0)
+            if valid.any():
+                updates = torch.stack((idx_mapping[valid], sampled_tokens[valid, 0])).to(self.device)
+                req_indices, last_tokens = updates.unbind()
+                self.req_states.last_sampled_tokens.index_copy_(0, req_indices, last_tokens.unsqueeze(1))
+            return
         # Device arguments remain for upstream API compatibility.
         del num_sampled, num_rejected, query_start_loc, draft_tokens
         if self._sampled_tokens_cpu is not None and self.rejection_sampler is not None:
@@ -1529,5 +1558,19 @@ class NPUModelRunner310V2(NPUModelRunner):
         return changed_req_indices
 
     def postprocess_num_computed_tokens(self, input_batch: Ascend310PInputBatch) -> None:
-        # ``postprocess_sampled`` already advances CPU-owned request state.
-        del input_batch
+        if self.is_last_pp_rank:
+            return
+        # Non-last stages advance their positions now so that a non-final
+        # prefill chunk can be followed by another chunk in the next step.
+        indices = input_batch.idx_mapping_np
+        req_states = self.req_states
+        computed = req_states.num_computed_tokens_np[indices] + input_batch.num_scheduled_tokens
+        req_states.num_computed_tokens_np[indices] = computed
+        req_states.num_computed_tokens_cpu[indices] = torch.from_numpy(computed)
+        for index, count in zip(indices, computed):
+            req_states.num_computed_tokens.stage_write_elem(int(index), int(count))
+        self.model_state.postprocess_state(
+            torch.from_numpy(indices),
+            torch.from_numpy((computed >= input_batch.prefill_len_np).astype(np.int32)),
+            req_states.num_computed_tokens_cpu,
+        )
