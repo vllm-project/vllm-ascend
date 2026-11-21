@@ -99,6 +99,10 @@ interfaces, and the service ports must not be blocked.
 Select the tab for the target hardware. A2, A3, and 950DT products use
 separate images.
 
+!!! note "Docker version"
+
+    Docker Engine 20.10 or later is recommended. Docker versions before 20.10 may not configure the device cgroup correctly on hosts using cgroup v2. In that case, devices passed with `--device` may be inaccessible inside the container and NPU initialization may fail.
+
 === "A3 series"
 
     An A3 server exposes 16 logical devices. Run this command on every A3
@@ -114,7 +118,6 @@ separate images.
       --name deepseek-v41 \
       --net=host \
       --ipc=host \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -160,7 +163,6 @@ separate images.
       --net=host \
       --ipc=host \
       --shm-size=512g \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
@@ -202,7 +204,6 @@ separate images.
       --name deepseek-v41-950dt \
       --net=host \
       --shm-size=512g \
-      --privileged=true \
       --device /dev/davinci0 \
       --device /dev/davinci1 \
       --device /dev/davinci2 \
