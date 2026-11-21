@@ -765,6 +765,8 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        if (pool := expert_offload.get_dspark_expert_pool(self.model)) is not None:
+            pool.active = False
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -878,7 +880,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
-        expert_offload.prepare_batch(self, batch_state)
+        uniform_token_count = expert_offload.prepare_batch(self, batch_state, uniform_token_count, scheduler_output)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1170,6 +1172,9 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        if (pool := expert_offload.get_dspark_expert_pool(self.model)) is not None:
+            pool.prepare(input_batch, invalid_drafts=bool(scheduler_output.num_invalid_spec_tokens))
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

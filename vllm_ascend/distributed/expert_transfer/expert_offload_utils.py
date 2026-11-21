@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import verify_graph_eligible
+
 if TYPE_CHECKING:
+    from vllm_ascend.distributed.expert_transfer.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.distributed.expert_transfer.expert_offload_manager import ExpertOffloadManager
     from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
     from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -93,6 +96,11 @@ def get_manager(model: torch.nn.Module | None) -> ExpertOffloadManager | None:
     return cast("ExpertOffloadManager | None", getattr(model, "_expert_offload_manager", None))
 
 
+def get_dspark_expert_pool(model: torch.nn.Module | None) -> DSparkExpertPool | None:
+    manager = get_manager(model)
+    return manager.dspark_expert_pool if manager is not None else None
+
+
 def validate_loading(runner: NPUModelRunner, load_dummy_weights: bool) -> None:
     expert_offload_config = getattr(getattr(runner, "ascend_config", None), "expert_offload_config", None)
     if load_dummy_weights and expert_offload_config is not None and expert_offload_config.enabled:
@@ -110,11 +118,26 @@ def initialize(runner: NPUModelRunner) -> None:
     initialize_expert_offload(runner)
 
 
-def prepare_batch(runner: NPUModelRunner, batch_state) -> None:
+def prepare_batch(runner: NPUModelRunner, batch_state, uniform_token_count: int | None, scheduler_output) -> int | None:
     expert_offload_manager = get_manager(getattr(runner, "model", None))
     if expert_offload_manager is not None:
         # Dummy batches have no request state and use the full expert pool.
         expert_offload_manager.has_prefill = batch_state is None or batch_state.has_prefill
+        pool = expert_offload_manager.dspark_expert_pool
+        if (
+            pool is not None
+            and batch_state is not None
+            and uniform_token_count not in (None, 1)
+            and not verify_graph_eligible(
+                batch_state,
+                num_speculative_tokens=pool.num_speculative_tokens,
+                structured=scheduler_output.has_structured_output_requests
+                or bool(scheduler_output.num_invalid_spec_tokens),
+            )
+        ):
+            # Mixed and short verification retain the eager routing path.
+            return None
+    return uniform_token_count
 
 
 def prepare_graph_capture(graph_manager: ModelAclGraphManager, needs_capture: Callable[[], bool]) -> None:
@@ -127,4 +150,5 @@ def shutdown(runner: NPUModelRunner) -> None:
     expert_offload_manager = get_manager(getattr(runner, "model", None))
     if expert_offload_manager is not None:
         expert_offload_manager.unsubscribe_graph_streams()
+        expert_offload_manager.dspark_expert_pool = None
         del runner.model._expert_offload_manager

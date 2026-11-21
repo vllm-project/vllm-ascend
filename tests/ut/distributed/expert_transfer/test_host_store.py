@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -52,3 +54,57 @@ def test_nz_transfer_counts_physical_padding_and_slot_offset(native_runtime):
     TorchExpertTransfer.copy_experts(adapter, store, {"weight": destination}, ((0, 2),), "cpu")
     assert not destination[:2].count_nonzero()
     torch.testing.assert_close(destination[2].reshape(-1), torch.arange(12, dtype=torch.float32))
+
+
+def test_native_storage_rejects_offset_views_before_copy(native_runtime, monkeypatch):
+    source = torch.arange(16, dtype=torch.float32)[4:].reshape(1, 2, 6)
+    adapter = SimpleNamespace(load_experts=lambda *_: {"weight": source})
+    store = HostExpertStore(SimpleNamespace(local_num_experts=1), ("weight",))
+    store.tensors["weight"] = source.clone()
+    copy = Mock(return_value=0)
+    monkeypatch.setattr(sys.modules["acl"].rt, "memcpy", copy)
+
+    with pytest.raises(ValueError, match="zero-offset.*weight.*expert 0"):
+        store.convert_to_native_layout(adapter, "cpu")
+
+    copy.assert_not_called()
+    assert store.prepared == {}
+    assert "weight" in store.tensors
+
+
+@pytest.mark.parametrize("storage_elements", [0, 13])
+def test_native_storage_rejects_invalid_copy_size_before_copy(native_runtime, monkeypatch, storage_elements):
+    source = torch.arange(12, dtype=torch.float32).reshape(1, 2, 6)
+    adapter = SimpleNamespace(load_experts=lambda *_: {"weight": source})
+    store = HostExpertStore(SimpleNamespace(local_num_experts=1), ("weight",))
+    store.tensors["weight"] = source.clone()
+    copy = Mock(return_value=0)
+    monkeypatch.setattr(sys.modules["acl"].rt, "memcpy", copy)
+    monkeypatch.setattr(sys.modules["torch_npu"], "get_storage_size", lambda _: storage_elements)
+
+    with pytest.raises(ValueError, match="invalid native storage size.*weight.*expert 0"):
+        store.convert_to_native_layout(adapter, "cpu")
+
+    copy.assert_not_called()
+    assert store.prepared == {}
+    assert "weight" in store.tensors
+
+
+def test_native_storage_rejects_inconsistent_expert_sizes_before_copy(native_runtime, monkeypatch):
+    sources = (
+        torch.arange(12, dtype=torch.float32).reshape(1, 2, 6),
+        torch.arange(10, dtype=torch.float32).reshape(1, 2, 5),
+    )
+    adapter = SimpleNamespace(load_experts=lambda _, ids, device: {"weight": sources[ids[0]]})
+    store = HostExpertStore(SimpleNamespace(local_num_experts=2), ("weight",))
+    store.tensors["weight"] = torch.zeros(2, 2, 6)
+    copy = Mock(return_value=0)
+    monkeypatch.setattr(sys.modules["acl"].rt, "memcpy", copy)
+
+    with pytest.raises(ValueError, match="inconsistent native expert storage size.*weight.*expert 1"):
+        store.convert_to_native_layout(adapter, "cpu")
+
+    assert copy.call_count == 1
+    assert copy.call_args.args[1] == 48
+    assert store.prepared == {}
+    assert "weight" in store.tensors

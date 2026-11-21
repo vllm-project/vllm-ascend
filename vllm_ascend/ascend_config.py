@@ -506,11 +506,21 @@ class SharedEngramConfig:
 
 
 @config(config=ConfigDict(frozen=True))
+class DSparkExpertPoolConfig:
+    """Opt-in L routing for the single-device DSpark expert-offload path."""
+
+    enabled: bool = False
+    protected_positions: int | None = None
+    suffix_experts: int | None = None
+
+
+@config(config=ConfigDict(frozen=True))
 class ExpertOffloadConfig:
     """Configuration for exact single-worker expert offload."""
 
     enabled: bool = False
     num_device_experts: int | None = Field(default=None, gt=0)
+    dspark_expert_pool: DSparkExpertPoolConfig = dataclasses.field(default_factory=DSparkExpertPoolConfig)
 
     @model_validator(mode="after")
     def _validate_capacity(self):
@@ -1942,6 +1952,10 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    if "dspark_expert_pool" in additional_config:
+        raise ValueError(
+            "additional_config.dspark_expert_pool moved to additional_config.expert_offload_config.dspark_expert_pool"
+        )
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
