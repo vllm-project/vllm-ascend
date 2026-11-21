@@ -1605,7 +1605,7 @@ layerwise setting and topology.
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
                 }' \
-                --speculative-config '{"num_speculative_tokens": 1,  "method":"mtp","enforce_eager":true,"kv_cache_dtype":"auto"}' \
+                --speculative-config '{"num_speculative_tokens": 1,  "method":"mtp","enforce_eager":true}' \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
@@ -1705,7 +1705,7 @@ layerwise setting and topology.
                     "enable_flashcomm1": true,
                     "enable_shared_expert_dp": true
                 }' \
-                --speculative-config '{"num_speculative_tokens": 1,  "method":"mtp","enforce_eager":true,"kv_cache_dtype":"auto"}' \
+                --speculative-config '{"num_speculative_tokens": 1,  "method":"mtp","enforce_eager":true}' \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
                     "kv_role": "kv_producer",
@@ -1793,7 +1793,7 @@ layerwise setting and topology.
                     "enable_fused_mc2": 2,
                     "enable_shared_expert_dp": true
                 }' \
-                --speculative-config '{"num_speculative_tokens": 5,  "method":"mtp","enforce_eager":true,"kv_cache_dtype":"auto"}' \
+                --speculative-config '{"num_speculative_tokens": 5,  "method":"mtp","enforce_eager":true}' \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
@@ -1881,7 +1881,7 @@ layerwise setting and topology.
                     "enable_fused_mc2": 2,
                     "enable_shared_expert_dp": true
                 }' \
-                --speculative-config '{"num_speculative_tokens": 5,  "method":"mtp","enforce_eager":true,"kv_cache_dtype":"auto"}' \
+                --speculative-config '{"num_speculative_tokens": 5,  "method":"mtp","enforce_eager":true}' \
                 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
                 --kv-transfer-config '{
                     "kv_connector": "MooncakeConnectorV2",
@@ -1975,8 +1975,8 @@ layerwise setting and topology.
     - Both roles use a 135,000-token sequence limit, chunked prefill, prefix
       caching, async scheduling, seed 1024, memory utilization 0.92,
       `enable_fused_mc2: 2`, and `enable_shared_expert_dp: true`.
-      Prefill also sets `enable_flashcomm1: true`. MTP uses `method: mtp`
-      and `kv_cache_dtype: auto`. Both roles use `glm47` tool and reasoning
+      Prefill also sets `enable_flashcomm1: true`. MTP uses `method: mtp`.
+      Both roles use `glm47` tool and reasoning
       parsers and the served model name `glm5`.
     - Both roles set `VLLM_KV_CACHE_LAYOUT=HND`. `HCCL_BUFFSIZE` is 512 on
       Prefill and 1024 on Decode. The non-pooled MooncakeConnectorV2 base KV
