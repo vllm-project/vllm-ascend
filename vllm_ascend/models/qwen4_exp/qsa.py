@@ -1178,6 +1178,10 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if (index_query is None) != (index_token_k is None):
             raise RuntimeError("QSA pipelined Indexer projections must be paired")
         if index_query is not None and index_token_k is not None:
+            # Queue the dependency only after main QKV split/norm/RoPE has
+            # been submitted, preserving Vector/Cube overlap while making the
+            # subsequent Indexer cache update and selection consume ready data.
+            current_stream().wait_stream(_qsa_indexer_stream())
             indexer_metadata = self.indexer._metadata()
             if indexer_metadata is None:
                 raise RuntimeError("QSA pipelined Indexer metadata is unavailable")
