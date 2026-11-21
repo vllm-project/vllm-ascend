@@ -71,6 +71,15 @@
 
 ## Test Cases
 
+On Atlas A3, the DeepSeek-V4-Flash-0731 W8A8 V2 runner (DP2 × PCP4,
+TP1, 7-step DSpark) called this operator for a 79-token prefill with
+`idx_mapping.shape=(1,)`, `query_start_loc.shape=(2,)`, and
+`pos.shape=(79,)`. The captured slot-mapping launch used `CP_SIZE=1`,
+a token tile of 1024, a gather window of 1024, and per-group manager
+block sizes `[128, 4096, 32, 32, 2, 8]`. The baseline passed the same
+values as its per-group kernel block sizes for this configuration
+(vLLM-Ascend main `de6351f5`, PR `98d8a92c`, vLLM `c410543d9`).
+
 The single-card NPU test compares integer slot IDs exactly against an
 independent host reference. It covers manager block sizes 128 and 256,
 CP sizes 1, 2, and 4, sharded and replicated groups, requests crossing block

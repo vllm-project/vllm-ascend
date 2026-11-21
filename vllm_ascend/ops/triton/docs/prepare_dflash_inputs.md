@@ -54,7 +54,8 @@
   6. Independently split `num_speculative_steps` across the same workers and write `sample_indices`, `sample_pos`, and `sample_idx_mapping`.
   7. Worker 0 writes the per-request scalar outputs `query_start_loc`, `seq_lens`, `temperature`, and `seeds`.
   8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. This change was
+  validated on Atlas A3.
 
 ## Parameters
 
