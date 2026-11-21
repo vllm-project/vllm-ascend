@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
@@ -802,9 +803,31 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys: list[str] = []
             block_hashes = []
             key_block_ids: list[int] = []
-            block_ids = req_meta.block_ids_by_group[group_id]
+            if req_meta.block_ids_by_group_np is not None and group_id < len(req_meta.block_ids_by_group_np):
+                block_ids = req_meta.block_ids_by_group_np[group_id].tolist()
+            else:
+                block_ids = list(req_meta.block_ids_by_group[group_id])
             skip_null_blocks = self._skip_null_blocks(req_meta, group_id)
             align_state_group = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+            if align_state_group and req_meta.mamba_terminal_block_ids is not None:
+                terminal_id = req_meta.mamba_terminal_block_ids.get(group_id)
+                if isinstance(terminal_id, torch.Tensor):
+                    if current_event is not None:
+                        current_event.synchronize()
+                        current_event = None
+                    terminal_id = int(terminal_id.item())
+                mask = group_store_mask if group_store_mask is not None else ()
+                selected = [index for index, keep in enumerate(mask) if keep]
+                if terminal_id is not None and len(selected) == 1:
+                    if terminal_id <= 0:
+                        logger.error(
+                            "Invalid Mamba terminal block id for request=%s group=%d: %d",
+                            req_id,
+                            group_id,
+                            terminal_id,
+                        )
+                        return False
+                    block_ids[selected[0]] = terminal_id
             # Align-state slots below the saved extent can become valid later.
             save_start = 0 if align_state_group else save_start_token
 
