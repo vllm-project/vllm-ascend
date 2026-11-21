@@ -48,6 +48,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     zmq_ctx,
 )
 
+SHUTDOWN_WARNING_INTERVAL_S = 30.0
+
 
 class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
     """D-side execution thread for Mooncake pull requests.
@@ -137,7 +139,9 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         # engine_id -> remote_pp_rank
         # -> [(local_layer_index, remote_layer_index), ...]
         self.remote_layer_index_pairs: SizedDict[str, dict[int, list[tuple[int, int]]]] = SizedDict()
-        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]]] = queue.Queue()
+        self.request_queue: queue.Queue[tuple[str, dict[str, ReqMeta]] | None] = queue.Queue()
+        self._request_submit_lock = threading.Lock()
+        self._stopping = False
         self.finished_requests: queue.SimpleQueue[tuple[str, bool]] = queue.SimpleQueue()
         self.invalid_block_ids: set[int] = set()
         self.invalid_block_ids_lock = threading.Lock()
@@ -148,9 +152,12 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_engine_id: str,
         requests: dict[str, ReqMeta],
     ) -> None:
-        """Queue requests for one remote engine."""
+        """Queue requests for one remote engine until shutdown starts."""
         if requests:
-            self.request_queue.put((remote_engine_id, requests))
+            with self._request_submit_lock:
+                if self._stopping:
+                    raise RuntimeError("Mooncake pull receiver is shutting down; cannot accept new requests")
+                self.request_queue.put((remote_engine_id, requests))
 
     def get_and_clear_finished_requests(self) -> KVConnectorTransferResults:
         """Drain completion and failure together for each finished request."""
@@ -171,12 +178,38 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
             self.invalid_block_ids = set()
         return invalid_block_ids
 
+    def shutdown(self) -> None:
+        """Reject new work, then drain accepted transfers before releasing resources.
+
+        Join timeouts report a slow drain; they do not cancel native transfers
+        or allow their KV cache owners to be released before completion.
+        """
+        with self._request_submit_lock:
+            if not self._stopping:
+                self._stopping = True
+                if self.is_alive():
+                    self.request_queue.put(None)
+        started = time.monotonic()
+        while self.is_alive():
+            self.join(timeout=SHUTDOWN_WARNING_INTERVAL_S)
+            if self.is_alive():
+                logger.warning(
+                    "Waiting %.1fs for Mooncake pull receiver to drain accepted transfers; "
+                    "resources remain owned until completion.",
+                    time.monotonic() - started,
+                )
+        self.executor.shutdown(wait=True)
+
     def run(self) -> None:
         """Consume queued requests and invoke the transfer implementation."""
         torch.npu.set_device(self.device)
         self.ready_event.set()
         while True:
-            remote_engine_id, requests = self.request_queue.get()
+            work = self.request_queue.get()
+            if work is None:
+                self.request_queue.task_done()
+                return
+            remote_engine_id, requests = work
             failed_request_ids: set[str] = set()
             request_endpoints = {(request.remote_host, request.remote_port) for request in requests.values()}
             try:
@@ -1370,19 +1403,26 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
             if not self._recving_thread.is_alive():
                 raise RuntimeError("Mooncake pull receiving thread failed to start")
 
+    def shutdown(self) -> None:
+        receiver = self._recving_thread
+        if receiver is not None:
+            receiver.shutdown()
+            self._recving_thread = None
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         """Start the pull operations described by scheduler metadata."""
         if not metadata.requests:
             return
         if self.kv_transfer_config.is_kv_consumer:
-            assert self._recving_thread is not None
+            receiver = self._recving_thread
+            assert receiver is not None
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})
                 requests[request_id] = request_metadata
 
             for remote_engine_id, requests in request_groups.items():
-                self._recving_thread.add_requests(remote_engine_id, requests)
+                receiver.add_requests(remote_engine_id, requests)
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """Return completed receives, including their failure status."""
