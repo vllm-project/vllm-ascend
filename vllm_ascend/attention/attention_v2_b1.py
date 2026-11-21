@@ -34,6 +34,7 @@ import vllm.envs as envs_vllm
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
+    _PA_WORKSPACE_KEY,
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -145,6 +146,15 @@ class AscendB1Metadata(AscendMetadata):
     # so the draft graph update must rebind PagedAttention kwargs instead of
     # the FIA-v2 ones. Set on every runtime build of that group.
     b1_pa_graph: bool = False
+    # PA-layout view for the FULL-mode capture: one block-table row and one
+    # context length per query token, because the decode-only PA op splits the
+    # query evenly over the context_lens rows. Kept separate from
+    # ``block_tables``/``seq_lens`` on purpose: FULL mode does not guarantee
+    # that every step is replayed from a graph, and an uncaptured step runs
+    # eagerly through the stock FIA path, which binds one row per request.
+    pa_block_tables: torch.Tensor | None = None
+    pa_seq_lens: torch.Tensor | None = None
+    pa_rows_expanded: bool = False
 
 
 def _uniform_query_len(actual_seq_lengths_q: list[int] | None) -> int | None:
@@ -158,6 +168,23 @@ def _uniform_query_len(actual_seq_lengths_q: list[int] | None) -> int | None:
             return None
         prev = end
     return query_len
+
+
+def _b1_pa_graph_tables(metadata) -> tuple[torch.Tensor, torch.Tensor]:
+    """The expanded one-query-per-row PA view a FULL-mode capture replays against.
+
+    Reads the dedicated ``pa_block_tables``/``pa_seq_lens`` fields rather than
+    ``block_tables``/``seq_lens`` so the stock per-request layout survives for
+    steps that miss the capture sizes and fall back to the stock FIA path.
+    """
+    block_tables = getattr(metadata, "pa_block_tables", None)
+    seq_lens = getattr(metadata, "pa_seq_lens", None)
+    if block_tables is None or seq_lens is None:
+        raise RuntimeError(
+            "B1 FULL capture binds the expanded PA view, but the 512-dim group builder did not "
+            "expand the metadata (pa_block_tables/pa_seq_lens are None)."
+        )
+    return block_tables, seq_lens
 
 
 def b1_verify_graph_params(layer_name: str | None, metadata) -> dict[str, Any]:
@@ -177,9 +204,10 @@ def b1_verify_graph_params(layer_name: str | None, metadata) -> dict[str, Any]:
     with PagedAttention kwargs (``block_table``, ``context_lens``).
     """
     if getattr(metadata, "b1_pa_graph", False):
+        block_table, context_lens = _b1_pa_graph_tables(metadata)
         return {
-            "block_table": metadata.block_tables,
-            "context_lens": metadata.seq_lens,
+            "block_table": block_table,
+            "context_lens": context_lens,
         }
     verify_mask = metadata.paged_verify_mask
     query_lengths = metadata.actual_seq_lengths_q
@@ -212,8 +240,12 @@ def b1_decode_graph_params(metadata, seq_lens: list[int]) -> dict[str, Any]:
     the FULL_DECODE_ONLY B1 capture takes the FIA-v2 ``actual_seq_kvlen`` list.
     """
     if getattr(metadata, "b1_pa_graph", False):
+        # Draft steps run one query per request, so the expanded view aliases
+        # the per-request block table; still read the PA field so the binding
+        # does not silently follow the stock layout if that ever changes.
+        block_table, _ = _b1_pa_graph_tables(metadata)
         return {
-            "block_table": metadata.block_tables,
+            "block_table": block_table,
             "context_lens": torch.tensor(seq_lens, dtype=torch.int32, device=metadata.seq_lens.device),
         }
     return {
@@ -237,6 +269,25 @@ class FIAPagedVerifyParamProvider:
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         return b1_verify_graph_params(self.layer_name, attn_metadata[self.layer_name])
+
+
+@dataclass(frozen=True, slots=True)
+class B1PAParamProvider:
+    """Provider for the FULL-mode full_graph_pa capture of the 512-dim group.
+
+    The stock ``PAParamProvider`` binds ``block_tables``/``seq_lens``, which
+    keep the per-request FIA layout on purpose; the capture itself was built
+    from the expanded PA view, so replay has to rebind those fields instead.
+    """
+
+    layer_name: str | None
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        block_table, context_lens = _b1_pa_graph_tables(attn_metadata[self.layer_name])
+        return {
+            "block_table": block_table,
+            "context_lens": context_lens,
+        }
 
 
 class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -273,9 +324,17 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             # FULL cudagraph mode captures this group through full_graph_pa:
             # no verify mask is needed, and the draft graph update must emit
             # PagedAttention kwargs (see b1_verify_graph_params). The decode-only
-            # PA op also needs one query per row, so re-lay multi-query steps.
+            # PA op also needs one query per row, so re-lay multi-query steps
+            # into the separate PA view; block_tables/seq_lens keep the
+            # per-request layout for steps that miss the capture sizes.
             metadata.b1_pa_graph = True
-            expand_pa_per_token_rows(metadata)
+            if not expand_pa_per_token_rows(metadata):
+                raise RuntimeError(
+                    "FULL cudagraph mode captures the 512-dim group through full_graph_pa, which needs "
+                    "one query per PA row, but the metadata layout could not be expanded "
+                    f"(actual_seq_lengths_q={metadata.actual_seq_lengths_q}, "
+                    f"seq_lens_list={metadata.seq_lens_list})."
+                )
             return metadata
         verify_len = self._b1_verify_len()
         if verify_len is None or metadata.block_tables is None:
@@ -315,7 +374,13 @@ class AscendB1AttentionMetadataBuilder(AscendAttentionMetadataBuilder):
             # FULL captures this group through full_graph_pa; the decode-only
             # PA op needs the same one-query-per-row layout as at runtime.
             metadata.b1_pa_graph = True
-            expand_pa_per_token_rows(metadata)
+            if not expand_pa_per_token_rows(metadata):
+                raise RuntimeError(
+                    "FULL cudagraph capture of the 512-dim group needs the one-query-per-row PA view, "
+                    "but the metadata layout could not be expanded "
+                    f"(actual_seq_lengths_q={metadata.actual_seq_lengths_q}, "
+                    f"seq_lens_list={metadata.seq_lens_list})."
+                )
         return metadata
 
 
@@ -375,6 +440,53 @@ class AscendB1AttentionBackendImpl(AscendAttentionBackendImpl):
         if self._b1_route(attn_metadata, query.shape[0]):
             return self.full_graph_fia_v2_paged_verify(query, attn_metadata, output)
         return super().forward_paged_attention(query, attn_metadata, output)
+
+    def full_graph_pa(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+    ):
+        """FULL-mode capture of the 512-dim group over the expanded PA view.
+
+        Mirrors AscendAttentionBackendImpl.full_graph_pa, but binds
+        ``pa_block_tables``/``pa_seq_lens`` and replays through
+        B1PAParamProvider. The stock ``block_tables``/``seq_lens`` must stay in
+        the per-request layout, because a step that misses the capture sizes
+        runs eagerly and falls back to the stock FIA path.
+        """
+        block_table, context_lens = _b1_pa_graph_tables(attn_metadata)
+        workspace = get_capture_resource(
+            _PA_WORKSPACE_KEY,
+            lambda: torch_npu._npu_paged_attention_get_workspace(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_table,
+                context_lens=context_lens,
+                out=output,
+            ),
+        )
+        register_task(
+            torch_npu._npu_paged_attention,
+            {
+                "query": query,
+                "key_cache": self.key_cache,
+                "value_cache": self.value_cache,
+                "num_kv_heads": self.num_kv_heads,
+                "num_heads": self.num_heads,
+                "scale_value": self.scale,
+                "block_table": block_table,
+                "context_lens": context_lens,
+                "out": output,
+                "workspace": workspace,
+            },
+            B1PAParamProvider(self._layer_name),
+        )
+        return output
 
     def full_graph_fia_v2_paged_verify(
         self,
@@ -538,6 +650,7 @@ __all__ = [
     "AscendB1AttentionBackendImpl",
     "AscendB1AttentionMetadataBuilder",
     "AscendB1Metadata",
+    "B1PAParamProvider",
     "FIAPagedVerifyParamProvider",
     "b1_verify_graph_params",
     "build_paged_verify_mask",

@@ -35,7 +35,10 @@ BLOCK_SIZE = 4
 def _paged_metadata(block_tables, query_ends, seq_lens_list):
     return SimpleNamespace(
         pa_rows_expanded=False,
+        pa_block_tables=None,
+        pa_seq_lens=None,
         block_tables=block_tables,
+        seq_lens=torch.tensor(seq_lens_list, dtype=torch.int32),
         actual_seq_lengths_q=query_ends,
         seq_lens_list=seq_lens_list,
     )
@@ -90,7 +93,7 @@ def test_expand_pa_per_token_rows_splits_multi_query_rows():
 
     assert expand_pa_per_token_rows(metadata) is True
 
-    assert metadata.block_tables.tolist() == [
+    assert metadata.pa_block_tables.tolist() == [
         [10, 11],
         [10, 11],
         [20, 21],
@@ -99,8 +102,13 @@ def test_expand_pa_per_token_rows_splits_multi_query_rows():
     ]
     # Request 0 holds the whole prefix (2 tokens), request 1 attends 2 computed
     # tokens plus its own causal position.
-    assert metadata.seq_lens.tolist() == [1, 2, 3, 4, 5]
+    assert metadata.pa_seq_lens.tolist() == [1, 2, 3, 4, 5]
     assert metadata.pa_rows_expanded is True
+    # The stock per-request view must survive: an uncaptured FULL batch falls
+    # back to FIA, which binds one block-table row per request.
+    assert metadata.block_tables is block_tables
+    assert metadata.seq_lens.tolist() == [2, 5, 5]
+    assert metadata.seq_lens_list == [2, 5, 5]
 
 
 def test_expand_pa_per_token_rows_keeps_single_query_metadata():
@@ -108,6 +116,9 @@ def test_expand_pa_per_token_rows_keeps_single_query_metadata():
     metadata = _paged_metadata(block_tables, [1, 2], [4, 5])
 
     assert expand_pa_per_token_rows(metadata) is True
+    # One query per row already: the PA view aliases the per-request fields.
+    assert metadata.pa_block_tables is block_tables
+    assert metadata.pa_seq_lens is metadata.seq_lens
     assert metadata.block_tables is block_tables
     assert metadata.seq_lens_list == [4, 5]
     assert metadata.pa_rows_expanded is True
@@ -122,10 +133,11 @@ def test_expand_pa_per_token_rows_rejects_incomplete_metadata():
 def test_expand_pa_per_token_rows_is_idempotent():
     metadata = _paged_metadata(torch.tensor([[1, 2]], dtype=torch.int32), [2], [2])
     assert expand_pa_per_token_rows(metadata) is True
-    block_tables = metadata.block_tables
+    pa_block_tables = metadata.pa_block_tables
 
     assert expand_pa_per_token_rows(metadata) is True
-    assert metadata.block_tables is block_tables
+    assert metadata.pa_block_tables is pa_block_tables
+    assert metadata.block_tables.tolist() == [[1, 2]]
 
 
 def test_shared_metadata_builder_keeps_pa_row_expansion_out():
@@ -154,8 +166,64 @@ def test_b1_builder_expands_pa_rows_in_full_mode(monkeypatch):
     built = builder.build(0, SimpleNamespace())
 
     assert built.b1_pa_graph is True
-    assert built.block_tables.tolist() == [[10, 11], [10, 11], [20, 21], [20, 21]]
-    assert built.seq_lens.tolist() == [1, 2, 3, 4]
+    assert built.pa_block_tables.tolist() == [[10, 11], [10, 11], [20, 21], [20, 21]]
+    assert built.pa_seq_lens.tolist() == [1, 2, 3, 4]
+    # The per-request view stays intact for steps that are not replayed.
+    assert built.block_tables.tolist() == [[10, 11], [20, 21]]
+    assert built.seq_lens.tolist() == [2, 4]
+    assert built.seq_lens_list == [2, 4]
+
+
+def test_uncaptured_full_batch_falls_back_to_the_per_request_table(monkeypatch):
+    # FULL mode does not guarantee a graph hit: a batch that misses the capture
+    # sizes runs eagerly through the stock FIA path, which binds one block-table
+    # row per request. The expanded PA rows must therefore never leak into
+    # block_tables/seq_lens (two requests with two queries each here).
+    builder = object.__new__(attention_v2_b1.AscendB1AttentionMetadataBuilder)
+    builder.kv_cache_spec = SimpleNamespace(head_size=512)
+    builder.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL))
+    block_tables = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    metadata = _paged_metadata(block_tables, [2, 4], [2, 4])
+    monkeypatch.setattr(
+        attention_v2_b1.AscendAttentionMetadataBuilder,
+        "build",
+        lambda *args, **kwargs: metadata,
+    )
+    built = builder.build(0, SimpleNamespace())
+    assert built.pa_block_tables.tolist() == [[10, 11], [10, 11], [20, 21], [20, 21]]
+
+    impl = object.__new__(attention_v2_b1.AscendB1AttentionBackendImpl)
+    impl.full_cudagraph = True
+    seen = {}
+
+    def stock_fia(self, query, key, value, attn_metadata, output, kv_cache=None):
+        seen["block_tables"] = attn_metadata.block_tables
+        seen["seq_lens"] = attn_metadata.seq_lens
+        seen["seq_lens_list"] = attn_metadata.seq_lens_list
+        return output
+
+    monkeypatch.setattr(attention_v2_b1.AscendAttentionBackendImpl, "forward_fused_infer_attention", stock_fia)
+    monkeypatch.setattr(attention_v2_b1, "_EXTRA_CTX", SimpleNamespace(capturing=False, is_draft_model=False))
+
+    output = torch.zeros(4, 3)
+    query = torch.zeros(4, 2, 3)
+    assert impl.forward_fused_infer_attention(query, None, None, built, output) is output
+
+    # The fallback sees the original, per-request layout.
+    assert seen["block_tables"].tolist() == [[10, 11], [20, 21]]
+    assert seen["seq_lens"].tolist() == [2, 4]
+    assert seen["seq_lens_list"] == [2, 4]
+
+
+def test_b1_pa_param_provider_rebinds_the_expanded_view():
+    metadata = _paged_metadata(torch.tensor([[10, 11], [20, 21]], dtype=torch.int32), [2, 4], [2, 4])
+    assert expand_pa_per_token_rows(metadata) is True
+
+    layer = "model.layers.0.self_attn.attn"
+    params = attention_v2_b1.B1PAParamProvider(layer).resolve({layer: metadata})
+
+    assert params["block_table"].tolist() == [[10, 11], [10, 11], [20, 21], [20, 21]]
+    assert params["context_lens"].tolist() == [1, 2, 3, 4]
 
 
 def test_in_full_cudagraph_mode_only_matches_full():

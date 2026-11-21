@@ -342,10 +342,16 @@ def expand_pa_per_token_rows(metadata) -> bool:
     Splitting each request's query block into one row per token -- the row's
     context length being the request's computed prefix plus its own causal
     position -- restores exact causal attention with the same output row
-    order.  ``block_tables`` and ``seq_lens`` are replaced in place because
-    they are exactly the two fields full_graph_pa binds and PAParamProvider
-    rebinds on every replay.  Zero-query rows (the pad row the runner appends)
-    contribute nothing.
+    order.  Zero-query rows (the pad row the runner appends) contribute
+    nothing.
+
+    The expanded layout is written to ``pa_block_tables`` / ``pa_seq_lens``
+    only, never over ``block_tables`` / ``seq_lens``: FULL mode does not
+    guarantee that every step is replayed from a graph, and a step that misses
+    the capture sizes runs eagerly through the stock FIA path, which binds one
+    block-table row per request.  The per-request view therefore has to stay
+    intact; only ``full_graph_pa`` and the PA param provider read the expanded
+    fields.
     """
     if getattr(metadata, "pa_rows_expanded", False):
         return True
@@ -365,7 +371,10 @@ def expand_pa_per_token_rows(metadata) -> bool:
     if sum(query_lens) != num_tokens:
         return False
     if all(q == 1 for q in query_lens):
-        # Already one query per row; the per-request metadata is exact.
+        # Already one query per row; the per-request view is exact, so the PA
+        # view aliases it instead of copying.
+        metadata.pa_block_tables = block_tables
+        metadata.pa_seq_lens = getattr(metadata, "seq_lens", None)
         metadata.pa_rows_expanded = True
         return True
     context_lens: list[int] = []
@@ -379,8 +388,8 @@ def expand_pa_per_token_rows(metadata) -> bool:
     if len(context_lens) != num_tokens:
         return False
     counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
-    metadata.block_tables = block_tables.repeat_interleave(counts, dim=0)
-    metadata.seq_lens = torch.tensor(context_lens, dtype=torch.int32)
+    metadata.pa_block_tables = block_tables.repeat_interleave(counts, dim=0)
+    metadata.pa_seq_lens = torch.tensor(context_lens, dtype=torch.int32)
     metadata.pa_rows_expanded = True
     return True
 
