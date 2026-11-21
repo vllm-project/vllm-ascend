@@ -7,6 +7,6 @@ entries:
       options default to 1 in the launcher.
       Shell templates now receive nine arguments, with PCP at argument 8 and PP
       at argument 9; append `1 1` to direct seven-argument template calls.
-      Ctrl+C, SIGTERM, or a launch exception now stops the started rank process
-      groups, with a 10-second cleanup period before remaining processes are
-      forcibly stopped.
+      Launcher exceptions, including Ctrl+C, now trigger SIGTERM notifications
+      to recorded rank process groups and a wait for their shells; cleanup
+      relies on workers responding to the signal and has no forced timeout.
