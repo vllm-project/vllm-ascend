@@ -110,7 +110,7 @@ host, assign distinct `lookup_rpc_port` identifiers and HTTP ports.
 Follow the **PD Disaggregation Scenario** in the
 [Mooncake deployment guide](kv_cache_pool_ascend_store.md#scenario-1-mooncake-backend)
 for node startup, P/D transfer, and proxy configuration. Configure the
-`AscendStoreConnector` on each node as follows.
+`AscendStoreConnector` on each node as follows:
 
 **Prefill (P) node:**
 
