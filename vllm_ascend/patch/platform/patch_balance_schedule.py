@@ -432,7 +432,7 @@ class BalanceScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             # Both supported versions prioritize waiting requests holding KV blocks.
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -446,8 +446,11 @@ class BalanceScheduler(Scheduler):
                     step_skipped_waiting.appendleft(skipped)
 
             while token_budget > 0:
-                # Requests holding KV blocks are always drained first.
-                request_queue = self.kv_holding_waiting or self.waiting
+                # vllm-project/vllm#60572: upstream counts KV holders under PAUSED_NEW
+                # in get_num_unfinished_requests(); drain them, leaving ordinary waiting queued.
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
                 if not request_queue:
                     break
                 if len(self.running) == self.max_num_active_reqs:
@@ -456,6 +459,8 @@ class BalanceScheduler(Scheduler):
                 # Keep admission balanced across DP ranks: if any rank was at
                 # the running cap after the previous step, stop admitting new
                 # waiting requests on every rank.
+                # This also applies to KV holders under PAUSED_NEW. During coordinated pauses,
+                # they drain as running requests finish and balance_gather() refreshes counts.
                 if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
                     break
 
