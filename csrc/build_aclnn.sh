@@ -144,6 +144,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "qsa_union_inputs"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
@@ -221,6 +222,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "qsa_union_inputs"
         "hisparse_resolve_residency"
     )
 

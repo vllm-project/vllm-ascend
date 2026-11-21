@@ -321,6 +321,63 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def _prepare_qsa_step_metadata(
+    attn_metadata: dict[str, Any],
+    qsa_main_builders: list[tuple[list[str], Any]],
+    num_actual_tokens: int,
+) -> None:
+    """Prepare cross-layer QSA metadata once while inputs are being built."""
+    from vllm_ascend.models.qwen4_exp.attention_dispatch import prepare_qsa_union_batches
+    from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_visible_lengths
+
+    prepared_metadata_ids: set[int] = set()
+    for layer_names, builder in qsa_main_builders:
+        if not layer_names:
+            continue
+        layer = builder.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
+        if not hasattr(layer, "indexer"):
+            continue
+        main_metadata = attn_metadata.get(layer_names[0])
+        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
+        if main_metadata is None or compressed_metadata is None:
+            continue
+        if id(main_metadata) in prepared_metadata_ids:
+            continue
+        request_plan = getattr(main_metadata, "qsa_request_plan", None)
+        if request_plan is None:
+            continue
+        rows = min(
+            num_actual_tokens,
+            int(getattr(compressed_metadata, "qsa_num_live_tokens", num_actual_tokens)),
+        )
+        device = compressed_metadata.seq_lens.device
+        max_tokens = builder.vllm_config.scheduler_config.max_num_batched_tokens
+        signature = (device, max_tokens)
+        buffer_cache = getattr(builder, "_qsa_visible_length_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            builder._qsa_visible_length_buffers = buffer_cache
+        visible_lengths = buffer_cache.get(signature)
+        if visible_lengths is None:
+            visible_lengths = torch.empty(max_tokens, dtype=torch.int32, device=device)
+            buffer_cache[signature] = visible_lengths
+
+        prepare_qsa_visible_lengths(
+            compressed_metadata.logical_positions,
+            compressed_metadata.seq_lens,
+            compressed_metadata.token_to_req,
+            visible_lengths,
+            rows,
+        )
+        main_metadata.qsa_request_plan = prepare_qsa_union_batches(
+            request_plan,
+            visible_lengths,
+            compressed_metadata.seq_lens,
+            main_metadata.block_table,
+        )
+        prepared_metadata_ids.add(id(main_metadata))
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -413,6 +470,7 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    qsa_main_builders: list[tuple[list[str], Any]] = []
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -504,6 +562,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if getattr(attn_metadata_builder, "prepares_qsa_step_metadata", False):
+                qsa_main_builders.append((attn_group.layer_names, attn_metadata_builder))
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
@@ -580,12 +640,22 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
+                if isinstance(attn_metadata_builder, QSAMetadataBuilder):
+                    # Preserve live prefixes for graph-padded inputs without
+                    # reading device lengths back on the host.
+                    metadata.qsa_num_live_tokens = int(variant_common.query_start_loc_cpu[num_actual_reqs])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if qsa_main_builders:
+        _prepare_qsa_step_metadata(
+            attn_metadata,
+            qsa_main_builders,
+            num_actual_tokens,
+        )
     return attn_metadata
 
 

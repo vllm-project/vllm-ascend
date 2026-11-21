@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Check batched and multi-head Union GBSA integration."""
+
+import pytest
+import torch
+import torch_npu  # noqa: F401
+
+from vllm_ascend.models.qwen4_exp.attention_dispatch import (
+    build_qsa_request_plan,
+    dispatch_qsa_attention,
+    prepare_qsa_union_batches,
+)
+from vllm_ascend.models.qwen4_exp.gbsa_union import build_qsa_union_inputs_from_compact, qsa_union_gbsa_attention
+from vllm_ascend.utils import enable_custom_op
+
+
+def test_qsa_union_inputs_meta_rejects_non_power_of_two_width():
+    enable_custom_op()
+    compact = torch.empty((8, 11), device="meta", dtype=torch.int32)
+    visible = torch.empty(8, device="meta", dtype=torch.int32)
+    row_map = torch.empty((1, 8), device="meta", dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="positive power of two"):
+        build_qsa_union_inputs_from_compact(compact, visible, row_map)
+
+
+@pytest.mark.parametrize("query_lengths", [(1, 7, 8, 9, 15, 16, 17, 19), (512,) * 8])
+def test_batched_prefill_dispatch_matches_single_request_launches(query_lengths):
+    torch.manual_seed(811)
+    starts = [0]
+    for length in query_lengths:
+        starts.append(starts[-1] + length)
+    total = starts[-1]
+    lengths_cpu = torch.arange(8, dtype=torch.int32) * 5 + 32768
+    pages = (int(lengths_cpu.max()) + 127) // 128
+    query = torch.randn(total, 3, 256, dtype=torch.bfloat16, device="npu")
+    key = torch.randn(8 * pages, 128, 1, 256, dtype=query.dtype, device="npu")
+    value = torch.randn_like(key)
+    table = torch.randperm(8 * pages, dtype=torch.int32, device="npu").reshape(8, pages)
+    lengths = lengths_cpu.npu()
+    requests = torch.repeat_interleave(torch.arange(8, dtype=torch.int32), torch.tensor(query_lengths)).npu()
+    positions = torch.cat(
+        [torch.arange(int(kv) - count, int(kv), dtype=torch.int32) for kv, count in zip(lengths_cpu, query_lengths)]
+    ).npu()
+    compact = torch.full((total, 515), -1, dtype=torch.int32, device="npu")
+    compact[:, :512] = torch.arange(512, dtype=torch.int32, device="npu")
+    expected = torch.empty_like(query)
+    actual = torch.empty_like(query)
+    for request, (start, end) in enumerate(zip(starts, starts[1:])):
+        rows = slice(start, end)
+        single_plan = build_qsa_request_plan(
+            torch.tensor([0, end - start]),
+            lengths_cpu[request : request + 1],
+            end - start,
+            torch.tensor([True]),
+        )
+        single_plan = prepare_qsa_union_batches(
+            single_plan,
+            positions[rows] + 1,
+            lengths[request : request + 1],
+            table[request : request + 1],
+        )
+        qsa_union_gbsa_attention(
+            query[rows],
+            key,
+            value,
+            compact[rows],
+            table,
+            requests[rows],
+            positions[rows],
+            lengths,
+            expected[rows],
+            request_index=request,
+            prepared=single_plan.prepared_union_batches[0],
+        )
+    plan = build_qsa_request_plan(torch.tensor(starts), lengths_cpu, total, torch.ones(8, dtype=torch.bool))
+    plan = prepare_qsa_union_batches(plan, positions + 1, lengths, table)
+    dispatch_qsa_attention(query, None, None, key, value, compact, table, requests, positions, lengths, actual, plan)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_lengths", [(17,), (9, 16)])
+def test_multi_kv_heads_match_independent_head_launches(query_lengths):
+    torch.manual_seed(811)
+    starts = [0]
+    for size in query_lengths:
+        starts.append(starts[-1] + size)
+    batch = len(query_lengths)
+    lengths_cpu = torch.arange(batch, dtype=torch.int32) * 5 + 32768
+    pages = (int(lengths_cpu.max()) + 127) // 128
+    q = torch.randn(starts[-1], 24, 256, dtype=torch.bfloat16, device="npu")
+    k = torch.randn(batch * pages, 128, 2, 256, device="npu", dtype=q.dtype)
+    v = torch.randn_like(k)
+    table = torch.randperm(batch * pages, dtype=torch.int32, device="npu").reshape(batch, pages)
+    lens = lengths_cpu.npu()
+    pos = torch.cat([torch.arange(int(kv) - size, int(kv)) for kv, size in zip(lengths_cpu, query_lengths)]).int().npu()
+    req = torch.repeat_interleave(torch.arange(batch, dtype=torch.int32), torch.tensor(query_lengths)).npu()
+    compact = torch.full((starts[-1], 515), -1, device="npu", dtype=torch.int32)
+    compact[:, :512] = torch.randint(0, 8000, (starts[-1], 512), device="npu", dtype=torch.int32)
+    plan = build_qsa_request_plan(torch.tensor(starts), lengths_cpu, starts[-1], torch.ones(batch, dtype=torch.bool))
+    plan = prepare_qsa_union_batches(plan, pos + 1, lens, table)
+
+    def run(query, key, value):
+        output = torch.full_like(query, float("nan"))
+        dispatch_qsa_attention(query, None, None, key, value, compact, table, req, pos, lens, output, plan)
+        return output
+
+    expected = torch.cat(
+        [
+            run(
+                q[:, h * 12 : (h + 1) * 12].contiguous(),
+                k[:, :, h : h + 1].contiguous(),
+                v[:, :, h : h + 1].contiguous(),
+            )
+            for h in range(2)
+        ],
+        dim=1,
+    )
+    actual = run(q, k, v)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
