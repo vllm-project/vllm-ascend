@@ -12,9 +12,85 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendMetadata,
     AttentionType,
     FIAParamProvider,
 )
+
+
+def test_encoder_only_graph_params_preserve_ragged_inputs_without_kv_cache():
+    impl = _make_impl()
+    impl.attn_type = AttentionType.ENCODER_ONLY
+    metadata = AscendMetadata(
+        model_runner_type="pooling",
+        causal=False,
+        actual_seq_lengths_q=[2, 5],
+        seq_lens_list=[2, 3],
+    )
+    key, value = _strided_kv(5), _strided_kv(5, offset=100)
+
+    actual_key, actual_value, _, block_table, ends = impl._get_fia_params(key, value, metadata)
+
+    assert actual_key is key and actual_value is value
+    assert block_table is None
+    assert ends == [2, 5]
+
+
+@pytest.mark.parametrize("sliding_window", [None, 3])
+def test_encoder_graph_replay_updates_both_cumulative_boundaries(sliding_window):
+    provider = FIAParamProvider("layer", sliding_window, is_non_pa=True, is_encoder_only=True)
+    for lengths in ([2, 3], [3, 2], [2, 3]):
+        metadata = AscendMetadata(
+            model_runner_type="pooling",
+            causal=False,
+            seq_lens_list=lengths,
+            actual_seq_lengths_q=[lengths[0], sum(lengths)],
+        )
+        params = provider.resolve({"layer": metadata})
+
+        assert params["actual_seq_lengths"] == metadata.actual_seq_lengths_q
+        assert params["actual_seq_lengths_kv"] == metadata.actual_seq_lengths_q
+        assert params.get("block_table") is None
+
+
+def test_encoder_capture_uses_updatable_fia_with_contiguous_qkv():
+    impl = _make_impl()
+    impl.attn_type = AttentionType.ENCODER_ONLY
+    metadata = AscendMetadata(
+        model_runner_type="pooling",
+        causal=False,
+        num_actual_tokens=5,
+        actual_seq_lengths_q=[2, 5],
+        seq_lens_list=[2, 3],
+    )
+    query = torch.arange(80, dtype=torch.float32).view(5, 2, 8)[..., ::2]
+    key, value = _strided_kv(5), _strided_kv(5, offset=100)
+    output = torch.empty_like(query)
+    captured = {}
+
+    def capture_task(op, kwargs, provider):
+        captured.update(kwargs)
+        assert provider.resolve({"layer": metadata})["actual_seq_lengths_kv"] == [2, 5]
+        kwargs["out"][0].fill_(1)
+
+    with (
+        patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(capturing=True, is_draft_model=False)),
+        patch.object(attn_module, "get_capture_resource", return_value=object()),
+        patch.object(attn_module, "register_task", side_effect=capture_task),
+        patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", create=True),
+        patch.object(
+            attn_module.torch_npu, "npu_fusion_attention", side_effect=RuntimeError("non-updatable attention")
+        ),
+    ):
+        result = impl._forward_encoder_attention(query, key, value, metadata, output)
+
+    assert result is output
+    torch.testing.assert_close(result, torch.ones_like(output))
+    assert captured["block_table"] is None and captured["atten_mask"] is None
+    assert captured["actual_seq_lengths"] == captured["actual_seq_lengths_kv"] == [2, 5]
+    for name, original in (("query", query), ("key", key), ("value", value)):
+        assert captured[name].is_contiguous()
+        torch.testing.assert_close(captured[name], original)
 
 
 def _make_impl(impl_cls=AscendAttentionBackendImpl):

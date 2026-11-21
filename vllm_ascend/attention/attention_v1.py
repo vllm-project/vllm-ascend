@@ -476,6 +476,7 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    is_encoder_only: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -491,6 +492,8 @@ class FIAParamProvider:
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
             }
+        if self.is_encoder_only:
+            params["actual_seq_lengths_kv"] = metadata.actual_seq_lengths_q
         # Replay-time mask choice (cf. PR #17682 review, issue #16889):
         # FULL graphs are captured with the right-aligned causal mask +
         # sparse_mode=3, which must stay valid for every replay shape.
@@ -632,7 +635,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def _get_fia_mask_params(
         self, attn_metadata: AscendMetadata, device: torch.device
     ) -> tuple[torch.Tensor | None, int, int, int]:
-        if not attn_metadata.causal:
+        if not attn_metadata.causal or self.attn_type == AttentionType.ENCODER_ONLY:
             if self.sliding_window is None:
                 return None, 0, SWA_INT_MAX, SWA_INT_MAX
             # Match upstream FlashAttention's non-causal window (W-1, W-1).
@@ -753,6 +756,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                is_encoder_only=self.attn_type == AttentionType.ENCODER_ONLY,
             ),
         )
         return output, num_tokens
@@ -872,6 +876,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
+        if self.attn_type == AttentionType.ENCODER_ONLY:
+            return key, value, 128, None, attn_metadata.actual_seq_lengths_q
         # PrefillNoCache doesn't need key_cache, but other modes do.
         # A KV-sharing consumer layer has no K/V of its own (key is None) and can
         # only read the producer layer's cache, so it always needs it.
@@ -1206,8 +1212,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
-        _: torch.Tensor,
+        output: torch.Tensor,
     ) -> torch.Tensor:
+        if _EXTRA_CTX.capturing and self.attn_type == AttentionType.ENCODER_ONLY:
+            output, _ = self.full_graph_fia(
+                query.contiguous(), key.contiguous(), value.contiguous(), attn_metadata, output
+            )
+            return output
         # use default sparse_mode 0 in normal scenario, which means no mask works on it
         # Pad actual_seq_len with 0 when num_tokens > actual_seq_len in TND layout
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
