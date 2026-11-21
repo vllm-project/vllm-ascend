@@ -1,0 +1,68 @@
+model_name: "BAAI/bge-reranker-v2-m3"
+model_type: "vllm-reranker"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: half
+  max_model_len: 8192
+  gpu_memory_utilization: 0.85
+  trust_remote_code: true
+  runner: "pooling"
+  enforce_eager: true
+  enable_chunked_prefill: false
+
+tasks:
+  - name: "single_pair"
+    queries: "What is the capital of France?"
+    documents: "Paris is the capital of France."
+    metrics:
+      - name: "score_match_rate"
+        value: 1.0
+  - name: "long_pair"
+    queries: "Which city is the capital of France?"
+    min_pair_tokens: 128
+    documents:
+      - >-
+        Paris is the capital of France. France is a country in Western Europe
+        with a long history, many regions and a population that includes people
+        from different cultural backgrounds. The city is known for museums,
+        universities, public transport, libraries, parks, bridges and historic
+        neighbourhoods along the Seine. Visitors often study its architecture,
+        art collections, public institutions and scientific organisations. The
+        city has hosted international exhibitions and conferences. Its stations
+        connect it to other cities in France and neighbouring countries. The
+        surrounding region also includes residential districts, protected parks,
+        and industrial and research centres.
+    metrics:
+      - name: "score_match_rate"
+        value: 1.0
+  - name: "one_to_many_ranking"
+    queries: "What is the capital of France?"
+    documents:
+      - "Berlin is the capital of Germany."
+      - "Paris is the capital of France."
+      - "France is a country in Europe."
+    expected_top_index: 1
+    metrics:
+      - name: "score_match_rate"
+        value: 1.0
+      - name: "ranking_agreement"
+        value: 1.0
+  - name: "paired_batch_mixed_lengths"
+    queries:
+      - "What is the capital of France?"
+      - "Name the capital of Germany."
+    documents:
+      - "Paris is the capital of France."
+      - >-
+        Berlin is the capital of Germany. It is also the largest city in Germany.
+        The city has museums, universities, railway stations and many parks.
+        Visitors can reach the city by air or rail and explore its historic streets.
+        The additional sentences exercise padding and batching with unequal input lengths.
+    metrics:
+      - name: "score_match_rate"
+        value: 1.0
+
+num_fewshot: 0
+apply_chat_template: false
