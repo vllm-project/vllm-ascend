@@ -1,0 +1,4 @@
+pr: 18328
+entries:
+  - category: bugfix
+    text: Fixed Mooncake Mamba state transfers between compatible producer and consumer layouts with different prefix-cache modes. Incompatible state shapes and dtypes are rejected before remote reads.
