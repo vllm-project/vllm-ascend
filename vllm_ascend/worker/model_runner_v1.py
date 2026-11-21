@@ -6069,10 +6069,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_raw_tensors.items()
                         )
                     )
-                    if (
-                        self.hybrid_with_attn_and_mamba
-                        and not uses_same_raw_tensor
-                    ):
+                    if self.hybrid_with_attn_and_mamba and not uses_same_raw_tensor:
                         shapes_with_blocks = tuple(
                             (num_blocks, *shape)
                             for shape in current_kv_cache_spec.shapes
