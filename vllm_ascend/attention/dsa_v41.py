@@ -10,7 +10,7 @@ moving cache or scheduler knowledge back into the model.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +30,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import (
+    AscendDSABackend,
+    _aligned_dspark_index_width,
+    build_dspark_swa_indices,
+    dsv4_dsa_overlap_stream,
+)
 from vllm_ascend.attention.utils import (
     KVCacheRuntimeShapes,
     maybe_save_kv_layer_to_connector,
@@ -909,6 +914,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._max_tokens = max_tokens
         self._dspark_swa_indices = None
         self._dspark_swa_lengths = None
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.method == "dspark":
+            width = _aligned_dspark_index_width(window_size, speculative_config.num_speculative_tokens)
+            # DSpark configuration and output capacity are fixed before capture.
+            self._dspark_swa_indices = torch.empty((max_tokens, 1, width), dtype=torch.int32, device=device)
+            self._dspark_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
         self._cache_seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
@@ -1278,6 +1289,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 ).view(req.num_reqs, blocks_per_req)
         noncausal = not bool(getattr(common, "causal", True))
         if noncausal and req.ori_sparse_indices is None:
+            # Buffers are allocated in __init__ and retained for graph replay.
+            indices_output = cast(
+                torch.Tensor, self._dspark_swa_indices
+            )[: req.num_actual_tokens]
+            lengths_output = cast(
+                torch.Tensor, self._dspark_swa_lengths
+            )[: req.num_actual_tokens]
+
             req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices(
                 common.block_table_tensor[: req.num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,
@@ -1286,6 +1305,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 common.query_start_loc[: req.num_reqs + 1],
                 req.seq_lens,
                 req.num_actual_tokens,
+                index_width=indices_output.shape[-1],
+                indices_output=indices_output,
+                lengths_output=lengths_output,
                 use_logical_indices=True,
             )
             # Full draft graphs retain these addresses from capture. Rebuild
@@ -1301,8 +1323,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
             assert self._dspark_swa_lengths is not None
             lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            indices_view.copy_(req.ori_sparse_indices)
-            lengths_view.copy_(req.ori_topk_length)
             req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None

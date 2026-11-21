@@ -324,7 +324,7 @@ def builders(monkeypatch):
                 decode_context_parallel_size=dcp,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
-            speculative_config=None if decode_sharded else SimpleNamespace(num_speculative_tokens=5),
+            speculative_config=None if decode_sharded else SimpleNamespace(method="dspark", num_speculative_tokens=5),
             compilation_config=SimpleNamespace(
                 cudagraph_capture_sizes=graph_sizes,
                 cudagraph_mode=CUDAGraphMode.NONE if decode_sharded else CUDAGraphMode.FULL_DECODE_ONLY,
@@ -1605,9 +1605,10 @@ def test_a5_noncausal_draft_plan_keeps_actual_window_lengths(builders, monkeypat
     builder.vllm_config.model_config.hf_text_config.compress_ratios = [0, 0, 2, 1]
     calls = []
 
-    def make_indices(*args, **kwargs):
-        n = args[6]
-        return torch.zeros((n, 1, 8), dtype=torch.int32), torch.full((n, 1), 6, dtype=torch.int32)
+    def make_indices(*args, indices_output, lengths_output, **kwargs):
+        indices_output.zero_()
+        lengths_output.fill_(6)
+        return indices_output, lengths_output
 
     monkeypatch.setattr(dsa_v41, "build_dspark_swa_indices", make_indices)
 
