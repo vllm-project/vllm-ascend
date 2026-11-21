@@ -147,103 +147,40 @@ def plan_swa_chunk_segments(
     return segments
 
 
-_PINNED_POOL: dict[tuple, list[torch.Tensor]] = {}
-_PINNED_CURSOR: dict[tuple, int] = {}
-# One slot per layer in flight, with headroom for the next step.
-_PINNED_SLOTS = 128
-
-
-def _pinned_buffer(shape, dtype):
-    """Rotating pinned host buffer, or ``None`` when pinning is unavailable.
-
-    A fresh slot per call keeps a non-blocking H2D safe while the host runs
-    ahead of the device.  Shapes are bounded by (rows, block-table width), so
-    the pool cannot grow with the sequence length distribution.
-    """
-    key = (tuple(shape), dtype)
-    pool = _PINNED_POOL.get(key)
-    if pool is None:
-        try:
-            pool = [torch.empty(shape, dtype=dtype, pin_memory=True) for _ in range(_PINNED_SLOTS)]
-        except (RuntimeError, TypeError):
-            return None
-        _PINNED_POOL[key] = pool
-    index = _PINNED_CURSOR.get(key, 0)
-    _PINNED_CURSOR[key] = (index + 1) % _PINNED_SLOTS
-    return pool[index]
-
-
 def build_stage_tables_fixed(
     block_table: torch.Tensor, counts: list[int], num_blocks: int | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Sync-free variant: per-request live-block counts are known on the host.
 
-    The dense stage table and the flat source indices are built on the CPU
-    into pinned buffers and copied with ``non_blocking=True``.  Issuing this
-    on the staging stream must never wait for the cache-write event: a
-    pageable H2D would block the host until that event fired, turning the
-    overlapped copy into a synchronous stall.  The device work is then a
-    single ``index_select`` over the slab.
-
-    The counts may over-approximate the live prefix (padding slots are copied
-    from block 0 and are never referenced by the kernel, which bounds
-    positions by the sequence length).  Values are clamped into the block
-    range so an over-approximated count can never issue an out-of-bounds
-    gather.
+    Uses ``cat`` over fixed-length slices and ``torch.where`` instead of
+    boolean-mask indexing, so no device-to-host synchronization happens.  The
+    counts may over-approximate the live prefix (padding slots are copied from
+    block 0 and are never referenced by the kernel, which bounds positions by
+    the sequence length).
     """
     rows, max_blocks = block_table.shape
     device = block_table.device
-    counts = [max(0, min(int(count), max_blocks)) for count in counts[:rows]]
-    if len(counts) < rows:
-        counts.extend([0] * (rows - len(counts)))
-    total = sum(counts)
+    counts_t = torch.tensor(counts[:rows], dtype=torch.int64, device=device)
+    positions = torch.arange(max_blocks, dtype=torch.int64, device=device)
+    valid = positions[None, :] < counts_t[:, None]
+    base = torch.cumsum(counts_t, dim=0) - counts_t
+    slots = base[:, None] + positions[None, :]
+    staged = torch.where(valid, slots, torch.full_like(slots, -1)).to(block_table.dtype)
+    # Padding slots may hold stale ids from an earlier step.  Clamp into the
+    # block range so an over-approximated count can never issue an
+    # out-of-bounds gather (a suspected cause of the 998/1000 worker hang).
     upper = int(num_blocks) - 1 if num_blocks else None
-
-    staged_src = _pinned_buffer((rows, max_blocks), block_table.dtype)
-    if staged_src is not None:
-        staged_src.fill_(-1)
-        base = 0
-        for row, count in enumerate(counts):
-            if count:
-                staged_src[row, :count] = torch.arange(base, base + count, dtype=block_table.dtype)
-                base += count
-        staged = staged_src.to(device, non_blocking=True)
-    else:
-        staged = torch.full((rows, max_blocks), -1, dtype=block_table.dtype, device=device)
-
-    flat_src = _pinned_buffer((rows * max_blocks,), torch.int64) if total else None
-    if flat_src is not None:
-        offset = 0
-        for row, count in enumerate(counts):
-            if count:
-                flat_src[offset : offset + count] = torch.arange(
-                    row * max_blocks, row * max_blocks + count, dtype=torch.int64
-                )
-                offset += count
-        flat_index = flat_src[:total].to(device, non_blocking=True)
-        flat = block_table.reshape(-1).index_select(0, flat_index).to(torch.int64)
-        flat = flat.clamp(0, upper) if upper is not None else flat.clamp_min(0)
-    else:
-        # Pinning unavailable (or nothing to copy): keep the original path.
-        staged_cpu = torch.full((rows, max_blocks), -1, dtype=block_table.dtype)
-        base = 0
-        for row, count in enumerate(counts):
-            if count:
-                staged_cpu[row, :count] = torch.arange(base, base + count, dtype=block_table.dtype)
-                base += count
-        staged = staged_cpu.to(device)
-        flat = torch.cat(
-            [
-                (
-                    block_table[row, :count].to(torch.int64).clamp_min(0)
-                    if upper is None
-                    else block_table[row, :count].to(torch.int64).clamp(0, upper)
-                )
-                for row, count in enumerate(counts)
-                if count
-            ]
-        ) if total else torch.empty(0, dtype=torch.int64, device=device)
-    return staged, flat, total
+    flat = torch.cat(
+        [
+            (
+                block_table[row, : int(counts[row])].to(torch.int64).clamp_min(0)
+                if upper is None
+                else block_table[row, : int(counts[row])].to(torch.int64).clamp(0, upper)
+            )
+            for row in range(rows)
+        ]
+    )
+    return staged, flat, int(flat.numel())
 
 
 def build_stage_tables(
