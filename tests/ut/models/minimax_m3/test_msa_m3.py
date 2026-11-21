@@ -50,7 +50,6 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     minimax_m3_sparse_forward,
 )
 from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
-from vllm_ascend.models.minimax_m3.ops import msa_m3_union as union_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _as_ascendc_index_kv_cache,
     _decode_gbsa_block_counts,
@@ -92,49 +91,8 @@ def mock_gbsa_ops(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock
     gbsa_ops_module = ModuleType("cann_ops_transformer.ops")
     gbsa_ops_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
     gbsa_ops_module.generic_block_sparse_attention = gbsa_attention_op  # type: ignore[attr-defined]
-    transformer_module = ModuleType("cann_ops_transformer")
-    transformer_module.generic_block_sparse_attention_metadata = gbsa_metadata_op  # type: ignore[attr-defined]
-    transformer_module.generic_block_sparse_attention = gbsa_attention_op  # type: ignore[attr-defined]
-    transformer_module.ops = gbsa_ops_module  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "cann_ops_transformer", transformer_module)
     monkeypatch.setitem(sys.modules, "cann_ops_transformer.ops", gbsa_ops_module)
     return gbsa_metadata_op, gbsa_attention_op
-
-
-@pytest.fixture(autouse=True)
-def reset_union_availability(monkeypatch: pytest.MonkeyPatch):
-    # Optional packages are explicitly enabled by the Union integration fixture.
-    monkeypatch.setitem(sys.modules, "cann_ops_nn", None)
-    monkeypatch.setitem(sys.modules, "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen", None)
-    msa_m3_module._can_use_union_attention.cache_clear()
-    yield
-    msa_m3_module._can_use_union_attention.cache_clear()
-
-
-@pytest.fixture
-def mock_union_ops(monkeypatch: pytest.MonkeyPatch, mock_gbsa_ops):
-    nn_ops = ModuleType("cann_ops_nn")
-    nn_ops.union_sparse_gen_launch = MagicMock(  # type: ignore[attr-defined]
-        return_value=(torch.zeros(1), torch.zeros(1), torch.zeros(1))
-    )
-    monkeypatch.setitem(sys.modules, "cann_ops_nn", nn_ops)
-    builders = (MagicMock(), MagicMock())
-    for name, builder_name, builder in (
-        (
-            "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen",
-            "union_sparse_gen_builder",
-            builders[0],
-        ),
-        (
-            "cann_ops_transformer.ops.attention.generic_block_sparse_attention.generic_block_sparse_attention",
-            "generic_block_sparse_attention_op_builder",
-            builders[1],
-        ),
-    ):
-        module = ModuleType(name)
-        setattr(module, builder_name, builder)
-        monkeypatch.setitem(sys.modules, name, module)
-    return nn_ops.union_sparse_gen_launch, *mock_gbsa_ops, builders  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
@@ -244,12 +202,7 @@ def _make_vllm_config(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         compilation_config=SimpleNamespace(
             static_forward_context={
-                "layer0.attn": SimpleNamespace(
-                    num_heads=4,
-                    num_kv_heads=2,
-                    head_dim=128,
-                    topk_blocks=16,
-                ),
+                "layer0.attn": SimpleNamespace(num_heads=4, num_kv_heads=2, head_dim=128, topk_blocks=16),
             }
         ),
         scheduler_config=SimpleNamespace(
@@ -264,23 +217,15 @@ def _make_vllm_config(
 
 
 def _make_sparse_builder(
-    device: torch.device,
-    kv_cache_dtype: torch.dtype = torch.bfloat16,
-    *,
-    impl: AscendMiniMaxM3SparseImpl | None = None,
+    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
-    layer = vllm_config.compilation_config.static_forward_context["layer0.attn"]
-    if impl is not None:
-        layer.num_heads = impl.num_heads
-        layer.num_kv_heads = impl.num_kv_heads
-    vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=7, max_num_new_slots_for_drafting=0, parallel_drafting=False
     )
     spec = FullAttentionSpec(
         block_size=128,
-        num_kv_heads=layer.num_kv_heads,
+        num_kv_heads=2,
         head_size=128,
         head_size_v=128,
         dtype=kv_cache_dtype,
@@ -664,124 +609,6 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
-
-
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
-def test_unsupported_fp8_cache_rejected_before_union_loading(monkeypatch, mock_union_ops, device_type):
-    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    with pytest.raises(TypeError, match="FP8 sparse attention is not supported on this device"):
-        AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "fp8", topk_blocks=16, sparse_block_size=128)
-    for builder in mock_union_ops[-1]:
-        builder.load.assert_not_called()
-
-
-@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("query_lens", [[1, 9, 17], [8]], ids=["mixed", "decode_only"])
-def test_union_prefill_keeps_native_decode(monkeypatch, mock_union_ops, kv_dtype, query_lens):
-    monkeypatch.setattr(
-        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
-    )
-    union_gen, metadata_op, attention_op, builders = mock_union_ops
-    # Fresh operator outputs expose accidental replacement of captured buffers.
-    metadata_op.side_effect = lambda *args, **kwargs: torch.full((1024,), metadata_op.call_count, dtype=torch.int32)
-    attention_op.side_effect = lambda q, *args, **kwargs: (
-        torch.zeros(q.shape, dtype=kwargs["attention_out_dtype"]),
-        None,
-    )
-    cache_dtype = "fp8_e4m3" if kv_dtype == torch.float8_e4m3fn else str(kv_dtype).removeprefix("torch.")
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
-    for extension_builder in builders:
-        extension_builder.load.assert_called_once()
-    builder = _make_sparse_builder(torch.device("cpu"), kv_dtype, impl=impl)
-    common = _create_common_attn_metadata(
-        BatchSpec(seq_lens=[257] * len(query_lens), query_lens=query_lens), 128, torch.device("cpu")
-    )
-    md = builder.build(0, common)
-    assert builder.reuse_decode_gbsa_metadata
-    assert bool(builder.decode_gbsa_metadata_buffers) is (kv_dtype != torch.float16)
-    monkeypatch.setattr(
-        msa_m3_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={"attn": md, "attn_next": md}),
-    )
-    metadata_calls_before_forward = metadata_op.call_count
-    union = MagicMock(wraps=union_module.minimax_m3_sparse_attn_union)
-    native_decode = MagicMock()
-    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", union)
-    monkeypatch.setattr(
-        msa_m3_module, "minimax_m3_sparse_attn", MagicMock(side_effect=AssertionError("native prefill must not run"))
-    )
-    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_decode", native_decode)
-    q_dtype = torch.float16 if kv_dtype == torch.float16 else torch.bfloat16
-    q = torch.zeros((sum(query_lens), 16 * 128), dtype=q_dtype)
-    selections = (
-        torch.zeros((1, md.num_decode_tokens, 16), dtype=torch.int32),
-        torch.zeros((1, sum(query_lens) - md.num_decode_tokens, 16), dtype=torch.int32),
-        torch.ones((1, md.num_decode_tokens), dtype=torch.int32),
-    )
-    output = torch.empty_like(q)
-    kv = (torch.zeros((9, 128, 1, 128), dtype=kv_dtype), torch.zeros((9, 128, 1, 128), dtype=kv_dtype))
-    assert impl.forward(SimpleNamespace(layer_name="attn"), q, kv, selections, output) is output
-    native_decode.assert_called_once()
-    dec_args, dec_kwargs = native_decode.call_args
-    assert dec_args[0].shape == (md.num_decode_tokens, 16, 128)
-    assert dec_args[2] is selections[0]
-    assert dec_args[8] == query_lens[0]
-    assert dec_kwargs["select_num_idx"] is selections[2]
-    assert dec_kwargs["cu_seqlens_q"] is md.decode.cu_seqlens_q
-    assert dec_kwargs["gbsa_metadata_cache"] is md.decode.gbsa_metadata_cache
-    assert dec_kwargs["dequant_scale"] is impl._dequant_scale
-    assert (impl._dequant_scale is not None) is (kv_dtype == torch.float8_e4m3fn)
-    if not md.num_prefills:
-        union.assert_not_called()
-        union_gen.assert_not_called()
-        attention_op.assert_not_called()
-        assert not any(call.kwargs.get("mask_mode") == 3 for call in metadata_op.call_args_list)
-        return
-    assert md.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
-    assert md.prefill.cu_seqlens_q_int64.dtype == torch.int64
-    assert md.prefill.cu_seqlens_q_int64.is_contiguous()
-    schedule = md.prefill.union_gbsa_metadata[(16, 16)]
-    assert metadata_op.call_count == metadata_calls_before_forward
-    union.assert_called_once()
-    pre_args = union.call_args.args
-    assert pre_args[0].shape == (26, 16, 128)
-    assert pre_args[6:10] == (5, 3, 17, 257)
-    assert pre_args[2] is selections[1]
-    assert pre_args[12] is schedule
-    union_gen.assert_called_once()
-    call = union_gen.call_args
-    assert call.args[1].dtype == torch.int32
-    assert call.args[2] is md.prefill.cu_seqlens_q_int64
-    assert call.args[3] is None
-    assert call.kwargs["block_shape"] == [1, 128]
-    assert call.kwargs["union_size"] == 8
-    assert call.kwargs["mask_type"] == 1
-    attention_op.assert_called_once()
-    call = attention_op.call_args
-    assert call.args[0].dtype == kv_dtype
-    assert call.kwargs["quant_mode"] == (5 if kv_dtype == torch.float8_e4m3fn else 0)
-    assert call.kwargs["attention_out_dtype"] == q_dtype
-    assert call.kwargs["metadata"] is schedule
-
-    # A second layer has different sparse selections but shares this batch's schedule.
-    next_impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
-    next_selections = (selections[0], torch.ones_like(selections[1]), selections[2])
-    assert next_impl.forward(SimpleNamespace(layer_name="attn_next"), q, kv, next_selections, output) is output
-    assert union_gen.call_count == attention_op.call_count == native_decode.call_count == 2
-    assert metadata_op.call_count == metadata_calls_before_forward
-    assert attention_op.call_args.kwargs["metadata"] is schedule
-    assert torch.all(union_gen.call_args.args[0] == 1)
-
-    schedule_before_rebuild = schedule.clone()
-    rebuilt = builder.build(0, _create_common_attn_metadata(BatchSpec([513], [33]), 128, torch.device("cpu")))
-    assert rebuilt.prefill.union_gbsa_metadata[(16, 16)].data_ptr() == schedule.data_ptr()
-    assert rebuilt.prefill.cu_seqlens_q_int64.data_ptr() == md.prefill.cu_seqlens_q_int64.data_ptr()
-    torch.testing.assert_close(rebuilt.prefill.cu_seqlens_q_int64, torch.tensor([0, 33], dtype=torch.int64))
-    assert not torch.equal(schedule, schedule_before_rebuild)
-    union_metadata_calls = [call for call in metadata_op.call_args_list if call.kwargs.get("mask_mode") == 3]
-    assert len(union_metadata_calls) == 2
-    assert union_metadata_calls[-1].args[0].shape == (1, 5, 5)
 
 
 @pytest.mark.parametrize("query_len", [1, 2, 4, 8])
@@ -3306,58 +3133,59 @@ def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
         )
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType.A2])
 @pytest.mark.parametrize(
-    "union_available,load_error", [(True, None), (False, None), (True, OSError), (True, RuntimeError)]
+    ("device_type", "split_kv_available", "expected_impl"),
+    [
+        (AscendDeviceType.A5, True, "kv_gather_q"),
+        (AscendDeviceType.A5, False, "gbsa"),
+        (AscendDeviceType.A3, True, "kv_gather_q"),
+        (AscendDeviceType.A3, False, "gbsa"),
+        (AscendDeviceType.A2, True, "kv_gather_q"),
+        (AscendDeviceType.A2, False, "gbsa"),
+    ],
 )
-@pytest.mark.parametrize("split_kv_available", [True, False])
-def test_sparse_model_prefill_dispatches_by_operator_availability(
-    monkeypatch,
-    mock_union_ops,
+def test_sparse_attn_prefill_dispatches_by_operator_availability(
     device_type: AscendDeviceType,
-    union_available: bool,
-    load_error: type[Exception] | None,
     split_kv_available: bool,
+    expected_impl: str,
 ) -> None:
-    profile = get_hardware_profile(device_type)
-    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: profile)
-    monkeypatch.setattr(msa_m3_npu_module, "get_current_hardware_profile", lambda: profile)
-    if not union_available:
-        monkeypatch.setitem(sys.modules, "cann_ops_nn", None)
-        monkeypatch.setitem(sys.modules, "cann_ops_nn.ops.index.union_sparse_gen.union_sparse_gen", None)
-    if load_error is not None:
-        mock_union_ops[3][1].load.side_effect = load_error("Union extension failed to load")
-    mock_is_available = MagicMock(return_value=split_kv_available)
-    monkeypatch.setattr(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", mock_is_available)
-    mock_union, mock_kv_gather_q, mock_gbsa = MagicMock(), MagicMock(), MagicMock()
-    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", mock_union)
-    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_kv_gather_q", mock_kv_gather_q)
-    monkeypatch.setattr(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3", mock_gbsa)
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "auto", topk_blocks=16, sparse_block_size=128)
-    builder = _make_sparse_builder(torch.device("cpu"), impl=impl)
-    common = _create_common_attn_metadata(BatchSpec(seq_lens=[257, 513], query_lens=[9, 17]), 128, torch.device("cpu"))
-    md = builder.build(0, common)
-    monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"attn": md}))
-    q = torch.zeros((26, 16 * 128), dtype=torch.bfloat16)
-    output = torch.empty_like(q)
-    kv = (torch.zeros((8, 128, 1, 128), dtype=q.dtype), torch.zeros((8, 128, 1, 128), dtype=q.dtype))
-    selections = (None, torch.zeros((1, 26, 16), dtype=torch.int32), None)
-    metadata_op = mock_union_ops[1]
-    metadata_calls_before_forward = metadata_op.call_count
-    assert impl.forward(SimpleNamespace(layer_name="attn"), q, kv, selections, output) is output
+    with (
+        patch.object(
+            msa_m3_npu_module,
+            "get_current_hardware_profile",
+            return_value=get_hardware_profile(device_type),
+        ),
+        patch.object(
+            msa_m3_npu_module,
+            "_is_minimax_sparse_attention_split_kv_available",
+            return_value=split_kv_available,
+        ) as mock_is_available,
+        patch.object(msa_m3_npu_module, "_minimax_m3_sparse_attn_a3") as mock_gbsa,
+        patch.object(
+            msa_m3_npu_module,
+            "_minimax_m3_sparse_attn_kv_gather_q",
+        ) as mock_kv_gather_q,
+    ):
+        msa_m3_npu_module.minimax_m3_sparse_attn(
+            q=torch.empty(0),
+            kv_cache=torch.empty(0),
+            topk_idx=torch.empty(0),
+            block_table=torch.empty(0),
+            cu_seqlens_q=torch.empty(0),
+            seq_lens=torch.empty(0),
+            prefix_lens=torch.empty(0),
+            max_query_len=0,
+            num_kv_heads=2,
+            sm_scale=0.5,
+            output=torch.empty(0),
+            total_kv_blocks=5,
+            max_kv_blocks=3,
+        )
 
-    expect_union = union_available and load_error is None
-    assert metadata_op.call_count == metadata_calls_before_forward
-    assert sum(call.kwargs.get("mask_mode") == 3 for call in metadata_op.call_args_list) == int(expect_union)
-    assert mock_union.call_count == int(expect_union)
-    assert mock_is_available.call_count == int(not expect_union)
-    if expect_union:
-        mock_kv_gather_q.assert_not_called()
-        mock_gbsa.assert_not_called()
-    elif split_kv_available:
+    if expected_impl == "kv_gather_q":
         mock_kv_gather_q.assert_called_once()
         mock_gbsa.assert_not_called()
-        assert mock_kv_gather_q.call_args.args[-2:] == (8, 5)
+        assert mock_kv_gather_q.call_args.args[-2:] == (5, 3)
         assert mock_kv_gather_q.call_args.kwargs == {
             "supports_fp8": device_type == AscendDeviceType.A5,
         }
@@ -3365,8 +3193,10 @@ def test_sparse_model_prefill_dispatches_by_operator_availability(
         mock_gbsa.assert_called_once()
         mock_kv_gather_q.assert_not_called()
         assert mock_gbsa.call_args.kwargs == {
-            "max_query_len": 17,
+            "max_query_len": 0,
         }
+
+    mock_is_available.assert_called_once_with()
 
 
 @pytest.mark.parametrize("tp_size", [1, 4, 8])
