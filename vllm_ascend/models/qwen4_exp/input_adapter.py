@@ -197,15 +197,7 @@ class Qwen4ExpPreparedInputAdapter:
             if buffer is None:
                 buffer = torch.empty(prepared_shape, dtype=target_dtype, device=target_device)
                 self._rope_buffers[key] = buffer
-            if positions.device.type == "npu" and positions.device == cache.device == buffer.device:
-                prepare_qsa_rope_cache(positions, cache, buffer)
-            else:
-                # CPU tests and cross-device configurations retain the portable
-                # fallback; the NPU hot path writes the persistent buffer in one
-                # Triton launch without intermediate clamp/index/copy tensors.
-                safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-                gathered = cache[safe_positions].to(device=target_device, dtype=target_dtype)
-                buffer.copy_(gathered)
+            prepare_qsa_rope_cache(positions, cache, buffer)
             if isinstance(layer.rotary_emb, _Qwen4ExpPreparedRotaryEmbedding):
                 layer.rotary_emb.set_prepared_cos_sin(buffer)
             else:
