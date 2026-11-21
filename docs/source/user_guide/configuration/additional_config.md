@@ -407,3 +407,17 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+The experimental native recurrence can be enabled with
+`gdn_native_prefill_checkpoints` together with `gdn_internal_prefill_checkpoints`.
+On a supported fused GDN backend, it runs both sides of an internal checkpoint
+within one model forward and exports the recurrent state and convolution window
+between them. The scheduler policies below also require the corresponding
+vLLM Core changes.
+
+| Key | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `gdn_native_prefill_checkpoints` | Boolean | `false` | Use the fused GDN recurrence to produce internal prefill checkpoints. |
+| `gdn_native_checkpoint_max_tokens` | Integer | `0` | Limit internal checkpoints to prefills ending at or below this token position. Zero adds no limit. |
+| `gdn_native_preserve_physical_prefix` | Boolean | `false` | Prefer reusable physical-page checkpoints on short cold prefills and retain stops at physical page boundaries. |
+| `gdn_elide_singleton_warm_tail` | Boolean | `false` | With the physical-prefix policy and a positive limit, skip a first-seen short suffix checkpoint after a local physical-page hit. |

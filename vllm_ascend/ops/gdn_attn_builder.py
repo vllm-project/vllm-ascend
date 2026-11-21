@@ -402,6 +402,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and all(getattr(context.get(name), "_ascend_internal_checkpoint_enabled", False) for name in layer_names)
             and bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
         )
+        self._ascend_native_gdn_checkpoints = self._ascend_gdn_checkpoints and all(
+            getattr(context.get(name), "_ascend_native_checkpoint_enabled", False) for name in layer_names
+        )
         if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
             raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         sequence_index_capacity = max(
@@ -1004,16 +1007,27 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                         (prefill_query_start_loc_cpu[:1], prefill_query_start_loc_cpu[1:][live_rows])
                     )
                     prefill_query_start_loc = prefill_query_start_loc_cpu.to(query_start_loc.device, non_blocking=True)
+                if self._ascend_native_gdn_checkpoints and runtime_batch and prefill_rows:
+                    cache_config = self.vllm_config.cache_config
+                    if cache_config.hash_block_size is None or cache_config.cache_hit_alignment_tokens is None:
+                        raise RuntimeError("Native GDN prefill requires the engine's resolved cache alignment")
                 checkpoint = self.checkpoint_builder.build(m, prefill_rows)
                 if checkpoint is not None:
                     # Do not round at a boundary without a reserved cache page.
                     checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
+                    if self._ascend_native_gdn_checkpoints:
+                        # Native packing uses host offsets; the allocator may leave
+                        # some requested columns null. Resolve this once per batch.
+                        checkpoint.offsets = checkpoint.checkpoint_offsets.tolist()
+                        if not any(checkpoint.offsets):
+                            checkpoint = None
             if self._USE_COMMON_KERNEL_METADATA:
                 non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
+                    build_device_metadata=self.build_device_chunk_metadata
+                    or (self._ascend_gdn_checkpoints and not self._ascend_native_gdn_checkpoints),
                 )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64

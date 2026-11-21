@@ -772,6 +772,10 @@ class AscendConfig:
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
     # numerical equivalence and performance are qualified on supported NPUs.
     gdn_internal_prefill_checkpoints: bool = False
+    gdn_native_prefill_checkpoints: bool = False
+    gdn_native_preserve_physical_prefix: bool = False
+    gdn_native_checkpoint_max_tokens: int = Field(default=0, ge=0, strict=True)
+    gdn_elide_singleton_warm_tail: bool = False
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -792,6 +796,16 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.gdn_native_prefill_checkpoints and not self.gdn_internal_prefill_checkpoints:
+            raise ValueError("gdn_native_prefill_checkpoints requires gdn_internal_prefill_checkpoints")
+        if (
+            self.gdn_native_checkpoint_max_tokens or self.gdn_native_preserve_physical_prefix
+        ) and not self.gdn_native_prefill_checkpoints:
+            raise ValueError("The GDN native checkpoint limit and physical-prefix policy require native prefill")
+        if self.gdn_elide_singleton_warm_tail and (
+            not self.gdn_native_preserve_physical_prefix or not self.gdn_native_checkpoint_max_tokens
+        ):
+            raise ValueError("GDN warm-tail elision requires the native physical-prefix policy and a positive limit")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
