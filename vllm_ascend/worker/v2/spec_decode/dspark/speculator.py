@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -34,6 +35,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import get_eagle3_aux_layers_from_config
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextChunk,
@@ -59,6 +61,9 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    _uses_v41_draft_backend = False
+    _reuse_full_draft_metadata = False
+    _full_draft_metadata: tuple[int, int, int, torch.Tensor, dict[str, Any]] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
     # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
@@ -252,6 +257,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
 
             self.attn_backends = attn_backends
             backend = _get_graph_update_backend(self.attn_groups)
+            self._uses_v41_draft_backend = issubclass(backend, DeepseekV41CacheBackend)
             if issubclass(backend, AscendMLABackend):
                 self.attn_architecture = "MLA"
                 # Check whether all MLA groups use FlashMLA.
@@ -294,6 +300,15 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
+    @contextmanager
+    def _draft_metadata_scope(self):
+        self._reuse_full_draft_metadata = self._uses_v41_draft_backend and self.pcp_manager is None and not self.use_dcp
+        try:
+            yield
+        finally:
+            self._full_draft_metadata = None
+            self._reuse_full_draft_metadata = False
+
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -302,6 +317,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             num_reqs = self.input_batch.num_reqs
         assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        # Upstream prepares uniform metadata before dispatching its FULL graph.
+        # The Ascend graph update can consume it when both calls describe the
+        # same draft batch. Consume it once, within the current proposal.
+        cached = self._full_draft_metadata
+        self._full_draft_metadata = None
+        if (
+            cached is not None
+            and cached[:3] == (num_reqs, num_reqs_padded, num_tokens_padded)
+            and cached[3] is seq_lens_cpu_upper_bound
+        ):
+            return [cached[4]]
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
             num_reqs, num_reqs_padded, self.num_query_per_req
         )
@@ -345,7 +371,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         """Build Ascend draft metadata through the upstream attention hook."""
-        if self.attn_architecture not in ("GQA", "MLA"):
+        standard_attention = self.attn_architecture in ("GQA", "MLA")
+        reuse_v41_full = (
+            self._reuse_full_draft_metadata
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+            and batch_desc.num_reqs is not None
+            and step == self.num_query_per_req
+            and causal is self._group_causal
+            and dcp_local_seq_lens is None
+            and np.array_equal(query_start_loc_np, self.arange_np[: num_reqs + 1] * self.num_query_per_req)
+        )
+        if not standard_attention and not reuse_v41_full:
             # Non-MLA/GQA (e.g. SFA) delegates straight to upstream without
             # Ascend CPU-side DCP preparation.
             return super()._build_attn_metadata(
@@ -362,6 +398,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # The draft forward may process padded inputs outside FULL graphs, but
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+        # V4.1 replay uses all-decode flags for the draft's uniform query,
+        # including when the target batch that produced it contains prefill.
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
         with (
             build_attn_metadata_wrapper(),
@@ -383,10 +421,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,
             )
-        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
-            # FULL replay uses the captured padded Q, so FIA needs cumulative
-            # query lengths through every padded request slot.
+        if standard_attention and batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
+            # FIA needs cumulative query lengths through every padded request slot.
             self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        if reuse_v41_full and attn_metadata is not None:
+            self._full_draft_metadata = (
+                num_reqs,
+                num_reqs_padded,
+                num_tokens,
+                seq_lens_cpu_upper_bound,
+                attn_metadata,
+            )
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
@@ -458,6 +503,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_draft_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
+            self._draft_metadata_scope(),
             draft_metadata_request_count(self, num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
