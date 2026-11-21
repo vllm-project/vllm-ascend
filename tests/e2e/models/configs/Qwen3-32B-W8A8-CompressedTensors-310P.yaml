@@ -1,0 +1,30 @@
+# Opt-in TP2 accuracy baseline measured on two Ascend310P3 devices,
+# CANN 9.2.1 / vLLM verified main 544f182d / Ascend main with this feature.
+# Set VLLM_USE_V2_MODEL_RUNNER=0 for accuracy evaluation: the current 310P
+# V2 sampler rejects logprobs and logits processors. V2 generation is tested separately.
+# Revalidate when changing the software stack; this is not a default PR job.
+model_name: "ramblingpolymath/Qwen3-32B-W8A8"
+model_type: "vllm"
+hardware: "Atlas 300I Series (310P3, 2 devices)"
+
+serve:
+  revision: "c97ec599f6d17967bb1049180d81d8a3e959fc97"
+  tensor_parallel_size: 2
+  dtype: float16
+  max_model_len: 2048
+  max_num_batched_tokens: 2048
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.8
+  trust_remote_code: false
+  enforce_eager: true
+
+tasks:
+- name: "mmlu_computer_security"
+  metrics:
+  - name: "acc,none"
+    value: 0.86
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
