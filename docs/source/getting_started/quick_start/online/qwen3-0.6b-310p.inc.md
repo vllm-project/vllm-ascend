@@ -1,4 +1,4 @@
-The following Qwen3-0.6B example has been validated on Atlas 300I DUO and Atlas 200I Pro.
+The following Qwen3-0.6B example has been validated on Atlas 300I Duo and Atlas 200I Pro.
 
 ???+ important "Runtime requirements for this hardware path"
 
@@ -17,7 +17,7 @@ vllm serve Qwen/Qwen3-0.6B \
 
 If you see the following logs:
 
-```text
+```output
 INFO:     Started server process [3594]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
@@ -66,7 +66,7 @@ kill -2 "$VLLM_PID"
 
 The output is as follows:
 
-```text
+```output
 INFO:     Shutting down FastAPI HTTP server.
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
