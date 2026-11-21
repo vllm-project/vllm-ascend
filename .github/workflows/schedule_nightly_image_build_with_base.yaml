@@ -61,6 +61,16 @@ on:
         required: false
         default: false
         type: boolean
+      isolated_build:
+        description: "If true, publish an isolated build (/presmoke) instead of the standard nightly artifacts. Everything isolation-related is derived from this single flag: both layers are built full-scale (amd64+arm64 for ubuntu and openEuler), the tags are unchanged and only the '-presmoke' CI repositories differ (ascend/vllm-ascend-presmoke, base_image/ascend-ci/vllm-ascend-presmoke), images are never pushed to atlas_inference and never synced to quay.io or swr.cn-north-4. Default false keeps the standard nightly behaviour untouched."
+        required: false
+        default: false
+        type: boolean
+      source_ref:
+        description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). /presmoke passes the triggering PR so both layers are built from the code and Dockerfiles under review ('pre-merge'), while vllm_ascend_branch still decides the branch and the published tag. Empty builds vllm_ascend_branch."
+        required: false
+        default: ''
+        type: string
 
 permissions:
   actions: read
@@ -113,9 +123,10 @@ jobs:
       suffix: ${{ matrix.suffix }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
       base_image_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
-      # Build both architectures for every OS, keeping the fixed runner mapping
-      # (and therefore the build cache) used by the nightly pipeline.
-      build_type: 'full'
+      source_ref: ${{ inputs.source_ref }}
+      # The standard nightly pipeline builds both architectures for every OS,
+      # keeping the fixed runner mapping (and therefore the build cache).
+      isolated_build: ${{ inputs.isolated_build }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' }}
       skip_base: ${{ inputs.skip_base || false }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
@@ -131,7 +142,9 @@ jobs:
       contents: read
     # An intentionally skipped base is excluded from expected_types_json;
     # missing nightly reports still make the collector fail.
-    if: ${{ always() && needs.setup-matrix.result == 'success' && needs.setup-matrix.outputs.has_matrix == 'true' && github.repository == 'vllm-project/vllm-ascend' }}
+    # Isolated builds (published to the '-presmoke' repositories) are not part of
+    # the standard nightly artifacts and must not be collected.
+    if: ${{ always() && needs.setup-matrix.result == 'success' && needs.setup-matrix.outputs.has_matrix == 'true' && github.repository == 'vllm-project/vllm-ascend' && !inputs.isolated_build }}
     uses: ./.github/workflows/_collect_build_info.yaml
     with:
       branch: ${{ inputs.vllm_ascend_branch }}

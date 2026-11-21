@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,7 +15,8 @@ from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
-def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_profiling):
+@pytest.mark.parametrize("has_trackers", [False, True])
+def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_profiling, has_trackers):
     k, v, conv, ssm, single = [torch.empty(3, 4) for _ in range(5)]
     other = torch.empty(3, 4, device="meta")
     caches = {"attention": (k, None, v), "mamba": [conv, ssm], "single": single, "other": other}
@@ -30,6 +31,9 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     # the test exercises the KV-connector path only (main-only branch).
     runner.vllm_config.aux_output_config.enabled = False
     runner.jit_warmup_registry.activate.side_effect = nullcontext
+    stale_trackers = [torch.empty(3, dtype=torch.int32)]
+    runner.replayssm_block_copy_tensors = stale_trackers
+    trackers = [torch.zeros(3, dtype=torch.int32), torch.ones(3, dtype=torch.int32)] if has_trackers else []
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
     registration_order = []
     runner._register_sparse_kv_caches.side_effect = lambda _: registration_order.append("offload")
@@ -37,6 +41,11 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     def register_connector(*_args):
         registration_order.append("connector")
 
+    tracker_context: AbstractContextManager[MagicMock | None]
+    if not vllm_version_is("0.33.0"):
+        tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
+    else:
+        tracker_context = nullcontext(None)
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
@@ -48,11 +57,18 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         patch.object(upstream, "ModelCudaGraphManager"),
         patch.object(upstream, "check_attention_cp_compatibility"),
         patch.object(upstream, "init_kv_cache", return_value=caches),
+        tracker_context as collect_trackers,
         patch.object(upstream, "get_kv_connector", side_effect=register_connector) as connector,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
+    if collect_trackers is not None:
+        collect_trackers.assert_called_once_with(runner.compilation_config.static_forward_context)
+        assert runner.replayssm_block_copy_tensors is trackers
+        assert type(runner.replayssm_block_copy_tensors) is list
+    else:
+        assert runner.replayssm_block_copy_tensors is stale_trackers
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
     if is_profiling:
         assert registration_order == ["offload"]
@@ -118,8 +134,14 @@ def test_mrv2_block_copy_preserves_segmented_mamba_storage():
     conv = storage[:12].view(3, 4)
     ssm = storage[12:].view(3, 8)
     before_conv, before_ssm = conv.clone(), ssm.clone()
-    upstream.copy_kv_cache_blocks_inplace([conv, ssm, conv, ssm], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)])
+    ring_start = torch.tensor([10, 20, 30], dtype=torch.int32)
+    num_committed = torch.tensor([1, 2, 3], dtype=torch.int32)
+    upstream.copy_kv_cache_blocks_inplace(
+        [conv, ssm, conv, ssm, ring_start, num_committed], 3, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
+    )
     torch.testing.assert_close(conv[2], before_conv[0])
     torch.testing.assert_close(ssm[2], before_ssm[0])
     torch.testing.assert_close(conv[:2], before_conv[:2])
     torch.testing.assert_close(ssm[:2], before_ssm[:2])
+    torch.testing.assert_close(ring_start, torch.tensor([10, 20, 10], dtype=torch.int32))
+    torch.testing.assert_close(num_committed, torch.tensor([1, 2, 1], dtype=torch.int32))

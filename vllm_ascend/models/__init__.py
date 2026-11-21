@@ -76,6 +76,9 @@ def register_model():
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
+    ModelRegistry.register_model(
+        "DSparkMiniMaxDraftModel", "vllm_ascend.models.minimax_m3.minimax_m3_dspark:MiniMaxFlashDSparkForCausalLM"
+    )
     ModelRegistry.register_model("Glm5DSparkForCausalLM", "vllm_ascend.models.glm5_dspark:Glm5DSparkForCausalLM")
     ModelRegistry.register_model(
         "Qwen3OmniDSparkModel",
@@ -124,4 +127,19 @@ def register_model():
     )
     ModelRegistry.register_model(
         "LlamaForCausalLMEagle3", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
+    )
+    # Ascend Step5: MRV2 port reusing the vLLM 0.33 upstream skeleton (ring +
+    # summary CSA state, MoE, weight loading) with the NPU compute kernels
+    # proven in the MRV1 implementation; overwrites the upstream mappings.
+    ModelRegistry.register_model(
+        "Step5ForCausalLM",
+        "vllm_ascend.models.step5.model:AscendStep5ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Step5ForConditionalGeneration",
+        "vllm_ascend.models.step5.vl:AscendStep5ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Step5MTP",
+        "vllm_ascend.models.step5.mtp:AscendStep5MTP",
     )

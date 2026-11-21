@@ -38,7 +38,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
@@ -779,6 +779,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
     Keep execution independent of the standard SFA indexer and its operators.
     """
 
+    _head_weight_f32: torch.Tensor | None
+
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
         if qk_rope_head_dim != 0:
@@ -809,6 +811,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self.index_kpool_compress_ape = vllm_indexer.index_kpool_compress_ape
         self.index_kpool_compress_gate = vllm_indexer.index_kpool_compress_gate
         self.k_cache: Any = vllm_indexer.k_cache
+        self.kpool_int8 = getattr(self.k_cache, "dtype", torch.bfloat16) == torch.int8
         self.tail_cache: Any = vllm_indexer.tail_cache
         self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
         # Reserve the shared exchange workspace at model-build time: backend
@@ -824,19 +827,8 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 self.topk_output_width,
                 parallel_config.tensor_parallel_size,
             )
-        if self.enable_sparse_li_c8 and not get_current_hardware_profile().supports(
-            HardwareCapability.POOL_KEY_INDEXER_FP8
-        ):
-            raise NotImplementedError("GLM KPool FP8 LI requires CANN PoolKeyIndexer FP8 support on Ascend 950.")
         self._init_cann_ops()
-        for name in (
-            "_key_weight",
-            "_gate_weight",
-            "_head_weight_f32",
-            "_norm_weight_f32",
-            "_norm_bias_f32",
-        ):
-            self.register_buffer(name, None, persistent=False)
+        self._head_weight_f32 = None
 
     @property
     def topk_output_width(self) -> int:
@@ -853,14 +845,19 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
     @property
     def num_cache_tensors(self) -> int:
-        return 2 if self.enable_sparse_li_c8 else 1
+        return 2 if self.enable_sparse_li_c8 or self.kpool_int8 else 1
 
     def process_weights_after_loading(self) -> None:
-        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
-        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
-        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
-        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
-        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+        """Refill the sole derived weight without moving its captured address."""
+        head_weight = (
+            self.wk_weights_proj.weight[self.head_dim :].detach().to(dtype=torch.float32, copy=True).contiguous()
+        )
+        # TODO: Use upstream refill_derived once all vLLM versions supported
+        # by vllm-ascend main provide it.
+        if self._head_weight_f32 is None:
+            self._head_weight_f32 = head_weight
+        else:
+            self._head_weight_f32.copy_(head_weight)
 
     @staticmethod
     def _bound_caches(layer: Any) -> tuple[torch.Tensor, ...]:
@@ -875,9 +872,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             cache = (cache,)
         if not isinstance(cache, (list, tuple)) or not cache or any(not isinstance(t, torch.Tensor) for t in cache):
             raise TypeError(f"GLM KPool cache {layer.prefix!r} is not bound to a tensor.")
-        if len(cache) != (2 if cache[0].dtype == torch.float8_e4m3fn else 1):
-            raise TypeError("GLM KPool cache requires a key tensor and, for FP8, one scale tensor.")
+        if len(cache) != (2 if cache[0].dtype in (torch.float8_e4m3fn, torch.int8) else 1):
+            raise TypeError("GLM KPool cache requires a key tensor and, for FP8 or INT8, one scale tensor.")
         return tuple(cache)
+
+    @staticmethod
+    def _symmetric_int8(value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        value = value.float()
+        scale = (value.abs().amax(dim=-1) / 127.0).clamp_min(torch.finfo(torch.float16).tiny).to(torch.float16)
+        return (value / scale.unsqueeze(-1)).round().clamp(-127, 127).to(torch.int8), scale
 
     def prepare_pcp_hidden(
         self, k_hidden_states: torch.Tensor, indexer_metadata: AscendIndexerKPoolMetadata
@@ -929,9 +932,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             k_hidden_states = self.prepare_pcp_hidden(k_hidden_states, indexer_metadata)
         num_tokens = hidden_states.shape[0]
         hidden = hidden_states[:num_tokens]
-        if self._key_weight is None:
+        if self._head_weight_f32 is None:
             self.process_weights_after_loading()
-        assert self._key_weight is not None
+        assert self._head_weight_f32 is not None
         q_values = None
         weights = None
         if compute_topk:
@@ -950,6 +953,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         indexer_cache, *scale_caches = self._bound_caches(self.k_cache)
         (tail_cache,) = self._bound_caches(self.tail_cache)
+        indexer_scale_cache = scale_caches[0] if scale_caches else None
         k_hidden = k_hidden_states[:num_tokens] if isinstance(k_hidden_states, torch.Tensor) else k_hidden_states()
         return self._forward_cann(
             k_hidden,
@@ -960,7 +964,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             indexer_metadata,
             tail_metadata,
             compute_topk=compute_topk,
-            indexer_scale_cache=scale_caches[0] if scale_caches else None,
+            indexer_scale_cache=indexer_scale_cache,
         )
 
     def _init_cann_ops(self) -> None:
@@ -1033,12 +1037,15 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             or tail_metadata.cann_inputs is None
         ):
             raise ValueError("GLM KPool metadata requires CANN request boundaries and pooled-key row indices.")
-        quantized = indexer_cache.dtype == torch.float8_e4m3fn
-        if indexer_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
-            raise TypeError("GLM KPool compressed cache must be bfloat16 or float8_e4m3fn.")
-        if quantized and (indexer_scale_cache is None or indexer_scale_cache.dtype != torch.float32):
+        fp8 = indexer_cache.dtype == torch.float8_e4m3fn
+        int8 = indexer_cache.dtype == torch.int8
+        if indexer_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn, torch.int8):
+            raise TypeError("GLM KPool compressed cache must be bfloat16, float8_e4m3fn or int8.")
+        if fp8 and (indexer_scale_cache is None or indexer_scale_cache.dtype != torch.float32):
             raise ValueError("GLM KPool FP8 cache requires FP32 per-pool scales.")
-        if not quantized and indexer_scale_cache is not None:
+        if int8 and (indexer_scale_cache is None or indexer_scale_cache.dtype != torch.float16):
+            raise ValueError("GLM KPool INT8 cache requires FP16 per-pool scales.")
+        if not (fp8 or int8) and indexer_scale_cache is not None:
             raise ValueError("GLM KPool BF16 cache must not have quantization scales.")
         if tail_cache.dtype != torch.float32:
             raise TypeError("GLM KPool compressor tail must be float32.")
@@ -1057,32 +1064,39 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         # Keep history separate: CANN can save the tail before other cores
         # finish reading history. Whole-pool shifts preserve the pooling result.
+        # Read parameters at execution time so refits/offloading cannot leave
+        # persistent views pointing at replaced parameter storage.
+        key_weight = self.wk_weights_proj.weight[: self.head_dim]
+        gate_weight = self.index_kpool_compress_gate
+        norm_weight, norm_bias = self.k_norm.weight, self.k_norm.bias
         norm_eps = getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6))
         state = self._prepare_keypool_state(tail_cache, cache_metadata.start_pos, tail_metadata, self.index_kpool)
         pooled_key = self._key_pool(
             hidden_states,
-            self._key_weight,
-            self._gate_weight,
+            key_weight,
+            gate_weight,
             self.index_kpool_compress_ape,
             state,
             cache_metadata.keypool_state_table,
             cache_metadata.keypool_start_offsets,
-            norm_weight=self._norm_weight_f32,
-            norm_bias=self._norm_bias_f32,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             cu_seqlens=cache_metadata.query_start_loc,
             cmp_ratio=self.index_kpool,
             norm_eps=norm_eps,
         )
+        if int8:
+            pooled_key, pooled_scales = self._symmetric_int8(pooled_key)
+        else:
+            pooled_scales = None
         tail_key = tail_gate = None
         if tail_metadata.cann_inputs.retained_indices is not None:
             # Re-project the live MTP rollback window missing from CANN state.
             tail_hidden = self._gather_retained_hidden(hidden_states, tail_metadata.cann_inputs.retained_indices)
-            tail_key = F.linear(tail_hidden, self._key_weight).float()
-            if self._norm_weight_f32 is not None:
-                tail_key = F.layer_norm(
-                    tail_key, (self.head_dim,), self._norm_weight_f32, self._norm_bias_f32, norm_eps
-                )
-            tail_gate = F.linear(tail_hidden, self._gate_weight).float()
+            tail_key = F.linear(tail_hidden, key_weight).float()
+            if norm_weight is not None:
+                tail_key = F.layer_norm(tail_key, (self.head_dim,), norm_weight, norm_bias, norm_eps)
+            tail_gate = F.linear(tail_hidden, gate_weight).float()
         self._write_keypool_caches(
             tail_cache,
             indexer_cache,
@@ -1093,6 +1107,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_metadata,
             state,
             scale_cache=indexer_scale_cache,
+            pooled_scales=pooled_scales,
         )
         # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
@@ -1122,18 +1137,25 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         else:
             scoring = indexer_metadata
             output_buffer = self.topk_indices_buffer
-        if quantized:
+        if fp8:
             assert indexer_scale_cache is not None
             query = q_values
             indexer_op = partial(self._pool_key_indexer_fp8, k_descale=indexer_scale_cache[..., 0])
+            select = partial(self._pool_key_indexer, indexer_op)
+            extra = {}
+        elif int8:
+            assert indexer_scale_cache is not None
+            query, q_descale = self._symmetric_int8(q_values)
+            select = self._cann_pool_key_indexer
+            extra = dict(q_descale=q_descale, k_descale=indexer_scale_cache[..., 0], quant_mode=2)
         else:
             query = q_values.to(indexer_cache.dtype)
-            indexer_op = self._cann_pool_key_indexer
-        indices, _ = self._pool_key_indexer(
-            indexer_op,
+            select = partial(self._pool_key_indexer, self._cann_pool_key_indexer)
+            extra = {}
+        indices, _ = select(
             query,
             indexer_cache,
-            weights.to(torch.bfloat16),
+            weights.to(torch.float16 if int8 else torch.bfloat16),
             scoring.pool_tail,
             actual_seq_q=scoring.cum_query_lens,
             actual_seq_k=scoring.seq_lens,
@@ -1143,6 +1165,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             topk=self.topk_tokens,
             pool_size=self.index_kpool,
             mask_mode=3,
+            **extra,
         )
         output = self._pack_keypool_indices(indices, scoring, self.topk_tokens, self.index_kpool, output_buffer)
         if row_shard is not None and self.topk_indices_buffer is not None:

@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -70,6 +71,10 @@ def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capac
 
 @pytest.mark.parametrize("capacity", [4, 9, 12])
 def test_tail_uses_one_full_precision_page(capacity):
+    # Register built-in specs first; register_ascend_kv_cache_specs() alone
+    # leaves the global registry partially populated, which breaks later
+    # lookups of built-in specs on fresh xdist workers.
+    register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()
     spec = AscendIndexerKPoolTailSpec(
         block_size=4,
@@ -334,7 +339,7 @@ def test_model_cache_layers_publish_source_compatible_specs(dtype, lookahead):
 
 
 def test_indexer_cache_rejects_unsupported_dtype():
-    with pytest.raises(ValueError, match="BF16 or FP8"):
+    with pytest.raises(ValueError, match="BF16, FP8 or INT8"):
         Glm5NextIndexerCache(
             head_dim=128,
             dtype=torch.float16,

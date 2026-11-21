@@ -28,6 +28,7 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
@@ -48,6 +49,7 @@ from ..base import (
     PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
+    require_mx_weight_format,
 )
 from ..registry import register_scheme
 
@@ -75,6 +77,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     supports_unaligned_tp_groups = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP8)
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
@@ -364,10 +367,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
     model_dtype = None
     quant_type: QuantType = QuantType.W8A8MXFP
     act_quant_type: torch.dtype = torch.float8_e4m3fn
-    fused_activations = frozenset({"silu"})
+    fused_activations = frozenset({"silu", "swiglustep"})
     supports_eplb = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP8)
         vllm_config = get_current_vllm_config()
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
         self.group_size = quant_description.get("group_size", 32)
@@ -712,20 +716,38 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        if mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            # GMM produces contiguous [gate | up] BF16 output. Mode 2 applies
-            # the clipped, non-interleaved SwiGLU-OAI before MXFP8 quantization;
+        if mlp_compute_input.activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
+            # Both modes consume GMM's contiguous [gate | up] BF16 output;
             # mode 1 would instead interpret alternating gate/up elements.
             hidden_states = self.apply_gmm1(mlp_compute_input)
+            activation_kwargs: dict[str, Any]
+            if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
+                # Mode 3 clamps gate after SiLU, matching SwigluStepAndMul
+                # without alpha/bias or interleaving.
+                activation_kwargs = dict(
+                    swiglu_mode=3,
+                    # Match the fixed post-SiLU limit in moe_mlp.py's
+                    # unfused SWIGLUSTEP path, independent of MoE config.
+                    clamp_limit=7.0,
+                )
+            else:
+                # Mode 2 applies the non-interleaved SwiGLU-OAI activation:
+                # clamp before activation, using the configured alpha/bias.
+                activation_kwargs = dict(
+                    swiglu_mode=2,
+                    clamp_limit=mlp_compute_input.swiglu_limit,
+                    glu_alpha=mlp_compute_input.swiglu_alpha,
+                    glu_bias=mlp_compute_input.swiglu_beta,
+                )
             hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
                 hidden_states,
+                # vLLM list type 1 and operator group_mode 0 both mean token counts.
+                group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
+                group_mode=0,
                 activate_left=True,
-                swiglu_mode=2,
-                clamp_limit=mlp_compute_input.swiglu_limit,
-                glu_alpha=mlp_compute_input.swiglu_alpha,
-                glu_bias=mlp_compute_input.swiglu_beta,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
+                **activation_kwargs,
             )
             return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
 

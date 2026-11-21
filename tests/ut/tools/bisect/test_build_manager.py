@@ -11,6 +11,9 @@ def _build_manager(tmp_path: Path, *, native_check: str = "per-commit") -> Build
     return BuildManager(
         BisectOptions(
             repo_dir=tmp_path,
+            work_dir=str(tmp_path / "work_dir"),  # override the /root/.cache default:
+            # CI runs as root so the default works there, but a non-root local
+            # run hits PermissionError on stat(/root/.cache) -> 9 test failures.
             assume_built_head=False,
             native_check=native_check,
         )
