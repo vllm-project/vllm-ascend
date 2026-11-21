@@ -746,6 +746,12 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         projector = attn.dsa_attn.dsa_attn.impl
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
         prepared = self._preprocess(attn, hidden_states, metadata, global_metadata)
+        # Both SWA and long-KV writes are issued by now.  Build the bounded SWA
+        # staging tables and launch the copy on a side stream here so it
+        # overlaps the indexer selection; ``_forward_attention`` joins it just
+        # before the kernel.  Every rank still issues its own writes and
+        # collectives unchanged: only the copy moves streams.
+        self._start_owner_swa_stage_async(attn, metadata)
         projector._parallel_o_proj.all_gather_weights()
         return prepared
 

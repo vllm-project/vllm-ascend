@@ -562,6 +562,101 @@ class AscendDSAV41Impl:
     model construction is independent from cache-aware attention execution.
     """
 
+    def _start_owner_swa_stage_async(self, attn, metadata):
+        """Launch bounded SWA staging on a side stream right after the cache writes.
+
+        The table build, metadata rebuild and copy are all device work, so they
+        overlap ``_select_sparse_indices`` on the main stream.  The result is
+        stashed on this layer's SWA metadata and consumed by
+        ``_forward_attention``; any non-prefill batch, non-owner cache or
+        overflow keeps the synchronous path.
+        """
+        swa_metadata = metadata.swa
+        # Never let a stash from an earlier branch reach the kernel.
+        swa_metadata._pcp_swa_async = None
+        config = self.pcp_config
+        if not config.owner_stage_swa_chunk or swa_metadata.replay_block_table is not None:
+            return
+        if getattr(attn, "packed_cache_ops", None) is not None:
+            return
+        if not (
+            swa_metadata.num_decodes == 0
+            and swa_metadata.num_prefills > 0
+            and swa_metadata.ori_sparse_indices is None
+            and swa_metadata.ori_topk_length is None
+            and swa_metadata.storage_block_size
+            and swa_metadata.ori_win_left >= 0
+        ):
+            return
+        from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+            get_swa_chunk_stage_cache,
+        )
+        from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+            owner_slab_for_tensor,
+        )
+
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
+        slab = owner_slab_for_tensor(swa_cache)
+        if slab is None or not slab.active:
+            return
+        has_compressed = self.role.compress_ratio in (1, 2)
+        num_reqs = swa_metadata.num_reqs
+        ori_block_table = swa_metadata.block_table[:num_reqs]
+        cache = get_swa_chunk_stage_cache(
+            swa_cache.device,
+            swa_cache,
+            budget_bytes=config.owner_stage_swa_chunk_bytes,
+        )
+        # Recorded after ``_preprocess`` issued the SWA/long-KV writes on the
+        # main stream (the multistream path joins its side stream before
+        # returning), so the copy can never read a half-written cache.
+        start = torch.npu.current_stream().record_event()
+        stream = cache.staging_stream()
+        issue = _timing_enter("stage_swa_chunk_issue", config.enable_timing)
+        staged = None
+        rebuilt = None
+        plan = None
+        with npu_stream_switch(stream, enabled=True):
+            stream.wait_event(start)
+            plan_token = _timing_enter("stage_swa_plan", config.enable_timing)
+            plan = _build_swa_chunk_plan(
+                swa_metadata,
+                ori_block_table,
+                num_reqs,
+                int(swa_metadata.storage_block_size),
+                int(swa_metadata.ori_win_left) + 1,
+                int(swa_cache.shape[0]),
+            )
+            _timing_exit(plan_token)
+            if plan is not None and plan.total_blocks > 0:
+                smla_token = _timing_enter("stage_swa_smla", config.enable_timing)
+                rebuilt = _build_swa_chunk_smla_metadata(
+                    attn,
+                    swa_metadata,
+                    metadata.attention if has_compressed else swa_metadata,
+                    plan,
+                    has_compressed=has_compressed,
+                    ratio=self.role.compress_ratio if has_compressed else 0,
+                    cmp_seq_lens=(metadata.attention.cache_seq_lens[:num_reqs] if has_compressed else None),
+                    cmp_residual=(metadata.attention.cmp_residual if has_compressed else None),
+                    cmp_topk=self.topology.index_topk if has_compressed else 0,
+                    num_reqs=num_reqs,
+                )
+                _timing_exit(smla_token)
+                if rebuilt is not None:
+                    staged = cache.stage_async(
+                        swa_cache,
+                        plan.window_block_table,
+                        counts=plan.counts,
+                        prepared=plan.prepared,
+                        enable_timing=config.enable_timing,
+                        start_event=start,
+                    )
+        _timing_exit(issue)
+        if staged is None or rebuilt is None:
+            return
+        swa_metadata._pcp_swa_async = (staged[2], (staged[0], staged[1]), plan, rebuilt, has_compressed)
+
     def __init__(self, prefix, role, topology, long_kv_source_prefix, index_k_source_prefix):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
@@ -995,66 +1090,82 @@ class AscendDSAV41Impl:
             # coordinates onto it; the sliding-window mask is relative, so it
             # is unchanged. Decodes, mixed batches, non-owner caches and sparse
             # ori indices keep the direct peer-read path.
-            eligible = (
-                metadata.swa.num_decodes == 0
-                and metadata.swa.num_prefills > 0
-                and metadata.swa.ori_sparse_indices is None
-                # A per-token visible-length floor (bounded replay) is tied to
-                # the unbounded coordinate system; keep that path untouched.
-                and metadata.swa.ori_topk_length is None
-                and metadata.swa.storage_block_size
-                and metadata.swa.ori_win_left >= 0
-            )
-            if eligible:
-                from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
-                    get_swa_chunk_stage_cache,
+            #
+            # ``_start_owner_swa_stage_async`` already built the tables and
+            # issued the copy on a side stream after the cache writes, so here
+            # we only join that event before the kernel.  A missing stash
+            # (decode/mixed, non-owner cache, overflow, packed-cache path) runs
+            # the synchronous staging below exactly as before.
+            async_stage = getattr(metadata.swa, "_pcp_swa_async", None)
+            metadata.swa._pcp_swa_async = None
+            staged = None
+            plan = None
+            rebuilt = None
+            if async_stage is not None and async_stage[4] == has_compressed:
+                done, staged_pair, plan, rebuilt, _ = async_stage
+                timing = _timing_enter("stage_swa_chunk_wait", self.pcp_config.enable_timing)
+                torch.npu.current_stream().wait_event(done)
+                _timing_exit(timing)
+                staged = staged_pair
+            if staged is None:
+                eligible = (
+                    metadata.swa.num_decodes == 0
+                    and metadata.swa.num_prefills > 0
+                    and metadata.swa.ori_sparse_indices is None
+                    # A per-token visible-length floor (bounded replay) is tied
+                    # to the unbounded coordinate system; keep that path untouched.
+                    and metadata.swa.ori_topk_length is None
+                    and metadata.swa.storage_block_size
+                    and metadata.swa.ori_win_left >= 0
                 )
-                from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
-                    owner_slab_for_tensor,
-                )
-
-                if owner_slab_for_tensor(swa_cache) is not None:
-                    timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
-                    plan = _build_swa_chunk_plan(
-                        metadata.swa,
-                        ori_block_table,
-                        num_reqs,
-                        int(metadata.swa.storage_block_size),
-                        int(metadata.swa.ori_win_left) + 1,
-                        int(swa_cache.shape[0]),
+                if eligible:
+                    from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
+                        get_swa_chunk_stage_cache,
                     )
-                    staged = None
-                    rebuilt = None
-                    if plan is not None and plan.total_blocks > 0:
-                        rebuilt = _build_swa_chunk_smla_metadata(
-                            attn,
+                    from vllm_ascend.attention.context_parallel.pcp_owner_vmm import (
+                        owner_slab_for_tensor,
+                    )
+
+                    if owner_slab_for_tensor(swa_cache) is not None:
+                        timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
+                        plan = _build_swa_chunk_plan(
                             metadata.swa,
-                            operator_metadata,
-                            plan,
-                            has_compressed=has_compressed,
-                            ratio=ratio,
-                            cmp_seq_lens=cmp_seq_lens,
-                            cmp_residual=cmp_residual,
-                            cmp_topk=cmp_topk,
-                            num_reqs=num_reqs,
+                            ori_block_table,
+                            num_reqs,
+                            int(metadata.swa.storage_block_size),
+                            int(metadata.swa.ori_win_left) + 1,
+                            int(swa_cache.shape[0]),
                         )
-                        if rebuilt is not None:
-                            staged = get_swa_chunk_stage_cache(
-                                swa_cache.device,
-                                swa_cache,
-                                budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
-                            ).stage(
-                                swa_cache,
-                                plan.window_block_table,
-                                counts=plan.counts,
-                                prepared=plan.prepared,
-                                enable_timing=self.pcp_config.enable_timing,
+                        if plan is not None and plan.total_blocks > 0:
+                            rebuilt = _build_swa_chunk_smla_metadata(
+                                attn,
+                                metadata.swa,
+                                operator_metadata,
+                                plan,
+                                has_compressed=has_compressed,
+                                ratio=ratio,
+                                cmp_seq_lens=cmp_seq_lens,
+                                cmp_residual=cmp_residual,
+                                cmp_topk=cmp_topk,
+                                num_reqs=num_reqs,
                             )
-                    _timing_exit(timing)
-                    if staged is not None:
-                        swa_cache, ori_block_table = staged
-                        seq_lens = plan.replay_seq_lens
-                        op_metadata = rebuilt
+                            if rebuilt is not None:
+                                staged = get_swa_chunk_stage_cache(
+                                    swa_cache.device,
+                                    swa_cache,
+                                    budget_bytes=self.pcp_config.owner_stage_swa_chunk_bytes,
+                                ).stage(
+                                    swa_cache,
+                                    plan.window_block_table,
+                                    counts=plan.counts,
+                                    prepared=plan.prepared,
+                                    enable_timing=self.pcp_config.enable_timing,
+                                )
+                        _timing_exit(timing)
+            if staged is not None:
+                swa_cache, ori_block_table = staged
+                seq_lens = plan.replay_seq_lens
+                op_metadata = rebuilt
         timing = _timing_enter("kernel", self.pcp_config.enable_timing)
         output, _ = torch.ops._C_ascend.npu_sparse_flash_mla(
             q,

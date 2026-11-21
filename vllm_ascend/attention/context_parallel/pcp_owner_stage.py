@@ -221,10 +221,23 @@ class PcpOwnerStageCache:
         self.device = device
         self._budget_bytes = budget_bytes
         self._scratch: torch.Tensor | None = None
+        self._staging_stream: torch.npu.Stream | None = None
         self.capacity_blocks = 0
         self.stage_calls = 0
         self.staged_blocks = 0
         self.overflow_fallbacks = 0
+
+    def staging_stream(self) -> torch.npu.Stream:
+        """Dedicated copy stream, kept apart from the DSA overlap stream.
+
+        Sharing ``dsv4_dsa_overlap_stream`` would serialize the copy behind the
+        indexer's query/weight work instead of overlapping with it.
+        """
+        if self._staging_stream is None:
+            import torch_npu
+
+            self._staging_stream = torch_npu.npu.Stream()
+        return self._staging_stream
 
     def _ensure(self, source_cache: torch.Tensor) -> torch.Tensor:
         if self._scratch is not None:
@@ -328,6 +341,45 @@ class PcpOwnerStageCache:
                 self.capacity_blocks,
             )
         return view, staged_table
+
+    def stage_async(
+        self,
+        source_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        *,
+        seq_lens: torch.Tensor | None = None,
+        block_size: int | None = None,
+        counts: list[int] | None = None,
+        prepared: tuple[torch.Tensor, torch.Tensor, int] | None = None,
+        enable_timing: bool = False,
+        start_event: torch.npu.Event | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.npu.Event] | None:
+        """Issue the staging copy on a side stream and return its done event.
+
+        ``start_event`` must be recorded on the main stream after the cache
+        writes that the copy reads.  The caller consumes the returned event
+        with ``main_stream.wait_event(done)`` immediately before the attention
+        kernel, so the table build and copy overlap the indexer selection.
+        Returns ``None`` on overflow, keeping the synchronous peer-read path.
+        """
+        if start_event is None:
+            start_event = torch.npu.current_stream().record_event()
+        stream = self.staging_stream()
+        stream.wait_event(start_event)
+        with torch.npu.stream(stream):
+            result = self.stage(
+                source_cache,
+                block_table,
+                seq_lens=seq_lens,
+                block_size=block_size,
+                counts=counts,
+                prepared=prepared,
+                enable_timing=enable_timing,
+            )
+            if result is None:
+                return None
+            done = stream.record_event()
+        return result[0], result[1], done
 
 
 _stage_caches: dict[tuple, PcpOwnerStageCache] = {}
