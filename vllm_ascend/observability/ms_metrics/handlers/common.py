@@ -132,13 +132,21 @@ def record_observation(
     value: float,
     labels: dict[str, str],
     feature: str,
-) -> None:
-    """Register ``specs`` and record one observation when the level allows it."""
+) -> bool:
+    """Register ``specs`` and record one observation when the level allows it.
+
+    Returns ``True`` only when the sample was handed to the recorder. Callers
+    that latch a one-shot state must retry until this returns ``True``: a
+    missing recorder or a suppressed recording error would otherwise drop the
+    only sample of that state.
+    """
     if not metric_enabled(spec):
-        return
+        return False
+    recorded = False
     with safe_recording(feature):
         metrics = register_metrics(specs, recorders, recorder_key)
-        record_metric(metrics, spec, value, labels)
+        recorded = record_metric(metrics, spec, value, labels)
+    return recorded
 
 
 def record_metric(
@@ -146,11 +154,12 @@ def record_metric(
     spec: MetricSpec,
     value: float,
     labels: dict[str, str],
-) -> None:
+) -> bool:
     """Record ``spec`` when the recorder exists and the active level allows it."""
     if metrics is None or spec.level > get_metric_level():
-        return
+        return False
     metrics.record_metric(spec.name, value=float(value), labels=labels)
+    return True
 
 
 @contextlib.contextmanager
