@@ -1,0 +1,7 @@
+pr: 22468
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MooncakeConnectorV2 startup failures for models whose attention layers
+      share another layer's KV cache. Shared-cache layers reuse the owner's
+      transferred data; combining KV sharing with KV parallelism remains unsupported.
