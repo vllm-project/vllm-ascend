@@ -108,23 +108,50 @@ def runner_pp_rank(runner: Any) -> int | str:
         return "?"
 
 
+def _rank_attr(obj: Any, name: str) -> int | None:
+    """Integer value of ``obj.name``, or ``None`` when absent / not an int.
+
+    Rank and size attributes may reach the runner as strings (parsed from
+    configs), so plain ``int()`` conversion is used, consistent with
+    ``runner_dp_rank`` / ``runner_tp_rank``.
+    """
+    if obj is None:
+        return None
+    value = getattr(obj, name, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def runner_cp_rank(runner: Any) -> int:
-    """Combined CP rank (``pcp_rank * dcp_size + dcp_rank``) when CP is on."""
-    try:
-        dcp = int(getattr(runner, "dcp_rank", 0) or 0)
-    except Exception:
-        dcp = 0
-    try:
-        pcp = int(getattr(runner, "pcp_rank", 0) or 0)
-    except Exception:
+    """Combined CP rank (``pcp_rank * dcp_size + dcp_rank``) when CP is on.
+
+    The PCP rank belongs to the PCP manager (``runner.pcp_manager.pcp_rank``);
+    the model runner itself carries no ``pcp_rank`` attribute, so reading it
+    from the runner silently resolves ``0`` on every PCP rank and makes the
+    ``dp*_tp*_pp*_cp*`` dump directories of different PCP ranks collide. Read
+    the manager first and keep the runner attribute as a fallback.
+    """
+    pcp_manager = getattr(runner, "pcp_manager", None)
+    pcp = _rank_attr(pcp_manager, "pcp_rank")
+    if pcp is None:
+        pcp = _rank_attr(runner, "pcp_rank")
+    dcp_size = _rank_attr(runner, "dcp_size")
+    if dcp_size is None:
+        dcp_size = _rank_attr(pcp_manager, "dcp_world_size")
+    dcp = _rank_attr(runner, "dcp_rank")
+    if dcp is None:
+        dcp = _rank_attr(pcp_manager, "dcp_rank")
+    if pcp is None:
         pcp = 0
-    try:
-        dcp_size = int(getattr(runner, "dcp_size", 1) or 1)
-    except Exception:
+    if dcp_size is None:
         dcp_size = 1
-    if dcp_size < 1:
-        dcp_size = 1
-    return int(pcp) * int(dcp_size) + int(dcp)
+    if dcp is None:
+        dcp = 0
+    return pcp * max(1, dcp_size) + dcp
 
 
 def dump_rank_tag(runner: Any) -> str:
