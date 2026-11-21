@@ -1,0 +1,4 @@
+pr: 19841
+entries:
+  - category: performance
+    text: Fine-grained embedding/LM head TP now composes with standard tensor parallelism instead of replicating the fine-grained slice per TP rank. In stacked deployments this cuts per-card embedding/LM-head weight memory and per-step weight reads by the tensor-parallel factor.

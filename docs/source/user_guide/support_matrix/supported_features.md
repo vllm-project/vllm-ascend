@@ -6,30 +6,30 @@ Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_
 
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
-| Feature                       |      Status    | Next Step                                                              |
-|-------------------------------|----------------|------------------------------------------------------------------------|
+| Feature                       |      Status    | Next Step                                                                  |
+|-------------------------------|----------------|----------------------------------------------------------------------------|
 | Chunked Prefill               | 🟢 Functional    | Functional, see detailed note: [Chunked Prefill][cp]                     |
 | Automatic Prefix Caching      | 🟢 Functional    | Functional, see detailed note: [vllm-ascend#732][apc]                    |
-| LoRA                          | 🔵 Experimental  | Functional, see detailed note: [LoRA][LoRA]                    |
-| Speculative decoding          | 🟢 Functional    | Basic support                                                          |
-| Pooling                       | 🔵 Experimental  | CI needed to adapt to more models.                                      |
-| Enc-dec                       | 🟡 Planned       | vLLM should support this feature first.                                |
-| Multi Modality                | 🟢 Functional    | [Multi Modality][multimodal], optimizing and adapting more models            |
-| LogProbs                      | 🟢 Functional    | CI needed                                                              |
-| Prompt LogProbs               | 🟢 Functional    | CI needed                                                              |
-| Async output                  | 🟢 Functional    | CI needed                                                              |
-| Beam search                   | 🔵 Experimental  | CI needed                                                              |
-| Guided Decoding               | 🟢 Functional    | [vllm-ascend#177][guided_decoding]                                     |
-| Tensor Parallel               | 🟢 Functional    | Make TP >4 work with graph mode.                                        |
-| Pipeline Parallel             | 🟢 Functional    | See [Pipeline Parallelism][pipeline_parallel]. An end-to-end tutorial is planned. |
+| LoRA                          | 🔵 Experimental  | Functional, see detailed note: [LoRA][LoRA]                              |
+| Speculative decoding          | 🟢 Functional    | Basic support                                                            |
+| Pooling                       | 🔵 Experimental  | CI needed to adapt to more models.                                       |
+| Encoder-Decoder               | 🟡 Planned       | vLLM should support this feature first.                                  |
+| Multi Modality                | 🟢 Functional    | [Multi Modality][multimodal], optimizing and adapting more models        |
+| LogProbs                      | 🟢 Functional    | CI needed                                                                |
+| Prompt LogProbs               | 🟢 Functional    | CI needed                                                                |
+| Async output                  | 🟢 Functional    | CI needed                                                                |
+| Beam search                   | 🔵 Experimental  | CI needed                                                                |
+| Guided Decoding               | 🟢 Functional    | [vllm-ascend#177][guided_decoding]                                       |
+| Tensor Parallel               | 🟢 Functional    | Make TP >4 work with graph mode.                                         |
+| Pipeline Parallel             | 🟢 Functional    | See [Pipeline Parallel][pipeline_parallel]. An end-to-end tutorial is planned. |
 | Expert Parallelism            | 🟢 Functional    | Supports asynchronous EPLB with the Ascend STAIR policy as the default; see [EPLB][eplb]. |
-| Data Parallel                 | 🟢 Functional    | Data Parallel support for Qwen3 MoE.                                   |
-| Prefill Decode Disaggregation | 🟢 Functional    | Functional, xPyD is supported.                                         |
+| Data Parallel                 | 🟢 Functional    | Data Parallel support for Qwen3 MoE.                                     |
+| Prefill Decode Disaggregation | 🟢 Functional    | Functional, xPyD is supported.                                           |
 | Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
-| Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
-| Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
-| Runtime Guard                 | 🔵 Experimental  | Detect / report / dump_kv; see [Runtime Guard][runtime_guard].          |
-| Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
+| Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                  |
+| Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                  |
+| Runtime Guard                 | 🔵 Experimental  | Detect / report / dump_kv; see [Runtime Guard][runtime_guard].           |
+| Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]      |
 | KVPP                          | 🔵 Experimental  | Non-hybrid MLA/SFA models with eager or PIECEWISE execution; see [KVPP][kvpp] for supported combinations. |
 | Fine-grained TP               | 🔵 Experimental  | Functional, see detailed note: [Fine-grained TP Doc][finegrained_tp] |
 | CPU Binding                   | 🟢 Functional    | Functional, see detailed note: [CPU Binding Doc][cpu_binding] |

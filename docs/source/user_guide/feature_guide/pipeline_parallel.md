@@ -132,33 +132,23 @@ PP is useful in the following situations:
 - A Prefill node in a P/D-disaggregated deployment needs more devices for model
   capacity or long-context prefill.
 
-PP also introduces activation transfers between stages and pipeline bubbles.
-Use a TP-only deployment as the baseline when the model fits in one node, then
-add PP when model capacity or the network topology requires it.
+PP also introduces activation transfers between stages and pipeline bubbles. Use a TP-only deployment as the baseline when the model fits in one node, then add PP when model capacity or the network topology requires it.
 
 | Deployment goal | Recommended starting point |
 | --- | --- |
 | The model fits in one node | Start with TP only and benchmark before adding PP. |
 | The model spans multiple nodes | Use TP within a node and PP across nodes. |
 | Multiple serving replicas are required | Build one TP/PP replica first, then add DP only on a supported model, operator, and network topology. |
-| Long-context Prefill needs PP tuning | Start with PP, then evaluate [Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md). |
 
 ## Model Support for PP
 
-A model can run with `--pipeline-parallel-size > 1` only when its
-implementation exposes the `SupportsPP` interface (the upstream marker in
-`vllm.model_executor.models.interfaces`). The interface declares that the
-model implementation can:
+A model can run with `--pipeline-parallel-size > 1` only when its implementation exposes the `SupportsPP` interface (the upstream marker in `vllm.model_executor.models.interfaces`). The interface declares that the model implementation can:
 
 - Split its Transformer decoder layers into per-stage `[start_layer, end_layer)` ranges.
 - Skip layers that fall outside its own range.
 - Send and receive the intermediate activations exchanged at stage boundaries.
 
-Models without this marker reject PP at startup, so checking support is
-mechanical: inspect the model class (or one of its parents) for
-`SupportsPP`, or check the **Pipeline Parallel** column in
-[Supported Models](../support_matrix/supported_models.md) for the validated
-per-model status on Ascend.
+Models without this marker reject PP at startup, so checking support is mechanical: inspect the model class (or one of its parents) for `SupportsPP`, or check the **Pipeline Parallel** column in [Supported Models](../support_matrix/supported_models.md) for the validated per-model status on Ascend.
 
 Model families with `SupportsPP` implementations on Ascend:
 
@@ -374,8 +364,6 @@ or equal to the Decode TP size and to be an integer multiple of it.
 
 For complete P/D startup commands, see
 [PD Disaggregation with Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md).
-For long-context Prefill optimization, see
-[Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md).
 
 ## Performance Characteristics: PP Compared with TP
 
@@ -425,10 +413,6 @@ the pipeline occupied. TP remains the preferred baseline when the model fits in
 one node, low-concurrency latency is the primary objective, or the stages cannot
 be balanced.
 
-For long-context Prefill workloads, consider
-[Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md), which
-adjusts chunk sizes using measured execution time to reduce stage idle time.
-
 ## Compatibility and Limitations
 
 - Xlite graph mode is not compatible with PP.
@@ -457,7 +441,6 @@ adjusts chunk sizes using measured execution time to reduce stage idle time.
 
 - [Supported Models](../support_matrix/supported_models.md)
 - [Ray Distributed](../../tutorials/features/ray.md)
-- [Dynamic Chunked Pipeline Parallel](dynamic_chunk_pipeline_parallel.md)
 - [Speculative Decoding](speculative_decoding.md)
 - [PD Disaggregation with Mooncake](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)
 - [Performance Benchmark](../../developer_guide/performance_and_debug/performance_benchmark.md)

@@ -95,9 +95,10 @@ class TestBatchInvariant:
         assert os.environ["HCCL_DETERMINISTIC"] == "strict"
         assert os.environ["LCCL_DETERMINISTIC"] == "1"
 
+    @patch("vllm_ascend.batch_invariant.torch_npu")
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
-    def test_enable_batch_invariant_mode_ascendc_path(self):
+    def test_enable_batch_invariant_mode_ascendc_path(self, mock_torch_npu):
         """Test enable_batch_invariant_mode with AscendC ops available"""
         # Mock dependencies
         mock_library = MagicMock()
@@ -121,11 +122,42 @@ class TestBatchInvariant:
 
         # Verify torch_npu function patching
         assert (
-            batch_invariant.torch_npu.npu_fused_infer_attention_score
+            mock_torch_npu.npu_fused_infer_attention_score
             == batch_invariant.torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
         assert batch_invariant.torch.sum is batch_invariant.reduce_sum
         assert batch_invariant.torch.Tensor.sum is batch_invariant.reduce_sum
+
+    @patch("vllm_ascend.batch_invariant.torch")
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_enable_batch_invariant_mode_rebinds_fia_workspace_query(self, mock_torch_npu, mock_torch):
+        """The FIA workspace query must follow the batch-invariant kernel"""
+        max_workspace = MagicMock()
+        with patch("vllm_ascend.batch_invariant._BI_FIA_MAX_WORKSPACE", max_workspace):
+            batch_invariant.enable_batch_invariant_mode()
+
+        assert mock_torch_npu._npu_fused_infer_attention_score_get_max_workspace is max_workspace
+        assert mock_torch.sum is batch_invariant.reduce_sum
+        assert mock_torch.Tensor.sum is batch_invariant.reduce_sum
+
+    @patch("vllm_ascend.batch_invariant.torch")
+    @patch("vllm_ascend.batch_invariant.torch_npu")
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_enable_batch_invariant_mode_keeps_workspace_query_without_bi_symbol(self, mock_torch_npu, mock_torch):
+        """Older batch_invariant_ops builds have no query; bind a stub that fails loudly"""
+        with patch("vllm_ascend.batch_invariant._BI_FIA_MAX_WORKSPACE", None):
+            batch_invariant.enable_batch_invariant_mode()
+
+        bound = mock_torch_npu._npu_fused_infer_attention_score_get_max_workspace
+        assert bound is batch_invariant._missing_bi_fia_workspace_query
+        with pytest.raises(
+            RuntimeError, match="_npu_fused_infer_attention_score_batch_invariant_get_max_workspace"
+        ) as excinfo:
+            bound()
+        assert "cudagraph_mm_encoder" in str(excinfo.value)
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", True)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)

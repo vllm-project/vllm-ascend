@@ -29,7 +29,9 @@ msgstr "本节概述了 vLLM Ascend 中实现的功能。开发者可参考本�
 
 msgid ""
 "- [KVPP: KV Cache Layer Parallelism](kvpp.md) — Physical cache placement, full-layer broadcast, and test design.\n"
-"- [Persistent Incremental Csrc Build Cache](persistent_csrc_build_cache.md) — Fine-grained native build reuse, correctness identity, concurrency, and CI integration."
+"- [Persistent Incremental Csrc Build Cache](persistent_csrc_build_cache.md) — Fine-grained native build reuse, correctness identity, concurrency, and CI integration.\n"
+"- [Triton JIT warmup on Ascend](triton_jit_warmup.md) — Kernel registration, startup compilation, and validation."
 msgstr ""
-"- [KVPP：KV Cache 层并行](kvpp.md) — 物理缓存放置、全层广播与测试设计。\n"
-"- [持久化增量 Csrc 构建缓存](persistent_csrc_build_cache.md) — 细粒度原生构建复用、正确性标识、并发与 CI 集成。"
+"- [KVPP：KV Cache 层并行](kvpp.md) — 物理缓存布局、全层广播与测试设计。\n"
+"- [持久化增量 Csrc 构建缓存](persistent_csrc_build_cache.md) — 细粒度原生构建复用、正确性标识、并发与 CI 集成。\n"
+"- [昇腾上的 Triton JIT 预热](triton_jit_warmup.md) — 内核注册、启动编译与验证。"

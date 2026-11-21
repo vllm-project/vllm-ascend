@@ -227,7 +227,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --data-parallel-size 2 \
       --enable-expert-parallel \
       --max-num-seqs 16 \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -270,7 +270,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --long-prefill-token-threshold 4096 \
       --enable-expert-parallel \
       --max-num-seqs 32 \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -365,7 +365,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 2 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -403,7 +403,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 2 \
       --data-parallel-start-rank 2 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -443,7 +443,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 4 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -482,7 +482,7 @@ Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi
       --data-parallel-size-local 4 \
       --data-parallel-start-rank 4 \
       --data-parallel-address $node0_ip \
-      --distributed_executor_backend "mp" \
+      --distributed-executor-backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
@@ -633,7 +633,7 @@ if __name__ == "__main__":
         process.join()
 ```
 
-The templates use named environment variables instead of positional shell arguments. Replace the `<...>` IP, NIC and weight-path placeholders in each template, or export those variables in the shell before launching. The numeric defaults below describe one engine; `launch_online_dp.py` overrides the per-rank values when it starts all local engines. You do not need to calculate a different port or device list for every rank. When using the launcher, edit `export DP_SIZE=...`, `export TP_SIZE=...`, `export PP_SIZE=...` and the other values in the node-specific launch block; these take precedence over the `${VARIABLE:-default}` values in the template.
+The templates use named environment variables instead of positional shell arguments. Replace the `<...>` IP, NIC and weight-path placeholders in each template, or export those variables in the shell before launching. The numeric defaults below describe one engine; `launch_online_dp.py` overrides the per-rank values when it starts all local engines. You do not need to calculate a different port or device list for every rank. When using the launcher, edit `export DP_SIZE=…`, `export TP_SIZE=…`, `export PP_SIZE=…` and the other values in the node-specific launch block; these take precedence over the `${VARIABLE:-default}` values in the template.
 
 | Variable | Meaning | How it is set |
 | -------- | ------- | ------------- |
@@ -1272,7 +1272,7 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
+- `--speculative-config '{"method":"eagle3", …}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
 
 **Decode node-specific configurations:**
 
@@ -2660,11 +2660,11 @@ print(msg.content)                       # the final answer
 
 #### 5.6.2 Reasoning Parser
 
-The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
+The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>…</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
 
 ##### 5.6.2.1 Server Configuration
 
-The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
+The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>…</mm:think>` delimiters:
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2988,7 +2988,7 @@ Use the following adjustments as starting points for the target workload. Rechec
 | Scenario | Parameter | Example Adjustment | Tuning Goal |
 | --- | --- | --- | --- |
 | Device-memory-bound workloads where KV cache capacity limits concurrency | `HCCL_BUFFSIZE` | Reduce from `2048` to `1024` (MB). | Reduce HCCL communication-buffer memory usage to make more device memory available for KV cache and allow higher concurrency. |
-| Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
+| Short-input workloads, such as 4k input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
 

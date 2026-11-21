@@ -4,6 +4,8 @@
 
 import os
 
+from typing import cast
+
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -74,13 +76,16 @@ class DeepseekV41Compressor(nn.Module):
     def pool_projected(self, kv, scores, metadata, *, prev_rows, prev_row_indices):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
+        ring_state = cast(torch.Tensor, self.state_cache.kv_cache)
         pooled = compressor_from_projected(
             kv,
             scores,
-            self.state_cache.kv_cache[0].squeeze(-2),
+            ring_state.squeeze(-2),
             metadata.c2_ring_metadata,
             self._ring_pooled[: kv.shape[0]],
-            max_query_len=metadata.max_query_len,
+            # Metadata keeps the graph descriptor bound. A C2 launch cannot
+            # consume more rows than its physical projection carrier.
+            max_query_len=min(metadata.max_query_len, kv.shape[0]),
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,

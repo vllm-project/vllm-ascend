@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import set_current_vllm_config
+from vllm.config import AttentionConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -45,6 +45,7 @@ from vllm_ascend.utils import vllm_version_is
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
+        self.mock_config.attention_config = AttentionConfig()
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1
@@ -716,6 +717,7 @@ class TestAscendSFAKPathFusion(TestBase):
         wk_weights_proj = MagicMock(return_value=(kw, None))
 
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        indexer.topk_tokens = 4
         indexer.wk_weights_proj = wk_weights_proj
         indexer.k_norm = MagicMock(side_effect=lambda x: x)
         indexer.head_dim = head_dim
@@ -737,6 +739,8 @@ class TestAscendSFAKPathFusion(TestBase):
         cos = torch.randn(num_tokens, 1, 1, 64)
         sin = torch.randn(num_tokens, 1, 1, 64)
         indexer_metadata = SimpleNamespace(
+            num_actual_tokens=num_tokens,
+            kv_gather_block_ids=None,
             cos=cos,
             sin=sin,
             slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
@@ -957,7 +961,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
@@ -1021,7 +1024,6 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.decode_token_per_req = 1
-        common_attn_metadata.context_parallel_metadata = None
         common_attn_metadata.max_query_len = 10
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100

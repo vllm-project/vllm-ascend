@@ -1,0 +1,6 @@
+pr: 22336
+entries:
+  - category: performance
+    text: A single Triton kernel fuses cast, add, and RMSNorm for Step-5-Preview on Ascend A5.
+    model: Step-5-Preview
+    hardware: [A5]

@@ -127,6 +127,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
@@ -177,12 +178,14 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
         "mla_preprocess"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
         "fused_quant_lightning_indexer_manage"
         "fused_scatter_copy_sparse_flash_attention"
     )
+
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
 elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
@@ -198,6 +201,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
+        "indexer_region_score"
         "kv_compress_epilog_v2"
         "compressor"
         "compressor_metadata"
@@ -217,6 +221,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hisparse_resolve_residency"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -284,7 +289,7 @@ log_selected_ops
 
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
-  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}" --install-for-all
   # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
   # editable-build artifacts removable by the non-root user who built them.
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then

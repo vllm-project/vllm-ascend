@@ -55,6 +55,15 @@ def free_endpoint():
         return f"127.0.0.1:{sock.getsockname()[1]}"
 
 
+def lifecycle_decorator():
+    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41/engram_lifecycle.py"
+    spec = importlib.util.spec_from_file_location("_engram_lifecycle_ut", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.close_engram_on_init_failure
+
+
 @pytest.fixture
 def owner(pool_module, tmp_path):
     owner = pool_module.SharedPoolOwner(free_endpoint(), "model-a", device="npu:0")
@@ -417,6 +426,7 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         engram_weight_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer, layer],
+        local_engram_layer_ids=(0, 1),
     )
     config = types.SimpleNamespace(engram_layer_ids=[0, 1], engram_num_embeddings=[32, 32], engram_head_dim=256)
     vc = types.SimpleNamespace(load_config=types.SimpleNamespace(load_format="real"), quant_config=object())
@@ -434,6 +444,8 @@ def test_model_construction_rolls_back_first_layer_when_second_attach_fails(pool
         engram_storage_dtype=lambda *args: torch.int8,
         get_current_hardware_profile=lambda: types.SimpleNamespace(supports=lambda _: False),
         HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
+        remote_reader=None,
+        EngramSharedInitError=type("EngramSharedInitError", (RuntimeError,), {}),
         rollback_shared_engram=pool_module.rollback_shared_engram,
     )
     with pytest.raises(RuntimeError, match="second attach failed"):
@@ -467,6 +479,7 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         engram_root="unused",
         engram_dp_shared_memory=False,
         layers=[layer],
+        local_engram_layer_ids=(0,),
         has_engram=True,
         device="cpu",
         end_layer=1,
@@ -506,7 +519,9 @@ def test_merged_model_initializes_rotation_and_registers_replay():
         engram_storage_dtype=lambda *args: torch.int8,
         get_current_hardware_profile=lambda: types.SimpleNamespace(supports=lambda _: False),
         HardwareCapability=types.SimpleNamespace(ENGRAM_MXFP8=object()),
+        remote_reader=None,
         get_ascend_config=lambda: types.SimpleNamespace(multistream_engram_overlap=False),
+        EngramSharedInitError=type("EngramSharedInitError", (RuntimeError,), {}),
         get_rotation_path=lambda _: "rotation",
         load_engram_rotation_block=lambda *args: rotation,
         create_engram_hash_state=lambda *args: "hash",
@@ -577,6 +592,8 @@ def test_outer_model_init_failure_releases_attached_engram(pool_module, owner, c
 
     ns = dict(
         Base=object,
+        close_engram_on_init_failure=lifecycle_decorator(),
+        get_ascend_config=lambda: types.SimpleNamespace(shared_engram=types.SimpleNamespace(backend="a3")),
         normalize_deepseek_v41_config=lambda config: config,
         DeviceOperator=types.SimpleNamespace(get_dsv41_packed_cache_ops=lambda: None),
         maybe_prefix=lambda *args: "model",
@@ -649,6 +666,7 @@ def test_vl_constructor_failure_releases_language_model_lease(pool_module, owner
 
     ns = dict(
         Base=Base,
+        close_engram_on_init_failure=lifecycle_decorator(),
         nn=torch.nn,
         torch=torch,
         maybe_prefix=lambda *args: "language_model",

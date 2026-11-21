@@ -17,9 +17,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
-)
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -65,7 +62,7 @@ class _StateBackend:
 
 def _make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=64),
+        model_config=SimpleNamespace(max_model_len=64, hf_config=SimpleNamespace()),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -76,6 +73,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
             get_resolved_kv_cache_layout=lambda: SimpleNamespace(
                 is_layer_compact=True,
                 is_block_compact=True,
@@ -175,7 +173,6 @@ def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, u
         config.kv_transfer_config = SimpleNamespace(
             kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
         )
-    apply_layerwise_kv_cache_plan(plan, config)
     allocated_sizes = []
     allocate = attn_utils._allocate_int8_cache_tensor
 
