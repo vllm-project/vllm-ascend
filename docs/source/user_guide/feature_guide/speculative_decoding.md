@@ -14,6 +14,7 @@ The following speculative decoding methods are supported:
 | Method | Description |
 | ------ | ----------- |
 | `ngram` | Match n-grams from the prompt |
+| `suffix` | Match request history and completed responses |
 | `medusa` | Medusa heads embedded in the target model |
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
@@ -93,6 +94,148 @@ The following code configures vLLM Ascend to use speculative decoding where prop
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
+
+## Speculating using Suffix Decoding
+
+This NPU suffix decoding implementation is available only with Model Runner V2.
+It differs from the earlier Model Runner V1 CPU implementation based on Arctic
+Inference and does not require Arctic Inference.
+
+Suffix decoding generates draft tokens by matching repeated token sequences,
+without loading an additional draft model. Like n-gram decoding, it searches
+within a request's prompt and generated output. It can also reuse completed
+responses from other requests and use frequency counts to choose continuations.
+
+The following examples use `Qwen2.5-7B-Instruct` on one NPU. Replace
+`/path/to/Qwen2.5-7B-Instruct` with your local model directory. The examples use
+four draft tokens and a reduced corpus of 65,536 tokens for a small setup.
+
+- Offline inference
+
+    ```python
+    import os
+
+    from vllm import LLM, SamplingParams
+
+
+    if __name__ == "__main__":
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        llm = LLM(
+            model="/path/to/Qwen2.5-7B-Instruct",
+            tensor_parallel_size=1,
+            max_model_len=2048,
+            max_num_seqs=8,
+            max_num_batched_tokens=1024,
+            gpu_memory_utilization=0.5,
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            speculative_config={
+                "method": "suffix",
+                "num_speculative_tokens": 4,
+                "suffix_decoding_corpus_tokens": 65536,
+            },
+        )
+        sampling_params = SamplingParams(temperature=0, max_tokens=128)
+        prompts = ["Continue the sequence: red blue green red blue green red blue"]
+
+        for output in llm.generate(prompts, sampling_params):
+            print(output.outputs[0].text)
+    ```
+
+- Online inference
+
+    ```shell
+    export ASCEND_RT_VISIBLE_DEVICES=0
+
+    vllm serve /path/to/Qwen2.5-7B-Instruct \
+      --served-model-name qwen \
+      --tensor-parallel-size 1 \
+      --max-model-len 2048 \
+      --max-num-seqs 8 \
+      --max-num-batched-tokens 1024 \
+      --gpu-memory-utilization 0.5 \
+      --no-enable-prefix-caching \
+      --async-scheduling \
+      --enforce-eager \
+      --speculative-config '{"method":"suffix","num_speculative_tokens":4,"suffix_decoding_corpus_tokens":65536}'
+    ```
+
+### Configuration
+
+Set these options inside `speculative_config`:
+
+- **`num_speculative_tokens`**: Set explicitly. Number of draft slots per request
+  per step; the examples use `4`.
+- **`suffix_decoding_max_tree_depth`**: Default `24`. Maximum suffix match length.
+  A value of `1` uses request history only; corpus matching requires at least `2`.
+- **`suffix_decoding_corpus_tokens`**: Default `1048576`. Token capacity of the
+  shared corpus. Set to `0` to disable cross-request retrieval.
+- **`suffix_decoding_max_cached_requests`**: Default `10000`. Set to `0` to disable
+  the corpus. Positive values do not limit the number of cached requests in this
+  implementation.
+- **`enable_adaptive_verification`**: Default `false`. Supply per-slot acceptance
+  estimates for adaptive verification; see below for requirements.
+
+`suffix_decoding_max_spec_factor` and `suffix_decoding_min_token_prob` are
+upstream deprecated options and have no effect on this implementation.
+For common speculative decoding options, see [Common Configuration](#common-configuration).
+
+### How it works
+
+Suffix decoding combines two sources of draft tokens:
+
+1. **Request history:** Search the request's own prompt and generated tokens for
+   the longest matching suffix, up to `suffix_decoding_max_tree_depth` tokens.
+2. **Shared corpus:** Store completed responses, together with up to three
+   preceding prompt tokens, in an NPU-resident ring buffer. Hash indexes based
+   on two-token and four-token contexts locate candidate positions. Matches
+   are extended, and prefix-consistent frequency voting selects continuations.
+
+### Memory usage
+
+With the default capacity, corpus and index storage consume approximately
+**36 MiB** on the NPU. Suffix decoding also uses dense request token history:
+
+```text
+history bytes = max_num_seqs * max_model_len * 4
+```
+
+Scratch buffers require additional memory. These allocations are separate from
+the KV cache. Reducing `suffix_decoding_corpus_tokens` reduces corpus storage;
+reducing `max_num_seqs` or `max_model_len` reduces dense history storage.
+Disabling the corpus leaves request-local matching and its history allocation
+in place.
+
+### Shared corpus and reproducibility
+
+!!! warning "The corpus is shared across requests"
+
+    Completed responses can be used by other requests, including requests with
+    different `cache_salt` values or LoRA adapters. Set
+    `suffix_decoding_corpus_tokens` to `0` where requests must not influence
+    each other's drafting.
+
+A fixed sampling seed alone does not make outputs reproducible with a shared
+corpus or adaptive verification. For reproducible seeded sampling, disable the
+corpus and leave adaptive verification off.
+
+### Adaptive verification
+
+Adaptive verification is optional and disabled by default. It learns acceptance
+statistics by draft source, match length and draft position, then supplies
+per-slot confidence estimates to help select the verification budget.
+
+To enable it, add `"enable_adaptive_verification": true` to
+`speculative_config`. It requires full decode graphs and an Ascend target
+attention backend that supports variable query lengths; it cannot be combined
+with the eager examples above without changing the graph configuration.
+
+At higher concurrency, verifying every draft slot can increase compute cost.
+Evaluate latency and throughput with your workload before choosing the draft
+length and enabling adaptive verification. See the
+[upstream adaptive verification guide](https://github.com/vllm-project/vllm/blob/main/docs/features/speculative_decoding/adaptive_verification.md)
+for the general mechanism.
 
 ## Speculating using EAGLE based draft models
 

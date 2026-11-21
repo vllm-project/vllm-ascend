@@ -1,0 +1,9 @@
+pr: 20854
+entries:
+  - category: feature
+    text: >-
+      Added NPU support for suffix speculative decoding, generating draft
+      tokens by matching request history and completed responses without
+      an additional draft model. Enable it with method="suffix" in
+      speculative_config; optionally enable adaptive verification with
+      enable_adaptive_verification=true.

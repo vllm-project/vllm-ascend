@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -42,6 +44,15 @@ def init_speculator(
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if speculative_config.method == "suffix":
+        if req_states is None:
+            raise ValueError("MRV2 suffix speculative decoding requires request states")
+        if vllm_version_is("0.33.0"):
+            raise ValueError("Ascend MRV2 suffix decoding requires vLLM with PR #60339.")
+
+        from vllm.v1.worker.gpu.spec_decode.suffix.speculator import SuffixSpeculator
+
+        return SuffixSpeculator(vllm_config, device, req_states)
     if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
