@@ -57,6 +57,7 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 )
 from vllm_ascend.ops.linear import AscendRowParallelLinear, AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.device_metadata import (
@@ -3017,6 +3018,40 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
     get_capacity.assert_not_called()
     all_to_all.assert_not_called()
     reduce_scatter.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["direct", "collective", "noncontiguous", "no_operator", "unquantized"])
+def test_o_proj_uses_output_buffer_only_for_local_mxfp8(case):
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.n_local_groups = 2
+    impl._wo_a_bmm = lambda x: x + 1
+    impl.wo_b = MagicMock(side_effect=lambda x: x * 2)
+    projection = impl.wo_b
+    projection.custom_op = None
+    projection.input_is_parallel = True
+    projection.tp_size = 2 if case == "collective" else 1
+    projection.reduce_results = True
+    projection.bias = None
+    projection.return_bias = False
+    projection.weight = torch.empty(4, 4, dtype=torch.float8_e4m3fn)
+    method = MagicMock(spec=AscendW8A8MXFP8DynamicLinearMethod)
+    method.apply_into.side_effect = lambda layer, x, out: out.copy_(x * 2)
+    projection.quant_method = None if case == "unquantized" else SimpleNamespace(quant_method=method)
+    inputs = torch.arange(24, dtype=torch.bfloat16).reshape(6, 2, 2)
+    output = torch.empty((4, 6), dtype=inputs.dtype).t() if case == "noncontiguous" else inputs.new_empty(6, 4)
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch.object(torch.ops._C_ascend, "npu_quant_matmul_out", create=True),
+        patch("vllm_ascend.attention.dsa_v1.hasattr", return_value=case != "no_operator", create=True),
+    ):
+        assert impl._forward_o_proj(inputs, output) is output
+    torch.testing.assert_close(output, (inputs.reshape(6, 4) + 1) * 2)
+    if case == "direct":
+        assert method.apply_into.call_args.args[2] is output
+        projection.assert_not_called()
+    else:
+        method.apply_into.assert_not_called()
+        projection.assert_called_once()
 
 
 @pytest.mark.parametrize(

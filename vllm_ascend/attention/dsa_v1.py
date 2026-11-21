@@ -60,7 +60,7 @@ from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, Indexe
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
 from vllm_ascend.utils import (
@@ -2384,7 +2384,28 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         else:
             o_proj_input = self._wo_a_bmm(o_proj_input)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+            quant_method = getattr(self.wo_b, "quant_method", None)
+            method = getattr(quant_method, "quant_method", quant_method)
+            # A direct GEMM may write the requested result only when the
+            # ordinary row projection has no communication or bias.
+            if (
+                isinstance(method, AscendW8A8MXFP8DynamicLinearMethod)
+                and hasattr(torch.ops._C_ascend, "npu_quant_matmul_out")
+                and self.wo_b.custom_op is None
+                and self.wo_b.input_is_parallel
+                and (self.wo_b.tp_size == 1 or not self.wo_b.reduce_results)
+                and self.wo_b.bias is None
+                and not self.wo_b.return_bias
+                and num_tokens > 0
+                and output.is_contiguous()
+                and output.dtype == o_proj_input.dtype == torch.bfloat16
+                and output.shape == (num_tokens, self.wo_b.weight.shape[1])
+                and self.wo_b.weight.ndim == 2
+                and self.wo_b.weight.is_contiguous()
+            ):
+                method.apply_into(self.wo_b, o_proj_input, output)
+            else:
+                output[...] = self.wo_b(o_proj_input)
         return output
 
     def _prepare_caches_before_attention(
