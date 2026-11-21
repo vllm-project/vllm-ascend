@@ -7,7 +7,6 @@ DP RPC port, TP size, PCP size, and PP size, in that order.
 
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 
@@ -24,7 +23,6 @@ def parse_args(argv=None):
     parser.add_argument("--dp-rpc-port", type=int, default=12345, help="DP RPC port.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="First API port on this node.")
     parser.add_argument("--template", "--script", default="./run_dp_template.sh", help="Shell template path.")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without starting services.")
     args = parser.parse_args(argv)
 
     if args.dp_size_local == -1:
@@ -64,11 +62,8 @@ def main(argv=None):
         ]
 
         print(f"DP rank={dp_rank}, devices={devices}, API port={port}", flush=True)
-        if args.dry_run:
-            print(shlex.join(command))
-        else:
-            # Start all local ranks before waiting for any of them.
-            processes.append(subprocess.Popen(command))
+        # Start all local ranks before waiting for any of them.
+        processes.append(subprocess.Popen(command))
 
     # Wait for every rank and propagate failure to the launcher exit status.
     exit_codes = [process.wait() for process in processes]

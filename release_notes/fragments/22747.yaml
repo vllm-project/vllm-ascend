@@ -7,4 +7,3 @@ entries:
       options default to 1 in the launcher.
       Shell templates now receive nine arguments, with PCP at argument 8 and PP
       at argument 9; append `1 1` to direct seven-argument template calls.
-      Use `--dry-run` to inspect device allocations and startup commands.

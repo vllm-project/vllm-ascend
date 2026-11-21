@@ -98,10 +98,6 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args.template, str(self.template))
         self.assertEqual(args.dp_size_local, 1)
 
-    def test_dry_run_does_not_start_processes(self):
-        _, calls, _ = self.capture("--dry-run")
-        self.assertEqual(calls, [])
-
     def test_waits_for_all_ranks_and_reports_failure(self):
         result, _, workers = self.capture(statuses=(7, 0))
         self.assertEqual(result, 1)

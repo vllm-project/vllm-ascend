@@ -35,7 +35,6 @@ All the arguments that can be set by users are:
 8. `--pcp-size`: prefill context parallel size, default 1
 9. `--pp-size`: pipeline parallel size, default 1
 10. `--template` (alias `--script`): shell template path, default `./run_dp_template.sh`
-11. `--dry-run`: print device allocations and shell commands without starting services
 
 Each local DP rank uses `TP × PCP × PP` consecutive devices. Device numbering starts
 at 0 on each node, independent of `--dp-rank-start`. This launcher requires each
@@ -77,12 +76,11 @@ cd examples/external_online_dp
 export VLLM_USE_V2_MODEL_RUNNER=1
 python launch_online_dp.py \
     --dp-size 2 --tp-size 1 --pcp-size 2 --pp-size 2 \
-    --dp-address x.x.x.x --vllm-start-port 9000 --dry-run
+    --dp-address x.x.x.x --vllm-start-port 9000
 ```
 
 This assigns devices `0,1,2,3` to DP rank 0 and `4,5,6,7` to DP rank 1,
-with API ports 9000 and 9001. Remove `--dry-run` after checking the allocation and
-adapting the template. External load balancers use these API endpoints, not the
+with API ports 9000 and 9001. External load balancers use these API endpoints, not the
 DP RPC port. PCP requires Model Runner V2 on Ascend; the model and other enabled
 features must support the selected combination. See the
 [context parallel guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html)
