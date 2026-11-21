@@ -24,11 +24,17 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
+    AscendNativeFp8BlockFusedMoEMethod,
+    AscendNativeFp8BlockLinearMethod,
+    _swap_block_axes,
     resolve_block_scales,
 )
+from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
@@ -100,10 +106,9 @@ class TestResolveBlockScales(TestBase):
 
 
 class TestAscendFp8BlockLinearMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(128, 128)):
+    def build_scheme(self, block_size=(128, 128)):
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
-            patch(f"{MODULE}.is_950", return_value=is_950),
             patch(f"{MODULE}.AscendW8A8MXFP8DynamicLinearMethod") as mock_mxfp8,
         ):
             mock_mxfp8.return_value.dynamic_mx_quant_scale_alg = 0
@@ -130,7 +135,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(weight.dtype, torch.float8_e4m3fn)
 
     def test_weight_switch_specs_follow_mxfp8_execution_method(self):
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(block_size=(4, 32))
         input_gather = (WeightSwitchGatherSpec("input_weight"),)
         output_gather = (WeightSwitchGatherSpec("output_weight", gather_dim=1),)
         input_repeat = (WeightSwitchRepeatSpec("input_scale"),)
@@ -155,19 +160,6 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(
             self._get_weight_switch_specs(scheme, input_sharded=False),
             (output_gather, output_repeat),
-        )
-
-    def test_weight_switch_specs_cover_dense_fallback(self):
-        scheme = self.build_scheme(is_950=False)
-
-        self.assertTrue(scheme.supports_weight_switch)
-        self.assertEqual(
-            self._get_weight_switch_specs(scheme, input_sharded=True),
-            ((WeightSwitchGatherSpec("weight", gather_dim=1),), ()),
-        )
-        self.assertEqual(
-            self._get_weight_switch_specs(scheme, input_sharded=False),
-            ((WeightSwitchGatherSpec("weight"),), ()),
         )
 
     def test_pergroup_param_declares_block_scale_and_loader_hints(self):
@@ -195,20 +187,8 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         layer.weight_scale_inv = nn.Parameter(scale_inv, requires_grad=False)
         return layer, weight, scale_inv
 
-    def test_resolves_to_model_dtype_off_950(self):
-        scheme = self.build_scheme(is_950=False, block_size=(4, 32))
-        layer, weight, scale_inv = self._make_layer()
-
-        with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
-            scheme.process_weights_after_loading(layer)
-
-        self.assertEqual(layer.weight.dtype, torch.bfloat16)
-        self.assertFalse(hasattr(layer, "weight_scale_inv"))
-        expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
-        self.assertTrue(torch.equal(layer.weight.data, expected))
-
-    def test_requantizes_to_mxfp8_on_950(self):
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+    def test_requantizes_to_mxfp8(self):
+        scheme = self.build_scheme(block_size=(4, 32))
         layer, _, _ = self._make_layer()
         num_groups = 64 // MX_GROUP_SIZE
         quantized = torch.zeros(8, 64).to(torch.float8_e4m3fn)
@@ -231,7 +211,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         # SFA splits kv_b_proj into W_UK/W_UV and disposes of the layer, so it
         # never runs a matmul. Requantizing it would only destroy the dense
         # matrix the attention backend has to absorb.
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer()
         layer.prefix = "model.layers.0.self_attn.kv_b_proj"
 
@@ -242,12 +222,13 @@ class TestAscendFp8BlockLinearMethod(TestBase):
             scheme.process_weights_after_loading(layer)
 
         mock_npu.npu_dynamic_mx_quant.assert_not_called()
+        self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
         expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.weight.data, expected))
 
     def test_falls_back_when_reduction_dim_is_not_mx_aligned(self):
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer(out_features=8, in_features=48, block=(4, 32))
         with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
             scheme.process_weights_after_loading(layer)
@@ -260,7 +241,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
             self._get_weight_switch_specs(scheme, input_sharded=False),
             ((WeightSwitchGatherSpec("weight"),), ()),
         )
-        self.assertIsNone(scheme.mxfp8_method)
+        self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
         expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.weight.data, expected))
@@ -268,19 +249,19 @@ class TestAscendFp8BlockLinearMethod(TestBase):
     def test_mx_fallback_does_not_require_layer_prefix(self):
         # The 950 MX-aligned path never logs this warning; this only covers the
         # fallback log so a missing prefix cannot raise AttributeError.
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(block_size=(4, 32))
         layer, _, _ = self._make_layer(out_features=8, in_features=48, block=(4, 32))
         delattr(layer, "prefix")
 
         with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
             scheme.process_weights_after_loading(layer)
 
-        self.assertIsNone(scheme.mxfp8_method)
+        self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
 
-    def test_apply_uses_unquantized_gemm_when_resolved_to_bf16(self):
-        scheme = self.build_scheme(is_950=False)
-        scheme.mxfp8_method = None
+    def test_apply_uses_unquantized_gemm_for_the_dense_fallback(self):
+        scheme = self.build_scheme()
+        scheme.use_mxfp8 = False
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.randn(4, 8), requires_grad=False)
         x = torch.randn(2, 8)
@@ -290,7 +271,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         mock_gemm.assert_called_once_with(x, layer.weight, None)
 
     def test_apply_delegates_to_mxfp8_when_requantized(self):
-        scheme = self.build_scheme(is_950=True)
+        scheme = self.build_scheme()
         scheme.mxfp8_method.apply.return_value = "mxfp8"
         layer = nn.Module()
         x = torch.randn(2, 8)
@@ -298,12 +279,24 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(scheme.apply(layer, x, None, 0), "mxfp8")
         scheme.mxfp8_method.apply.assert_called_once_with(layer, x, None, 0)
 
+    def test_prepare_input_for_overlap_follows_the_active_method(self):
+        # A dense layer must not hand an MXFP8-prepared input to unquantized_gemm.
+        scheme = self.build_scheme()
+        scheme.mxfp8_method.prepare_input_for_overlap.return_value = "prepared"
+        layer = nn.Module()
+        x = torch.randn(2, 8)
+
+        self.assertEqual(scheme.prepare_input_for_overlap(layer, x), "prepared")
+
+        scheme.use_mxfp8 = False
+        self.assertIsNone(scheme.prepare_input_for_overlap(layer, x))
+        scheme.mxfp8_method.prepare_input_for_overlap.assert_called_once_with(layer, x)
+
 
 class TestAscendFp8BlockFusedMoEMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(4, 32)):
+    def build_scheme(self, block_size=(4, 32)):
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
-            patch(f"{MODULE}.is_950", return_value=is_950),
             patch(f"{MODULE}.AscendW8A8MXFP8DynamicFusedMoEMethod") as mock_mxfp8,
         ):
             mock_mxfp8.return_value.dynamic_mx_quant_scale_alg = 0
@@ -337,22 +330,25 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         layer.w13_weight = nn.Parameter(w13.reshape(num_experts, 2 * intermediate, hidden), requires_grad=False)
         layer.w2_weight = nn.Parameter(w2.reshape(num_experts, hidden, intermediate), requires_grad=False)
         layer.w13_weight_scale_inv = nn.Parameter(
-            torch.rand(num_experts, 2 * intermediate // block[0], hidden // block[1]) + 0.5, requires_grad=False
+            w13_scale.reshape(num_experts, -1, w13_scale.shape[1]), requires_grad=False
         )
         layer.w2_weight_scale_inv = nn.Parameter(
-            torch.rand(num_experts, hidden // block[0], intermediate // block[1]) + 0.5, requires_grad=False
+            w2_scale.reshape(num_experts, -1, w2_scale.shape[1]), requires_grad=False
         )
         return layer
 
-    def test_resolves_every_expert_off_950(self):
-        scheme = self.build_scheme(is_950=False)
-        layer = self._make_moe_layer(intermediate=32)
+    def test_resolves_every_expert_when_mx_unaligned(self):
+        # The MXFP8 fallback that remains: an expert whose reduction dim is not
+        # a multiple of the group size is served dense.
+        scheme = self.build_scheme()
+        layer = self._make_moe_layer(intermediate=32, hidden=48)
         original_w13 = layer.w13_weight.data.clone()
         original_scale = layer.w13_weight_scale_inv.data.clone()
         scheme._bf16_method = MagicMock()
 
         scheme.process_weights_after_loading(layer)
 
+        self.assertFalse(scheme.use_mxfp8)
         self.assertEqual(layer.w13_weight.dtype, torch.bfloat16)
         self.assertEqual(layer.w2_weight.dtype, torch.bfloat16)
         self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
@@ -362,8 +358,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         expected = reference_resolve(original_w13[0], original_scale[0], 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.w13_weight.data[0], expected))
 
-    def test_requantizes_every_expert_on_950(self):
-        scheme = self.build_scheme(is_950=True)
+    def test_requantizes_every_expert(self):
+        scheme = self.build_scheme()
         # Both weights need an even group count so the operator's split layout
         # is representable for each of them.
         layer = self._make_moe_layer(intermediate=64)
@@ -389,7 +385,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_apply_delegates_to_the_active_method(self):
-        scheme = self.build_scheme(is_950=False)
+        scheme = self.build_scheme()
+        scheme.use_mxfp8 = False
         scheme._bf16_method = MagicMock()
         scheme._bf16_method.apply.return_value = "bf16"
         layer = nn.Module()
@@ -398,6 +395,467 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
 
         self.assertEqual(result, "bf16")
         scheme._bf16_method.apply.assert_called_once()
+
+
+NATIVE_BLOCK = 128
+
+
+class TestSwapBlockAxes(TestBase):
+    """The G-B kernels read weight/scale orientation from the tensor strides."""
+
+    def test_materializes_a_transposed_copy_with_canonical_strides(self):
+        # A reduction dim holding exactly one 128-wide block is a typical TP
+        # shard; torch skips size-1 dims when checking contiguity, so
+        # .contiguous() would keep stride (N, 1, 1), read as a transposed scale.
+        scale = torch.randn(2, 4, 1)
+        weight = torch.randn(4, 8)
+
+        self.assertEqual(tuple(_swap_block_axes(scale).stride()), (4, 4, 1))
+        swapped = _swap_block_axes(weight)
+        self.assertEqual(tuple(swapped.shape), (8, 4))
+        self.assertTrue(torch.equal(swapped, weight.transpose(0, 1)))
+        # A fresh copy, so the checkpoint tensor is left untouched.
+        self.assertNotEqual(swapped.data_ptr(), weight.data_ptr())
+
+
+class TestNativeFp8LinearMethod(TestBase):
+    def setUp(self):
+        patcher = patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def build_scheme(self, block_size=(NATIVE_BLOCK, NATIVE_BLOCK)):
+        with patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()):
+            scheme = AscendNativeFp8BlockLinearMethod(block_size)
+        return scheme
+
+    @staticmethod
+    def _make_layer(out_features=256, in_features=512):
+        weight, scale_inv = make_block_weight(out_features, in_features, NATIVE_BLOCK, NATIVE_BLOCK, seed=6)
+        layer = nn.Module()
+        layer.prefix = "model.layers.0.mlp.down_proj"
+        layer.weight = nn.Parameter(weight, requires_grad=False)
+        layer.weight_scale_inv = nn.Parameter(scale_inv, requires_grad=False)
+        return layer, weight, scale_inv
+
+    def test_weight_switch_is_disabled(self):
+        # A transposed weight no longer follows the [output, input] axis that
+        # weight switching rebuilds.
+        self.assertFalse(self.build_scheme().supports_weight_switch)
+
+    @staticmethod
+    def _shape_layer(tp_size=16, allow_mismatch=False, output_sizes=(8192,)):
+        layer = SimpleNamespace(
+            prefix="model.layers.0.self_attn.qkv_proj",
+            tp_size=tp_size,
+            output_sizes=list(output_sizes),
+            allow_fp8_block_shape_mismatch=allow_mismatch,
+        )
+        return layer
+
+    def test_replicated_dims_may_be_indivisible_by_the_tp_shard(self):
+        # hidden 5120 with tp=16 owns 5120 elements per rank along a replicated
+        # reduction dim: whole tiles, even though 5120 is not 128 * 16.
+        scheme = self.build_scheme()
+        scheme.validate_weight_shapes(
+            self._shape_layer(),
+            input_size=5120,
+            output_size=8192,
+            input_size_per_partition=5120,
+            output_partition_sizes=[512],
+        )
+
+    def test_rejects_a_replicated_dim_that_does_not_span_whole_tiles(self):
+        scheme = self.build_scheme()
+        with self.assertRaisesRegex(ValueError, "128-wide tile"):
+            scheme.validate_weight_shapes(
+                self._shape_layer(tp_size=1),
+                input_size=5000,
+                output_size=8192,
+                input_size_per_partition=5000,
+                output_partition_sizes=[8192],
+            )
+
+    def test_accepts_a_fused_pack_that_ends_in_a_partial_tile(self):
+        # DeepSeek/GLM ``fused_qkv_a_proj`` packs a 576-wide kv_a tail behind a
+        # tile-aligned q_a_proj: upstream pads that sub-matrix's scales, and G-B
+        # still reads one scale per tile because only the packed tail is partial.
+        scheme = self.build_scheme()
+        scheme.validate_weight_shapes(
+            self._shape_layer(tp_size=1, allow_mismatch=True, output_sizes=(1536, 576)),
+            input_size=256,
+            output_size=2112,
+            input_size_per_partition=256,
+            output_partition_sizes=[1536, 576],
+        )
+
+    def test_rejects_a_partial_tile_inside_the_packed_rows(self):
+        # A sub-matrix boundary that does not land on a tile boundary leaves the
+        # straddling tile with one of the two sub-matrix scales, which G-B cannot
+        # distinguish.
+        scheme = self.build_scheme()
+        with self.assertRaisesRegex(ValueError, "output dim"):
+            scheme.validate_weight_shapes(
+                self._shape_layer(tp_size=1, allow_mismatch=True, output_sizes=(576, 1536)),
+                input_size=256,
+                output_size=2112,
+                input_size_per_partition=256,
+                output_partition_sizes=[576, 1536],
+            )
+
+    def test_rejects_a_shard_that_owns_only_part_of_a_tile(self):
+        scheme = self.build_scheme()
+        with self.assertRaisesRegex(ValueError, "output dim"):
+            scheme.validate_weight_shapes(
+                self._shape_layer(output_sizes=(8000,)),
+                input_size=8192,
+                output_size=8000,
+                input_size_per_partition=512,
+                output_partition_sizes=[500],
+            )
+
+    def test_process_weights_transposes_weight_and_scale_for_gb(self):
+        scheme = self.build_scheme()
+        layer, weight, scale_inv = self._make_layer()
+
+        scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
+        self.assertEqual(tuple(layer.weight.shape), (512, 256))
+        self.assertTrue(torch.equal(layer.weight.data, weight.transpose(0, 1).contiguous()))
+        self.assertEqual(tuple(layer.weight_scale.shape), (4, 2))
+        self.assertEqual(layer.weight_scale.dtype, torch.float32)
+        self.assertTrue(torch.equal(layer.weight_scale.data, scale_inv.transpose(0, 1).contiguous()))
+        self.assertFalse(hasattr(layer, "weight_scale_inv"))
+
+    def test_prepare_input_quantizes_the_reduction_dim(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_layer()
+        scheme.process_weights_after_loading(layer)
+        x = torch.randn(4, 512, dtype=torch.bfloat16)
+        quantized = torch.zeros(4, 512).to(torch.float8_e4m3fn)
+        block_scale = torch.ones(4, 4)
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_block_quant.return_value = (quantized, block_scale)
+            prepared = scheme.prepare_input_for_overlap(layer, x)
+
+        mock_npu.npu_dynamic_block_quant.assert_called_once_with(x, dst_type=torch.float8_e4m3fn)
+        self.assertIsNotNone(prepared)
+        self.assertIs(prepared.quantized, quantized)
+        self.assertIs(prepared.scale, block_scale)
+        self.assertEqual(prepared.output_dtype, torch.bfloat16)
+
+    def test_prepare_input_declines_higher_rank_input(self):
+        # Only a 2D token matrix can be quantized ahead of the barrier; anything
+        # else keeps applying its own layout inside apply().
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_layer()
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            self.assertIsNone(scheme.prepare_input_for_overlap(layer, torch.randn(2, 3, 512)))
+        mock_npu.npu_dynamic_block_quant.assert_not_called()
+
+    def test_apply_runs_the_gb_matmul_on_prepared_input(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_layer()
+        scheme.process_weights_after_loading(layer)
+        quantized = torch.zeros(4, 512).to(torch.float8_e4m3fn)
+        block_scale = torch.ones(4, 4)
+        prepared = PreparedLinearInput(quantized, block_scale, torch.bfloat16)
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_quant_matmul.return_value = torch.zeros(4, 256, dtype=torch.bfloat16)
+            output = scheme.apply(layer, prepared)
+
+        call = mock_npu.npu_quant_matmul.call_args
+        self.assertIs(call.args[0], quantized)
+        self.assertIs(call.args[1], layer.weight)
+        self.assertIs(call.args[2], layer.weight_scale)
+        self.assertIs(call.kwargs["pertoken_scale"], block_scale)
+        self.assertEqual(call.kwargs["group_sizes"], [1, NATIVE_BLOCK, NATIVE_BLOCK])
+        self.assertEqual(call.kwargs["output_dtype"], torch.bfloat16)
+        self.assertEqual(tuple(output.shape), (4, 256))
+
+    def test_apply_quantizes_raw_input_and_restores_the_leading_dims(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_layer()
+        scheme.process_weights_after_loading(layer)
+        x = torch.randn(2, 3, 512, dtype=torch.bfloat16)
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_block_quant.return_value = (
+                torch.zeros(6, 512).to(torch.float8_e4m3fn),
+                torch.ones(6, 4),
+            )
+            mock_npu.npu_quant_matmul.return_value = torch.zeros(6, 256, dtype=torch.bfloat16)
+            output = scheme.apply(layer, x)
+
+        quantized_input = mock_npu.npu_dynamic_block_quant.call_args.args[0]
+        self.assertEqual(tuple(quantized_input.shape), (6, 512))
+        self.assertEqual(tuple(output.shape), (2, 3, 256))
+
+    def test_bias_is_applied_outside_the_kernel(self):
+        # The G-B kernel has no bias epilogue, so apply() must add it itself.
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_layer()
+        scheme.process_weights_after_loading(layer)
+        prepared = PreparedLinearInput(torch.zeros(4, 512).to(torch.float8_e4m3fn), torch.ones(4, 4), torch.bfloat16)
+        bias = torch.ones(256, dtype=torch.bfloat16)
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_quant_matmul.side_effect = lambda *args, **kwargs: torch.zeros(4, 256, dtype=torch.bfloat16)
+            output = scheme.apply(layer, prepared, bias)
+
+        self.assertNotIn("bias", mock_npu.npu_quant_matmul.call_args.kwargs)
+        self.assertTrue(torch.equal(output, bias.expand(4, 256)))
+
+    def test_kv_b_proj_still_resolves_for_the_attention_backend(self):
+        scheme = self.build_scheme()
+        layer, weight, scale_inv = self._make_layer()
+        layer.prefix = "model.layers.0.self_attn.kv_b_proj"
+
+        scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.dtype, torch.bfloat16)
+        self.assertFalse(hasattr(layer, "weight_scale"))
+        reference = reference_resolve(weight, scale_inv, NATIVE_BLOCK, NATIVE_BLOCK, torch.bfloat16)
+        self.assertTrue(torch.equal(layer.weight.data, reference))
+
+
+class TestNativeFp8MoEMethod(TestBase):
+    def build_scheme(self, block_size=(NATIVE_BLOCK, NATIVE_BLOCK)):
+        with patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()):
+            scheme = AscendNativeFp8BlockFusedMoEMethod(block_size, MagicMock())
+        return scheme
+
+    @staticmethod
+    def _make_moe_layer(num_experts=2, intermediate=NATIVE_BLOCK, hidden=NATIVE_BLOCK):
+        layer = nn.Module()
+        layer.prefix = "model.layers.0.mlp.experts"
+        w13 = torch.randn(num_experts, 2 * intermediate, hidden).to(torch.float8_e4m3fn)
+        w2 = torch.randn(num_experts, hidden, intermediate).to(torch.float8_e4m3fn)
+        layer.w13_weight = nn.Parameter(w13, requires_grad=False)
+        layer.w2_weight = nn.Parameter(w2, requires_grad=False)
+        layer.w13_weight_scale_inv = nn.Parameter(
+            torch.rand(num_experts, 2 * intermediate // NATIVE_BLOCK, hidden // NATIVE_BLOCK) + 0.5,
+            requires_grad=False,
+        )
+        layer.w2_weight_scale_inv = nn.Parameter(
+            torch.rand(num_experts, hidden // NATIVE_BLOCK, intermediate // NATIVE_BLOCK) + 0.5,
+            requires_grad=False,
+        )
+        return layer, w13, w2
+
+    def test_activations_are_block_fp8(self):
+        self.assertEqual(self.build_scheme().act_quant_type, torch.float8_e4m3fn)
+
+    def test_process_weights_transposes_experts_for_gb(self):
+        scheme = self.build_scheme()
+        layer, w13, w2 = self._make_moe_layer(intermediate=256, hidden=256)
+
+        scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.w13_weight.dtype, torch.float8_e4m3fn)
+        self.assertEqual(tuple(layer.w13_weight.shape), (2, 256, 512))
+        self.assertTrue(torch.equal(layer.w13_weight.data, w13.transpose(1, 2).contiguous()))
+        self.assertTrue(torch.equal(layer.w2_weight.data, w2.transpose(1, 2).contiguous()))
+        self.assertEqual(tuple(layer.w13_weight_scale.shape), (2, 2, 4))
+        self.assertEqual(tuple(layer.w2_weight_scale.shape), (2, 2, 2))
+        self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
+        self.assertFalse(hasattr(layer, "w2_weight_scale_inv"))
+
+    @staticmethod
+    def _mlp_input(layer, dynamic_scale=None):
+        return MoEMlpComputeInput(
+            hidden_states=torch.randn(8, 256, dtype=torch.bfloat16),
+            group_list=torch.tensor([4, 4], dtype=torch.int64),
+            group_list_type=1,
+            dynamic_scale=dynamic_scale,
+            topk_scales=None,
+            weights=MagicMock(),
+            quant=MagicMock(),
+            fusion=False,
+            layer=layer,
+        )
+
+    def test_apply_gmm1_feeds_block_scales_to_the_grouped_matmul(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_moe_layer()
+        scheme.process_weights_after_loading(layer)
+        mlp_input = self._mlp_input(layer)
+        hidden_states = mlp_input.hidden_states
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_block_quant.return_value = (
+                torch.zeros(8, 256).to(torch.float8_e4m3fn),
+                torch.ones(8, 2),
+            )
+            mock_npu.npu_grouped_matmul.return_value = [torch.zeros(8, 512)]
+            with patch(f"{MODULE}.dispose_tensor") as mock_dispose:
+                scheme.apply_gmm1(mlp_input)
+
+        call = mock_npu.npu_grouped_matmul.call_args
+        self.assertEqual(call.kwargs["weight"], [layer.w13_weight])
+        self.assertEqual(call.kwargs["scale"], [layer.w13_weight_scale])
+        self.assertEqual(len(call.kwargs["per_token_scale"]), 1)
+        self.assertEqual(call.kwargs["split_item"], 2)
+        self.assertEqual(call.kwargs["group_type"], 0)
+        self.assertEqual(call.kwargs["group_list_type"], 1)
+        mock_dispose.assert_called_once_with(hidden_states)
+
+    def test_apply_gmm1_ignores_the_scale_of_an_unquantized_dispatch(self):
+        # MC2 reports a scale for a dispatch that block-wise FP8 leaves unquantized.
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_moe_layer()
+        scheme.process_weights_after_loading(layer)
+        mlp_input = self._mlp_input(layer, dynamic_scale=torch.ones(8, 2))
+        block_scale = torch.ones(8, 2, dtype=torch.float32)
+
+        with (
+            patch(f"{MODULE}.torch_npu") as mock_npu,
+            patch(f"{MODULE}.dispose_tensor"),
+        ):
+            mock_npu.npu_dynamic_block_quant.return_value = (
+                torch.zeros(8, 256).to(torch.float8_e4m3fn),
+                block_scale,
+            )
+            mock_npu.npu_grouped_matmul.return_value = [torch.zeros(8, 512)]
+            scheme.apply_gmm1(mlp_input)
+
+        mock_npu.npu_dynamic_block_quant.assert_called_once()
+        call = mock_npu.npu_grouped_matmul.call_args
+        self.assertEqual(call.kwargs["x"][0].dtype, torch.float8_e4m3fn)
+        self.assertIs(call.kwargs["per_token_scale"][0], block_scale)
+
+    def test_apply_gmm2_feeds_block_scales_to_the_grouped_matmul(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_moe_layer()
+        scheme.process_weights_after_loading(layer)
+        mlp_input = self._mlp_input(layer)
+
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_grouped_matmul.return_value = [torch.zeros(8, 256)]
+            scheme.apply_gmm2(mlp_input, torch.zeros(8, 256).to(torch.float8_e4m3fn), torch.ones(8, 2))
+
+        call = mock_npu.npu_grouped_matmul.call_args
+        self.assertEqual(call.kwargs["weight"], [layer.w2_weight])
+        self.assertEqual(call.kwargs["scale"], [layer.w2_weight_scale])
+        self.assertEqual(call.kwargs["split_item"], 2)
+        self.assertEqual(call.kwargs["group_type"], 0)
+
+    def test_apply_act_quant_returns_block_scales(self):
+        scheme = self.build_scheme()
+        with patch(f"{MODULE}.torch_npu") as mock_npu:
+            mock_npu.npu_dynamic_block_quant.return_value = (
+                torch.zeros(8, 256).to(torch.float8_e4m3fn),
+                torch.ones(8, 2),
+            )
+            quantized, scale = scheme.apply_act_quant(self._mlp_input(None), torch.randn(8, 256))
+
+        self.assertEqual(quantized.dtype, torch.float8_e4m3fn)
+        self.assertEqual(tuple(scale.shape), (8, 2))
+
+    def test_apply_dispatches_the_native_quant_type(self):
+        scheme = self.build_scheme()
+        layer, _, _ = self._make_moe_layer()
+        scheme.process_weights_after_loading(layer)
+        for name, value in (
+            ("ascend_expert_map", None),
+            ("global_redundant_expert_num", 0),
+            ("ascend_mc2_mask", None),
+            ("apply_router_weight_on_input", False),
+            ("ascend_pertoken_scale", None),
+            ("activation", "silu"),
+        ):
+            setattr(layer, name, value)
+
+        with patch(f"{MODULE}._EXTRA_CTX") as mock_ctx:
+            mock_ctx.moe_comm_method.fused_experts.return_value = "native-moe"
+            output = scheme.apply(
+                layer,
+                torch.randn(4, 256),
+                torch.rand(4, 2),
+                torch.zeros(4, 2, dtype=torch.int64),
+                None,
+                None,
+            )
+
+        self.assertEqual(output, "native-moe")
+        call = mock_ctx.moe_comm_method.fused_experts.call_args
+        fused_experts_input = call.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.quant.quant_type, QuantType.W8A8FP8_BLOCK)
+        # G-B only reads one stacked weight tensor, so no dynamic EPLB.
+        self.assertFalse(fused_experts_input.dynamic_eplb)
+        self.assertIs(call.kwargs["quant_method"], scheme)
+
+    def test_apply_rejects_a_partially_routed_input(self):
+        scheme = self.build_scheme()
+        with self.assertRaisesRegex(RuntimeError, "topk"):
+            scheme.apply(nn.Module(), torch.randn(4, 256), None, None, None, None)
+
+
+class TestFp8WeightShapeValidation(TestBase):
+    def setUp(self):
+        self.linear = AscendFp8BlockLinearMethod.__new__(AscendFp8BlockLinearMethod)
+        self.linear.block_n = self.linear.block_k = 128
+        self.moe = AscendFp8BlockFusedMoEMethod.__new__(AscendFp8BlockFusedMoEMethod)
+        self.moe.block_n = 64
+        self.moe.block_k = 128
+
+    def test_rejects_misaligned_row_and_column_shards(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
+            with self.assertRaisesRegex(ValueError, "input_size_per_partition"):
+                self.linear.validate_weight_shapes(layer, 768, 128, 192, [128])
+            with self.assertRaisesRegex(ValueError, "output_partition_size"):
+                self.linear.validate_weight_shapes(layer, 256, 768, 256, [192])
+            self.linear.validate_weight_shapes(layer, 256, 1536, 256, [384])
+            global_tp.assert_not_called()
+
+    def test_packed_mismatch_respects_loader_allowance(self):
+        layer = nn.Module()
+        layer.tp_size = 8
+        layer.output_sizes = [1536, 512]
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 2048, 256, [192, 64])
+        layer.allow_fp8_block_shape_mismatch = True
+        self.linear.validate_weight_shapes(layer, 256, 2048, 256, [192, 64])
+
+    def test_replicated_final_projection_can_end_in_a_partial_tile(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        layer.output_sizes = [512, 512, 256]
+        layer.num_kv_head_replicas = 4
+        self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 128, 64])
+        layer.num_kv_head_replicas = 1
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 128, 64])
+
+    def test_moe_checks_block_k_only_when_tensor_sharded(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        with self.assertRaisesRegex(ValueError, "block_n"):
+            self.moe.validate_weight_shapes(layer, 160)
+        with self.assertRaisesRegex(ValueError, "block_k"):
+            self.moe.validate_weight_shapes(layer, 192)
+        layer.tp_size = 1
+        self.moe.validate_weight_shapes(layer, 192)
+
+    def test_global_tp_fallback_and_replicated_merged_pair(self):
+        layer = nn.Module()
+        layer.output_sizes = [1536, 512]
+        with patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8) as global_tp:
+            self.linear.validate_weight_shapes(layer, 256, 2048, 256, [1536, 512])
+            global_tp.assert_called_once_with()
+
+    def test_sharded_final_projection_uses_its_own_global_size(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        layer.output_sizes = [512, 768]
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 192])
 
 
 if __name__ == "__main__":
