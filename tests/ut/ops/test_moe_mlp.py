@@ -472,6 +472,67 @@ class TestApplyMoeMlp(unittest.TestCase):
         quant_method.apply_act_quant.assert_called_once_with(mlp_compute_input, "silu_out")
         quant_method.apply_gmm2.assert_called_once_with(mlp_compute_input, "act_quant_out", "act_scale")
 
+    def test_w4a4_positive_limit_clamps_before_activation_and_quantization(self):
+        # DeepSeek-V4 Expert.forward: clamp gate only above +limit, clamp up
+        # on both sides, then multiply SiLU(gate) by up before quantization.
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                quant_method = self._quant_method(fused=True)
+                gate = torch.tensor([[-20.0, -1.0, 10.0, 20.0]], dtype=dtype)
+                up = torch.tensor([[-20.0, 20.0, -10.0, 1.0]], dtype=dtype)
+                gmm1_out = torch.cat((gate, up), dim=-1)
+                quant_method.apply_gmm1.return_value = gmm1_out
+                mlp_compute_input = _mlp_compute_input(
+                    quant=MoEQuantParams(quant_type=QuantType.W4A4MXFP),
+                    activation=MoEActivation.SILU,
+                    swiglu_limit=10.0,
+                )
+                expected = torch.nn.functional.silu(gate.clamp(max=10.0)) * up.clamp(-10.0, 10.0)
+
+                def swiglu(x, gate=gate, up=up):
+                    actual_gate, actual_up = x.chunk(2, dim=-1)
+                    torch.testing.assert_close(actual_gate, gate.clamp(max=10.0))
+                    torch.testing.assert_close(actual_up, up.clamp(-10.0, 10.0))
+                    return torch.nn.functional.silu(actual_gate) * actual_up
+
+                with (
+                    patch(f"{MOE_MLP}.torch.npu.current_stream", MagicMock()),
+                    patch(f"{MOE_MLP}.torch_npu.npu_swiglu", side_effect=swiglu),
+                ):
+                    out, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+
+                self.assertEqual(out, "final_out")
+                quant_method.apply_gmm1_act_quant.assert_not_called()
+                quant_method.apply_gmm1.assert_called_once_with(mlp_compute_input)
+                quant_method.apply_act_quant.assert_called_once()
+                torch.testing.assert_close(quant_method.apply_act_quant.call_args.args[1], expected)
+                quant_method.apply_gmm2.assert_called_once_with(mlp_compute_input, "act_quant_out", "act_scale")
+
+    def test_w4a4_nonpositive_limit_retains_fused_path(self):
+        for limit in (0.0, -1.0):
+            with self.subTest(limit=limit):
+                quant_method = self._quant_method(fused=True)
+                mlp_compute_input = _mlp_compute_input(
+                    quant=MoEQuantParams(quant_type=QuantType.W4A4MXFP), swiglu_limit=limit
+                )
+                with patch(f"{MOE_MLP}.torch.npu.current_stream", MagicMock()):
+                    out, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+                self.assertEqual(out, "final_out")
+                quant_method.apply_gmm1_act_quant.assert_called_once_with(mlp_compute_input)
+                quant_method.apply_gmm1.assert_not_called()
+                quant_method.apply_act_quant.assert_not_called()
+
+    def test_positive_limit_preserves_other_quantization_fused_paths(self):
+        for quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.W8A8MXFP, QuantType.W4A8MXFP):
+            with self.subTest(quant_type=quant_type):
+                quant_method = self._quant_method(fused=True)
+                mlp_compute_input = _mlp_compute_input(quant=MoEQuantParams(quant_type=quant_type), swiglu_limit=10.0)
+                with patch(f"{MOE_MLP}.torch.npu.current_stream", MagicMock()):
+                    out, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+                self.assertEqual(out, "final_out")
+                quant_method.apply_gmm1_act_quant.assert_called_once_with(mlp_compute_input)
+                quant_method.apply_gmm1.assert_not_called()
+
     def test_before_gmm2_event_recorded_between_act_quant_and_gmm2(self):
         quant_method = self._quant_method(fused=False)
         mlp_compute_input = _mlp_compute_input()
