@@ -517,9 +517,28 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker, store, arrays, jobs, errors = self.make_hybrid(extra_entry=True)
         for layer in range(4):
             worker.sync_save_events[layer] = MagicMock()
-        with patch.object(store, "batch_copy_put", wraps=store.batch_copy_put) as put:
+        calls = MagicMock()
+        with (
+            patch.object(store, "batch_copy_put", wraps=store.batch_copy_put) as put,
+            patch.object(store, "batch_commit", wraps=store.batch_commit) as commit,
+        ):
+            calls.attach_mock(put, "put")
+            calls.attach_mock(commit, "commit")
             request = self.save_prefix(worker)
-        self.assertEqual(put.call_count, 4)
+        self.assertEqual(put.call_count, 7)
+        for call in put.call_args_list:
+            groups = {key.split("@group:", 1)[1].split("@", 1)[0] for key in call.args[0]}
+            self.assertEqual(len(groups), 1)
+        commit_index = next(
+            index
+            for index, call in enumerate(calls.mock_calls)
+            if call[0] == "commit" and all("@group:0@" in key for key in call.args[0])
+        )
+        # Group 0's final PUT is published before group 1 copies the same layer.
+        self.assertEqual(calls.mock_calls[commit_index - 1][0], "put")
+        self.assertTrue(all("@group:0@" in key for key in calls.mock_calls[commit_index - 1].args[0]))
+        self.assertEqual(calls.mock_calls[commit_index + 1][0], "put")
+        self.assertTrue(all("@group:1@" in key for key in calls.mock_calls[commit_index + 1].args[0]))
         for event in worker.sync_save_events:
             event.synchronize.assert_called_once()
         self.assertEqual(sorted(len(value) for value in store.objects.values()), [16] * 4 + [32] + [48] * 2)
@@ -545,6 +564,29 @@ class TestMooncakeHybrid(unittest.TestCase):
             np.testing.assert_array_equal(array[slots], saved[name][slots])
         self.assertFalse(errors)
         self.assertFalse(store.open_reads)
+
+    def test_inactive_first_group_still_synchronizes_before_later_put(self):
+        worker, store, _, _, errors = self.make_hybrid()
+        events: list[tuple[str, int]] = []
+        for layer in range(4):
+            worker.sync_save_events[layer] = MagicMock()
+            worker.sync_save_events[layer].synchronize.side_effect = lambda layer=layer: events.append(("sync", layer))
+        real_put = store.batch_copy_put
+
+        def put(keys, buffers, sizes, offsets):
+            # Group 0 fails at layer 0 and is inactive at layer 2; group 1
+            # still needs the layer 2 event before its own PUT can start.
+            group = int(keys[0].split("@group:", 1)[1].split("@", 1)[0])
+            events.append(("put", group))
+            results = real_put(keys, buffers, sizes, offsets)
+            return [-1 if "@group:0@" in key else result for key, result in zip(keys, results, strict=True)]
+
+        store.batch_copy_put = put
+        self.save_prefix(worker)
+        for event in worker.sync_save_events:
+            event.synchronize.assert_called_once()
+        self.assertEqual(events[events.index(("sync", 2)) + 1], ("put", 1))
+        self.assertFalse(errors)
 
     def test_continuation_restores_group_keys_into_new_local_blocks(self):
         worker, store, arrays, jobs, errors = self.make_hybrid()

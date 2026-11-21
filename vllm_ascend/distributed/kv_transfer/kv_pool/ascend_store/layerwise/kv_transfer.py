@@ -645,7 +645,6 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
     ) -> list[int]:
         if not keys:
             return []
-        self.sync_save_events[layer_id].synchronize()
         results: list[int] = []
         for batch_keys, batch_buffers, batch_sizes, batch_offsets in self._range_transfer_batches(
             keys, buffers, sizes, offsets, self.max_transfer_blocks, self.max_transfer_bytes
@@ -677,7 +676,14 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             self._session_tracker.commit_put_keys(committed_keys)
         self._remove_started_keys(keys)
 
-    def _handle_range_request(self, req_meta: LayerRangeReqMeta, final_group_layer: bool | None = None) -> None:
+    def _handle_range_request(
+        self,
+        req_meta: LayerRangeReqMeta,
+        final_group_layer: bool | None = None,
+        *,
+        save_event_synced: bool = False,
+    ) -> bool:
+        """Copy one group and return whether the layer's save event was synchronized."""
         layer_id = req_meta.layer_id
         if self._active_put_keys is None or layer_id == 0:
             self._active_put_keys = set(req_meta.keys)
@@ -688,73 +694,28 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
+            if not save_event_synced:
+                self.sync_save_events[layer_id].synchronize()
+                save_event_synced = True
             results = self._copy_range_puts(layer_id, active_keys, active_buffers, active_sizes, active_offsets)
             failed_keys = [key for key, result in zip(active_keys, results, strict=True) if result < 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
 
-        if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
-            return
-        active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
-        self._commit_range_keys(layer_id, active_keys)
-        self._active_put_keys = None
-
-    def _handle_merged_range_saves(self, transfer_tasks: list[LayerTransferTask]) -> None:
-        """Copy one layer's groups together, then finalize each group independently."""
-        layer_id = transfer_tasks[0].layer_id
-        keys: list[str] = []
-        buffers: list[list[int]] = []
-        sizes: list[list[int]] = []
-        offsets: list[list[int]] = []
-        groups: list[tuple[LayerTransferTask, LayerRangeReqMeta, list[str], set[str]]] = []
-        for task in transfer_tasks:
-            shared = task.shared_block_data
-            if shared is None:
-                raise RuntimeError("Layerwise range save requires shared block metadata")
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
-            if not isinstance(req_meta, LayerRangeReqMeta):
-                raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
-            req_meta.layer_id = layer_id
-            active = self._group_put_keys.get(task.group_id)
-            if active is None or layer_id == 0:
-                active = set(req_meta.keys)
-            indices = [index for index, key in enumerate(req_meta.keys) if key in active]
-            group_keys = [req_meta.keys[index] for index in indices]
-            groups.append((task, req_meta, group_keys, active))
-            keys.extend(group_keys)
-            buffers.extend(req_meta.all_buffers[index] for index in indices)
-            sizes.extend(req_meta.all_sizes[index] for index in indices)
-            offsets.extend(req_meta.all_offsets[index] for index in indices)
-
-        results = self._copy_range_puts(layer_id, keys, buffers, sizes, offsets)
-        start = 0
-        for task, req_meta, group_keys, active in groups:
-            end = start + len(group_keys)
-            failed = [key for key, result in zip(group_keys, results[start:end], strict=True) if result < 0]
-            if failed:
-                self._revoke_range_keys(failed)
-                active.difference_update(failed)
-            # A pool key spans the group's layers. Publish only after its last
-            # required range, even when another group at this layer continues.
-            if task.final_group_layer or layer_id == self.final_layer_id:
-                self._commit_range_keys(layer_id, [key for key in group_keys if key in active])
-                self._group_put_keys[task.group_id] = None
-            else:
-                self._group_put_keys[task.group_id] = active
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-                if self.try_finish_and_delete_stored_request(req_id):
-                    self.set_finished_request(req_id)
-            start = end
+        is_final_group_layer = layer_id == self.final_layer_id if final_group_layer is None else final_group_layer
+        if is_final_group_layer:
+            active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
+            self._commit_range_keys(layer_id, active_keys)
+            self._active_put_keys = None
+        return save_event_synced
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
         layer_id = transfer_tasks[0].layer_id
         try:
-            if len(transfer_tasks) > 1:
-                self._handle_merged_range_saves(transfer_tasks)
-                return
+            # Groups share one layer event. Wait only before the first active
+            # PUT, then preserve per-group transfer and publication boundaries.
+            save_event_synced = False
             for task in transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:
@@ -766,7 +727,11 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
                 req_meta.layer_id = layer_id
                 self._active_put_keys = self._group_put_keys.get(task.group_id)
                 try:
-                    self._handle_range_request(req_meta, task.final_group_layer or layer_id == self.final_layer_id)
+                    save_event_synced = self._handle_range_request(
+                        req_meta,
+                        task.final_group_layer or layer_id == self.final_layer_id,
+                        save_event_synced=save_event_synced,
+                    )
                 finally:
                     self._group_put_keys[task.group_id] = self._active_put_keys
                 for req_id in req_meta.req_ids:

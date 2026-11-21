@@ -84,7 +84,7 @@ class TestMooncakeSharedSource(unittest.TestCase):
                     expected = {name: cache.clone() for name, cache in caches.items()}
                     with patch.object(store, "batch_copy_put", wraps=store.batch_copy_put) as put:
                         conn.bind_connector_metadata(metadata(worker))
-                        expected_puts = sum(bool(tasks) for tasks in worker.layer_save_tasks)
+                        expected_puts = sum(len(tasks) for tasks in worker.layer_save_tasks)
                         forward(conn, worker, cut=True)
                     self.assertEqual(put.call_count, expected_puts)
                     self.assertTrue(store.complete)
@@ -122,7 +122,7 @@ class TestMooncakeSharedSource(unittest.TestCase):
                     conn.bind_connector_metadata(metadata(worker))
                     forward(conn, worker)
 
-    def test_merged_transfers_preserve_limits_and_range_offsets(self):
+    def test_group_puts_and_merged_gets_preserve_limits_and_range_offsets(self):
         worker, store, caches, conn = make_mooncake_worker(self, bounded=True)
         worker.kv_send_thread.max_transfer_blocks = 1
         worker.kv_send_thread.max_transfer_bytes = 8
@@ -148,13 +148,13 @@ class TestMooncakeSharedSource(unittest.TestCase):
             self.assertEqual(int(cache[0].sum()), 0)
         self.assertFalse(store.open_reads)
 
-    def test_merged_put_exception_or_short_reply_revokes_pending_groups(self):
+    def test_group_put_exception_or_short_reply_revokes_pending_groups(self):
         for short_reply in (False, True):
             with self.subTest(short_reply=short_reply):
                 worker, store, _, conn = make_mooncake_worker(self, bounded=True)
                 conn.bind_connector_metadata(metadata(worker))
                 if short_reply:
-                    store.batch_copy_put = Mock(return_value=[16])
+                    store.batch_copy_put = Mock(return_value=[])
                 else:
                     store.batch_copy_put = Mock(side_effect=RuntimeError("store disconnected"))
                 with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer"):
@@ -199,12 +199,17 @@ class TestMooncakeSharedSource(unittest.TestCase):
 
     def test_failed_put_revokes_uncommitted_objects(self):
         worker, store, _, conn = make_mooncake_worker(self, bounded=True)
+        worker.sync_save_events = [Mock() for _ in range(worker.num_layers)]
+        worker.kv_send_thread.sync_save_events = worker.sync_save_events
         conn.bind_connector_metadata(metadata(worker))
         store.fail_put = True
         forward(conn, worker)
         worker.kv_send_thread.request_queue.join()
         self.assertFalse(store.complete)
         self.assertFalse(worker._put_started_keys)
+        worker.sync_save_events[2].synchronize.assert_called_once()
+        for layer in (8, 14, 20):
+            worker.sync_save_events[layer].synchronize.assert_not_called()
 
     def test_failed_get_stops_before_attention_and_releases_sessions(self):
         worker, store, _, conn = make_mooncake_worker(self, bounded=True)
