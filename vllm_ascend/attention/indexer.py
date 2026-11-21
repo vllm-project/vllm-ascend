@@ -15,7 +15,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -188,6 +188,34 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     Indexer hardcodes the CUDA fp8 path.
     TODO: Will be removed once original Indexer supports different quantization methods.
     """
+
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AscendSFAIndexerCacheSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        """K followed by scale inside each page; C4 retains its scale axes."""
+        prefix = (num_blocks, spec.num_kv_heads, spec.block_size)
+        shapes = [(*prefix, spec.head_size * get_dtype_size(spec.dtype))]
+        if spec.scale_dim:
+            scale_shape: tuple[int, ...] = (spec.scale_dim * get_dtype_size(spec.scale_dtype),)
+            if spec.cache_sparse_li_c4:
+                scale_shape = (spec.scale_dim // 2, 2 * get_dtype_size(spec.scale_dtype))
+            shapes.append((*prefix, *scale_shape))
+        return tuple(shapes)
+
+    @staticmethod
+    def get_runtime_dtypes(spec: AscendSFAIndexerCacheSpec) -> tuple[torch.dtype, ...]:
+        return (spec.dtype, spec.scale_dtype) if spec.scale_dim else (spec.dtype,)
+
+    @staticmethod
+    def format_runtime_views(
+        spec: AscendSFAIndexerCacheSpec, components: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(components)
 
     accept_output_buffer: bool = True
 
@@ -901,6 +929,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 slot_mapping,
                 self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
                 self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                block_size=self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT].shape[1],
+                key_block_stride=self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT].stride(0),
+                scale_block_stride=self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT].stride(0),
             )
         else:
             self.write_cache(k_li, k_li_scale, slot_mapping, indexer_metadata.cache_scatter_indices)

@@ -423,12 +423,19 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     )
 
 
-def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
+@pytest.mark.parametrize("paged", [False, True])
+def test_c4_cache_write_preserves_packed_bytes(monkeypatch, paged):
     indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
     indexer.enable_sparse_li_c4 = True
     indexer.enable_sparse_li_c8 = False
     key_cache = torch.full((2, 128, 1, 64), 23, dtype=torch.uint8)
     scale_bytes = torch.full((2, 128, 1, 2, 2), 23, dtype=torch.uint8)
+    backing = None
+    if paged:
+        # Keep each block dense, with K and scale sharing the physical page.
+        backing = torch.full((2, 128 * (64 + 4) + 32), 23, dtype=torch.uint8)
+        key_cache = backing[:, : 128 * 64].view(2, 128, 1, 64)
+        scale_bytes = backing[:, 128 * 64 : 128 * (64 + 4)].view(2, 128, 1, 2, 2)
     indexer.k_cache = SimpleNamespace(kv_cache=(key_cache, scale_bytes.view(torch.float8_e8m0fnu)))
     packed_key = torch.arange(3 * 64, dtype=torch.uint8).view(3, 64)
     scale = torch.arange(12, dtype=torch.uint8).view(3, 2, 2)
@@ -439,19 +446,25 @@ def test_c4_cache_write_preserves_packed_bytes(monkeypatch):
 
     def scatter(cache, indices, updates):
         assert cache.dtype == updates.dtype == torch.uint8
-        cache[indices.flatten()] = updates
+        if indices.shape[1] == 2:
+            cache[indices[:, 0], indices[:, 1]] = updates
+        else:
+            cache[indices.flatten()] = updates
 
     scatter_op = Mock(side_effect=scatter)
     monkeypatch.setattr("vllm_ascend.attention.indexer.DeviceOperator.scatter_cache", scatter_op)
 
-    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots)
+    scatter_indices = torch.stack((slots // 128, slots % 128), dim=-1)
+    indexer.write_cache(packed_key, scale.view(torch.float8_e8m0fnu), slots, scatter_indices)
 
     expected_key = torch.full_like(key_cache, 23).view(-1, 64)
     expected_scale = torch.full_like(scale_bytes, 23).view(-1, 2, 2)
     expected_key[slots] = packed_key
     expected_scale[slots] = scale
-    assert torch.equal(key_cache.view(-1, 64), expected_key)
-    assert torch.equal(scale_bytes.view(-1, 2, 2), expected_scale)
+    assert torch.equal(key_cache, expected_key.view(2, 128, 1, 64))
+    assert torch.equal(scale_bytes, expected_scale.view(2, 128, 1, 2, 2))
+    if backing is not None:
+        assert torch.all(backing[:, -32:] == 23)
     assert scatter_op.call_count == 2
 
 
