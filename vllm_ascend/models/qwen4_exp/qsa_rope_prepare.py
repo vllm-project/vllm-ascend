@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared QSA rotary-cache preparation utilities."""
+"""Prepare shared Qwen4Exp QSA rotary-cache rows before model forward."""
 
 from __future__ import annotations
 
@@ -36,27 +36,6 @@ def _prepare_qsa_rope_cache_kernel(
         other=0.0,
     )
     tl.store(output_ptr + row * output_stride_row + offsets, values, mask=mask)
-
-
-def validate_qsa_rope_positions(
-    positions: torch.Tensor,
-    cos_sin: torch.Tensor,
-    qkv: torch.Tensor,
-    rope_dim: int,
-) -> None:
-    """Validate inputs for gathering the full rotary cache in-kernel."""
-    if positions.ndim not in (1, 2) or (positions.ndim == 2 and positions.shape[0] != 3):
-        raise ValueError("QSA positions must have shape [tokens] or [3, tokens]")
-    if positions.dtype not in (torch.int32, torch.int64):
-        raise ValueError("QSA positions must use int32 or int64")
-    if positions.shape[-1] != qkv.shape[0]:
-        raise ValueError("QSA positions and QKV projection must have the same token count")
-    if positions.device != qkv.device or cos_sin.device != qkv.device:
-        raise ValueError("QSA positions, rotary cache and QKV projection must share a device")
-    if cos_sin.ndim != 2 or cos_sin.shape[0] == 0 or cos_sin.shape[1] != rope_dim:
-        raise ValueError("QSA full rotary cache must have shape [cache_rows, rope_dim]")
-    if cos_sin.stride(1) != 1:
-        raise ValueError("QSA full rotary cache must be contiguous in its last dimension")
 
 
 def prepare_qsa_rope_cache(
@@ -99,4 +78,4 @@ def prepare_qsa_rope_cache(
     )
 
 
-__all__ = ["prepare_qsa_rope_cache", "validate_qsa_rope_positions"]
+__all__ = ["prepare_qsa_rope_cache"]
