@@ -2311,6 +2311,32 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             init_ascend_config(vc)
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mrv2_internal_layout_keys_do_not_enter_ascend_config(self, mock_fix):
+        from vllm_ascend.mrv2_utils import (
+            MRV2_DECODE_QUERY_LIMITS_KEY,
+            MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+            MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+        )
+
+        vc = VllmConfig()
+        vc.additional_config = {
+            "_mrv2_padding_graph_gears": {"prefill": [8]},
+            MRV2_DECODE_QUERY_LIMITS_KEY: {6: 4},
+            MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY: [8],
+            MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY: {6: [8, 16]},
+        }
+
+        init_ascend_config(vc)
+
+        self.assertEqual(vc.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY], {6: 4})
+        self.assertEqual(vc.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY], [8])
+        self.assertEqual(
+            vc.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY],
+            {6: [8, 16]},
+        )
+
+    @_clean_up
     @patch("vllm_ascend.ascend_config.logger.warning")
     @patch(
         "vllm_ascend.ascend_config.importlib.util.find_spec",

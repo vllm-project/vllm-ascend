@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.models.deepseek_v41.engram import model_state as engram_state
 from vllm_ascend.platform import _setup_worker_and_scheduler
+from vllm_ascend.utils import MRV2PaddingPlan
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -554,6 +555,10 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 class _ReplicatedPCPManager(AscendPCPManager):
     """Exercise replicated layouts explicitly, independently of speculation."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.padding_plan = MRV2PaddingPlan()
 
     @property
     def is_decode_sharded(self):

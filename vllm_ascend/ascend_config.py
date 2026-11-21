@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
-from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
@@ -916,20 +915,6 @@ class AscendConfig:
                 "would never be used. Disabling quantized_all_reduce_config."
             )
             self.quantized_all_reduce_config = dataclasses.replace(self.quantized_all_reduce_config, enable=False)
-        # Sequence-parallel max_num_batched_tokens divisibility writeback
-        if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
-            tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
-            if vc.scheduler_config.max_num_batched_tokens % tp_pcp_size != 0:
-                vc.scheduler_config.max_num_batched_tokens = (
-                    cdiv(vc.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
-                )
-                logger.warning_once(
-                    "When using sequence parallelism, the max_num_batched_tokens should be divisible "
-                    "by tp_size * pcp_size (%s). It has been adjusted to %s.",
-                    str(tp_pcp_size),
-                    str(vc.scheduler_config.max_num_batched_tokens),
-                )
-
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
@@ -2002,12 +1987,26 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
 
     runtime_boot = build_runtime_config_from_additional(additional_config)
 
+    from vllm_ascend.mrv2_utils import (
+        MRV2_DECODE_QUERY_LIMITS_KEY,
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    )
+
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
+        # Platform-derived physical graph gears. They survive config transport
+        # but are not a user-facing AscendConfig option.
+        "_mrv2_padding_graph_gears",
+        MRV2_DECODE_QUERY_LIMITS_KEY,
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
         # backend selector; Ascend supports only the triton value (FLA kernels
         # run via triton-ascend), and the triton default applies either way

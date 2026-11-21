@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.hisparse.pcp import (
     PCPHiSparseConnector,
+    prepare_pcp_mirror_staging,
     prepare_pcp_query_metadata,
     prepare_pcp_query_states,
 )
@@ -48,6 +49,35 @@ def handle():
     cache.view = NS(cache=torch.zeros(12, 8, dtype=torch.uint8))
     cache.slot_mapping = torch.tensor([10, 11, -1, 12, 13, -1])
     return cache
+
+
+def test_pcp_mirror_staging_uses_runner_physical_capacity():
+    worker = NS(
+        vllm_config=NS(
+            scheduler_config=NS(max_num_batched_tokens=15, max_num_seqs=1),
+            parallel_config=NS(prefill_context_parallel_size=2),
+            num_lookahead_tokens=0,
+        ),
+        _slot_mapping_staging=NS(slots=torch.empty(31, dtype=torch.int64)),
+    )
+
+    prepare_pcp_mirror_staging(worker, max_num_tokens=16, max_num_reqs=1)
+
+    assert worker._slot_mapping_staging.slots.numel() == 33
+
+
+def test_metadata_builder_uses_physical_token_capacity(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+
+    def init(builder, *args, **kwargs):
+        builder.use_pcp = False
+
+    monkeypatch.setattr(sfa_hisparse.AscendSFAMetadataBuilder, "__init__", init)
+    monkeypatch.setattr(sfa_hisparse, "get_mrv2_physical_batch_capacity", lambda config: (16, 1))
+
+    builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], NS(), torch.device("cpu"))
+
+    assert builder._row_capacity == 16
 
 
 @pytest.mark.parametrize(
@@ -271,9 +301,23 @@ def test_pcp_builder_reuses_state_input_without_per_draft_buffers(monkeypatch):
     monkeypatch.setattr(sfa_hisparse, "needs_pcp_kv_gather", lambda *args: True)
     monkeypatch.setattr(sfa_hisparse, "compute_token_to_req_indices", lambda q, out, n, size: out[:size].zero_())
     config = NS(
-        scheduler_config=NS(max_num_seqs=2, max_num_batched_tokens=8),
+        scheduler_config=NS(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+            max_num_active_seqs=None,
+            max_num_scheduled_tokens=None,
+        ),
         compilation_config=NS(max_cudagraph_capture_size=8),
-        parallel_config=NS(prefill_context_parallel_size=2),
+        parallel_config=NS(
+            prefill_context_parallel_size=2,
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            enable_hc_sp=False,
+            use_sequence_parallel_moe=True,
+        ),
+        additional_config={},
+        uniform_decode_query_len=1,
+        get_decode_cudagraph_query_lens=lambda query_len: {query_len: 2},
     )
     builder = sfa_hisparse.AscendHiSparseMetadataBuilder(None, [], config, torch.device("cpu"))
     common = NS(num_reqs=3, query_start_loc_cpu=torch.tensor([0, 2, 3, 4], dtype=torch.int32))

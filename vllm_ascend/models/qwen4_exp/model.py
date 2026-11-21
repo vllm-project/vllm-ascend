@@ -14,13 +14,19 @@
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
+import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
-from vllm.models.qwen4_exp.amd import (
-    hyperconnection as upstream_hc,
-)
+from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendProcessorMixin,
@@ -52,9 +58,17 @@ upstream_hc.hc_silu = hc_silu
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
+from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple  # noqa: E402
 
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
+# vLLM owns Qwen4Exp PP, HC and SP control flow. Bind only the device-specific
+# collectives and operators used by that upstream implementation.
+upstream_model.sp_all_gather = sp_all_gather
+upstream_model.sp_reduce_scatter = sp_reduce_scatter
+upstream_model.sp_shard = sp_shard
+upstream_ple.sp_all_gather = sp_all_gather
+upstream_ple.sp_shard = sp_shard
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
@@ -72,6 +86,35 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
                 name: dims for name, dims in dynamic_arg_dims.items() if name != "query_start_loc"
             }
 
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Adapt the upstream PP boundary to Ascend's full-token transport."""
+        pp_group = get_pp_group()
+        if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
+            hidden_states = intermediate_tensors["hidden_states"]
+            intermediate_tensors = IntermediateTensors(
+                {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+            )
+
+        output = super().forward(
+            input_ids,
+            positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+        if not pp_group.is_last_rank and self.use_hc_sequence_parallel:
+            assert isinstance(output, IntermediateTensors)
+            hidden_states = sp_all_gather(output["hidden_states"])
+            output = IntermediateTensors({**output.tensors, "hidden_states": hidden_states[: positions.shape[-1]]})
+        return output
+
 
 # Qwen4ExpForCausalLM resolves this module global when it creates the backbone.
 upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
@@ -79,6 +122,8 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
@@ -106,6 +151,8 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

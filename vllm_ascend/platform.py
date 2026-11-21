@@ -47,7 +47,13 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+from vllm_ascend.mrv2_utils import (
+    MRV2_DECODE_QUERY_LIMITS_KEY,
+    MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+    MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+    MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    apply_v2_model_runner_config_patch,
+)
 
 # isort: off
 from vllm_ascend.utils import (
@@ -56,6 +62,9 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
     dsv4_skips_indexer_topk,
+    ensure_mrv2_physical_batch_capacity,
+    get_mrv2_decode_query_limits,
+    get_mrv2_padding_plan,
     get_dsv4_compress_ratio,
     bootstrap_custom_op_env,
     check_kv_extra_config,
@@ -65,9 +74,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
-    update_cudagraph_capture_sizes,
     enable_sp,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -1464,6 +1471,7 @@ def _setup_compile_backend(
     if additional_config is None:
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
+    aligned_gears = additional_config.get("_mrv2_padding_graph_gears", {})
 
     reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
     if reduced_cg_cap is not None:
@@ -1477,22 +1485,32 @@ def _setup_compile_backend(
         # were derived from the truncated grid, so regenerate them alongside
         # the restored off-stride default rather than mixing two size sets.
         # Explicit split sizes never receive reduced_cg_cap (see below).
-        if not vllm_version_is("0.33.0"):
-            for name in (
-                "prefill_cudagraph_capture_token_sizes",
-                "max_prefill_cudagraph_capture_tokens",
-                "decode_cudagraph_capture_request_sizes",
-                "max_decode_cudagraph_capture_requests",
-            ):
-                setattr(compilation_config, name, None)
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+        ):
+            setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    additional_config = vllm_config.additional_config or {}
-    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp
+    additional_config = vllm_config.additional_config
+    if additional_config is None:
+        vllm_config.additional_config = {}
+        additional_config = vllm_config.additional_config
+    # Graph capture and MRV2 runtime preprocessing share one physical-layout
+    # policy.  Normalize capture gears up front so replay never depends on a
+    # model-internal padding branch.
+    padding_plan = get_mrv2_padding_plan(
+        vllm_config,
+        enable_shared_expert_dp,
+        sequence_parallel=enable_sp(vllm_config),
+    )
+    requires_tp_aligned_capture_sizes = padding_plan.token_alignment > 1
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1502,35 +1520,137 @@ def _setup_compile_backend(
         # Main V2 resolves prefill tokens and decode requests separately.
         # The TP token-layout restriction applies to the prefill grid; keep
         # the resolved decode request grid used by the graph managers intact.
-        prefill_sizes = None
-        if not vllm_version_is("0.33.0"):
-            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
-        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
-        if not sp_aclgraph_sizes:
-            raise AssertionError(
-                f"cudagraph_capture_sizes {original_sizes} does not contain"
-                f"values that are multiples of tp_size "
-                f"{vllm_config.parallel_config.tensor_parallel_size}"
-            )
-
-        if prefill_sizes is not None:
+        prefill_sizes = aligned_gears.get(
+            "prefill",
+            compilation_config.prefill_cudagraph_capture_token_sizes,
+        )
+        logical_query_limits = get_mrv2_decode_query_limits(vllm_config)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        logical_draft_prefill_limits: dict[int, int] = {}
+        if getattr(speculative_config, "method", None) == "draft_model":
+            draft_prefill_query_len = vllm_config.num_speculative_tokens + 2
+            logical_draft_prefill_limits = {
+                int(query_len): int(max_reqs)
+                for query_len, max_reqs in vllm_config.get_decode_cudagraph_query_lens(draft_prefill_query_len).items()
+            }
+        else:
+            additional_config.pop(MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY, None)
+        shared_query_lens = (*logical_query_limits, *logical_draft_prefill_limits)
+        request_alignment = padding_plan.common_request_alignment(shared_query_lens)
+        sp_aclgraph_sizes = sorted({padding_plan.align_tokens(size) for size in prefill_sizes})
+        if sp_aclgraph_sizes:
             compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
             compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
-            # Re-record the token union from the resolved split grids. Keeping
-            # a legacy-only list (e.g. [4] with one decode request) makes the
-            # engine handshake's config re-entry reject the derived sizes.
-            vllm_config._split_cudagraph_capture_sizes(
-                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
+        max_decode_tokens = compilation_config.max_decode_cudagraph_capture_tokens
+        if not isinstance(max_decode_tokens, int) or max_decode_tokens <= 0:
+            max_decode_tokens = None
+        decode_sizes = aligned_gears.get("decode", compilation_config.decode_cudagraph_capture_request_sizes or [])
+        has_logical_decode_tiers = any(logical_query_limits.values()) or any(logical_draft_prefill_limits.values())
+        if has_logical_decode_tiers:
+            aligned_decode_sizes = sorted(
+                {(size + request_alignment - 1) // request_alignment * request_alignment for size in decode_sizes}
             )
-            compilation_config.post_init_cudagraph_sizes()
-        elif len(sp_aclgraph_sizes) != len(original_sizes):
-            # Match max_cudagraph_capture_size with the valid max size to avoid
-            # initialization error of vllm server.
-            compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
-            compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
-            update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
+        else:
+            aligned_decode_sizes = []
+        compilation_config.decode_cudagraph_capture_request_sizes = aligned_decode_sizes
+        compilation_config.max_decode_cudagraph_capture_requests = max(aligned_decode_sizes, default=0)
+
+        logical_draft_sizes = vllm_config.get_draft_decode_cudagraph_request_sizes()
+        aligned_draft_sizes = sorted({padding_plan.align_requests(size, query_len=1) for size in logical_draft_sizes})
+        # Single-module MTP/EAGLE uses a separate q=1 draft graph manager.
+        # Keep its request grid stable across config re-entry.
+        additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = aligned_draft_sizes
+        # Standalone draft_model first runs q=K+2. Size eager buffers from its
+        # uncapped physical request grid before resolving adaptive token gears.
+        if logical_draft_prefill_limits:
+            additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] = padding_plan.align_query_limits(
+                logical_draft_prefill_limits,
+                request_alignment=request_alignment,
+            )
+        ensure_mrv2_physical_batch_capacity(vllm_config, padding_plan)
+
+        if getattr(speculative_config, "enable_adaptive_verification", False):
+            varlen_query_lens = {vllm_config.uniform_decode_query_len}
+            if logical_draft_prefill_limits:
+                varlen_query_lens.update(logical_draft_prefill_limits)
+            aligned_varlen_sizes_by_query: dict[int, list[int]] = {}
+            for query_len in varlen_query_lens:
+                logical_varlen_sizes = vllm_config.get_varlen_decode_cudagraph_token_sizes(query_len)
+                aligned_varlen_sizes = sorted(
+                    {
+                        aligned_size
+                        for size in logical_varlen_sizes
+                        if size > 0
+                        for aligned_size in (padding_plan.align_tokens(size),)
+                        if max_decode_tokens is None or aligned_size <= max_decode_tokens
+                    }
+                )
+                if not aligned_varlen_sizes:
+                    raise ValueError(
+                        "Adaptive-verification CUDA graph token sizes cannot satisfy "
+                        f"the TP token alignment {padding_plan.token_alignment} within "
+                        f"max_decode_cudagraph_capture_tokens={max_decode_tokens}. "
+                        "Increase the token cap or disable adaptive verification."
+                    )
+                aligned_varlen_sizes_by_query[query_len] = aligned_varlen_sizes
+            additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = aligned_varlen_sizes_by_query
+
+        physical_draft_sizes = sorted(
+            {
+                fitted_size
+                for size in aligned_draft_sizes
+                if (
+                    fitted_size := padding_plan.limit_aligned_requests(
+                        size,
+                        query_len=1,
+                        max_tokens=max_decode_tokens,
+                    )
+                )
+            }
+        )
+        additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = physical_draft_sizes
+        physical_query_limits = padding_plan.align_query_limits(
+            logical_query_limits,
+            max_tokens=max_decode_tokens,
+            request_alignment=request_alignment,
+        )
+        physical_draft_prefill_limits = padding_plan.align_query_limits(
+            logical_draft_prefill_limits,
+            max_tokens=max_decode_tokens,
+            request_alignment=request_alignment,
+        )
+        if logical_draft_prefill_limits:
+            additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] = physical_draft_prefill_limits
+        # EngineCore re-runs VllmConfig.__post_init__ after its startup
+        # handshake. Preserve physical tiers derived from logical admission.
+        additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] = physical_query_limits
+        has_decode_tiers = any(physical_query_limits.values()) or any(physical_draft_prefill_limits.values())
+        if not has_decode_tiers:
+            aligned_decode_sizes = []
+            compilation_config.decode_cudagraph_capture_request_sizes = []
+            compilation_config.max_decode_cudagraph_capture_requests = 0
+        additional_config["_mrv2_padding_graph_gears"] = {
+            "prefill": sp_aclgraph_sizes,
+            "decode": aligned_decode_sizes,
+        }
+        # The patched split includes standalone q=K+2 in the same upstream
+        # token-size contract while keeping its graph-manager mapping separate.
+        vllm_config._split_cudagraph_capture_sizes(False, physical_query_limits)
+        if logical_draft_prefill_limits and compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
+            # One-routine FULL managers dispatch every batch from the token-keyed
+            # prefill grid. Mirror the complete split result so standalone q=K+2
+            # and the target/q=1 shapes do not silently fall back to eager.
+            sp_aclgraph_sizes = list(compilation_config.cudagraph_capture_sizes)
+            compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
+            compilation_config.max_prefill_cudagraph_capture_tokens = max(sp_aclgraph_sizes, default=0)
+            additional_config["_mrv2_padding_graph_gears"]["prefill"] = sp_aclgraph_sizes
+        compilation_config.post_init_cudagraph_sizes()
+
+    # Keep the user-facing scheduling budget in max_num_scheduled_tokens /
+    # max_num_active_seqs while exposing the physical capacity to runner and
+    # graph-manager construction. This also makes config re-entry idempotent.
+    if padding_plan.token_alignment > 1:
+        ensure_mrv2_physical_batch_capacity(vllm_config, padding_plan)
 
     # Get custom compile backend for graph fusion
     compilation_config.oot_compiler = compile_backend
@@ -2020,7 +2140,7 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
         return None
-    if not vllm_version_is("0.33.0") and any(
+    if any(
         getattr(compilation_config, name) is not None
         for name in (
             "prefill_cudagraph_capture_token_sizes",

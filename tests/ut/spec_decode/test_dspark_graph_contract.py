@@ -20,6 +20,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+from vllm_ascend.models.common.ops import sequence_parallel as sp_module
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -241,7 +242,7 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
     assert proxy.active is False
 
 
-@pytest.mark.parametrize("query_count", [7, 8])
+@pytest.mark.parametrize("query_count", [4, 7, 8])
 def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager = DFlashCudaGraphManager.__new__(DFlashCudaGraphManager)
     manager.compilation_config = SimpleNamespace(
@@ -274,6 +275,32 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
         assert desc.num_reqs >= num_reqs
         assert desc.num_tokens == desc.num_reqs * query_count
         assert desc.uniform_token_count == query_count
+        if query_count == 4:
+            # TP=4, K=3 DFlash uses q=K+1, so every global graph is
+            # already aligned without a method-specific capacity rule.
+            assert desc.num_tokens % 4 == 0
+
+
+def test_dspark_tp4_sp_pads_anchor_query_rows_and_mask(monkeypatch):
+    # TP=4, K=3 DSpark anchor mode keeps its three-row draft descriptor;
+    # the model-local SP boundary pads it instead of using standalone K+2.
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=3,
+        num_reqs=1,
+        uniform_token_count=3,
+    )
+    assert desc.num_tokens % 4 == 3
+
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(sp_module, "get_tensor_model_parallel_rank", lambda: 3)
+    hidden_states = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    is_padding = torch.zeros(3, dtype=torch.bool)
+
+    local_hidden = sp_module._ascend_sp_shard_impl(hidden_states)
+    local_mask = sp_module._ascend_sp_padding_mask_impl(is_padding)
+    torch.testing.assert_close(local_hidden, torch.zeros(1, 2))
+    torch.testing.assert_close(local_mask, torch.ones(1, dtype=torch.bool))
 
 
 @pytest.mark.parametrize("module", [speculator_module, dflash_module], ids=["dspark", "dflash"])

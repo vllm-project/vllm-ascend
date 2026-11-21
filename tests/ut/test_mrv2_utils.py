@@ -45,6 +45,68 @@ def test_validate_v2_model_runner_accepts_a_supported_config():
     mrv2_utils._validate_v2_model_runner(config)
 
 
+def test_decode_query_limits_are_stable_across_config_revalidation():
+    upstream = MagicMock(return_value={6: 1})
+    config = SimpleNamespace(additional_config={}, uniform_decode_query_len=6)
+
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 6, upstream) == {6: 1}
+    upstream.assert_called_once_with(config, 6)
+
+    config.additional_config[mrv2_utils.MRV2_DECODE_QUERY_LIMITS_KEY] = {"6": 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 6, upstream) == {6: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 1, upstream) == {6: 1}
+    assert upstream.call_count == 2
+
+
+def test_standalone_draft_prefill_limits_are_separate_from_target_limits():
+    upstream = MagicMock(side_effect=lambda _config, query_len: {query_len: 1})
+    config = SimpleNamespace(
+        additional_config={
+            mrv2_utils.MRV2_DECODE_QUERY_LIMITS_KEY: {"4": 4},
+            mrv2_utils.MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY: {"5": 4},
+        },
+        uniform_decode_query_len=4,
+        num_speculative_tokens=3,
+        speculative_config=SimpleNamespace(method="draft_model"),
+    )
+
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 4, upstream) == {4: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 5, upstream) == {5: 4}
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 1, upstream) == {1: 1}
+    config.speculative_config.method = "dflash"
+    assert mrv2_utils.resolve_mrv2_decode_query_lens(config, 5, upstream) == {5: 1}
+    assert upstream.call_count == 2
+
+
+def test_draft_decode_sizes_are_stable_across_config_revalidation():
+    upstream = MagicMock(return_value=[1, 2])
+    config = SimpleNamespace(additional_config={})
+
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [1, 2]
+    upstream.assert_called_once_with(config)
+
+    config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = [4]
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [4]
+
+    config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = []
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == []
+    upstream.assert_called_once_with(config)
+
+
+def test_varlen_decode_sizes_are_stable_per_query_len():
+    upstream = MagicMock(side_effect=lambda _config, query_len: [query_len])
+    config = SimpleNamespace(additional_config={})
+
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [6]
+    upstream.assert_called_once_with(config, 6)
+
+    config.additional_config[mrv2_utils.MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY] = {"6": [8, 16], 1: []}
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [8, 16]
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 1, upstream) == []
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 7, upstream) == [7]
+    assert upstream.call_count == 2
+
+
 def test_explicit_v1_request_is_rejected(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
@@ -68,19 +130,32 @@ def test_apply_config_patch_is_wired(monkeypatch):
 
     original_property = VllmConfig.use_v2_model_runner
     original_validate = getattr(VllmConfig, "_validate_v2_model_runner", None)
+    resolver_markers = {
+        "get_decode_cudagraph_query_lens": "_mrv2_limits",
+        "get_draft_decode_cudagraph_request_sizes": "_mrv2_draft",
+        "get_varlen_decode_cudagraph_token_sizes": "_mrv2_varlen",
+    }
+    originals = {name: getattr(VllmConfig, name) for name in resolver_markers}
 
     mrv2_utils.apply_v2_model_runner_config_patch()
     assert isinstance(VllmConfig.use_v2_model_runner, property)
     assert VllmConfig.use_v2_model_runner.fget is mrv2_utils.use_v2_model_runner
     if original_validate is not None:
-        # Ascend owns this hook so the GPU-only Triton precondition does not
-        # reject configs built in environments without Triton.
         assert VllmConfig._validate_v2_model_runner is mrv2_utils._validate_v2_model_runner
+    for name, marker in resolver_markers.items():
+        resolver = getattr(VllmConfig, name)
+        assert getattr(resolver, marker) is True
+        expected = getattr(originals[name], "_vllm_ascend_upstream", originals[name])
+        assert resolver._vllm_ascend_upstream is expected
 
     # Re-applying is harmless.
+    patched = {name: getattr(VllmConfig, name) for name in resolver_markers}
     mrv2_utils.apply_v2_model_runner_config_patch()
+    assert all(getattr(VllmConfig, name) is resolver for name, resolver in patched.items())
 
     # Restore the upstream class state so later tests are unaffected.
     monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
     if original_validate is not None:
         monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)
+    for name, resolver in originals.items():
+        monkeypatch.setattr(VllmConfig, name, resolver)

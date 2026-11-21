@@ -96,6 +96,32 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
         return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
+def make_ple_database():
+    database = ChunkedTokenDatabase(
+        [KeyMetadata("m", 0, 0, 0, 0), KeyMetadata("m", 0, 0, 0, 1)],
+        [16, 16],
+        None,
+    )
+    database.set_group_buffers(
+        {0: [1000], 1: []},
+        {0: [16], 1: []},
+        {0: [16], 1: []},
+    )
+    return database
+
+
+def make_ple_request(block_id, *, for_load=False):
+    load_spec = LoadSpec(0, 16, can_load=True, token_len=16) if for_load else None
+    return ReqMeta(
+        req_id="non-owner-ple",
+        token_len_chunk=16,
+        block_ids_by_group=[[block_id], [block_id]],
+        block_hashes=["h0"],
+        kv_cache_group_ids=[0, 1],
+        load_spec=load_spec,
+    )
+
+
 class TestLayerBatchBuilderOffsets(unittest.TestCase):
     def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
         database = FakeTokenDatabase()
@@ -564,6 +590,31 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
+
+    def test_put_skips_only_explicit_non_owner_ple_group(self):
+        for empty_ple_group_id, expected_calls in ((1, 1), (None, 2)):
+            with self.subTest(empty_ple_group_id=empty_ple_group_id):
+                store = FakeStore([0, 0])
+                thread = KVCacheStoreSendingThread(
+                    m_store=store,
+                    token_database=make_ple_database(),
+                    block_size=[16, 16],
+                    tp_rank=0,
+                    dcp_size=1,
+                    put_step=1,
+                    kv_role="kv_producer",
+                    ready_event=threading.Event(),
+                    group_uses_align_state=[False, False],
+                    empty_ple_group_id=empty_ple_group_id,
+                )
+                request = make_ple_request(1)
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+
+                thread._handle_request(request)
+
+                self.assertEqual(len(store.put_calls), expected_calls)
+                self.assertIn("@group:0@", store.put_calls[0][0][0])
 
     def test_save_keeps_checks_for_align_state_slots(self):
         thread, store = self._make_thread()
@@ -1097,6 +1148,25 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         self.assertEqual(len(store.get_calls), 1)
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
+
+    def test_async_get_skips_non_owner_ple_group(self):
+        store = FakeStore()
+        thread = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=make_ple_database(),
+            block_size=[16, 16],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            empty_ple_group_id=1,
+        )
+        request = make_ple_request(0, for_load=True)
+        thread.request_queue.put(request)
+
+        thread._handle_request(request)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[16]]))
 
     def test_handle_request_applies_load_mask(self):
         store = FakeStore()

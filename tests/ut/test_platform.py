@@ -1,6 +1,8 @@
 import importlib
+import math
+from contextlib import contextmanager
 from functools import partial
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +20,13 @@ from tests.ut.graph_dispatch_fixture import CudagraphDispatcher
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.mrv2_utils import (
+    MRV2_DECODE_QUERY_LIMITS_KEY,
+    MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+    MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+    MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    apply_v2_model_runner_config_patch,
+)
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
@@ -35,7 +44,12 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
     dsv4_skips_indexer_topk,
-    vllm_version_is,
+)
+
+_UPSTREAM_VARLEN_RESOLVER = getattr(
+    VllmConfig.get_varlen_decode_cudagraph_token_sizes,
+    "_vllm_ascend_upstream",
+    VllmConfig.get_varlen_decode_cudagraph_token_sizes,
 )
 
 
@@ -514,6 +528,80 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         return mock_vllm_config
+
+    @staticmethod
+    def mock_main_graph_config(
+        *,
+        tp_size: int,
+        max_num_seqs: int,
+        query_len: int,
+        mode: CUDAGraphMode = CUDAGraphMode.FULL_DECODE_ONLY,
+        max_num_tokens: int = 64,
+        capture_sizes: list[int] | None = None,
+        prefill_sizes: list[int] | None = None,
+        decode_sizes: list[int] | None = None,
+        max_decode_tokens: int | None = None,
+        query_limits: dict[int, int] | None = None,
+        speculative_config=None,
+    ):
+        config = TestNPUPlatform.mock_vllm_config()
+        graph_sizes = {
+            "cudagraph_capture_sizes": capture_sizes,
+            "prefill_cudagraph_capture_token_sizes": prefill_sizes,
+            "decode_cudagraph_capture_request_sizes": decode_sizes,
+            "max_decode_cudagraph_capture_tokens": max_decode_tokens,
+        }
+        graph_sizes = {name: value for name, value in graph_sizes.items() if value is not None}
+        config.compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=mode,
+            **graph_sizes,
+        )
+        config.scheduler_config.max_num_seqs = max_num_seqs
+        config.scheduler_config.max_num_active_seqs = None
+        config.scheduler_config.max_num_batched_tokens = max_num_tokens
+        config.scheduler_config.max_num_scheduled_tokens = None
+        config.parallel_config.tensor_parallel_size = tp_size
+        config.parallel_config.dbo_config = None
+        config.uniform_decode_query_len = query_len
+        config.use_v2_model_runner = True
+        config.performance_mode = "balanced"
+        config.speculative_config = speculative_config
+        config.model_config.enforce_eager = False
+        config.additional_config = {"ascend_compilation_config": {}}
+        config.get_decode_cudagraph_query_lens = lambda current_query_len: (
+            query_limits if query_limits is not None else {current_query_len: config.scheduler_config.max_num_seqs}
+        )
+        config.get_draft_decode_cudagraph_request_sizes = lambda: []
+        config._split_cudagraph_capture_sizes = partial(VllmConfig._split_cudagraph_capture_sizes, config)
+        config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
+        return config
+
+    @staticmethod
+    def make_cpu_graph_manager(manager_cls, config, **kwargs):
+        pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+        cudagraph_mode = kwargs.pop("cudagraph_mode", CUDAGraphMode.FULL_DECODE_ONLY)
+        with (
+            patch("vllm.v1.worker.gpu.cudagraph_utils.get_pp_group", return_value=pp_group),
+            patch("vllm.v1.worker.gpu.cudagraph_utils.current_platform.get_global_graph_pool", return_value=None),
+        ):
+            return manager_cls(config, torch.device("cpu"), cudagraph_mode, **kwargs)
+
+    @staticmethod
+    def run_compile_backend(config, *, sequence_parallel=True, shared_expert_dp=False, initialize=True):
+        if initialize:
+            config._set_cudagraph_sizes()
+        with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
+            _setup_compile_backend(config, "test_backend", enable_shared_expert_dp=shared_expert_dp)
+
+    @staticmethod
+    @contextmanager
+    def patched_graph_resolvers(config, **resolvers):
+        with patch.multiple(VllmConfig, **resolvers):
+            apply_v2_model_runner_config_patch()
+            for name in resolvers:
+                setattr(config, name, MethodType(getattr(VllmConfig, name), config))
+            yield
 
     @staticmethod
     def mock_vllm_ascend_config():
@@ -1025,28 +1113,10 @@ class TestNPUPlatform(TestBase):
                     expected_max,
                 )
 
-    def test_apply_config_platform_defaults_respects_explicit_max(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.compilation_config.max_cudagraph_capture_size = 456
-        vllm_config.compilation_config.cudagraph_capture_sizes = None
-
-        self.platform.apply_config_platform_defaults(vllm_config)
-
-        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 456)
-
     def test_apply_config_platform_defaults_respects_explicit_sizes(self):
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.compilation_config.max_cudagraph_capture_size = None
-        vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4]
-
-        self.platform.apply_config_platform_defaults(vllm_config)
-
-        self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
-        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
-
-    @patch("vllm_ascend.platform.vllm_version_is", return_value=False)
-    def test_apply_config_platform_defaults_respects_explicit_split_sizes(self, _mock_version):
         for name, value in (
+            ("max_cudagraph_capture_size", 456),
+            ("cudagraph_capture_sizes", [1, 2, 4]),
             ("prefill_cudagraph_capture_token_sizes", [1, 3, 7]),
             ("max_prefill_cudagraph_capture_tokens", 7),
             ("decode_cudagraph_capture_request_sizes", [1, 3, 7]),
@@ -1060,98 +1130,453 @@ class TestNPUPlatform(TestBase):
                 config.compilation_config.cudagraph_capture_sizes = None
                 setattr(config.compilation_config, name, value)
                 self.platform.apply_config_platform_defaults(config)
-                self.assertIsNone(config.compilation_config.max_cudagraph_capture_size)
-                self.assertIsNone(config.compilation_config.reduced_cg_cap)
+                if name != "max_cudagraph_capture_size":
+                    self.assertIsNone(config.compilation_config.max_cudagraph_capture_size)
+                if name not in ("max_cudagraph_capture_size", "cudagraph_capture_sizes"):
+                    self.assertIsNone(config.compilation_config.reduced_cg_cap)
                 self.assertEqual(getattr(config.compilation_config, name), value)
 
     def test_setup_compile_backend_restores_off_stride_split_sizes(self):
         for max_num_seqs in (7, 77):
             for mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
                 with self.subTest(max_num_seqs=max_num_seqs, mode=mode):
-                    config = TestNPUPlatform.mock_vllm_config()
-                    config.compilation_config = CompilationConfig(
-                        mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=mode
+                    config = self.mock_main_graph_config(
+                        tp_size=1,
+                        max_num_seqs=max_num_seqs,
+                        query_len=1,
+                        mode=mode,
+                        max_num_tokens=1024,
                     )
-                    config.scheduler_config.max_num_seqs = max_num_seqs
-                    config.scheduler_config.max_num_batched_tokens = 1024
-                    config.uniform_decode_query_len = 1
-                    config.use_v2_model_runner = True
-                    config.performance_mode = "balanced"
-                    config.model_config.enforce_eager = False
-                    config.additional_config = {"ascend_compilation_config": {}}
-                    config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
-                    config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                    if not vllm_version_is("0.33.0"):
-                        config._split_cudagraph_capture_sizes = partial(
-                            VllmConfig._split_cudagraph_capture_sizes, config
-                        )
-                    config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                     self.platform.apply_config_platform_defaults(config)
-                    config._set_cudagraph_sizes()
-                    with patch("vllm_ascend.platform.enable_sp", return_value=False):
-                        _setup_compile_backend(config, compile_backend="test_backend")
+                    self.run_compile_backend(config, sequence_parallel=False)
                     self.assertIn(max_num_seqs, config.compilation_config.cudagraph_capture_sizes)
                     self.assertEqual(config.compilation_config.max_cudagraph_capture_size, max_num_seqs)
                     config._set_cudagraph_sizes()
                     self.assertIn(max_num_seqs, config.compilation_config.cudagraph_capture_sizes)
 
-    def test_setup_compile_backend_keeps_split_decode_grid_after_tp_alignment(self):
+    def test_setup_compile_backend_aligns_split_decode_grid_for_tp_layout(self):
         cases = ((1, 1, [4]), (4, 2, [16, 32]), (4, 1, [1, 2, 4, 8]))
         for max_num_seqs, query_len, sizes in cases:
             for mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
                 for sequence_parallel in (False, True):
                     with self.subTest(seqs=max_num_seqs, query=query_len, mode=mode, sp=sequence_parallel):
-                        config = TestNPUPlatform.mock_vllm_config()
-                        config.compilation_config = CompilationConfig(
-                            mode=CompilationMode.VLLM_COMPILE,
-                            cudagraph_mode=mode,
-                            cudagraph_capture_sizes=list(sizes),
+                        config = self.mock_main_graph_config(
+                            tp_size=4,
+                            max_num_seqs=max_num_seqs,
+                            query_len=query_len,
+                            mode=mode,
+                            max_num_tokens=1024,
+                            capture_sizes=list(sizes),
                         )
-                        config.scheduler_config.max_num_seqs = max_num_seqs
-                        config.scheduler_config.max_num_batched_tokens = 1024
-                        config.parallel_config.tensor_parallel_size = 4
-                        config.uniform_decode_query_len = query_len
-                        config.use_v2_model_runner = True
-                        config.performance_mode = "balanced"
-                        config.speculative_config = None
-                        config.model_config.enforce_eager = False
-                        config.additional_config = {"ascend_compilation_config": {}}
-                        config.get_decode_cudagraph_query_lens = lambda q, count=max_num_seqs: {q: count}
-                        config.get_draft_decode_cudagraph_request_sizes = lambda: []
-                        if not vllm_version_is("0.33.0"):
-                            config._split_cudagraph_capture_sizes = partial(
-                                VllmConfig._split_cudagraph_capture_sizes, config
-                            )
-                        config._set_cudagraph_sizes = partial(VllmConfig._set_cudagraph_sizes, config)
                         config._set_cudagraph_sizes()
-                        decode_sizes = None
-                        if not vllm_version_is("0.33.0"):
-                            decode_sizes = config.compilation_config.decode_cudagraph_capture_request_sizes
-                        if decode_sizes is not None:
-                            decode_sizes = list(decode_sizes)
-                        with patch("vllm_ascend.platform.enable_sp", return_value=sequence_parallel):
-                            _setup_compile_backend(
-                                config, compile_backend="test_backend", enable_shared_expert_dp=not sequence_parallel
-                            )
+                        decode_sizes = list(config.compilation_config.decode_cudagraph_capture_request_sizes)
+                        self.run_compile_backend(
+                            config,
+                            sequence_parallel=sequence_parallel,
+                            shared_expert_dp=not sequence_parallel,
+                            initialize=False,
+                        )
+                        compilation_config = config.compilation_config
                         # Engine handshakes re-enter the native config resolver.
                         config._set_cudagraph_sizes()
                         config._set_cudagraph_sizes()
-                        if not vllm_version_is("0.33.0"):
-                            self.assertEqual(
-                                config.compilation_config.decode_cudagraph_capture_request_sizes, decode_sizes
-                            )
-                            prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
-                            self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
-                            if max_num_seqs == 1:
-                                self.assertEqual(prefill_sizes, [4])
-                                self.assertEqual(decode_sizes, [1])
-                                if mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                                    self.assertEqual(config.compilation_config.cudagraph_capture_sizes, [1])
-                        else:
-                            self.assertTrue(
-                                all(size % 4 == 0 for size in config.compilation_config.cudagraph_capture_sizes)
-                            )
-                        self.assertEqual(config.compilation_config.cudagraph_mode, mode)
+                        request_alignment = 4 // math.gcd(4, query_len)
+                        expected_decode_sizes = sorted(
+                            {
+                                (size + request_alignment - 1) // request_alignment * request_alignment
+                                for size in decode_sizes
+                            }
+                        )
+                        self.assertEqual(
+                            compilation_config.decode_cudagraph_capture_request_sizes, expected_decode_sizes
+                        )
+                        prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+                        self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
+                        if max_num_seqs == 1:
+                            self.assertEqual(prefill_sizes, [4])
+                            self.assertEqual(expected_decode_sizes, [4])
+                            self.assertEqual(config.scheduler_config.max_num_seqs, 4)
+                            self.assertEqual(config.scheduler_config.max_num_active_seqs, 1)
+                            if mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                                self.assertEqual(compilation_config.cudagraph_capture_sizes, [4])
+                                dispatcher = CudagraphDispatcher(config)
+                                dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL_DECODE_ONLY)
+                                cg_mode, desc = dispatcher.dispatch(4, uniform_decode=True)
+                                assert (cg_mode, desc.num_reqs) == (CUDAGraphMode.FULL, 4)
+                        self.assertEqual(compilation_config.cudagraph_mode, mode)
+
+    def test_setup_compile_backend_keeps_dynamic_query_tiers_stable_on_reentry(self):
+        from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=8,
+            max_num_seqs=1,
+            query_len=6,
+            prefill_sizes=[6],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(enable_adaptive_verification=False),
+        )
+
+        def dynamic_query_limits(self, query_len):
+            if self.scheduler_config.max_num_seqs == 1:
+                return {6: 1}
+            # Recomputing from the padded capacity would create this phantom
+            # tier, even though scheduler admission remains one request.
+            return {6: 1, 4: self.scheduler_config.max_num_seqs}
+
+        # Install the production wrapper over a deterministic stand-in for
+        # main's dynamic schedule resolver. Binding the wrapped class method to
+        # this config ensures the test fails if the patch is not wired.
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=dynamic_query_limits,
+        ):
+            self.run_compile_backend(config)
+
+            assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {6: 4}
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
+            assert config.compilation_config.decode_cudagraph_capture_request_sizes == [4]
+            assert config.compilation_config.cudagraph_capture_sizes == [24]
+
+            # EngineCore performs this native config re-entry after its handshake.
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_decode_cudagraph_query_lens(6) == {6: 4}
+            assert config.compilation_config.cudagraph_capture_sizes == [24]
+
+            manager = self.make_cpu_graph_manager(
+                CudaGraphManager,
+                config,
+                decode_query_lens=config.get_decode_cudagraph_query_lens(6),
+            )
+            manager._graphs_captured = True
+            desc = manager.dispatch(1, 24, 6, 0)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert (desc.num_reqs, desc.num_tokens) == (4, 24)
+
+    def test_setup_compile_backend_common_query_grid_and_token_cap(self):
+        cases = (
+            (12, {4: 1, 6: 1}, None, {4: 6, 6: 6}, [6], [24, 36], CUDAGraphMode.FULL_DECODE_ONLY, 6),
+            (8, None, 20, {6: 0}, [], [], CUDAGraphMode.NONE, 4),
+        )
+        for tp_size, query_limits, token_cap, limits, request_sizes, capture_sizes, mode, capacity in cases:
+            with self.subTest(tp_size=tp_size, token_cap=token_cap):
+                config = self.mock_main_graph_config(
+                    tp_size=tp_size,
+                    max_num_seqs=1,
+                    query_len=6,
+                    capture_sizes=[6],
+                    query_limits=query_limits,
+                    max_decode_tokens=token_cap,
+                )
+                self.run_compile_backend(config)
+                scheduler_config = config.scheduler_config
+
+                assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == limits
+                assert config.compilation_config.decode_cudagraph_capture_request_sizes == request_sizes
+                assert config.compilation_config.cudagraph_capture_sizes == capture_sizes
+                assert config.compilation_config.cudagraph_mode == mode
+                # The graph cap must not shrink eager fallback buffers or admission.
+                assert (scheduler_config.max_num_seqs, scheduler_config.max_num_active_seqs) == (capacity, 1)
+
+    def test_setup_compile_backend_aligns_adaptive_varlen_grid(self):
+        from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=8,
+            max_num_seqs=1,
+            query_len=6,
+            capture_sizes=[6],
+            speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        )
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=lambda _self, _q: {6: 1},
+            get_varlen_decode_cudagraph_token_sizes=_UPSTREAM_VARLEN_RESOLVER,
+        ):
+            self.run_compile_backend(config)
+
+            aligned_sizes = config.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY][6]
+            assert aligned_sizes and all(size % 8 == 0 for size in aligned_sizes)
+            assert config.get_varlen_decode_cudagraph_token_sizes(6) == aligned_sizes
+
+            # EngineCore re-validates the config after its handshake. The
+            # aligned adaptive grid must survive that native re-entry.
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_varlen_decode_cudagraph_token_sizes(6) == aligned_sizes
+
+            manager = self.make_cpu_graph_manager(
+                CudaGraphManager,
+                config,
+                decode_query_lens={6: 4},
+                varlen_decode=True,
+            )
+            full_descs = manager._capture_descs[CUDAGraphMode.FULL]
+            assert full_descs
+            assert all(desc.num_tokens % 8 == 0 for desc in full_descs)
+            manager._graphs_captured = True
+            desc = manager.dispatch(1, 6, None, 0, max_query_len=6)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert desc.num_tokens == aligned_sizes[0]
+
+    def test_setup_compile_backend_rejects_adaptive_grid_below_alignment(self):
+        config = self.mock_main_graph_config(
+            tp_size=8,
+            max_num_seqs=1,
+            query_len=6,
+            prefill_sizes=[4],
+            decode_sizes=[1],
+            max_decode_tokens=4,
+            speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        )
+
+        with (
+            self.patched_graph_resolvers(
+                config,
+                get_decode_cudagraph_query_lens=lambda _self, _q: {6: 1},
+                get_varlen_decode_cudagraph_token_sizes=_UPSTREAM_VARLEN_RESOLVER,
+            ),
+            pytest.raises(ValueError, match="Adaptive-verification CUDA graph token sizes"),
+        ):
+            self.run_compile_backend(config)
+
+    def test_setup_compile_backend_aligns_single_module_mtp_draft_grid(self):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            capture_sizes=[4],
+            speculative_config=SimpleNamespace(enable_adaptive_verification=False),
+        )
+
+        # Model c410's single-module MTP path: the draft model has a separate
+        # one-token graph grid even though the target verifies four tokens.
+        with self.patched_graph_resolvers(
+            config,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+        ):
+            self.run_compile_backend(config)
+
+            assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
+            assert config.get_draft_decode_cudagraph_request_sizes() == [4]
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
+            assert config.compilation_config.cudagraph_capture_sizes == [4]
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_draft_decode_cudagraph_request_sizes() == [4]
+            assert config.compilation_config.cudagraph_capture_sizes == [4]
+
+            manager = self.make_cpu_graph_manager(
+                SpeculatorCudaGraphManager,
+                config,
+                decode_query_lens={1: 4},
+                decode_request_sizes=config.get_draft_decode_cudagraph_request_sizes(),
+            )
+            manager._graphs_captured = True
+            desc = manager.dispatch(1, 1, 1, 0)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert (desc.num_reqs, desc.num_tokens) == (4, 4)
+
+    def test_setup_compile_backend_aligns_standalone_draft_prefill_grid(self):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            mode=CUDAGraphMode.FULL,
+            max_num_tokens=4,
+            prefill_sizes=[4],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=False),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+        ):
+            # The helper pins the original split method. Rebind the production
+            # wrapper so this test also covers EngineCore config re-entry.
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 4}
+            assert config.additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] == {5: 4}
+            assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
+            assert config.compilation_config.decode_cudagraph_capture_request_sizes == [4]
+            physical_capacity = (
+                config.scheduler_config.max_num_batched_tokens,
+                config.scheduler_config.max_num_scheduled_tokens,
+            )
+            assert physical_capacity == (
+                20,
+                4,
+            )
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
+            assert 20 in config.compilation_config.cudagraph_capture_sizes
+            assert 20 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+            assert config.compilation_config.max_cudagraph_capture_size == 20
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_decode_cudagraph_query_lens(4) == {4: 4}
+            assert config.get_decode_cudagraph_query_lens(5) == {5: 4}
+            assert 20 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+            assert config.compilation_config.max_cudagraph_capture_size == 20
+
+            manager = self.make_cpu_graph_manager(
+                SpeculatorCudaGraphManager,
+                config,
+                decode_query_lens=config.get_decode_cudagraph_query_lens(5),
+                cudagraph_mode=CUDAGraphMode.FULL,
+            )
+            manager._graphs_captured = True
+            # StandaloneARSpeculator dispatches the real expanded rows here;
+            # the graph manager, not the caller, chooses the physical gear.
+            desc = manager.dispatch(1, 5, 5, 0, max_query_len=5)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert (desc.num_reqs, desc.num_tokens) == (4, 16)
+
+    def test_setup_compile_backend_keeps_standalone_grid_without_prefill_graphs(self):
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            max_num_tokens=4,
+            prefill_sizes=[],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=False),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+        ):
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            assert config.compilation_config.prefill_cudagraph_capture_token_sizes == []
+            assert config.additional_config[MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY] == {5: 4}
+            assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
+            assert config.compilation_config.cudagraph_capture_sizes == [4, 16, 20]
+            physical_capacity = (
+                config.scheduler_config.max_num_batched_tokens,
+                config.scheduler_config.max_num_scheduled_tokens,
+            )
+            assert physical_capacity == (
+                20,
+                4,
+            )
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_decode_cudagraph_query_lens(5) == {5: 4}
+            assert config.compilation_config.cudagraph_capture_sizes == [4, 16, 20]
+
+    def test_setup_compile_backend_aligns_adaptive_standalone_grid(self):
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+        config = self.mock_main_graph_config(
+            tp_size=4,
+            max_num_seqs=1,
+            query_len=4,
+            mode=CUDAGraphMode.FULL,
+            max_num_tokens=4,
+            prefill_sizes=[4],
+            decode_sizes=[1],
+            speculative_config=SimpleNamespace(method="draft_model", enable_adaptive_verification=True),
+        )
+        config.num_speculative_tokens = 3
+
+        def query_limits(self, query_len):
+            logical_max_reqs = self.scheduler_config.max_num_active_seqs or self.scheduler_config.max_num_seqs
+            return {query_len: logical_max_reqs}
+
+        with self.patched_graph_resolvers(
+            config,
+            get_decode_cudagraph_query_lens=query_limits,
+            get_draft_decode_cudagraph_request_sizes=lambda _self: [1],
+            get_varlen_decode_cudagraph_token_sizes=_UPSTREAM_VARLEN_RESOLVER,
+        ):
+            config._split_cudagraph_capture_sizes = MethodType(VllmConfig._split_cudagraph_capture_sizes, config)
+            self.run_compile_backend(config)
+
+            aligned_sizes = config.additional_config[MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY][5]
+            assert 8 in aligned_sizes
+            assert all(size % 4 == 0 for size in aligned_sizes)
+            assert config.get_varlen_decode_cudagraph_token_sizes(5) == aligned_sizes
+            assert 8 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+
+            config._set_cudagraph_sizes()
+            config._set_cudagraph_sizes()
+            assert config.get_varlen_decode_cudagraph_token_sizes(5) == aligned_sizes
+            assert 8 in config.compilation_config.prefill_cudagraph_capture_token_sizes
+
+            manager = self.make_cpu_graph_manager(
+                SpeculatorCudaGraphManager,
+                config,
+                cudagraph_mode=CUDAGraphMode.FULL,
+                decode_query_lens=config.get_decode_cudagraph_query_lens(5),
+                varlen_decode=True,
+            )
+            manager._graphs_captured = True
+            desc = manager.dispatch(1, 5, None, 0, max_query_len=5)
+            assert desc.cg_mode == CUDAGraphMode.FULL
+            assert desc.num_tokens == 8
+
+    def test_setup_compile_backend_does_not_apply_standalone_grid_to_other_drafters(self):
+        for method in ("dspark", "dflash"):
+            with self.subTest(method=method):
+                config = self.mock_main_graph_config(
+                    tp_size=4,
+                    max_num_seqs=1,
+                    query_len=4,
+                    max_num_tokens=4,
+                    prefill_sizes=[],
+                    decode_sizes=[1],
+                    speculative_config=SimpleNamespace(
+                        method=method,
+                        enable_adaptive_verification=False,
+                    ),
+                )
+                config.num_speculative_tokens = 3
+                resolved_query_lens = []
+
+                def query_limits(self, query_len, _resolved_query_lens=resolved_query_lens):
+                    _resolved_query_lens.append(query_len)
+                    return {query_len: 1}
+
+                with self.patched_graph_resolvers(
+                    config,
+                    get_decode_cudagraph_query_lens=query_limits,
+                    get_draft_decode_cudagraph_request_sizes=lambda _self: [],
+                ):
+                    self.run_compile_backend(config)
+
+                assert 5 not in resolved_query_lens
+                assert MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY not in config.additional_config
+                assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {4: 1}
+                assert (
+                    config.scheduler_config.max_num_batched_tokens,
+                    config.scheduler_config.max_num_seqs,
+                ) == (4, 1)
 
     def test_apply_config_platform_defaults_sets_sp_threshold(self):
         for enabled_option in ("enable_sp", "fuse_gemm_comms"):
@@ -1307,50 +1732,6 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
 
         vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
-
-    def test_setup_compile_backend_aligns_tp_token_layout_capture_sizes(self):
-        cases = [
-            (True, False, True),
-            (False, True, True),
-            (False, False, False),
-        ]
-        for upstream_sp, enable_shared_expert_dp, should_align in cases:
-            with self.subTest(
-                upstream_sp=upstream_sp,
-                enable_shared_expert_dp=enable_shared_expert_dp,
-            ):
-                vllm_config = TestNPUPlatform.mock_vllm_config()
-                compilation_config = vllm_config.compilation_config
-                compilation_config.mode = CompilationMode.VLLM_COMPILE
-                compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-                compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
-                compilation_config.max_cudagraph_capture_size = 8
-                compilation_config.splitting_ops = []
-                vllm_config.additional_config = {
-                    "ascend_compilation_config": {
-                        "enable_npugraph_ex": True,
-                        "enable_static_kernel": True,
-                    }
-                }
-                vllm_config.model_config.enforce_eager = False
-                vllm_config.parallel_config.tensor_parallel_size = 8
-                vllm_config._set_cudagraph_sizes = MagicMock()
-                vllm_config.update_sizes_for_sequence_parallelism = MagicMock(return_value=[8])
-
-                with patch("vllm_ascend.platform.enable_sp", return_value=upstream_sp):
-                    _setup_compile_backend(
-                        vllm_config,
-                        compile_backend="test_backend",
-                        enable_shared_expert_dp=enable_shared_expert_dp,
-                    )
-
-                if should_align:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
-                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [8])
-                    self.assertEqual(compilation_config.max_cudagraph_capture_size, 8)
-                else:
-                    vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
-                    self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))

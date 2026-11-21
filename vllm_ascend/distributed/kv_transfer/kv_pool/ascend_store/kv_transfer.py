@@ -466,6 +466,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
+        empty_ple_group_id: int | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -484,6 +485,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+        self.empty_ple_group_id = empty_ple_group_id
         # Request-local durable high-water marks. They are advanced only after
         # the backend store succeeds, so a failed range is retried on the next
         # Decode boundary instead of being lost when scheduler metadata moves
@@ -789,6 +791,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
+            if group_id == self.empty_ple_group_id:
+                logger.debug("Skipping PLE cache put on a non-owner PP stage: request=%s", req_id)
+                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1003,6 +1008,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        empty_ple_group_id: int | None = None,
     ):
         super().__init__(
             m_store,
@@ -1018,6 +1024,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self.empty_ple_group_id = empty_ple_group_id
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1050,6 +1057,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
+                if group_id == self.empty_ple_group_id:
+                    logger.debug("Skipping PLE cache get on a non-owner PP stage: request=%s", req_id)
+                    continue
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size

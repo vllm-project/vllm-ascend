@@ -846,6 +846,54 @@ class TestKVPPPoolWorker(unittest.TestCase):
             self.assertTrue(all(f"@pp_rank:{shard // 4}@" in key for key in shard_keys))
             self.assertTrue(all(f"@head_or_tp_rank:{shard % 4}@" in key for key in shard_keys))
 
+    def test_only_qwen_ple_uses_pp_local_lookup_ownership(self):
+        worker = make_worker(self, pp_size=4, pp_partition=[1, 1, 1, 1])
+        worker.hf_config = SimpleNamespace(model_type="qwen4_exp_text")
+        gdn = MambaSpec(
+            block_size=16,
+            shapes=((4,), (8,)),
+            dtypes=(torch.float32, torch.float32),
+        )
+        ple = MambaSpec(
+            block_size=16,
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            tp_replicated=True,
+        )
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(["model.layers.0.mixer"], gdn),
+                # PP projection keeps the PLE slot and spec on non-owner stages.
+                KVCacheGroupSpec([], ple),
+            ]
+        )
+        worker._ple_group_id = worker._find_ple_group_id()
+        self.assertEqual(worker._ple_group_id, 1)
+        worker.group_uses_align_state = [False, False]
+
+        cpu_group = object()
+
+        def gather(gathered, local_owns_ple, *, group):
+            self.assertFalse(local_owns_ple)
+            self.assertIs(group, cpu_group)
+            gathered[:] = [False, False, True, False]
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with (
+            patch(f"{module}.get_pp_group", return_value=SimpleNamespace(cpu_group=cpu_group)),
+            patch.object(torch.distributed, "all_gather_object", side_effect=gather),
+        ):
+            worker._ple_group_owners = worker._collect_ple_group_owners()
+
+        key = "model@pp_rank:0@group:0@"
+        normal_keys = worker._expand_lookup_keys_by_rank([key], 0)
+        ple_keys = worker._expand_lookup_keys_by_rank([key], 1)
+        self.assertEqual((len(normal_keys), len(ple_keys)), (4, 1))
+        self.assertIn("@pp_rank:2@", ple_keys[0])
+
+        worker.hf_config = SimpleNamespace(model_type="deepseek_v4")
+        self.assertIsNone(worker._find_ple_group_id())
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
@@ -1614,6 +1662,32 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_start_load_kv_sync_skips_only_non_owner_ple(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker._ple_group_id = 1
+        worker.grouped_block_size = [16, 16]
+        worker.group_num_layers = {0: 1, 1: 0}
+        worker.m_store.get = MagicMock(return_value=[0])
+        worker.token_database.set_group_buffers(
+            {0: [1000], 1: []},
+            {0: [160], 1: []},
+        )
+        req = ReqMeta(
+            req_id="non-owner-ple",
+            token_len_chunk=16,
+            block_ids_by_group=[[0], [0]],
+            block_hashes=["h0"],
+            kv_cache_group_ids=[0, 1],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+
+        keys, addrs, sizes = worker.m_store.get.call_args.args
+        self.assertEqual((len(keys), addrs, sizes), (1, [[1000]], [[160]]))
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",

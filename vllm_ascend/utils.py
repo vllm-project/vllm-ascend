@@ -23,7 +23,9 @@ import functools
 import json
 import math
 import os
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -125,7 +127,6 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
         CUDAGraphMode.FULL_AND_PIECEWISE,
     ):
         # Capture sizes are already PCP-local, including graph padding.
-        # Older vLLM versions use the shared token grid instead of a prefill grid.
         prefill_sizes = getattr(compilation_config, "prefill_cudagraph_capture_token_sizes", None)
         if prefill_sizes is None:
             prefill_sizes = compilation_config.cudagraph_capture_sizes
@@ -1122,6 +1123,245 @@ def enable_sp(vllm_config=None) -> bool:
     from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
 
     return enable_dense_sp(vllm_config)
+
+
+@dataclass(frozen=True)
+class MRV2PaddingPlan:
+    """Physical MRV2 batch-layout constraints for one engine configuration.
+
+    ``token_alignment`` is only the true token-row divisibility constraint
+    shared by SP, HC-SP and shared-expert DP. Fine-grained TP has a different
+    layout contract, so it is recorded separately instead of being folded into
+    the token multiple. PCP keeps its request/context partitioning in the PCP
+    manager and consumes this plan only for the resulting local token width.
+    """
+
+    token_alignment: int = 1
+    requires_uniform_token_rows: bool = False
+
+    def align_tokens(self, num_tokens: int) -> int:
+        return align_num_tokens_to_tp(num_tokens, self.token_alignment)
+
+    def request_alignment(self, query_len: int) -> int:
+        """Return the request multiple whose token rows satisfy alignment."""
+        if query_len < 1:
+            raise ValueError(f"query_len must be positive, got {query_len}")
+        return self.token_alignment // math.gcd(self.token_alignment, query_len)
+
+    def common_request_alignment(self, query_lens: Iterable[int]) -> int:
+        return math.lcm(1, *(self.request_alignment(query_len) for query_len in query_lens))
+
+    def align_requests(self, num_reqs: int, query_len: int) -> int:
+        return align_num_tokens_to_tp(num_reqs, self.request_alignment(query_len))
+
+    def limit_aligned_requests(
+        self,
+        num_reqs: int,
+        query_len: int,
+        max_tokens: int | None,
+    ) -> int:
+        """Clamp an aligned request tier without creating partial TP shards."""
+        aligned_reqs = self.align_requests(num_reqs, query_len)
+        if max_tokens is None:
+            return aligned_reqs
+        request_alignment = self.request_alignment(query_len)
+        capped_reqs = max_tokens // query_len
+        capped_reqs = capped_reqs // request_alignment * request_alignment
+        return min(aligned_reqs, capped_reqs)
+
+    def align_query_limits(
+        self,
+        query_limits: Mapping[int, int],
+        max_tokens: int | None = None,
+        request_alignment: int | None = None,
+    ) -> dict[int, int]:
+        """Align every query tier to one request grid shared by the runner.
+
+        Main's split graph API uses one request-count grid for all query
+        lengths.  The grid must therefore use the least common multiple of
+        their per-query request alignments, not merely align each tier in
+        isolation.
+        """
+        alignment = self.common_request_alignment(query_limits) if request_alignment is None else request_alignment
+        if alignment < 1:
+            raise ValueError(f"request_alignment must be positive, got {alignment}")
+        aligned_limits: dict[int, int] = {}
+        for query_len, max_reqs in query_limits.items():
+            aligned_reqs = align_num_tokens_to_tp(max_reqs, alignment)
+            if max_tokens is not None:
+                capped_reqs = max_tokens // query_len
+                capped_reqs = capped_reqs // alignment * alignment
+                aligned_reqs = min(aligned_reqs, capped_reqs)
+            aligned_limits[query_len] = aligned_reqs
+        return aligned_limits
+
+    def align_batch_tokens(self, num_tokens: int, num_reqs: int, uniform_query_len: int | None) -> int:
+        """Align one worker-local batch without mixing token/request axes."""
+        if uniform_query_len and num_tokens == num_reqs * uniform_query_len:
+            return self.align_requests(num_reqs, uniform_query_len) * uniform_query_len
+        return self.align_tokens(num_tokens)
+
+
+def get_mrv2_padding_plan(
+    vllm_config: VllmConfig,
+    enable_shared_expert_dp: bool | None = None,
+    sequence_parallel: bool | None = None,
+    finegrained_tp_config: Any | None = None,
+) -> MRV2PaddingPlan:
+    """Compose MRV2 physical-layout constraints from enabled features."""
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    if enable_shared_expert_dp is None:
+        enable_shared_expert_dp = bool(additional_config.get("enable_shared_expert_dp", False))
+    if sequence_parallel is None:
+        sequence_parallel = enable_sp(vllm_config)
+    needs_alignment = (
+        enable_shared_expert_dp or sequence_parallel or getattr(parallel_config, "enable_hc_sp", False) is True
+    )
+
+    finegrained_config = finegrained_tp_config or additional_config.get("finegrained_tp_config") or {}
+    if isinstance(finegrained_config, dict):
+        oproj_tp_size = finegrained_config.get("oproj_tensor_parallel_size", 1)
+        mlp_tp_size = finegrained_config.get("mlp_tensor_parallel_size", 1)
+    else:
+        oproj_tp_size = getattr(finegrained_config, "oproj_tensor_parallel_size", 1)
+        mlp_tp_size = getattr(finegrained_config, "mlp_tensor_parallel_size", 1)
+    requires_uniform_token_rows = getattr(parallel_config, "data_parallel_size", 1) > 1 and (
+        oproj_tp_size > 1 or mlp_tp_size > 1
+    )
+    return MRV2PaddingPlan(
+        token_alignment=tp_size if tp_size > 1 and needs_alignment else 1,
+        requires_uniform_token_rows=requires_uniform_token_rows,
+    )
+
+
+def align_num_tokens_to_tp(num_tokens: int, alignment: int) -> int:
+    """Round a physical token-row count up to its TP alignment."""
+    if alignment < 1:
+        raise ValueError(f"alignment must be positive, got {alignment}")
+    return (num_tokens + alignment - 1) // alignment * alignment
+
+
+def get_mrv2_decode_query_limits(vllm_config: VllmConfig) -> dict[int, int]:
+    """Return main's decode query lengths and logical request limits."""
+    uniform_query_len = vllm_config.uniform_decode_query_len
+    return {
+        int(query_len): int(limit)
+        for query_len, limit in vllm_config.get_decode_cudagraph_query_lens(uniform_query_len).items()
+    }
+
+
+def get_mrv2_physical_batch_capacity(
+    vllm_config: VllmConfig,
+    padding_plan: MRV2PaddingPlan | None = None,
+) -> tuple[int, int]:
+    """Return runner-local physical token/request buffer capacities.
+
+    The caller may store these in the physical scheduler fields while keeping
+    scheduler admission in max_num_scheduled_tokens/max_num_active_seqs. This
+    accounts for padding rows and requests materialized by normalized gears.
+    """
+    plan = padding_plan or get_mrv2_padding_plan(vllm_config)
+    scheduler_config = vllm_config.scheduler_config
+    logical_max_tokens = scheduler_config.max_num_scheduled_tokens or scheduler_config.max_num_batched_tokens
+    logical_max_reqs = scheduler_config.max_num_active_seqs or scheduler_config.max_num_seqs
+    max_tokens = plan.align_tokens(logical_max_tokens)
+    max_reqs = logical_max_reqs
+    compilation_config = vllm_config.compilation_config
+
+    # Eager uniform decode also pads by complete requests.  Its physical token
+    # extent can exceed a plain token-axis round-up when query_len and TP are
+    # not divisors of one another (for example, TP=8 and query_len=6).
+    query_limits = get_mrv2_decode_query_limits(vllm_config)
+    common_request_alignment = plan.common_request_alignment(query_limits)
+    for query_len, tier_max_reqs in query_limits.items():
+        logical_reqs = min(
+            tier_max_reqs,
+            logical_max_reqs,
+            logical_max_tokens // query_len,
+        )
+        if logical_reqs:
+            physical_reqs = align_num_tokens_to_tp(
+                logical_reqs,
+                common_request_alignment,
+            )
+            if physical_reqs > logical_reqs:
+                max_reqs = max(max_reqs, physical_reqs)
+            max_tokens = max(max_tokens, physical_reqs * query_len)
+
+    token_sizes: list[int] = []
+    for name in ("cudagraph_capture_sizes", "prefill_cudagraph_capture_token_sizes"):
+        sizes = getattr(compilation_config, name, None)
+        if sizes:
+            token_sizes.extend(sizes)
+    if token_sizes:
+        max_tokens = max(max_tokens, max(token_sizes))
+
+    decode_sizes = getattr(compilation_config, "decode_cudagraph_capture_request_sizes", None) or []
+    if decode_sizes:
+        max_reqs = max(max_reqs, max(decode_sizes))
+        decode_token_sizes = [
+            min(max(decode_sizes), tier_max_reqs) * query_len for query_len, tier_max_reqs in query_limits.items()
+        ]
+        if decode_token_sizes:
+            max_tokens = max(max_tokens, max(decode_token_sizes))
+
+    # Main uses a separate q=1 graph manager for single-module MTP/EAGLE
+    # draft steps. Platform normalization stores its physical request grid in
+    # the config so capacity sizing and both graph managers share one layout.
+    from vllm_ascend.mrv2_utils import (
+        MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY,
+        MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY,
+        MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY,
+    )
+
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    draft_sizes = additional_config.get(MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY, ())
+    if draft_sizes:
+        max_draft_reqs = max(int(size) for size in draft_sizes)
+        max_reqs = max(max_reqs, max_draft_reqs)
+        max_tokens = max(max_tokens, max_draft_reqs)
+    draft_prefill_limits = additional_config.get(MRV2_DRAFT_PREFILL_QUERY_LIMITS_KEY, {})
+    if isinstance(draft_prefill_limits, Mapping):
+        for query_len, tier_max_reqs in draft_prefill_limits.items():
+            query_len = int(query_len)
+            tier_max_reqs = int(tier_max_reqs)
+            max_reqs = max(max_reqs, tier_max_reqs)
+            max_tokens = max(max_tokens, query_len * tier_max_reqs)
+    varlen_sizes_by_query = additional_config.get(MRV2_VARLEN_DECODE_TOKEN_SIZES_KEY, {})
+    if isinstance(varlen_sizes_by_query, Mapping):
+        varlen_sizes = [int(size) for sizes in varlen_sizes_by_query.values() for size in sizes]
+        if varlen_sizes:
+            max_tokens = max(max_tokens, max(varlen_sizes))
+    return max_tokens, max_reqs
+
+
+def ensure_mrv2_physical_batch_capacity(
+    vllm_config: VllmConfig,
+    padding_plan: MRV2PaddingPlan | None = None,
+) -> tuple[int, int]:
+    """Keep scheduler admission logical while sizing runner/graph capacity.
+
+    Upstream defines ``max_num_batched_tokens`` and ``max_num_seqs`` as the
+    physical runner/graph capacities. Their ``max_num_scheduled_tokens`` and
+    ``max_num_active_seqs`` counterparts preserve the user-visible scheduling
+    limits when padding requires larger physical buffers or graph gears.
+    """
+    scheduler_config = vllm_config.scheduler_config
+    physical_tokens, physical_reqs = get_mrv2_physical_batch_capacity(
+        vllm_config,
+        padding_plan,
+    )
+    if physical_tokens > scheduler_config.max_num_batched_tokens:
+        if scheduler_config.max_num_scheduled_tokens is None:
+            scheduler_config.max_num_scheduled_tokens = scheduler_config.max_num_batched_tokens
+        scheduler_config.max_num_batched_tokens = physical_tokens
+    if physical_reqs > scheduler_config.max_num_seqs:
+        if scheduler_config.max_num_active_seqs is None:
+            scheduler_config.max_num_active_seqs = scheduler_config.max_num_seqs
+        scheduler_config.max_num_seqs = physical_reqs
+    return physical_tokens, physical_reqs
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:

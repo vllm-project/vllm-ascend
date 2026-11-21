@@ -53,16 +53,15 @@ def hisparse_write_target(cache, metadata, num_input_rows, num_slot_rows):
     return cache.view.cache, cache.slot_mapping[:count], count
 
 
-def prepare_pcp_mirror_staging(worker):
+def prepare_pcp_mirror_staging(worker, max_num_tokens: int, max_num_reqs: int):
     """Size pinned Host slot staging for gathered rows before graph capture."""
     config = worker.vllm_config
-    capacity = (
-        config.scheduler_config.max_num_batched_tokens * config.parallel_config.prefill_context_parallel_size
-        + config.scheduler_config.max_num_seqs * (config.num_lookahead_tokens + 1)
+    capacity = max_num_tokens * config.parallel_config.prefill_context_parallel_size + max_num_reqs * (
+        config.num_lookahead_tokens + 1
     )
     staging = worker._slot_mapping_staging
     if staging is not None and staging.slots.numel() < capacity:
-        staging.slots = torch.empty(capacity, dtype=staging.slots.dtype, pin_memory=True)
+        staging.slots.resize_(capacity)
 
 
 class PCPHiSparseConnector(ActiveKVConnector):
@@ -176,7 +175,11 @@ def adapt_pcp_hisparse_connector(runner):
     # Taking over ActiveKVConnector state must not discard a subclass's lifecycle.
     if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
         raise ValueError("HiSparse PCP requires the direct HiSparseConnector")
-    prepare_pcp_mirror_staging(connector.kv_connector.connector_worker)
+    prepare_pcp_mirror_staging(
+        connector.kv_connector.connector_worker,
+        runner.max_num_tokens,
+        runner.max_num_reqs,
+    )
     (host_group_id,) = runner.kv_cache_config.host_group_ids
     adapted = PCPHiSparseConnector(connector, runner.pcp_manager, runner.block_tables, host_group_id)
     if runner.speculator is not None:

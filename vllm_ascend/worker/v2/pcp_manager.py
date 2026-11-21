@@ -37,7 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import MRV2PaddingPlan, get_mrv2_padding_plan, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -183,9 +183,10 @@ class AscendPCPManager(PCPManager):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         global_input_buffers: AscendInputBuffers,
+        padding_plan: MRV2PaddingPlan | None = None,
     ) -> None:
         """Set runner state that upstream's constructor does not receive."""
-        self.bind_config(vllm_config)
+        self.bind_config(vllm_config, padding_plan)
         self.kv_cache_config = kv_cache_config
         self.global_input_buffers = global_input_buffers
 
@@ -199,8 +200,13 @@ class AscendPCPManager(PCPManager):
         self._draft_layer_names = frozenset(speculator.draft_attn_layer_names)
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
 
-    def bind_config(self, vllm_config: VllmConfig) -> None:
+    def bind_config(
+        self,
+        vllm_config: VllmConfig,
+        padding_plan: MRV2PaddingPlan | None = None,
+    ) -> None:
         self.vllm_config = vllm_config
+        self.padding_plan = padding_plan or get_mrv2_padding_plan(vllm_config)
         self.shard_decode_requests: bool = self.shard_decode_requests and self.is_decode_sharded
 
     @property
@@ -220,6 +226,23 @@ class AscendPCPManager(PCPManager):
     def is_last_pp_rank(self) -> bool:
         """Whether this PCP manager belongs to the last PP stage."""
         return get_pp_group().is_last_rank
+
+    def get_num_tokens_for_dispatch(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> int:
+        """Return the aligned worker-local PCP width used by dispatch."""
+        num_tokens = super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+        if len(num_scheduled_tokens) and not bool(is_prefilling.any()):
+            query_len = int(num_scheduled_tokens[0])
+            if query_len > 0 and bool((num_scheduled_tokens == query_len).all()):
+                return self.padding_plan.align_batch_tokens(
+                    num_tokens,
+                    num_tokens // query_len,
+                    query_len,
+                )
+        return self.padding_plan.align_tokens(num_tokens)
 
     @staticmethod
     def validate_config(
@@ -287,7 +310,12 @@ class AscendPCPManager(PCPManager):
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        local_batch = super().partition_batch(input_batch, batch_desc)
+        layout_desc = batch_desc
+        if batch_desc.cg_mode == CUDAGraphMode.NONE and self.padding_plan.token_alignment > 1:
+            # Eager PCP still consumes the physical width agreed at dispatch;
+            # PIECEWISE changes only layout padding, not request metadata.
+            layout_desc = replace(batch_desc, cg_mode=CUDAGraphMode.PIECEWISE)
+        local_batch = super().partition_batch(input_batch, layout_desc)
         assert isinstance(local_batch, AscendInputBatch)
         # A sharded decode graph is sized per rank, so upstream can pad the
         # local requests. Replicated decode graphs are padded below instead.
