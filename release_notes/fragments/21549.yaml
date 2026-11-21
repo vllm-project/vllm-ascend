@@ -1,0 +1,13 @@
+pr: 21549
+entries:
+  - category: feature
+    text: >-
+      Added experimental KDA RecoverSSM for Kimi K3 and K3.1 DSpark decoding,
+      including prefill context parallelism (PCP), on Model Runner V2; enable
+      it with --use-replayssm, as it is disabled by default. Prefix caching uses
+      Mamba cache mode align, and experimental
+      Mooncake prefill/decode separation requires matching RecoverSSM,
+      prefix-caching and state settings on both sides. Validation is limited
+      to specific 950DT configurations, including a P/D test using an
+      experimental image with modified parallelism checks; end-to-end
+      functionality on other hardware, including 950PR, remains unverified.

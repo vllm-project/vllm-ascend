@@ -17,13 +17,16 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
@@ -53,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -84,6 +88,7 @@ class BaseKVPoolWorker(ABC):
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
+        self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -98,7 +103,7 @@ class BaseKVPoolWorker(ABC):
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
-        self._init_key_head_config(model_config, parallel_config)
+        self._init_key_head_config(model_config)
         self._init_metadata(model_config, vllm_config, extra_config)
         self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
@@ -151,12 +156,19 @@ class BaseKVPoolWorker(ABC):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
-        # Global layer addressing for layerwise keys under pipeline parallel:
-        # get_num_layers returns the per-stage layer count, so record the
-        # stage's global layer offset and the model-wide total layers used by
-        # the layerwise key space.
         self.pp_layer_offset = 0
         self.total_layers = None
+        if self.pp_size > 1 and self.pcp_size > 1:
+            # vLLM 0.33.0 derives the PP stage without the PCP rank dimension.
+            # Fixed upstream: https://github.com/vllm-project/vllm/pull/65539
+            # TODO: Remove once vLLM 0.33.0 support is dropped and PP/PCP
+            # layer-range regression tests pass with the v0.34.0 baseline.
+            self.total_layers = model_config.get_total_num_hidden_layers()
+            start, end = get_pp_indices(self.total_layers, self.pp_rank, self.pp_size)
+            self.pp_layer_offset = start
+            self.num_layers = end - start
+            return
+
         try:
             start, _ = model_config.get_layers_start_end_indices(parallel_config)
             self.pp_layer_offset = start
@@ -174,6 +186,7 @@ class BaseKVPoolWorker(ABC):
             )
             self.pp_layer_offset = 0
             self.total_layers = None
+        self.num_layers = model_config.get_num_layers(parallel_config)
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
@@ -216,6 +229,7 @@ class BaseKVPoolWorker(ABC):
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
@@ -233,9 +247,8 @@ class BaseKVPoolWorker(ABC):
     def _compute_use_hybrid(self, vllm_config, kv_cache_groups) -> bool:
         return uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
 
-    def _init_key_head_config(self, model_config, parallel_config) -> None:
+    def _init_key_head_config(self, model_config) -> None:
         self.current_layer = 0
-        self.num_layers = model_config.get_num_layers(parallel_config)
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -329,6 +342,9 @@ class BaseKVPoolWorker(ABC):
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            if group_id in self.sharded_mamba_group_ids:
+                # Layerwise keys carry PCP coordinates in their own suffix.
+                group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -355,9 +371,17 @@ class BaseKVPoolWorker(ABC):
         real_backend = getattr(backend_module, backend_name)
 
         backend_kwargs = {}
-        # lazy_init is requested only for compressed models. Each backend owns
-        # the hardware/protocol checks that decide whether it can honor it.
-        backend_kwargs["lazy_init"] = self.use_compress
+        # lazy_init is requested for compressed models and for sparse-indexer
+        # models that run the packed C8 cache path. The v0.26 trigger was
+        # fabric memory with c8_enable_reshape_optim; on main the packed path
+        # is the dtype-derived native default (sparse + fp8/int8), so the gate
+        # tracks that condition instead of the removed knob. Each backend owns
+        # the hardware/protocol checks that decide whether it can honor the
+        # request (Mooncake honors it under fabric memory, Memcache under
+        # device_sdma).
+        cache_dtype = self.vllm_config.cache_config.cache_dtype
+        packed_c8_path = self.use_sparse and cache_dtype in ("fp8", "int8")
+        backend_kwargs["lazy_init"] = self.use_compress or packed_c8_path
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
@@ -401,6 +425,7 @@ class BaseKVPoolWorker(ABC):
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
+        retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
@@ -408,7 +433,7 @@ class BaseKVPoolWorker(ABC):
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
             use_eagle=use_eagle,
-            retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+            retention_interval=retention_interval,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -651,7 +676,37 @@ class BaseKVPoolWorker(ABC):
             assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
             registered_regions[storage_key] = (new_start, end)
 
+    def _recoverssm_store_caches(self, kv_caches):
+        """Export the model's copyable state prefix, leaving verification records local."""
+        if self.kv_cache_config is None:
+            raise ValueError("RecoverSSM pooling requires KV cache specs")
+        result = dict(kv_caches)
+        copy_funcs = None
+        for group in self.kv_cache_config.kv_cache_groups:
+            specs = group.kv_cache_spec
+            for name in group.layer_names:
+                spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
+                if not isinstance(spec, MambaSpec):
+                    continue
+                if spec.num_speculative_blocks != 0:
+                    raise ValueError("RecoverSSM pooling requires zero speculative state blocks")
+                if copy_funcs is None:
+                    mamba_groups = get_mamba_groups(self.kv_cache_config)
+                    model_cls = get_model_cls(self.vllm_config.model_config)
+                    copy_funcs = model_cls.get_mamba_state_copy_funcs({s.mamba_type for s in mamba_groups})
+                caches = self._as_cache_tuple(kv_caches[name])
+                num_states = len(copy_funcs[spec.mamba_type])
+                if len(caches) < num_states:
+                    raise ValueError(
+                        f"RecoverSSM pooling layer {name!r} requires at least {num_states} persistent state tensors, "
+                        f"got {len(caches)}"
+                    )
+                result[name] = caches[:num_states]
+        return result
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         self._set_num_blocks(kv_caches)
         self._register_kv_caches(kv_caches)
 
@@ -987,6 +1042,8 @@ class BaseKVPoolWorker(ABC):
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
+        if kv_cache_group_id in self.sharded_mamba_group_ids:
+            return self.tp_size * self.pcp_size
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
@@ -1317,6 +1374,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                sharded_mamba_group_ids=self.sharded_mamba_group_ids,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1521,10 +1579,11 @@ class KVPoolWorker(BaseKVPoolWorker):
             request.current_event = current_event
             requests.append(request)
 
-        if not requests:
-            return
-
-        self._previous_save_batch = send_thread.add_save_batch(requests)
+        if requests:
+            self._previous_save_batch = send_thread.add_save_batch(requests)
+        # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
+        send_thread.request_queue.join()
+        send_thread.raise_if_failed()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.

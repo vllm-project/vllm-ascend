@@ -211,6 +211,39 @@ A new PR will be created with the title format `[Revert] Revert "original_title"
 
 Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
 
+### `/run`
+
+Run the full PR gate (`pr_test.yaml`) on the **latest** commit of this PR. Pushing
+new commits does not start CI on its own, so use `/run` when the PR is ready for a
+gate run.
+
+Unlike `/rerun`, which only retries jobs that already failed inside an existing run,
+`/run` starts a fresh run against the current head commit. The test scope follows the
+labels the PR currently carries (`ready-precise`, `ready-a5`,
+`main2main`); without any of them only `pre-commit` and `cpu-ut` run, which is the
+same scope a push used to get.
+
+`/run` only ever starts one gate run per commit. The verdict comes from the newest
+completed E2E run on the head commit:
+
+- If an E2E run for the head commit is already queued or in progress, `/run` is a no-op.
+- If that newest run **passed**, `/run` refuses to start another one — the commit is
+  already verified, so push a new commit if the code changed.
+- If that newest run **finished without passing**, `/run` refuses as well and points
+  to `/rerun`, which retries only the failed jobs on that same commit and is much
+  cheaper than the full matrix. A `cancelled` run is not treated as a verdict on the
+  code, so such a commit can still be tested with `/run`.
+
+`/run` requests tests, so the CODEOWNERS approval gate is not evaluated in its
+runs; it is evaluated when reviews are submitted instead.
+
+**Examples:**
+
+```text
+# Run the PR gate on the latest commit
+/run
+```
+
 ### `/rerun`
 
 Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
@@ -259,6 +292,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
+| `/run` | ✅ | ❌ |
 | `/cancel` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
@@ -270,6 +304,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/run` | PR author, or users with triage+ permission on the repository |
 | `/cancel` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |

@@ -17,9 +17,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
-)
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
@@ -65,7 +62,7 @@ class _StateBackend:
 
 def _make_config():
     return SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=64),
+        model_config=SimpleNamespace(max_model_len=64, hf_config=SimpleNamespace()),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
@@ -76,6 +73,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            prefix_cache_retention_interval=0,
             get_resolved_kv_cache_layout=lambda: SimpleNamespace(
                 is_layer_compact=True,
                 is_block_compact=True,
@@ -107,6 +105,7 @@ def _make_specs(main_head_size=4):
         ),
         STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
+            ring_capacity=2,
             sliding_window=2,
             compress_ratio=2,
             num_kv_heads=1,
@@ -174,7 +173,6 @@ def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, u
         config.kv_transfer_config = SimpleNamespace(
             kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
         )
-    apply_layerwise_kv_cache_plan(plan, config)
     allocated_sizes = []
     allocate = attn_utils._allocate_int8_cache_tensor
 
@@ -289,6 +287,27 @@ def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatc
     torch.testing.assert_close(actual[1], torch.tensor([[5, 5, 7, 7], [5, 5, 7, 7]], dtype=torch.float32))
     torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
     torch.testing.assert_close(actual[2], torch.zeros_like(actual[2]))
+
+
+def test_speculative_tail_view_preserves_all_nine_physical_rows():
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        ring_capacity=9,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=256,
+    )
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    view = view_kpool_tail_cache(STATE, spec, raw, 3)[0]
+    assert view.shape == (3, 9, 4)
+    assert view.stride() == (64, 4, 1)
+    view[1, 8].fill_(7)
+    torch.testing.assert_close(raw.view(torch.float32)[96:100], torch.full((4,), 7.0))
+    assert not torch.count_nonzero(view[0])
+    assert not torch.count_nonzero(view[2])
 
 
 def test_padded_page_layout_rejected_without_tail_caches():

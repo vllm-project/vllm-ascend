@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -34,11 +34,13 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.expert_transfer.expert_offload_config import validate_expert_offload_config
+from vllm_ascend.kv_trace.kv_trace_config import KVTraceConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "AscendStoreConnector")
+_KVPP_SUPPORTED_CONNECTORS = ("MooncakeConnectorV2", "MooncakePushConnector", "AscendStoreConnector")
 _MEGA_MOE_SUPPORTED = None
 
 
@@ -47,8 +49,8 @@ def is_mega_moe_supported() -> bool:
 
     Always read _MEGA_MOE_SUPPORTED through this accessor instead of
     ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
+    when the worker config is published, and a direct import binds a stale
+    snapshot for the bool.
     """
     global _MEGA_MOE_SUPPORTED
     if _MEGA_MOE_SUPPORTED is None:
@@ -99,7 +101,10 @@ class KVPPConfig:
                 name = connector.get("kv_connector")
                 if name not in _KVPP_SUPPORTED_CONNECTORS:
                     raise ValueError(f"KVPP does not support kv connector {name!r}.")
-                if name == "MooncakeConnectorV2" and connector.get("kv_role") == "kv_consumer":
+                if (
+                    name in ("MooncakeConnectorV2", "MooncakePushConnector")
+                    and connector.get("kv_role") == "kv_consumer"
+                ):
                     raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
@@ -147,7 +152,7 @@ class AscendCompilationConfig:
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
@@ -409,19 +414,24 @@ class RlConfig:
 class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
-    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
-    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
-    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
-    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+    Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
+    selects shared-scale int8 (default on A2) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (default on A5). An explicit
+    value overrides the hardware default. Both select calls by group size,
+    dtype, shape and payload rather than forward phase.
+    A collective takes the selected path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
+    default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
+    measurements. Benchmark MXFP8 independently on the intended A5 workload.
 
-    The wrapper is built for every parallel group, but only groups with at most
-    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
-    TP degree itself is validated here, so an unsupported TP fails at config
-    parsing time instead of when some parallel group is constructed.
+    The wrapper is built for every parallel group; unsupported group sizes
+    keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
+    8 ranks. The TP degree itself is validated here before group construction.
     """
 
     enable: bool = False
     min_numel: int = 16777216
+    quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
@@ -440,13 +450,73 @@ class QuantizedAllReduceConfig:
         )
 
         tp_size = vllm_config.parallel_config.tensor_parallel_size
-        if tp_size > _MAX_VALID_WORLD_SIZE:
+        if self.quant_dtype == "int8" and tp_size > _MAX_VALID_WORLD_SIZE:
             raise ValueError(
                 "additional_config.quantized_all_reduce_config supports "
                 f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
                 f"int8 bound leaves too few quantization levels beyond that), but "
                 f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
             )
+        if self.quant_dtype == "mxfp8":
+            from vllm_ascend.distributed.device_communicators.mxfp8_all_reduce import (
+                _SUPPORTED_WORLD_SIZES,
+            )
+
+            if not is_950():
+                raise ValueError("quantized_all_reduce_config.quant_dtype='mxfp8' requires Atlas A5.")
+            if tp_size != 1 and tp_size not in _SUPPORTED_WORLD_SIZES:
+                raise ValueError("MXFP8 AllToAll quantized all-reduce requires TP=2/4/8 (or TP=1 to bypass).")
+
+
+@config
+class SharedEngramConfig:
+    """Shared Engram owner and per-rank receive capacity."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["a2", "a3", "a5"]
+    endpoint: str
+    capacity: int = 65536
+    library_path: str | None = None
+    listen_port: int | None = None
+    local_comm_res: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_backend_options(cls, data: Any) -> Any:
+        options = data.kwargs if isinstance(data, ArgsKwargs) else data
+        if isinstance(options, dict) and options.get("backend") == "a3":
+            # Serialized dataclasses include the other backend's default fields.
+            defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
+            if any(name in options and options[name] != default for name, default in defaults.items()):
+                raise ValueError("A3 does not accept A2/A5 shared Engram options")
+        return data
+
+    @model_validator(mode="after")
+    def _validate(self):
+        host, separator, port = self.endpoint.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("shared Engram endpoint must be host:port")
+        if not 0 < self.capacity <= 262144:
+            raise ValueError("shared Engram capacity must be in [1, 262144]")
+        if self.listen_port is not None and not 0 < self.listen_port < 65536:
+            raise ValueError("shared Engram listen_port must be in [1, 65535]")
+        if self.listen_port is not None and self.local_comm_res:
+            raise ValueError("listen_port and local_comm_res are mutually exclusive")
+        return self
+
+
+@config(config=ConfigDict(frozen=True))
+class ExpertOffloadConfig:
+    """Configuration for exact single-worker expert offload."""
+
+    enabled: bool = False
+    num_device_experts: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_capacity(self):
+        if self.enabled and self.num_device_experts is None:
+            raise ValueError("expert_offload_config.num_device_experts is required when enabled")
+        return self
 
 
 @config
@@ -474,6 +544,9 @@ class AscendConfig:
     are optional; the values below show every supported key with its default
     value (see the mutex/validation notes below before copying).
 
+    ``quantized_all_reduce_config.quant_dtype`` is omitted below because its
+    default depends on the hardware: ``mxfp8`` on A5 and ``int8`` on A2.
+
         {
             "refresh": false,
             "enable_cpu_binding": true,
@@ -482,6 +555,7 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "kv_trace": {"enabled": false, "action": "log"},
             "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
             "sfa_dcp_force_tmajor_restore": false,
@@ -490,7 +564,7 @@ class AscendConfig:
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -561,13 +635,6 @@ class AscendConfig:
                     "threshold": 256,
                     "long_max_wait_ms": 0.0
                 },
-                "profiling_chunk_config": {
-                    "enabled": false,
-                    "smooth_factor": 1.0,
-                    "min_chunk": 4096,
-                    "need_timing": null,
-                    "max_fit_chunk": 30
-                },
                 "batch_job_sched_config": {
                     "enabled": false,
                     "max_jobs": 20,
@@ -591,7 +658,8 @@ class AscendConfig:
                 "enabled": false,
                 "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 110,
-                "keep_device_kv_cache": false
+                "keep_device_kv_cache": false,
+                "store_port_base": 8500
             }
         }
 
@@ -608,7 +676,7 @@ class AscendConfig:
       ``num_head_replica``.
     - Deprecated top-level scheduler keys (``enable_balance_scheduling``,
       ``recompute_scheduler_enable``, ``short_request_first_config``,
-      ``profiling_chunk_config``, ``batch_job_sched_config``) still resolve,
+      ``batch_job_sched_config``) still resolve,
       but emit deprecation warnings; prefer nesting under
       ``scheduler_config`` as shown above.
     """
@@ -617,6 +685,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -629,6 +698,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
@@ -642,13 +712,16 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
-    # This is a reference value: if the actual per-rank received token
-    # count exceeds it, tokens may be truncated, causing precision
-    # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # MegaMoe (enable_fused_mc2=2/3): passed as the symm buffer's
+    # max_recv_token_num. 0 (default) lets the operator auto-compute it as
+    # num_max_tokens_per_rank * ep_world_size * min(num_topk, expert_per_rank).
+    # A positive value is used as a reference capacity instead: if the actual
+    # per-rank received token count exceeds it, tokens may be truncated,
+    # causing precision degradation. Do not set it too large because
+    # workspace memory scales linearly with this value.
+    # Plain MC2 (enable_fused_mc2=1): the same value is passed as
+    # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
+    mega_moe_max_tokens: int = 0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -663,6 +736,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
+    # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
+    # keeps the shared expert separate. Internal flag, not user-settable.
+    megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -691,8 +768,12 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
+    # This switches the prefill recurrence; keep opt-in until cold/cache-hit
+    # numerical equivalence and performance are qualified on supported NPUs.
+    gdn_internal_prefill_checkpoints: bool = False
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -704,6 +785,7 @@ class AscendConfig:
     num_head_replica: int = 1
 
     # ---- private derived state (init=False) ----
+    _megamoe_supported: bool = dataclasses.field(default=False, init=False, repr=False)
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c4_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
@@ -721,25 +803,48 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            self._megamoe_supported = False
+        elif self.enable_fused_mc2 in (2, 3):
+            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+            # with the shared expert fused into the operator.
+            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
+            self._megamoe_supported = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not self._megamoe_supported:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                    "MegaMoe (and its shared-expert fusion) will be disabled."
+                )
             self.enable_fused_mc2 = 1
+        else:
+            raise ValueError(
+                "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
+                f"(MegaMoE + shared-expert fusion); got {self.enable_fused_mc2}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
-    # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
-    # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        validate_expert_offload_config(self.expert_offload_config, vc, self)
+        if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
+            if getattr(vc, "shutdown_timeout", 0) <= 0:
+                raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
+            os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
+        if self.shared_engram is not None and self.shared_engram.backend == "a3":
+            if not vc.use_v2_model_runner:
+                raise ValueError("shared_engram requires Model Runner V2")
+            if not engram_config or not engram_config.cpu_offload:
+                raise ValueError("shared_engram requires Engram cpu_offload")
+            if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
+                raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
+            and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
@@ -764,39 +869,6 @@ class AscendConfig:
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
-        # profiling_chunk vs min_chunk clamp
-        if self.scheduler_config.profiling_chunk_config.enabled:
-            logger.warning_once(
-                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
-                "as of v0.32.0 and has entered the sunset process. It will be removed "
-                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
-                "for details and migration guidance."
-            )
-            max_batched = vc.scheduler_config.max_num_batched_tokens
-            if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
-                logger.warning(
-                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
-                    "max_num_batched_tokens=%d, min_chunk=%d. "
-                    "Clamping min_chunk to %d to avoid it being silently ignored.",
-                    max_batched,
-                    self.scheduler_config.profiling_chunk_config.min_chunk,
-                    max_batched,
-                )
-                self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
-            raise ValueError(
-                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
-                "Please set --pipeline-parallel-size to a value greater than 1, "
-                "or disable profiling_chunk_config."
-            )
-
-        # profiling_chunk vs balance mutex
-        if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
-            raise ValueError(
-                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
-                "cannot be enabled at the same time. Please disable one of them."
-            )
-
         # enable_shared_expert_dp = val and ep and tp>1
         from vllm_ascend.utils import enable_sp
 
@@ -811,15 +883,28 @@ class AscendConfig:
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
 
+        # Dense Qwen3.5-family sequence parallelism: the same FlashComm switch
+        # also drives SP for dense checkpoints (no MoE to shard).
+        # vllm_ascend.patch.worker.patch_qwen3_5.enable_dense_sp is the single
+        # predicate for runtime reads that only see a VllmConfig (reached
+        # through utils.enable_sp); it is not an AscendConfig field (not an
+        # external interface).
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
+        elif vc.parallel_config.use_sequence_parallel_moe:
             logger.info_once("FlashComm1 is enabled.")
+        elif enable_sp(vllm_config=vc):
+            logger.info_once("FlashComm1 dense sequence parallelism is enabled for the Qwen3.5 dense family.")
+        else:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence "
+                "parallelism (requires tensor_parallel_size > 1, pipeline_parallel_size == 1, "
+                "and an SP-capable model family: MoE with expert parallelism or the dense "
+                "Qwen3.5 family). Disabling."
+            )
 
         # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
         # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
@@ -863,7 +948,7 @@ class AscendConfig:
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
-        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not self._megamoe_supported), (
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
@@ -873,7 +958,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and self._megamoe_supported and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -954,7 +1039,16 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config,
+            # Some ModelSlim checkpoints describe only the INT8 projection,
+            # not indexer.quant_type. Treat it as C8 only when explicitly
+            # requested; W8A8 projection alone does not imply a C8 cache.
+            ("INT8_DYNAMIC", "W8A8_MXFP8", "W8A8_DYNAMIC")
+            if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+            and vllm_config.attention_config.indexer_kv_dtype == "int8"
+            else ("INT8_DYNAMIC", "W8A8_MXFP8"),
+        )
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,
@@ -967,10 +1061,11 @@ class AscendConfig:
         self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
+        self._validate_megamoe_shared_expert_fusion(vc)
 
-        # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
@@ -1007,7 +1102,7 @@ class AscendConfig:
         )
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         hardware_profile = get_current_hardware_profile()
         if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
@@ -1036,6 +1131,36 @@ class AscendConfig:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication. "
                 "Please set additional_config.enable_fused_mc2 to 0."
+            )
+
+    def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+
+        The shared expert is fused into the routed A5 MegaMoe operator, so this
+        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        the shared expert and routed experts share the residual width. Latent-MoE
+        models (e.g. Kimi K3) project the residual stream before the routed FFN and
+        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
+        that layout. Fail fast instead of silently downgrading, because a silent
+        downgrade would change results without failing the launch.
+        """
+        if not self.megamoe_shared_expert_fusion:
+            return
+
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "the current hardware profile does not support it. "
+                "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
+                "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
@@ -1237,6 +1362,7 @@ class AscendConfig:
     def _parse_sparse_li_layers_from_quant_config(
         cls, quant_config: Any, valid_quant_types: tuple[str, ...]
     ) -> tuple[set[int], set[str]]:
+        """Prefer explicit indexer cache types over projection-type fallback."""
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
@@ -1251,10 +1377,20 @@ class AscendConfig:
             if not isinstance(key, str):
                 continue
             matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
-            if matched_suffix is None or value not in valid_quant_types:
+            if matched_suffix is None:
                 continue
             layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
+                continue
+            # A projection's quantization does not override an explicit
+            # indexer cache rollback, such as quant_type="FLOAT".
+            if (
+                get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                and matched_suffix == ".indexer.wq_b.weight"
+                and f"{layer_name}.indexer.quant_type" in quant_description
+            ):
+                continue
+            if value not in valid_quant_types:
                 continue
             layer_names.add(layer_name)
             layer_ids.add(extract_layer_index(layer_name))
@@ -1316,7 +1452,7 @@ class AscendConfig:
         return
 
     def get_mc2_comm_alg(self) -> str:
-        from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
         # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
@@ -1331,7 +1467,7 @@ class AscendConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). Integer fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -1347,6 +1483,7 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    qkv_iproj_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1355,6 +1492,7 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1368,6 +1506,22 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
+        if self.qkv_iproj_tensor_parallel_size > 1:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("QKV input projection TP requires TP=1, PCP=1 and PP=1.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("QKV input projection TP is supported only on a PD decode node.")
+            text_config = vc.model_config.hf_text_config
+            if getattr(text_config, "model_type", None) not in ("glm5_next", "glm5_next_text"):
+                raise ValueError("QKV input projection TP currently supports GLM-5.3-Flash only.")
+            if text_config.linear_num_heads % self.qkv_iproj_tensor_parallel_size:
+                raise ValueError("qkv_iproj_tensor_parallel_size must divide the KDA head count.")
+            enabled_configs.append(f"qkv_iproj_tensor_parallel_size={self.qkv_iproj_tensor_parallel_size}")
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
@@ -1434,6 +1588,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.qkv_iproj_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,
@@ -1485,45 +1640,6 @@ class XliteGraphConfig:
                 "Current cache block size may not be optimal for xlite graph mode: current=%d, recommended=128.",
                 vllm_config.cache_config.block_size,
             )
-
-
-@config
-class ProfilingChunkConfig:
-    """Configuration for profiling-based dynamic chunk sizing.
-
-    Migrated to ``@config`` (pydantic dataclass). Range/positivity checks
-    moved to an ``after`` model_validator. ``need_timing`` uses ``None`` as a
-    "not provided" sentinel so the after-validator can distinguish "user did
-    not set it" (→ default to ``enabled``) from "user explicitly set False"
-    (→ keep False), mirroring the original ``config.get("need_timing", self.enabled)``.
-    """
-
-    enabled: bool = False
-    smooth_factor: float = 1.0
-    min_chunk: int = 4096
-    need_timing: bool | None = None
-    max_fit_chunk: int = 30
-
-    @model_validator(mode="after")
-    def _validate_and_link_need_timing(self):
-        # need_timing defaults to enabled when not explicitly set by the user.
-        # (Original: config.get("need_timing", self.enabled).) Using None as
-        # sentinel distinguishes "not provided" from "explicitly False".
-        if self.need_timing is None:
-            self.need_timing = self.enabled
-        if not self.enabled and self.need_timing:
-            logger.warning(
-                "profiling_chunk_config.need_timing=True is ignored because "
-                "profiling_chunk_config.enabled=False. Setting need_timing to False."
-            )
-            self.need_timing = False
-        if not (0 < self.smooth_factor <= 1.0):
-            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
-        if self.min_chunk <= 0:
-            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
-        if self.max_fit_chunk <= 5:
-            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
-        return self
 
 
 @config
@@ -1635,14 +1751,13 @@ class SchedulerConfig:
     resolves the precedence (nested scheduler_config > top-level legacy >
     default), preserving the original deprecation warnings, and then constructs
     this class from final configuration values. Sub-configs
-    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig) are
+    (ShortRequestFirstConfig / BatchJobSchedConfig) are
     typed fields that pydantic coerces from nested dicts.
     """
 
     enable_balance_scheduling: bool = False
     recompute_scheduler_enable: bool = False
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
-    profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
 
@@ -1683,7 +1798,6 @@ class SchedulerConfig:
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.
             "short_request_first_config": _resolve("short_request_first_config", {}),
-            "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
             "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
         }
@@ -1704,6 +1818,10 @@ class SparseKVOffloadConfig:
     topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
+    # Base TCP port of the MemFabric shared offload store. The data parallel
+    # group ``i`` binds ``store_port_base + i``. Independent services that share
+    # a network namespace must use distinct bases.
+    store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
 
@@ -1718,6 +1836,8 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if not 1 <= self.store_port_base <= 65535:
+            raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
         return self
 
     @classmethod
@@ -1790,7 +1910,7 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
-# Only marks synchronous draft construction/loading for platform validation.
+# Marks synchronous draft construction/loading for validation and config publication.
 # Nested scopes restore their caller's marker, including on failure.
 _DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
 
@@ -1854,9 +1974,11 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Do not reuse a cached config: let AscendConfig's normal nested
         # pydantic validation report the invalid sub-config input below.
         refresh = True
-    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG, _MEGA_MOE_SUPPORTED
+    is_draft = is_draft_config_context()
     if (
-        _ASCEND_CONFIG is not None
+        not is_draft
+        and _ASCEND_CONFIG is not None
         and not refresh
         and _is_ascend_config_initialized(_ASCEND_CONFIG)
         and _INIT_VLLM_CONFIG is vllm_config
@@ -1929,7 +2051,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_balance_scheduling",
         "recompute_scheduler_enable",
         "short_request_first_config",
-        "profiling_chunk_config",
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
@@ -1965,9 +2086,12 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
+    if is_draft:
+        return new_config
     if _is_ascend_config_initialized(new_config):
         _ASCEND_CONFIG = new_config
         _INIT_VLLM_CONFIG = vllm_config
+        _MEGA_MOE_SUPPORTED = new_config._megamoe_supported
         # Publish the fully validated singleton before invalidating derived
         # process caches. The next runtime read rebuilds them from new_config;
         # failed construction leaves the previous singleton/cache untouched.

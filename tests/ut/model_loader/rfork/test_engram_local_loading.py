@@ -156,7 +156,7 @@ def test_host_table_is_ready_but_only_device_weight_is_registered(
     pointers = torch.tensor([12345], dtype=torch.int64)
     table._codes_uva = SimpleNamespace(ptrs=pointers)
     monkeypatch.setattr(
-        tensor_runtime.tensor_layout,
+        tensor_runtime.weight_state,
         "is_tensor_on_transfer_device",
         lambda tensor: tensor is model.device_weight or tensor is pointers,
     )

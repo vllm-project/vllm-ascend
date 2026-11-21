@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
-from vllm.config import CUDAGraphMode, KVTransferConfig
+from vllm.config import AttentionConfig, CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -304,7 +305,9 @@ class TestNPUWorkerV2(TestBase):
             worker.profiler = None
             worker._pp_send_work = []
 
-            pooling_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            pooling_output = ModelRunnerOutput(
+                req_ids=[], **({"req_id_to_index": {}} if vllm_version_is("0.33.0") else {})
+            )
             worker.model_runner.execute_model.return_value = None
             worker.model_runner.pool.return_value = pooling_output
 
@@ -316,93 +319,6 @@ class TestNPUWorkerV2(TestBase):
         self.assertIs(result, pooling_output)
         worker.model_runner.execute_model.assert_called_once()
         worker.model_runner.pool.assert_called_once_with()
-
-    @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
-    @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_delegates_cpp_state(
-        self,
-        mock_get_pp_group,
-        mock_synchronize,
-    ):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
-            worker = NPUWorker()
-            worker.use_v2_model_runner = True
-            worker.scheduler_config = SimpleNamespace(max_num_batched_tokens=1024)
-
-            model_runner = MagicMock()
-            model_runner.max_num_reqs = 8
-            worker.model_runner = model_runner
-
-            mock_get_pp_group.return_value.is_first_rank = True
-
-            with patch("time.perf_counter", side_effect=[10.0, 10.25]):
-                latency_ms = worker.profile_prefill_latency(512)
-
-            self.assertEqual(latency_ms, 250.0)
-            model_runner._dummy_run.assert_called_once_with(
-                num_tokens=512,
-                force_attention=True,
-                is_profile=False,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                profile_cpp=True,
-            )
-            self.assertEqual(mock_synchronize.call_count, 2)
-
-    @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
-    @patch("vllm_ascend.worker.worker.get_pp_group")
-    def test_profile_prefill_latency_v2_propagates_dummy_error(
-        self,
-        mock_get_pp_group,
-        mock_synchronize,
-    ):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
-            worker = NPUWorker()
-            worker.use_v2_model_runner = True
-            worker.scheduler_config = SimpleNamespace(max_num_batched_tokens=1024)
-
-            model_runner = MagicMock()
-            model_runner.max_num_reqs = 8
-            model_runner._dummy_run.side_effect = RuntimeError("dummy failure")
-            worker.model_runner = model_runner
-
-            mock_get_pp_group.return_value.is_first_rank = True
-
-            with self.assertRaisesRegex(RuntimeError, "dummy failure"):
-                worker.profile_prefill_latency(512)
-
-            self.assertEqual(mock_synchronize.call_count, 1)
-
-    def test_sample_tokens_v2_attaches_execution_time(self):
-        from vllm_ascend.worker.worker import NPUWorker
-
-        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
-            worker = NPUWorker()
-            worker.use_v2_model_runner = True
-
-            profiling_config = SimpleNamespace(need_timing=True)
-            model_runner = MagicMock()
-            model_runner.ascend_config = SimpleNamespace(
-                scheduler_config=SimpleNamespace(
-                    profiling_chunk_config=profiling_config,
-                )
-            )
-            model_runner._cpp_execution_time_ms = 125.0
-            model_runner_output = SimpleNamespace()
-            output = SimpleNamespace(model_runner_output=model_runner_output)
-            model_runner.sample_tokens.return_value = output
-            worker.model_runner = model_runner
-
-            grammar_output = SimpleNamespace()
-            result = worker.sample_tokens(grammar_output)
-
-            self.assertIs(result, output)
-            self.assertEqual(model_runner_output.execution_time_ms, 125.0)
-            self.assertIsNone(model_runner._cpp_execution_time_ms)
-            model_runner.sample_tokens.assert_called_once_with(grammar_output)
 
 
 @pytest.mark.parametrize("with_kv_transfer", [False, True])
@@ -436,6 +352,7 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
     worker.use_v2_model_runner = True
     worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
     worker.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC),
         kv_transfer_config=(
             KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None

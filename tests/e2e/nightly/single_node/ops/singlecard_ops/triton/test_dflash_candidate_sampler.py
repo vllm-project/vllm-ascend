@@ -8,7 +8,7 @@ import pytest
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import _log1p_neg_stable
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import CandidateSampler
+from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as dflash2_speculator
 
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa: F401
 from vllm_ascend.worker.v2.sample.gumbel import _gumbel_sample
@@ -103,13 +103,24 @@ def test_context_cache_contains_rotated_keys(monkeypatch, use_triton, is_neox_st
         torch.testing.assert_close(args[2], values[layer])
 
 
+def _make_draft_logits(num_reqs, steps, vocab, device):
+    fill = -float("inf")
+    cache_cls = getattr(dflash2_speculator, "DraftLogitsCache", None)
+    if cache_cls is None:
+        logits = torch.full((num_reqs, steps, vocab), fill, device=device)
+        return logits, logits
+
+    cache = cache_cls(num_reqs, steps, vocab, dtype=torch.get_default_dtype(), fill=fill, device=device)
+    return cache, cache.values
+
+
 @pytest.mark.parametrize("probabilistic", [False, True])
 def test_candidate_walk_preserves_conditional_scores_and_clears_old_cache(probabilistic):
     """Zero-temperature walks must preserve q along the chosen path for rejection."""
     max_reqs, num_reqs, steps, topk, vocab = 4, 3, 2, 4, 64
     device = "npu"
-    sampler = CandidateSampler(max_reqs, steps, topk, torch.device(device))
-    logits = torch.full((max_reqs, steps, vocab), -float("inf"), device=device) if probabilistic else None
+    sampler = dflash2_speculator.CandidateSampler(max_reqs, steps, topk, torch.device(device))
+    draft_logits, logits = _make_draft_logits(max_reqs, steps, vocab, device) if probabilistic else (None, None)
     mapping = torch.tensor([[2, 2], [0, 0], [-1, -1]], dtype=torch.int32, device=device).flatten()
     positions = torch.full((num_reqs * steps,), 10, dtype=torch.int32, device=device)
     temperatures = torch.zeros(max_reqs, device=device)
@@ -130,7 +141,7 @@ def test_candidate_walk_preserves_conditional_scores_and_clears_old_cache(probab
             temperatures,
             seeds,
             tokens,
-            logits,
+            draft_logits,
             use_fp64=False,
         )
         expected_tokens = torch.tensor(
@@ -150,12 +161,12 @@ def test_probabilistic_candidate_walk_matches_proposal_distribution(temperature)
     """The NPU walk must draw from the same softmax q supplied to rejection."""
     num_reqs, steps, topk = 8192, 1, 4
     device = "npu"
-    sampler = CandidateSampler(num_reqs, steps, topk, torch.device(device))
+    sampler = dflash2_speculator.CandidateSampler(num_reqs, steps, topk, torch.device(device))
     unary = torch.tensor([-1.0, 0.0, 0.5, 1.0])
     scores = unary.expand(num_reqs, steps, topk, topk).contiguous().to(device)
     candidates = torch.arange(topk).expand(num_reqs, steps, topk).contiguous().to(device)
     tokens = torch.empty(num_reqs, dtype=torch.int64, device=device)
-    logits = torch.full((num_reqs, steps, topk), -float("inf"), device=device)
+    draft_logits, logits = _make_draft_logits(num_reqs, steps, topk, device)
     seeds = torch.arange(num_reqs, dtype=torch.int64, device=device)
     sampler.sample(
         candidates,
@@ -166,7 +177,7 @@ def test_probabilistic_candidate_walk_matches_proposal_distribution(temperature)
         torch.full((num_reqs,), temperature, device=device),
         seeds,
         tokens,
-        logits,
+        draft_logits,
         use_fp64=False,
     )
     frequencies = torch.bincount(tokens.cpu(), minlength=topk).float() / num_reqs
@@ -193,13 +204,13 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
     """Each second-step proposal and cache must depend on the sampled predecessor."""
     num_reqs, steps, topk = 8192, 2, 2
     device = torch.device("npu")
-    sampler = CandidateSampler(num_reqs, steps, topk, device)
+    sampler = dflash2_speculator.CandidateSampler(num_reqs, steps, topk, device)
     start = torch.tensor([0.0, 0.5])
     transitions = torch.tensor([[1.0, -0.5], [-1.0, 0.5]])
     scores = torch.stack((start.expand(topk, topk), transitions)).expand(num_reqs, -1, -1, -1).contiguous()
     candidates = torch.tensor([[0, 1], [2, 3]]).expand(num_reqs, -1, -1).contiguous()
     tokens = torch.empty(num_reqs, steps, dtype=torch.int64, device=device)
-    logits = torch.full((num_reqs, steps, 4), -float("inf"), device=device)
+    draft_logits, logits = _make_draft_logits(num_reqs, steps, 4, device)
     sampler.sample(
         candidates.to(device),
         scores.to(device),
@@ -209,7 +220,7 @@ def test_probabilistic_candidate_walk_caches_realized_conditional_distribution(t
         torch.full((num_reqs,), temperature, device=device),
         torch.arange(num_reqs, dtype=torch.int64, device=device),
         tokens,
-        logits,
+        draft_logits,
         use_fp64=False,
     )
     tokens = tokens.cpu()

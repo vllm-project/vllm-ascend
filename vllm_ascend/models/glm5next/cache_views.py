@@ -44,7 +44,7 @@ def view_kpool_tail_cache(
     return [
         torch.as_strided(
             typed_slot,
-            size=(num_blocks, kv_cache_spec.block_size, 2 * kv_cache_spec.head_size),
+            size=(num_blocks, kv_cache_spec.ring_capacity, 2 * kv_cache_spec.head_size),
             stride=(page_el, 2 * kv_cache_spec.head_size, 1),
         )
     ]

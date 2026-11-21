@@ -18,6 +18,7 @@ from vllm_ascend.attention.mla_v1 import (
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     AscendMLADecodeMetadata,
+    AscendMLABackend,
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
@@ -355,7 +356,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         max_tokens: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        block_size = self.vllm_config.cache_config.block_size
+        # Current-KV workspaces are consumed by MLA kernels, independently of
+        # the scheduler's logical block size and DCP interleave size.
+        block_size = AscendMLABackend.get_supported_kernel_block_sizes()[0]
         cache_shape = (cdiv(max_tokens, block_size), block_size, self.num_kv_heads)
         return (
             torch.empty((*cache_shape, self.kv_lora_rank), dtype=self.dtype, device=device),

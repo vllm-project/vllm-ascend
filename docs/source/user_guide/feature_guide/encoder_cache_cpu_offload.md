@@ -10,7 +10,7 @@ memory instead of running the encoder again.
   `aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED)`
 - Linux kernel newer than 5.10, as required by CANN when converting an mmap
   allocation into page-locked Host memory
-- A single host using `/dev/shm`
+- A single Host using `/dev/shm`
 - `ec_both` role
 
 Cross-node encoder-cache transfer and NIXL/P2P transfer are not supported by
@@ -38,7 +38,7 @@ vllm serve <model-path> \
 
 `ec_cpu_bytes` must be a positive integer large enough for at least one
 encoder-cache block. The corresponding mmap is created under `/dev/shm`, so
-the host must also have enough tmpfs capacity. Tensor-parallel workers map the
+the Host must also have enough tmpfs capacity. Tensor-parallel workers map the
 same file; each worker process registers its own virtual mapping with CANN.
 
 ## Transfer behavior

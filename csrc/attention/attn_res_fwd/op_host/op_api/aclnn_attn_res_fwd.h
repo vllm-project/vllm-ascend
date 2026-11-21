@@ -3,6 +3,8 @@
 #include "aclnn/aclnn_base.h"
 #include "aclnn_util.h"
 extern "C" {
+// If blockWriteIdx >= 0, blocks must not share storage with any read-only
+// input. The Torch adapter rejects such aliases before launching the kernel.
 ACLNN_API aclnnStatus aclnnAttnResFwdGetWorkspaceSize(
     const aclTensor *prefix, const aclTensor *blocks, const aclTensor *proj,
     const aclTensor *norm, const aclTensor *addend, const aclTensor *outputNorm,
