@@ -92,7 +92,7 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
 
     def plan(**kwargs):
         seen.append(kwargs["ori_topk_length"].clone())
-        return torch.full((1024,), len(seen), dtype=torch.int32)
+        return torch.full((sparse_mla.SMLA_METADATA_SIZE,), len(seen), dtype=torch.int32)
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
     common = _common(block_size)
@@ -118,6 +118,7 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
     assert draft.block_table.data_ptr() != address
     if a5:
         assert not seen
+        assert first.smla_metadata.numel() == 2048
         assert second.smla_topk_length.data_ptr() == first.smla_topk_length.data_ptr()
         assert second.smla_valid_mask.data_ptr() == first.smla_valid_mask.data_ptr()
         assert second.smla_metadata.data_ptr() == first.smla_metadata.data_ptr()
@@ -236,7 +237,7 @@ def test_a5_sparse_mla_splits_oversized_storage_pages(monkeypatch):
             torch.testing.assert_close(actual, expected)
         return (q,)
 
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (op, None))
     assert metadata.block_size == 128
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query)
 
@@ -299,7 +300,7 @@ def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypat
     query = torch.ones(3, 2, 128)
     cache = torch.zeros(2, 128, 1, 128)
     metadata = SimpleNamespace(
-        smla_metadata=torch.empty(1024, dtype=torch.int32) if a5 else None,
+        smla_metadata=torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32) if a5 else None,
         smla_topk_length=torch.tensor([[1], [1], [0]], dtype=torch.int32),
         smla_valid_mask=torch.tensor([[True], [True], [False]]),
         smla_sinks=torch.ones(2, dtype=torch.float32),
@@ -322,7 +323,7 @@ def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypat
 
     if a5:
         _stub_metadata_op(monkeypatch)
-        monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
+        monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (op, None))
     else:
         monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     output = sparse_mla.sparse_mla(query, cache, torch.tensor([[[0]], [[0]], [[-1]]], dtype=torch.int32), metadata, 0.5)
@@ -331,7 +332,8 @@ def test_nope_operator_returns_kernel_output_with_unwritten_graph_rows(monkeypat
     torch.testing.assert_close(output[:2], query[:2] * 2)
 
 
-def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch):
+@pytest.mark.parametrize("plan_size", [1024, 2048])
+def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypatch, plan_size):
     buffer = torch.empty(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32)
     metadata = SimpleNamespace(
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -339,7 +341,7 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         max_query_len=1,
         max_seq_len=8,
         block_table=torch.tensor([[2], [1]], dtype=torch.int32),
-        smla_metadata=None,
+        smla_metadata=buffer,
         smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
         smla_valid_mask=torch.ones(2, 1, dtype=torch.bool),
         block_size=8,
@@ -355,15 +357,8 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         assert kwargs["ori_mask_mode"] == 0 and kwargs["cmp_mask_mode"] == 0
         assert kwargs["ori_win_left"] == -1 and kwargs["ori_win_right"] == -1
         assert kwargs["ori_topk_length"].data_ptr() == metadata.smla_topk_length.data_ptr()
-        return torch.full_like(buffer, metadata.max_seq_len)
+        return torch.arange(plan_size, dtype=torch.int32) + metadata.max_seq_len
 
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", build)
-    sparse_mla.build_smla_metadata(metadata, buffer, 2, 128, 7, metadata.query_start_loc, metadata.smla_topk_length)
-    address = metadata.smla_metadata.data_ptr()
-    metadata.max_seq_len = 12
-    sparse_mla.build_smla_metadata(metadata, buffer, 2, 128, 7, metadata.query_start_loc, metadata.smla_topk_length)
-    assert metadata.smla_metadata.data_ptr() == address
-    assert (metadata.smla_metadata == 12).all()
     query = torch.ones(2, 2, 128, dtype=torch.bfloat16)
     cache = torch.zeros(3, 8, 1, 128, dtype=torch.bfloat16)
     indices = torch.tensor([[[7, 6, -1, 0]], [[2, -1, 1, 0]]], dtype=torch.int32)
@@ -372,7 +367,10 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         assert kwargs["ori_kv"] is cache
         assert kwargs["sinks"] is metadata.smla_sinks
         assert kwargs.get("cmp_kv") is None
-        assert kwargs["metadata"] is buffer
+        assert kwargs["metadata"].data_ptr() == buffer.data_ptr()
+        torch.testing.assert_close(
+            kwargs["metadata"], torch.arange(plan_size, dtype=torch.int32) + metadata.max_seq_len
+        )
         assert kwargs["layout_kv"] == "PA_BBND" and kwargs["topk_value_mode"] == 1
         assert kwargs["ori_mask_mode"] == 0 and kwargs["cmp_mask_mode"] == 0
         assert kwargs["ori_win_left"] == -1 and kwargs["ori_win_right"] == -1
@@ -383,8 +381,12 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         assert kwargs["cu_seqlens_q"] is metadata.query_start_loc
         return q + 1, torch.empty(0)
 
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
-    torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+    monkeypatch.setattr("vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops", lambda: (None, build))
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (smla, None))
+    for max_seq_len in (8, 12):
+        metadata.max_seq_len = max_seq_len
+        torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+        assert metadata.smla_metadata is buffer
 
 
 def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
@@ -426,7 +428,7 @@ def test_a5_smla_rebuilds_plan_for_a_trimmed_query(monkeypatch):
         return q + 1, torch.empty(0)
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (smla, None))
     query = torch.ones(1, 2, 8, dtype=torch.bfloat16)
     cache = torch.zeros(3, 8, 1, 8, dtype=torch.bfloat16)
     indices = torch.tensor([[[5, -1, 1, -1]]], dtype=torch.int32)
@@ -472,7 +474,7 @@ def test_a5_smla_rebuilds_plan_for_the_draft_model(monkeypatch):
         return q + 1, torch.empty(0)
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (smla, None))
     monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: SimpleNamespace(is_draft_model=True))
     # query rows == topk_length rows: the shape check alone cannot detect the
     # stale plan.
@@ -523,7 +525,7 @@ def test_a5_smla_plans_from_reused_indices_for_the_target(monkeypatch):
         return (q,)
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla_metadata", plan)
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", attend)
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (attend, None))
     monkeypatch.setattr(sparse_mla, "get_forward_context", lambda: pytest.fail("no forward context"))
     cache = torch.zeros(1, 128, 1, 128, dtype=torch.bfloat16)
     for expected in ([[2048], [2051], [0]], [[2049], [2048], [0]]):
@@ -595,7 +597,7 @@ def test_a5_smla_passes_persistent_sinks_to_operator(monkeypatch):
         seen["sinks"] = kwargs["sinks"]
         return (q,)
 
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (op, None))
     query = torch.ones(3, state.num_heads, 8)
     sparse_mla.sparse_mla(query, torch.zeros(8, 128, 1, 8), torch.zeros(3, 1, 4, dtype=torch.int32), metadata, 0.5)
 
@@ -611,7 +613,7 @@ def test_a5_smla_sinks_outlive_the_operator_call(monkeypatch):
     builder = _builder(128, True, monkeypatch)
     metadata = builder.build(0, _common(128))
     state = _sinks_owner(builder)
-    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", lambda q, **kwargs: (q,))
+    monkeypatch.setattr(sparse_mla, "_get_sparse_flash_mla_ops", lambda: (lambda q, **kwargs: (q,), None))
     query = torch.ones(3, state.num_heads, 8)
     sparse_mla.sparse_mla(query, torch.zeros(8, 128, 1, 8), torch.zeros(3, 1, 4, dtype=torch.int32), metadata, 0.5)
 
