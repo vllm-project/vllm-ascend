@@ -272,3 +272,10 @@
 # SKIP(owner): /tests/deepseek_v41_utils.py
 # SKIP(owner): /tests/ut/
 # SKIP(owner): /tests/e2e/pull_request/
+# AI review POC (RFC #21451): later entries win over /.github above
+/.github/agent-review/ @wangxiyuan
+/.github/workflows/ai_review.yml @wangxiyuan
+/.github/workflows/_schedule_ai_review_image_build.yaml @wangxiyuan
+/.github/workflows/dockerfiles/Dockerfile.ai-review @wangxiyuan
+/.github/workflows/scripts/ai_review.py @wangxiyuan
+/.github/workflows/scripts/test_ai_review.py @wangxiyuan
