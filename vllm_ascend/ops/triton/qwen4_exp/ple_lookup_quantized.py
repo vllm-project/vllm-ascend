@@ -123,7 +123,7 @@ def lookup_quantized(
             or scale_chunk_ptrs.shape[1] != width // PLE_GROUP_SIZE
         ):
             raise ValueError("PLE resident scales must cover the local shard with one scale per group")
-    for pointers in ((code_chunk_ptrs,) if direct_scale else (code_chunk_ptrs, scale_chunk_ptrs)):
+    for pointers in (code_chunk_ptrs,) if direct_scale else (code_chunk_ptrs, scale_chunk_ptrs):
         if pointers.dtype != torch.int64 or pointers.ndim != 1 or not pointers.is_contiguous():
             raise ValueError("PLE pointer tables must be contiguous 1-D int64 tensors")
         if pointers.device != output.device or pointers.numel() < chunks:
