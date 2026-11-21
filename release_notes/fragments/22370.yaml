@@ -1,0 +1,4 @@
+pr: 22370
+entries:
+  - category: performance
+    text: GLM5Next RecoverSSM verification on Ascend950DT_9581 uses a 54-row merged input projection for full six-token batches of six to eight requests with a single shard, 4096 hidden channels and 64 heads.
