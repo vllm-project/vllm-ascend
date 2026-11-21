@@ -1159,19 +1159,11 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
     self.speculator = object()
 
 
-@pytest.mark.parametrize(
-    ("enforce_eager", "offload_backend", "use_ascend_offloader"),
-    [
-        pytest.param(True, "prefetch", True, id="eager-prefetch"),
-        pytest.param(False, "prefetch", False, id="graph-prefetch"),
-        pytest.param(True, "auto", False, id="eager-auto"),
-    ],
-)
-def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
+def _runner_init_configs(*, use_pp=False, enable_eplb=False, phase=None, offload_config=None, finegrained_tp=0):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            enable_eplb=False,
-            pipeline_parallel_size=1,
+            enable_eplb=enable_eplb,
+            pipeline_parallel_size=2 if use_pp else 1,
             tensor_parallel_size=1,
             use_sequence_parallel_moe=False,
         ),
@@ -1182,15 +1174,38 @@ def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_asc
             max_num_active_seqs=None,
         ),
         speculative_config=None,
+        offload_config=offload_config or OffloadConfig(),
+    )
+    ascend_config = SimpleNamespace(
+        enable_shared_expert_dp=False,
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=finegrained_tp,
+            lmhead_tensor_parallel_size=finegrained_tp,
+            embedding_tensor_parallel_size=finegrained_tp,
+            mlp_tensor_parallel_size=finegrained_tp,
+        ),
+        dump_config_path=None,
+    )
+    if phase is not None:
+        ascend_config.eplb_config = SimpleNamespace(load_collection_phase=phase)
+    return vllm_config, ascend_config
+
+
+@pytest.mark.parametrize(
+    ("enforce_eager", "offload_backend", "use_ascend_offloader"),
+    [
+        pytest.param(True, "prefetch", True, id="eager-prefetch"),
+        pytest.param(False, "prefetch", False, id="graph-prefetch"),
+        pytest.param(True, "auto", False, id="eager-auto"),
+    ],
+)
+def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
+    vllm_config, ascend_config = _runner_init_configs(
+        finegrained_tp=1,
         offload_config=OffloadConfig(
             offload_backend=offload_backend,
             prefetch=PrefetchOffloadConfig(offload_group_size=2, offload_num_in_group=1),
         ),
-    )
-    ascend_config = SimpleNamespace(
-        enable_shared_expert_dp=False,
-        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
-        dump_config_path=None,
     )
     copy_stream = object()
     parent_offloader = None
@@ -1256,34 +1271,7 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
     else:
         monkeypatch.setenv("HCCL_BUFFSIZE", env_buffer_size)
 
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            enable_eplb=False,
-            pipeline_parallel_size=2 if use_pp else 1,
-            tensor_parallel_size=1,
-            use_sequence_parallel_moe=False,
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=8,
-            max_num_scheduled_tokens=None,
-            max_num_seqs=2,
-            max_num_active_seqs=None,
-        ),
-        offload_config=OffloadConfig(),
-    )
-    ascend_config = SimpleNamespace(
-        enable_shared_expert_dp=False,
-        eplb_config=SimpleNamespace(load_collection_phase="all"),
-        dump_config_path=None,
-    )
-
-    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
-        oproj_tensor_parallel_size=0,
-        lmhead_tensor_parallel_size=0,
-        embedding_tensor_parallel_size=0,
-        mlp_tensor_parallel_size=0,
-    )
+    vllm_config, ascend_config = _runner_init_configs(use_pp=use_pp, phase="all")
     # The old group exposes no private backend API.
     old_group = object()
     new_group = object()
@@ -1370,33 +1358,10 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 
 @pytest.mark.parametrize("method", ["mtp", "ngram", "ngram_gpu"])
 def test_init_spec_pp_full_graph_and_speculator(method):
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            enable_eplb=True,
-            pipeline_parallel_size=2,
-            tensor_parallel_size=1,
-            use_sequence_parallel_moe=False,
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=8,
-            max_num_scheduled_tokens=None,
-            max_num_seqs=2,
-            max_num_active_seqs=None,
-        ),
-        offload_config=OffloadConfig(),
-    )
-    ascend_config = SimpleNamespace(
-        enable_shared_expert_dp=False,
-        eplb_config=SimpleNamespace(load_collection_phase="decode"),
-        dump_config_path=None,
-    )
-
-    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
-    ascend_config.finegrained_tp_config = SimpleNamespace(
-        oproj_tensor_parallel_size=0,
-        lmhead_tensor_parallel_size=0,
-        embedding_tensor_parallel_size=0,
-        mlp_tensor_parallel_size=0,
+    vllm_config, ascend_config = _runner_init_configs(
+        use_pp=True,
+        enable_eplb=True,
+        phase="decode",
     )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()

@@ -62,10 +62,7 @@ def test_draft_decode_sizes_are_stable_across_config_revalidation():
     upstream = MagicMock(return_value=[1, 2])
     config = SimpleNamespace(additional_config={})
 
-    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [
-        1,
-        2,
-    ]
+    assert mrv2_utils.resolve_mrv2_draft_decode_request_sizes(config, upstream) == [1, 2]
     upstream.assert_called_once_with(config)
 
     config.additional_config[mrv2_utils.MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] = [4]
@@ -88,10 +85,7 @@ def test_varlen_decode_sizes_are_stable_per_query_len():
         "6": [8, 16],
         1: [],
     }
-    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [
-        8,
-        16,
-    ]
+    assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 6, upstream) == [8, 16]
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 1, upstream) == []
     assert mrv2_utils.resolve_mrv2_varlen_decode_token_sizes(config, 7, upstream) == [7]
     assert upstream.call_count == 2
