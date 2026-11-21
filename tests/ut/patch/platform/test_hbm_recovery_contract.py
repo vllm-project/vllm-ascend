@@ -259,3 +259,30 @@ def test_only_classified_non_kv_ranges_allow_repair_before_restart(kind):
         assert isinstance(fault, namespace["HbmUceKvCacheFault"]) == (kind == "kv")
     if kind in ("malformed", "query_failed", "non_pta"):
         registry.recover_uce_addresses.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "start,size,expected",
+    [(100, 100, [0]), (150, 100, [0, 1]), (50, 50, None), (99, 2, None), (299, 2, None), (100, 0, None)],
+)
+def test_uce_range_requires_complete_kv_coverage(start, size, expected):
+    covered = load_method(
+        "vllm_ascend/worker/sentinel/kv_cache_region_registry.py", "KvCacheRegionRegistry", "_covered_allocations"
+    )
+    registry = NS(regions=[NS(data_ptr=100, nbytes=100), NS(data_ptr=200, nbytes=100)])
+    if expected is None:
+        with pytest.raises(ValueError):
+            covered(registry, start, size)
+    else:
+        assert covered(registry, start, size) == expected
+
+
+def test_mixed_kv_and_non_kv_ranges_never_mark_partial_storage_safe():
+    path = "vllm_ascend/worker/sentinel/kv_cache_region_registry.py"
+    covered = load_method(path, "KvCacheRegionRegistry", "_covered_allocations")
+    recover = load_method(path, "KvCacheRegionRegistry", "recover_uce_addresses")
+    registry = NS(regions=[NS(data_ptr=100, nbytes=100)], uce_ranges=[], _update_tensor_to_safe=Mock())
+    registry._covered_allocations = lambda start, size: covered(registry, start, size)
+    assert recover(registry, [{"ptr": 110, "size": 1}, {"ptr": 199, "size": 2}]) is None
+    registry._update_tensor_to_safe.assert_not_called()
+    assert registry.uce_ranges == []

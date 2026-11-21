@@ -9,6 +9,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager, HcclSleepWakeupManager
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 
@@ -19,7 +20,7 @@ def recover_acl_graphs(worker, request_id: str) -> None:
 
     Keep persistent model and KV tensor addresses. Replace the graph pool
     after dropping graph-owned events, task handles and workspaces;
-    capture_model then rebuilds the supported V2 decode graph entries.
+    capture_model then rebuilds the original V2 capture plan.
     Exceptions must reach the existing EngineCore recovery vote.
     """
     runner = worker.model_runner
@@ -34,7 +35,7 @@ def recover_acl_graphs(worker, request_id: str) -> None:
 
 
 def _recover_v2_graphs(worker, request_id: str) -> None:
-    """Discard old V2 graphs, rebuild MC2 and the graph pool, then recapture and verify every graph replay."""
+    """Rebuild the original V2 capture plan, retaining replay checks for uniform decode plans."""
     runner = worker.model_runner
     graph_manager = runner.cudagraph_manager
     if graph_manager is None:
@@ -43,19 +44,23 @@ def _recover_v2_graphs(worker, request_id: str) -> None:
     if runner.speculator is not None or has_encoder_graph:
         raise RuntimeError("HBM UCE V2 recapture does not support draft or encoder graphs yet")
     descriptors = [desc for descs in graph_manager._capture_descs.values() for desc in descs]
-    if not descriptors or any(
-        desc.cg_mode != CUDAGraphMode.FULL
-        or desc.num_ubatches != 1
-        or desc.num_active_loras != 0
-        or desc.uniform_token_count != runner.decode_query_len
+    # _dummy_run cannot reproduce arbitrary descriptor shapes, LoRA counts
+    # or microbatch layouts. Its limitations must not restrict recapture.
+    verify_decode_replay = bool(descriptors) and all(
+        desc.cg_mode == CUDAGraphMode.FULL
+        and desc.num_ubatches == 1
+        and desc.num_active_loras == 0
+        and desc.uniform_token_count == runner.decode_query_len
         for desc in descriptors
-    ):
-        raise RuntimeError("HBM UCE V2 recapture requires uniform FULL decode graphs without LoRA or microbatching")
+    )
 
     logger.info("[FT] Invalidating V2 ACL graphs after HBM UCE: request_id=%s rank=%s", request_id, worker.rank)
     with set_current_vllm_config(runner.vllm_config):
         torch.npu.synchronize()
         manager = AclGraphSleepWakeupManager(runner.vllm_config, lambda: runner)
+        # release_graphs also clears breakable PIECEWISE graphs; sleep alone
+        # only clears the target FULL graph dictionary and ACL wrappers.
+        graph_manager.release_graphs()
         manager.sleep()
         _rebuild_mc2_after_recovery(worker, request_id)
         _renew_graph_pool(runner)
@@ -64,28 +69,48 @@ def _recover_v2_graphs(worker, request_id: str) -> None:
         graph_manager.aux_hidden_states = []
         graph_manager.intermediate_tensors = None
         try:
+            # PIECEWISE wrappers lazily capture inside model.forward; normal
+            # serving has this gate disabled after startup.
+            set_cudagraph_capturing_enabled(True)
             runner.capture_model()
             set_cudagraph_capturing_enabled(False)
-            graph_manager.recovery_replayed_graphs = set()
-            for desc in descriptors:
-                runner._dummy_run(desc.num_tokens, uniform_decode=True, skip_eplb=True)
-                torch.npu.synchronize()
-            if not set(descriptors).issubset(graph_manager.recovery_replayed_graphs):
-                raise RuntimeError("HBM UCE recovery did not replay all recaptured V2 graphs")
+            torch.npu.synchronize()
+            rebuilt = [desc for descs in graph_manager._capture_descs.values() for desc in descs]
+            if rebuilt != descriptors or (descriptors and not graph_manager._graphs_captured):
+                raise RuntimeError("HBM UCE recovery did not rebuild the original V2 capture plan")
+            full_descriptors = {desc for desc in descriptors if desc.cg_mode == CUDAGraphMode.FULL}
+            if not full_descriptors.issubset(graph_manager.graphs):
+                raise RuntimeError("HBM UCE recovery is missing recaptured V2 FULL graphs")
+            if verify_decode_replay:
+                graph_manager.recovery_replayed_graphs = set()
+                for desc in descriptors:
+                    runner._dummy_run(desc.num_tokens, uniform_decode=True, skip_eplb=True)
+                    torch.npu.synchronize()
+                if not set(descriptors).issubset(graph_manager.recovery_replayed_graphs):
+                    raise RuntimeError("HBM UCE recovery did not replay all recaptured V2 graphs")
         finally:
             graph_manager.recovery_replayed_graphs = None
             set_cudagraph_capturing_enabled(False)
-    logger.info("[FT] V2 ACL graphs recaptured and replay verified: request_id=%s rank=%s", request_id, worker.rank)
+    logger.info(
+        "[FT] V2 ACL graphs recaptured: request_id=%s rank=%s descriptors=%s decode_replay_verified=%s",
+        request_id,
+        worker.rank,
+        len(descriptors),
+        verify_decode_replay,
+    )
 
 
 def _renew_graph_pool(runner) -> None:
+    """Replace the retired graph pool for every owner without moving model or KV storage."""
     # The last graph release retires its allocator pool (use_count == 0).
     # Reusing that handle for capture triggers create_or_incref_pool's assert.
     # Persistent model/KV allocations stay intact; only graph temporaries move.
-    """Replace the released graph pool and update its users while preserving model and KV allocations."""
     pool = current_platform.graph_pool_handle()
     type(current_platform)._global_graph_pool = pool
     for wrapper in list(acl_graph._acl_graph_wrappers):
+        wrapper.graph_pool = pool
+    # Breakable wrappers use a separate registry from ACLGraphWrapper.
+    for wrapper in list(BreakableACLGraphWrapper._all_instances):
         wrapper.graph_pool = pool
     graph_manager = getattr(runner, "cudagraph_manager", None)
     if graph_manager is not None:

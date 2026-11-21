@@ -9,7 +9,8 @@ entries:
   - category: feature
     text: >-
       Add Ascend fault-tolerance retry and recover supported KV-cache HBM UCE
-      faults by clearing affected blocks and recapturing V2 decode graphs.
+      faults by clearing affected blocks and recapturing the original V2 target-model graph plan, including PIECEWISE
+      and mixed graph modes. Draft and encoder graph recovery is not supported.
       Enable fault tolerance to use recovery; unsupported faults fail recovery
       and require engine restart.
   - category: config

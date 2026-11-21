@@ -95,6 +95,7 @@ class CacheAllocation:
 
 
 def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent half-open byte intervals."""
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
         if not merged or start > merged[-1][1]:
@@ -267,6 +268,7 @@ class KvCacheRegionRegistry:
         self.num_blocks = None
 
     def register(self, kv_caches: Any, rank: int = 0, device_id: int | None = None) -> None:
+        """Bind allocator-owned storage maps and reject incomplete or conflicting ownership."""
         self.clear()
         mappings = {}
         for layer, kind, tensor in _iter_kv_tensors(kv_caches):
@@ -325,9 +327,9 @@ class KvCacheRegionRegistry:
         raise ValueError("UCE range includes memory outside owned KV allocations")
 
     def recover_uce_addresses(self, addr_entries: list[dict]) -> KvCacheRegion | None:
+        """Validate all UCE ranges, save them, mark matched tensors safe, and return one representative region."""
         # Validate every range, including multi-allocation faults, before making
         # any storage safe. A range crossing a non-KV gap is not recoverable.
-        """Validate all UCE ranges, save them, mark matched tensors safe, and return one representative region."""
         matches = set()
         ranges = []
         try:
@@ -355,9 +357,9 @@ class KvCacheRegionRegistry:
         logger.debug("Marked KV storage alias safe: allocation=%s rank=%s", region.layer_name, region.rank)
 
     def refresh_pointers(self) -> None:
+        """Reject allocations whose address or size changed since KV region registration."""
         # A reset must preserve storage identity for retained prefixes. Moving
         # allocations without rebuilding the ownership map cannot be accepted.
-        """Reject allocations whose address or size changed since KV region registration."""
         for region, tensor in zip(self.regions, self._tensors):
             if tensor.data_ptr() != region.data_ptr or tensor.numel() != region.nbytes:
                 raise RuntimeError("KV allocation changed during device recovery")
