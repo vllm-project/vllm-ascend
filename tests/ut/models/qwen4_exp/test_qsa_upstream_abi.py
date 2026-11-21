@@ -14,24 +14,6 @@ def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
     assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
-def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
-    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
-    monkeypatch.setattr(
-        qsa.upstream_qsa.Qwen4ExpQSAAttention,
-        "_project_qkv_gate",
-        upstream_projection,
-    )
-    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
-    torch.nn.Module.__init__(layer)
-    layer.layer_name = "model.layers.0.self_attn.attn"
-    layer._main_fused_norm_rope_eligible = Mock(return_value=False)
-    qkv = torch.empty((2, 8))
-    positions = torch.arange(2)
-
-    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
-    upstream_projection.assert_called_once_with(qkv, positions)
-
-
 def test_indexer_query_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
     upstream_projection = Mock(return_value=("query", "key"))
     monkeypatch.setattr(
@@ -117,13 +99,12 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     projected_v = projected_k + 10
     projected_gate = projected_q + 20
 
-    def project_into_gate(qkv_arg, positions_arg, gate_out=None):
+    def project_qkv(qkv_arg, positions_arg):
         assert qkv_arg is qkv
         assert positions_arg is positions
-        gate_out.copy_(projected_gate.view_as(gate_out))
-        return projected_q, projected_k, projected_v, gate_out.view(2, 8)
+        return projected_q, projected_k, projected_v, projected_gate
 
-    layer._project_qkv_gate = Mock(side_effect=project_into_gate)
+    layer._project_qkv_gate = Mock(side_effect=project_qkv)
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
@@ -142,7 +123,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions, gate_out=gate)
+    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
     torch.testing.assert_close(gate, projected_gate.view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args
