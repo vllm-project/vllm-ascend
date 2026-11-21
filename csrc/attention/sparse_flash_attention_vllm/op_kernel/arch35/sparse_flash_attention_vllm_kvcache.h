@@ -12,12 +12,12 @@
  * \file sparse_attn_sharedkv_kvcache.h
  * \brief
  */
-#ifndef SPARSE_FLASH_ATTENTION_KVCACHE_H
-#define SPARSE_FLASH_ATTENTION_KVCACHE_H
+#ifndef SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H
+#define SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
-#include "sparse_flash_attention_common_arch35.h"
+#include "sparse_flash_attention_vllm_common_arch35.h"
 #include "util_regbase.h"
 
 using namespace matmul;
@@ -297,4 +297,4 @@ __aicore__ inline void InitTaskParamByRun(const RunParamStr& runParam, RunInfo &
     runInfo.kvLoopEndIdx = runParam.kvLoopEndIdx;
 }
 
-#endif  // SPARSE_FLASH_ATTENTION_KVCACHE_H
+#endif  // SPARSE_FLASH_ATTENTION_VLLM_KVCACHE_H

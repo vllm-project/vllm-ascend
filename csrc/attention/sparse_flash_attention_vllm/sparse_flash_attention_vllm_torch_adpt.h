@@ -122,7 +122,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention(
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
 
     EXEC_NPU_CMD(
-        aclnnSparseFlashAttention,
+        aclnnSparseFlashAttentionVllm,
         query,
         key,
         value,
