@@ -40,7 +40,7 @@
 /docs @liqian79
 /docs/source/getting_started @MrZ20
 /docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
-/docs/source/user_guide/feature_guide/rl.md @Ronald1995
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995 @Liccol
 /docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
 /docs/source/community/contributors.md @wangxiyuan
 /.readthedocs.yaml @liqian79 @MrZ20
@@ -49,7 +49,7 @@
 
 # examples
 /examples/ @MrZ20
-/examples/rl/ @Ronald1995
+/examples/rl/ @Ronald1995 @Liccol
 /examples/eplb/ @freyfwt
 /examples/rfork/ @yangsonglin13
 
@@ -91,7 +91,7 @@
 /vllm_ascend/distributed/eplb @freyfwt
 /vllm_ascend/distributed/expert_transfer/ @LookAround0301 @florian0125 @gjc0824 @xuanbozzz
 /vllm_ascend/distributed/kvpp.py @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
-/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine @Liccol
 /vllm_ascend/distributed/kv_transfer @weijinqian0
 /vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
 /vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
@@ -230,7 +230,7 @@
 # tests
 /tests/ @wenjun91
 # RLHF e2e tests
-/tests/e2e/common/rlhf/ @Ronald1995
+/tests/e2e/common/rlhf/ @Ronald1995 @Liccol
 /tests/e2e/nightly @wenjun91
 /tests/e2e/nightly/single_node/ops @Foriv
 /tests/e2e/nightly/single_node/ops/singlecard_ops/triton/ @Foriv @ShyRa1n

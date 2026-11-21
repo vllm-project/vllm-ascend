@@ -138,7 +138,9 @@ def test_sfa_consumes_shared_local_topk_without_second_remap(local_output):
     expected = impl._remap_sparse_indices(global_ids)
     impl._update_indexcache_topk_indices(expected if local_output else global_ids)
     shared = impl._get_indexcache_topk_indices(1)
-    metadata = SimpleNamespace(dcp_context=SimpleNamespace(gather_context=object(), seq_lens=None, block_table=None))
+    metadata = SimpleNamespace(
+        dcp_context=SimpleNamespace(gather_context=object(), seq_lens=None, block_table=None, kv_gather_block_ids=None)
+    )
     output = torch.ones(1, 2, 4)
     with (
         patch.object(impl, "_has_prefill", return_value=False),
@@ -294,6 +296,7 @@ def test_nope_dcp_prefill_gathers_one_latent_cache_at_logical_page_size(dtype):
     cache = torch.arange(2 * 256 * 8).reshape(2, 256, 1, 8).to(dtype)
     blocks = torch.tensor([3, 1], dtype=torch.int64)
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    metadata.num_actual_tokens = 2
     metadata.num_prefills = 1
     metadata.pcp_has_global_prefill = False
     metadata.block_size = 128
@@ -369,6 +372,7 @@ def test_nope_dcp_executes_single_cache_attention_with_existing_device_helper(pc
             split_sizes=(8,) if prefill else (8, 0),
         ),
         kv_gather_block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        kv_gather_block_ids=torch.arange(2) if prefill else None,
         block_table=torch.tensor([[0, 1]], dtype=torch.int32),
         seq_lens=lengths,
     )
@@ -460,7 +464,9 @@ def test_dcp_prefill_consumes_gather_once_for_prefetched_and_direct_attention(tu
     metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
     metadata.num_prefills = 1
     metadata.pcp_has_global_prefill = False
-    metadata.dcp_context = SimpleNamespace(gather_context=None, kv_gather_block_table=torch.tensor([[0, 1]]))
+    metadata.dcp_context = SimpleNamespace(
+        gather_context=None, kv_gather_block_table=torch.tensor([[0, 1]]), kv_gather_block_ids=torch.arange(2)
+    )
     failure = RuntimeError("injected gather wait failure")
 
     def wait():

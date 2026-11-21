@@ -752,7 +752,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
 
     Register only P0 as the Prefill service. Send client inference requests to the Proxy, which forwards them to P0 and the four Decode nodes. The Decode APIs also support health checks, metrics queries, and profiling.
 
-    **Key PD Settings**
+    **Key PD Settings:**
 
     | Setting | A3 Prefill | A3 Decode |
     |---|---|---|
@@ -850,7 +850,7 @@ The Decode launcher is located at [`vllm-ascend/examples/external_online_dp/laun
     |---|---|---|
     | DP / TP / PP | `1 / 1 / 4` | `4 / 8 / 1` |
     | PCP / DCP | `8 / 1` | `1 / 8` |
-    | VLLM_PP_LAYER_PARTITION | `24,24,24,21` | — |
+    | `VLLM_PP_LAYER_PARTITION` | `24,24,24,21` | — |
     | `--block-size` / `--cp-kv-cache-interleave-size` | `1536 / 1536` | `1536 / 1536` |
     | `--max-model-len` | `140000` | `140000` |
     | `--max-num-batched-tokens` | `16384` | `768` |
@@ -1337,11 +1337,11 @@ These are supplied deployment references. Environment readiness does not establi
 
     | File | Purpose |
     |---|---|
-    | `runtime_env.sh` | Select the Python interpreter, add package libraries to `LD_LIBRARY_PATH`, and set `PYTHONHASHSEED=0` |
-    | `mmc-meta.conf` | MetaService configuration; needed only on the MetaService host |
-    | `mmc-local-standalone.conf` | Standalone provider configuration, with DRAM capacity |
-    | `mmc-local.conf` | Engine client configuration, with `dram.size=0GB` |
-    | `memcache_standalone.py` | Start and keep the standalone provider running |
+    | `runtime_env.sh` | Select the Python interpreter, add package libraries to `LD_LIBRARY_PATH`, and set `PYTHONHASHSEED=0`. |
+    | `mmc-meta.conf` | MetaService configuration; needed only on the MetaService host. |
+    | `mmc-local-standalone.conf` | Standalone provider configuration, with DRAM capacity. |
+    | `mmc-local.conf` | Engine client configuration, with `dram.size=0GB`. |
+    | `memcache_standalone.py` | Start and keep the standalone provider running. |
 
     Save the following as `<MEMCACHE_CONFIG_DIR>/runtime_env.sh`. Set `MEMC_PYTHON` before sourcing it if the interpreter is not `python3`. Both packages must be installed in the selected interpreter's environment:
 
@@ -2209,4 +2209,4 @@ For common environment, installation, and parameter questions, refer to the [pub
 
 - **Q: How should TP size be selected?** A: The attention-head count in the checkpoint must be divisible by TP size. TP also changes the KDA state layout and expert placement; check memory requirements and communication performance together.
 
-- **Q: How is DSpark enabled in PD separation?** A: Prepare a DSpark draft checkpoint compatible with the target model on this platform and replace `<YOUR_DRAFT_MODEL_PATH>` in both templates with its local directory. Apply the role-specific `--speculative-config` from Section [5.1](#51-pd-deployment), [5.2](#52-long-context), or [5.3](#53-pooled-pd). Keep the draft checkpoint and `num_speculative_tokens` identical on both sides, and retain `--enforce-eager` for the Prefill target model.
+- **Q: How is DSpark enabled in PD separation?** A: Prepare a DSpark draft checkpoint compatible with the target model on this platform and replace `<YOUR_DRAFT_MODEL_PATH>` in both templates with its local directory. Apply the role-specific `--speculative-config` from [Section 5.1](#51-pd-deployment), [Section 5.2](#52-long-context), or [Section 5.3](#53-pooled-pd). Keep the draft checkpoint and `num_speculative_tokens` identical on both sides, and retain `--enforce-eager` for the Prefill target model.

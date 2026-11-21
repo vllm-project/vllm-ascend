@@ -172,8 +172,7 @@ PCP and DCP cannot be combined. Every cache group must be DCP-sharded;
 sliding-window, recurrent/align-state, circular-buffer and other non-DCP-scaled
 groups must keep DCP disabled. The smallest cacheable block size must divide
 the others; `--prefix-match-unit` must be unset with DCP.
-GQA/MQA also requires `tensor_parallel_size // num_key_value_heads >=
-decode_context_parallel_size`.
+GQA/MQA models do not support DCP.
 
 In P/D disaggregation both sides must use the same DCP size; set
 `prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config` so the

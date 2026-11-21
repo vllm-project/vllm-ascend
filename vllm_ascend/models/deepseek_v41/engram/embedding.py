@@ -222,6 +222,9 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
 
         register_host_offload_storage(self)
 
+    def process_weights_after_loading(self) -> None:
+        """Ascend storage setup is complete at load time and has no GPU peer table to finalize."""
+
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
             return self.tp_size, get_tensor_model_parallel_rank()

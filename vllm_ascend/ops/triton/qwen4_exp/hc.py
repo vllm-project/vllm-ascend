@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 
 @triton.jit
 def _grouped_gemma_rmsnorm_kernel(
@@ -181,6 +183,70 @@ def _hc_gate_mix_kernel(
     )
 
 
+_HC_GATE_MIX_BLOCK_SIZE = 512
+_HC_GATE_MIX_ROWS_PER_BLOCK = 8
+_INT32_MAX = torch.iinfo(torch.int32).max
+
+
+def _row_major_offset_exceeds_int32(rows: int, width: int, stride: int) -> bool:
+    if rows == 0 or width == 0:
+        return False
+    return (rows - 1) * stride + width - 1 > _INT32_MAX
+
+
+def _hc_gate_mix_needs_wide_offsets(
+    rows: int,
+    dim: int,
+    group_dim: int,
+    stride_x_row: int,
+    stride_gate_row: int,
+    stride_output_row: int,
+) -> bool:
+    return (
+        _row_major_offset_exceeds_int32(rows, dim, stride_x_row)
+        or _row_major_offset_exceeds_int32(rows, dim, stride_gate_row)
+        or _row_major_offset_exceeds_int32(rows, group_dim, stride_output_row)
+    )
+
+
+@triton.jit(do_not_specialize=["rows"])
+def _hc_gate_mix_row_block_kernel(
+    x_ptr,
+    gate_ptr,
+    output_ptr,
+    rows,
+    stride_x_row,
+    stride_gate_row,
+    stride_output_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    WIDE_OFFSETS: tl.constexpr,
+) -> None:
+    row_block = tl.program_id(0)
+    tile = tl.program_id(1)
+    row_offsets = row_block * ROWS_PER_BLOCK + tl.arange(0, ROWS_PER_BLOCK)
+    if WIDE_OFFSETS:
+        # Triton row indices default to int32; widen before multiplying by a row stride.
+        row_offsets = row_offsets.to(tl.int64)
+    inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    row_mask = row_offsets < rows
+    inner_mask = inner_offsets < GROUP_DIM
+    mask = row_mask[:, None] & inner_mask[None, :]
+    accumulator = tl.zeros([ROWS_PER_BLOCK, BLOCK_SIZE], dtype=tl.float32)
+    for stream in tl.static_range(HC_COUNT):
+        column_offsets = stream * GROUP_DIM + inner_offsets
+        x_offsets = row_offsets[:, None] * stride_x_row + column_offsets[None, :]
+        gate_offsets = row_offsets[:, None] * stride_gate_row + column_offsets[None, :]
+        gates = tl.load(gate_ptr + gate_offsets, mask=mask, other=0.0)
+        values = tl.load(x_ptr + x_offsets, mask=mask, other=0.0)
+        accumulator += tl.sigmoid(gates.to(tl.float32)) * values.to(tl.float32)
+    accumulator /= HC_COUNT
+    output_offsets = row_offsets[:, None] * stride_output_row + inner_offsets[None, :]
+    tl.store(output_ptr + output_offsets, accumulator, mask=mask)
+
+
 def _hc_gate_mix(
     x: torch.Tensor,
     gate: torch.Tensor,
@@ -197,8 +263,39 @@ def _hc_gate_mix(
     dim = int(dim)
     group_dim = dim // hc_count
     output = x.new_empty((rows, group_dim))
-    block_size = 512
-    if rows:
+    block_size = _HC_GATE_MIX_BLOCK_SIZE
+    profile = get_current_hardware_profile()
+    if rows >= profile.qwen4exp_hc_gate_mix_row_block_min_rows and profile.supports(
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK
+    ):
+        wide_offsets = _hc_gate_mix_needs_wide_offsets(
+            rows,
+            dim,
+            group_dim,
+            x.stride(0),
+            gate.stride(0),
+            output.stride(0),
+        )
+        _hc_gate_mix_row_block_kernel[
+            (
+                triton.cdiv(rows, _HC_GATE_MIX_ROWS_PER_BLOCK),
+                triton.cdiv(group_dim, block_size),
+            )
+        ](
+            x,
+            gate,
+            output,
+            rows,
+            x.stride(0),
+            gate.stride(0),
+            output.stride(0),
+            GROUP_DIM=group_dim,
+            HC_COUNT=hc_count,
+            ROWS_PER_BLOCK=_HC_GATE_MIX_ROWS_PER_BLOCK,
+            BLOCK_SIZE=block_size,
+            WIDE_OFFSETS=wide_offsets,
+        )
+    elif rows:
         _hc_gate_mix_kernel[(rows, triton.cdiv(group_dim, block_size))](
             x,
             gate,
