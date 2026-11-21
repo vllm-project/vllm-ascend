@@ -42,9 +42,6 @@ def expand_qsa_selected_tokens(compact_indices: torch.Tensor, visible_lens: torc
     groups = compact_indices[:, :-GBSA_RESIDUAL_TOKENS]
     full_groups = visible_lens.floor_divide(GBSA_COMPRESS_RATIO)
     valid = (groups >= 0) & (groups < full_groups.unsqueeze(-1))
-    if groups.shape[1] >= 512:
-        capacity = groups.shape[1] - visible_lens.remainder(GBSA_COMPRESS_RATIO).ne(0).to(torch.int32)
-        valid &= valid.to(torch.int32).cumsum(-1) <= capacity.unsqueeze(-1)
     offsets = torch.arange(GBSA_COMPRESS_RATIO, device=groups.device, dtype=groups.dtype)
     tokens = groups.unsqueeze(-1) * GBSA_COMPRESS_RATIO + offsets
     tokens = torch.where(valid.unsqueeze(-1), tokens, -1).flatten(1)

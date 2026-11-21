@@ -39,7 +39,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
     def metadata(indices, counts, query_heads, kv_heads, head_dim, block_shape, **kwargs):
         assert block_shape == [1, 4]
         assert head_dim == 128
-        assert kwargs["residual_block_mode"] == 0
+        assert kwargs["residual_block_mode"] == 1
         assert kwargs["seqused_kv"].tolist() == [sequence_length]
         return torch.empty(0)
 
@@ -52,6 +52,7 @@ def test_qsa_gbsa_uses_kernel_paged_cache(dtype, tail_tokens, storage_page_size,
             selected_tokens: list[int] = []
             for block in explicit:
                 selected_tokens.extend(token for token in range(block * 4, block * 4 + 4) if token < sequence_length)
+            selected_tokens.extend(range(sequence_length // 4 * 4, sequence_length))
             table = kwargs["block_table"][row]
             physical = table[torch.tensor(selected_tokens) // 128].long()
             offsets = torch.tensor(selected_tokens) % 128
@@ -186,17 +187,17 @@ def test_qsa_gbsa_uses_per_row_mtp_visible_lengths():
 
     indices, counts, visible_lengths = calls[0]
     assert visible_lengths.tolist() == [102, 103, 104, 105]
-    assert counts[0].tolist() == [2, 2, 2, 3]
+    assert counts[0].tolist() == [1, 1, 2, 2]
     assert indices[0, :, :2].tolist() == [
         [24, 25],
         [24, 25],
         [24, 25],
         [24, 25],
     ]
-    assert indices[0, 3, 2].item() == 26
 
 
-def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
+@pytest.mark.parametrize("tail", range(4))
+def test_qsa_gbsa_preserves_all_512_groups_with_implicit_tail(tail):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/gbsa.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -234,17 +235,16 @@ def test_qsa_gbsa_reserves_tail_within_512_entry_limit():
         compact_indices,
         torch.arange(17, dtype=torch.int32).view(1, -1),
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([2048], dtype=torch.int32),
-        torch.tensor([2049], dtype=torch.int32),
+        torch.tensor([2047 + tail], dtype=torch.int32),
+        torch.tensor([2048 + tail], dtype=torch.int32),
         torch.empty_like(query),
     )
 
     indices, counts, visible_lengths = calls[0]
     assert indices.shape == (2, 1, 512)
-    assert visible_lengths.tolist() == [2049]
+    assert visible_lengths.tolist() == [2048 + tail]
     assert counts[:, 0].tolist() == [512, 512]
-    assert indices[0, 0, :511].tolist() == list(range(511))
-    assert indices[0, 0, 511].item() == 512
+    assert indices[0, 0].tolist() == list(range(512))
 
 
 def test_gbsa_uses_cann_transformer_op_api_without_bundled_sources():
