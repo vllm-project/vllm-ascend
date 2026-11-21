@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEMC2CombineMetadata
 from vllm_ascend.ops.fused_moe.moe_utils import enable_fusion_gmmswigluquant
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -59,6 +60,7 @@ class MoEMlpComputeInput:
     topk_ids: torch.Tensor | None = None
     # Optional per-layer MoE LoRA state, propagated from MoEFusedExpertsInput.
     lora_context: Any = None
+    has_mc2_dispatch_capacity: bool = False
 
 
 def build_mlp_compute_input(
@@ -113,4 +115,5 @@ def build_mlp_compute_input(
         expanded_row_idx=expanded_row_idx,
         topk_ids=fused_experts_input.topk_ids,
         lora_context=fused_experts_input.lora_context,
+        has_mc2_dispatch_capacity=isinstance(token_dispatch_output.combine_metadata, MoEMC2CombineMetadata),
     )
