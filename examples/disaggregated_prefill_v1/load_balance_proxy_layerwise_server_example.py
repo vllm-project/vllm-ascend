@@ -513,6 +513,13 @@ async def _handle_completions(api: str, request: Request):
 
         # Record request info for recompute
         stream_flag = bool(req_data.get("stream", False))
+        # vLLM rejects `stream_options` when `stream` is False. The prefill path
+        # already drops it in `send_request_to_service`; the decode path forwards
+        # the client request as-is, so strip it here for non-streaming requests
+        # to avoid an upstream HTTP 400 ("Stream options can only be defined when
+        # stream=True"). See issue #19619.
+        if not stream_flag and "stream_options" in req_data:
+            del req_data["stream_options"]
         chat_flag = "messages" in req_data
         if "prompt" in req_data:
             origin_prompt = req_data["prompt"]

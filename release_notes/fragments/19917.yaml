@@ -1,0 +1,7 @@
+pr: 19917
+entries:
+  - category: bugfix
+    text: >-
+      Fixed an HTTP 400 error in the layerwise PD load-balancing proxy example
+      when a non-streaming request carries stream_options; the decode path now
+      strips stream_options when stream is false, mirroring the prefill path.
