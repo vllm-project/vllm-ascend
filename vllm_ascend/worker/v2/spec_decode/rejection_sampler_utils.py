@@ -41,6 +41,7 @@ from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
 )
 from vllm_ascend.ops.triton.spec_decode.resample import resample
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.spec_decode.dspark.cache_adapter import compact_rejection_inputs
 
 _ENTROPY_EPSILON = 1e-10
 
@@ -376,7 +377,13 @@ def rejection_sample(
             draft_logits = draft_logits_cache.values
             draft_logits_row_mapping = draft_logits_cache.row_mapping
         if draft_logits_row_mapping is not None:
-            raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+            (draft_logits, draft_sampled, idx_mapping, expanded_idx_mapping,
+             temperature, seed) = compact_rejection_inputs(
+                draft_logits_cache, draft_sampled, idx_mapping,
+                expanded_idx_mapping, expanded_local_pos, temperature, seed,
+            )
+            # All subsequent NPU kernels see a compact, unsharded local cache.
+            draft_logits_row_mapping = None
     if fly_window_size > 0:
         raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
     if (

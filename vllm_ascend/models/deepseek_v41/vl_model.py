@@ -240,6 +240,9 @@ class AscendDeepseekV41ForCausalLM(
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.language_model.prepare_engram_graph_inputs(padded_tokens)
 
+    def compute_logits_local(self,hidden_states: torch.Tensor,) -> torch.Tensor | None:
+        return self.language_model.compute_logits_local(hidden_states)
+
     def get_model_state_cls(self):
         # The registry selects this wrapper even for text-only serving.
         # MRV2 needs the language model's lookback history and graph events.
