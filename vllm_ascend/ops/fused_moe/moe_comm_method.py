@@ -301,6 +301,10 @@ class FusedMC2CommImpl(MoECommMethod):
             import inspect as _inspect
 
             self._mega_moe_supported_kwargs = frozenset(_inspect.signature(self.mega_moe).parameters)
+            if get_ascend_config().megamoe_shared_expert_fusion and get_current_hardware_profile().supports(
+                HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT
+            ):
+                self._validate_integer_shared_abi(self._mega_moe_supported_kwargs)
             # Resolve the Python ABI once, before the first collective/capture.
             # The activation and its scalar parameters belong to FusedMoEConfig.
             self.mega_moe_activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
@@ -320,6 +324,26 @@ class FusedMC2CommImpl(MoECommMethod):
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
         self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+
+    @staticmethod
+    def _validate_integer_shared_abi(supported_kwargs: frozenset[str]) -> None:
+        # Dropping these knobs would reinterpret shared INT8 weights as routed
+        # packed INT4. Reject an incompatible package before capture/collectives.
+        required = {
+            "shared_l1_weights",
+            "shared_l2_weights",
+            "shared_l1_weights_sf",
+            "shared_l2_weights_sf",
+            "shared_expert_quant_out_dtype",
+            "shared_weight1_type",
+            "shared_weight2_type",
+        }
+        missing = required - supported_kwargs
+        if missing:
+            raise RuntimeError(
+                "A3 MegaMoe shared fusion requires an operator with independent shared INT8 descriptors; "
+                f"missing arguments: {', '.join(sorted(missing))}. Use enable_fused_mc2=2 with the current package."
+            )
 
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
@@ -551,7 +575,7 @@ class FusedMC2CommImpl(MoECommMethod):
         if activation_kwargs is None:
             activation_kwargs = getattr(self, "mega_moe_activation_kwargs", {}) or {}
 
-        # Shared experts fused into the MegaMoe operator (A5 only): their
+        # Shared experts fused into the MegaMoe operator: their
         # GMM1 + activation + GMM2 runs inside the kernel on the local tokens,
         # so no Dispatch/Combine traffic is involved. The caller skips the
         # separate shared-expert forward when this payload is present.
@@ -578,7 +602,9 @@ class FusedMC2CommImpl(MoECommMethod):
             if shared_weight_type is not None and shared_weight_type != weight_type:
                 shared_kwargs["shared_weight1_type"] = shared_weight_type
                 shared_kwargs["shared_weight2_type"] = shared_weight_type
-        # Older CANN MegaMoe ABI lacks the shared-quant-out-dtype /
+        # A3 requires independent shared INT8 descriptors. The legacy A5
+        # compatibility path below permits older CANN MegaMoe ABI without the
+        # shared-quant-out-dtype /
         # shared-weight-type knobs; dropping them is safe on such builds
         # because the operator infers the shared GMM mode from the shared
         # weight dtypes themselves.
@@ -587,6 +613,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # (expected by end of November 2026).
         dropped = [k for k in shared_kwargs if k not in self._mega_moe_supported_kwargs]
         if dropped:
+            if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION_INT):
+                raise RuntimeError(f"A3 MegaMoe cannot drop required shared-expert arguments: {sorted(dropped)}")
             # warning_once caches on *args (must be hashable); format up front.
             logger.warning_once(
                 "CANN MegaMoe op does not accept shared-expert knobs %s; skipping them.",

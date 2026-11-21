@@ -418,6 +418,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     def get_fused_mc2_weights(self, layer):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         use_mega_moe = _EXTRA_CTX.use_mega_moe
+        shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None) if use_mega_moe else None
+        shared = shared_fusion.weights if shared_fusion is not None else None
 
         if self.use_expert_weight_list:
             if use_mega_moe:
@@ -428,6 +430,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                     w2_scale=[t.reshape(-1) for t in layer.w2_weight_scale_list],
                     w1_scale_bias=[t.reshape(-1) for t in layer.w13_scale_bias_list],
                     w2_scale_bias=[t.reshape(-1) for t in layer.w2_scale_bias_list],
+                    shared_w1=shared.w1 if shared else None,
+                    shared_w2=shared.w2 if shared else None,
+                    shared_w1_scale=shared.w1_scale if shared else None,
+                    shared_w2_scale=shared.w2_scale if shared else None,
                 )
             else:
                 return MoEWeights(
@@ -446,6 +452,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=layer.cann_mega_moe_w13_scale_bias_list,
                 w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         return MoEWeights(
             w1=[layer.w13_weight],

@@ -253,7 +253,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         layer = create_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
-        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x),
+            patch("torch_npu.npu_format_cast", side_effect=lambda weight, _format: weight),
+        ):
             self.quant_method.process_weights_after_loading(layer)
 
         # Per-expert MegaMoe lists are built from the fused int64 scales.
@@ -279,7 +282,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         layer.activation = "swigluoai_uninterleave"
-        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x),
+            patch("torch_npu.npu_format_cast", side_effect=lambda weight, _format: weight),
+        ):
             self.quant_method.process_weights_after_loading(layer)
 
         # The non-fused activation path still consumes the fp32 scale copy.
