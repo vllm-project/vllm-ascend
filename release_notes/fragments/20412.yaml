@@ -1,0 +1,9 @@
+pr: 20412
+entries:
+  - category: bugfix
+    text: >-
+      Fixed DefaultEplb balanced expert packing: the non-redundant
+      packing path no longer crashes with a TypeError under
+      numpy >= 2, and invalid redundancy/card combinations now
+      raise a descriptive ValueError instead of a bare
+      IndexError/ZeroDivisionError.
