@@ -1,0 +1,7 @@
+pr: 21652
+entries:
+  - category: bugfix
+    text: >-
+      DeepSeek V4/V4.1 unquantized wo_a output-projection weights now honor
+      weight_nz_mode=2, with NZ conversion applied after the grouped weight
+      layout is finalized. The default weight-layout policy is unchanged.
