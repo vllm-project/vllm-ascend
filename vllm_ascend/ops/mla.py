@@ -331,12 +331,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
+        # Per-step values for a model whose attention needs more than the
+        # generic contract carries; Mistral Large 4's scalable softmax is the
+        # one user. They go through the op rather than onto the impl so that a
+        # traced forward cannot hand the impl a previous step's tensor. A model
+        # that passes them must install a set_log_positions hook.
+        log_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
         num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
         output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
-        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
+        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix, log_positions)
         output = output.view(-1, hidden_dim)
         return output
 
@@ -346,9 +352,25 @@ def mla_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    log_positions: torch.Tensor | None = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
+    if log_positions is not None:
+        # Per-step values a model needs to hand the impl outside the generic
+        # attention contract. They are delivered here, from inside the op, and
+        # not by the model's forward, because that forward is traced: Dynamo
+        # replays a plain attribute write *after* the compiled graph has
+        # already called this op, so the impl would read the previous step's
+        # values. An explicit op input is also what makes the value survive
+        # cudagraph replay, since the capture holds a reference to this tensor
+        # and the graph refills it each step.
+        set_log_positions = getattr(self, "set_log_positions", None)
+        if set_log_positions is None:
+            raise RuntimeError(
+                f"{layer_name} was handed log_positions but installed no set_log_positions hook to receive them."
+            )
+        set_log_positions(log_positions)
     if forward_context.attn_metadata:
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
@@ -362,6 +384,7 @@ def mla_forward_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    log_positions: torch.Tensor | None = None,
 ) -> None:
     return
 

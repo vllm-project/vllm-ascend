@@ -32,7 +32,11 @@ pytest.importorskip(
     reason="upstream vLLM does not ship Mistral Large 4 (vllm-project/vllm#64534)",
 )
 
+from vllm.forward_context import ForwardContext, override_forward_context  # noqa: E402
+
 from vllm_ascend.models import mistral_large4 as ml4  # noqa: E402
+from vllm_ascend.ops import mla as ops_mla  # noqa: E402
+from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention  # noqa: E402
 
 
 def _spec(layer_idx: int, kv_source_layer: int, has_indexer: bool = True):
@@ -677,6 +681,129 @@ def test_dspark_accepts_nested_component_cache_views():
 def test_dspark_rejects_an_invalid_cache_layout(cache):
     with pytest.raises(RuntimeError, match="Mistral DSpark"):
         ml4.AscendMistralLarge4DSparkForCausalLM._normalize_draft_kv_cache(cache, kv_lora_rank=8)
+
+
+# ------------------------------------------------ delivering log positions
+
+
+class _LogPositionsImpl:
+    """Records the log positions the impl can see when it actually runs."""
+
+    def __init__(self, observed: list[torch.Tensor | None], indexer=None):
+        self._observed = observed
+        self.indexer = indexer
+        self.mistral_log_positions: torch.Tensor | None = None
+
+    def forward(self, layer_name, hidden_states, kv_cache, attn_metadata, output):
+        seen = self.mistral_log_positions
+        self._observed.append(None if seen is None else seen.clone())
+        output.copy_(hidden_states)
+
+
+class _OpLayer(torch.nn.Module):
+    """The production outer-MLA forward, over a stub impl."""
+
+    forward = AscendMultiHeadLatentAttention.forward
+
+    def __init__(self, impl, prefix: str, hidden_size: int):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.output_token_shard_size = 1
+        self.prefix = prefix
+        self.mla_attn = SimpleNamespace(impl=impl, layer_name=prefix, kv_cache=[])
+
+
+class _ML4Layer(torch.nn.Module):
+    """The production Mistral forward over the production outer MLA."""
+
+    forward = ml4.AscendMistralMLAAttention.forward
+
+    def __init__(self, impl, prefix: str, hidden_size: int):
+        super().__init__()
+        self.attn = _OpLayer(impl, prefix, hidden_size)
+        ml4.install_log_positions_hook(self.attn, impl)
+
+
+def test_the_hook_reaches_both_ssmax_users():
+    backend = ml4.AscendMistralIndexerBackend.__new__(ml4.AscendMistralIndexerBackend)
+    backend.log_positions = None
+    impl = _LogPositionsImpl([], indexer=SimpleNamespace(impl=backend))
+    attn = torch.nn.Module()
+
+    ml4.install_log_positions_hook(attn, impl)
+    log_positions = torch.tensor([0.0, 0.7, 1.1])
+    attn.set_log_positions(log_positions)
+
+    assert impl.mistral_log_positions is log_positions
+    assert backend.log_positions is log_positions
+
+
+def test_the_hook_serves_a_layer_that_has_no_indexer():
+    # Layers on a shared index schedule own no indexer, and still run SSMax.
+    impl = _LogPositionsImpl([], indexer=None)
+    attn = torch.nn.Module()
+
+    ml4.install_log_positions_hook(attn, impl)
+    log_positions = torch.tensor([0.0, 0.7, 1.1])
+    attn.set_log_positions(log_positions)
+
+    assert impl.mistral_log_positions is log_positions
+
+
+def test_the_op_refuses_positions_it_has_no_hook_to_deliver():
+    """Rather than drop them and let SSMax raise somewhere less obvious."""
+    impl = _LogPositionsImpl([])
+    layer = _OpLayer(impl, "layer.0", 4)
+    context = ForwardContext(
+        no_compile_layers={"layer.0": layer},
+        attn_metadata={},
+        slot_mapping={},
+    )
+
+    with override_forward_context(context), pytest.raises(RuntimeError, match="set_log_positions"):
+        ops_mla.mla_forward(torch.zeros(3, 4), torch.zeros(3, 4), "layer.0", torch.zeros(3))
+
+
+def test_the_compiled_graph_hands_the_impl_the_current_step_positions():
+    """The step's log positions must survive torch.compile.
+
+    They reach the impl as an explicit input to the MLA custom op. Set as an
+    attribute from the traced model forward instead, Dynamo would replay the
+    write after the compiled graph had already run the op, so the impl would
+    read whatever the *previous* step left behind. One position set cannot
+    catch that — the stale value equals the right one — so this runs two
+    different sets and compares the compiled reads against the eager one.
+    """
+    # vLLM dispatches mla_forward on NPU only. Keep a CPU registration alive
+    # for this test so inductor sees the same custom op.
+    cpu_impl = torch.library.Library("vllm", "IMPL", "CPU")
+    cpu_impl.impl("mla_forward", ops_mla.mla_forward)
+
+    observed: list[torch.Tensor | None] = []
+    impl = _LogPositionsImpl(observed)
+    layer = _ML4Layer(impl, "layer.0", 4)
+    context = ForwardContext(
+        no_compile_layers={"layer.0": layer.attn},
+        attn_metadata={},
+        slot_mapping={},
+    )
+
+    positions = torch.zeros(3)
+    hidden_states = torch.ones(3, 4)
+    first = torch.tensor([0.0, 0.69, 1.09])
+    second = torch.tensor([6.21, 6.22, 6.23])
+
+    with override_forward_context(context):
+        layer(positions, hidden_states, first, None)
+        compiled = torch.compile(layer, backend="inductor", fullgraph=True)
+        compiled(positions, hidden_states, first, None)
+        compiled(positions, hidden_states, second, None)
+
+    assert len(observed) == 3
+    torch.testing.assert_close(observed[0], first)
+    torch.testing.assert_close(observed[1], first)
+    # The one that matters: a different set must not read back the first.
+    torch.testing.assert_close(observed[2], second)
 
 
 def test_the_model_does_not_call_the_indexer_itself():

@@ -94,6 +94,7 @@ __all__ = [
     "adopt_ascend_modules",
     "adopt_shared_kv_skip",
     "has_shared_kv_skip",
+    "install_log_positions_hook",
     "prepare_indexer_for_ascend",
     "validate_moe_parallelism",
 ]
@@ -177,6 +178,39 @@ def adopt_shared_kv_skip(attn: nn.Module) -> None:
 
     impl._get_sfa_kv_slot_mapping = _get_sfa_kv_slot_mapping
     setattr(impl, _SHARED_KV_SKIP_MARKER, True)
+
+
+def install_log_positions_hook(attn: nn.Module, impl: Any) -> None:
+    """Give *attn* the hook the MLA custom op calls with the step's positions.
+
+    Both scalable-softmax users need ``log(positions + 1)`` for the step: the
+    MLA query inside ``AscendSFAImpl``, and the indexer's own query. Neither
+    the Ascend attention contract nor the Ascend indexer signature carries it.
+
+    It is delivered from inside ``mla_forward``, not from the model's
+    ``forward``, and that placement is the whole point. The model forward is
+    traced by ``torch.compile``: Dynamo collects a plain attribute write as a
+    side effect and replays it *after* the compiled graph has already called
+    the op, so an impl fed from there reads the previous step's positions.
+    Every step but the first is then silently wrong — fluent output, flattened
+    long-context attention — and the first raises, because nothing has been
+    set at all. Carrying the tensor as an explicit op input is also what makes
+    it survive cudagraph replay, since the capture keeps a reference to it and
+    the graph refills it each step from the positions buffer.
+    """
+
+    def set_log_positions(log_positions: torch.Tensor) -> None:
+        # The indexer backend is resolved per call rather than captured here:
+        # the indexer builds its impl lazily, so it need not exist yet.
+        impl.mistral_log_positions = log_positions
+        backend = getattr(getattr(impl, "indexer", None), "impl", None)
+        if isinstance(backend, AscendMistralIndexerBackend):
+            backend.log_positions = log_positions
+
+    # Stored unbound on purpose, as in adopt_shared_kv_skip: the op looks the
+    # hook up on the instance, which does not bind it, so it receives the
+    # single argument the call site passes.
+    attn.set_log_positions = set_log_positions
 
 
 class AscendMistralMLAAttention(MistralMLAAttention):
@@ -323,6 +357,9 @@ class AscendMistralMLAAttention(MistralMLAAttention):
         impl.mistral_ssmax = self.ssmax
         impl.mistral_use_rope = spec.use_rope
         impl.mistral_shares_kv = spec.shares_kv
+
+        install_log_positions_hook(self.attn, impl)
+
         if _produces_topk_for_shared_layers(config, spec):
             if topk_indices_buffer is None:
                 raise ValueError(
@@ -341,15 +378,16 @@ class AscendMistralMLAAttention(MistralMLAAttention):
         rotary_emb: Any,
     ) -> torch.Tensor:
         del rotary_emb
-        impl = self.attn.mla_attn.impl
         # The Ascend SFA impl runs the indexer itself and its generic contract
-        # carries no log positions. Hand both SSMax users the current step's
-        # values before entering the custom op.
-        impl.mistral_log_positions = log_positions
-        backend = getattr(getattr(impl, "indexer", None), "impl", None)
-        if isinstance(backend, AscendMistralIndexerBackend):
-            backend.log_positions = log_positions
-        return self.attn(positions, hidden_states)
+        # carries no log positions, so they travel as an explicit input to the
+        # MLA custom op, which hands them to both SSMax users from inside the
+        # op. Setting them as an attribute here instead would be wrong under
+        # torch.compile: this forward is traced, and Dynamo replays attribute
+        # writes after the compiled graph has already run the op, so SSMax
+        # would scale by the previous step's positions. That failure is silent
+        # — fluent, wrong output — everywhere except the first compiled step,
+        # which raises because nothing has been set yet.
+        return self.attn(positions, hidden_states, log_positions=log_positions)
 
 
 class AscendMistralIndexer(MistralIndexer):
@@ -398,7 +436,8 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
     **Scalable softmax.** Upstream scales the indexer query by
     ``s * log(pos + 1) + b`` after ``wq_b``. The Ascend ``forward`` has no
     ``log_positions`` parameter, so there is no hook; the scale is applied
-    here, in the same place and the same order as upstream.
+    here, in the same place and the same order as upstream, over the positions
+    the MLA custom op hands this backend for the step.
     """
 
     def __init__(self, vllm_indexer: AscendMistralIndexer, qk_rope_head_dim: int) -> None:
@@ -407,9 +446,11 @@ class AscendMistralIndexerBackend(AscendSFAIndexerBackend):
         # Kept so the q path and SSMax can run from the upstream module.
         self.q_input_norm = vllm_indexer.q_input_norm
         self.ssmax = vllm_indexer.ssmax
-        # Set once per step by the attention module, which is the last place
-        # that holds the step's log positions before the Ascend impl takes
-        # over. The Ascend indexer signature has nowhere to carry them.
+        # Set once per step from inside the MLA custom op, which carries the
+        # step's log positions as an explicit input. The Ascend indexer
+        # signature has nowhere to carry them itself, and setting them from the
+        # traced model forward would hand this backend the previous step's
+        # values once the model is compiled.
         self.log_positions: torch.Tensor | None = None
 
     def mistral_q(self, hidden_states: torch.Tensor) -> torch.Tensor:
