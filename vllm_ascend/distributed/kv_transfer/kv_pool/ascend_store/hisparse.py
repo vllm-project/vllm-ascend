@@ -26,7 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-_HISPARSE_CACHE_NAMESPACE = "hisparse-v5"
+_HISPARSE_CACHE_NAMESPACE = "hisparse-v1"
 _HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
 
 
