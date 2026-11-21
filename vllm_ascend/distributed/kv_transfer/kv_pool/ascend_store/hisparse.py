@@ -26,7 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.buffer import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-_HISPARSE_CACHE_NAMESPACE = "hisparse-v1"
+_HISPARSE_POOL_KEY_NAMESPACE = "hisparse-ascendstore-v1"
 _HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
 
 
@@ -89,7 +89,7 @@ def build_pool_key_namespace(
         _hisparse_page_geometry(config, dcp_size, granularity),
     )
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
-    return f"{_HISPARSE_CACHE_NAMESPACE}:{digest}"
+    return f"{_HISPARSE_POOL_KEY_NAMESPACE}:{digest}"
 
 
 def aligned_hisparse_allocation_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:

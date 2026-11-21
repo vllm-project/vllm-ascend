@@ -13,7 +13,7 @@ entries:
       kv_role=kv_both on MultiConnector and its children. Startup rejects PD
       disaggregation, multi-node deployments, prefill context parallelism, duplicate or additional connectors,
       layerwise transfers, other Store backends and other MemCache protocols. Mooncake FabricMem and
-      SSD modes are excluded from this combination. The hisparse-v1 pool namespace
-      separates entries by target and draft checkpoints, resolved revisions,
+      SSD modes are excluded from this combination. The hisparse-ascendstore-v1
+      key namespace separates entries by target and draft checkpoints, resolved revisions,
       dummy-weight mode, effective model configurations and page layout.
     hardware: [A5]
