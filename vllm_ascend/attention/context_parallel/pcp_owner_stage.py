@@ -226,6 +226,8 @@ class PcpOwnerStageCache:
         self.stage_calls = 0
         self.staged_blocks = 0
         self.overflow_fallbacks = 0
+        self.last_total_blocks = 0
+        self.max_total_blocks = 0
 
     def staging_stream(self) -> torch.npu.Stream:
         """Dedicated copy stream, kept apart from the DSA overlap stream.
@@ -301,6 +303,8 @@ class PcpOwnerStageCache:
         timing_exit(timing)
         if total == 0:
             return None
+        self.last_total_blocks = total
+        self.max_total_blocks = max(self.max_total_blocks, total)
         scratch = self._ensure(source_cache)
         if total > self.capacity_blocks:
             self.overflow_fallbacks += 1
