@@ -394,6 +394,8 @@ def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
 
 
 def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+    can_fuse = MagicMock(return_value=False)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
     projection_calls = []
     rope_calls = []
     rope = object()
@@ -453,3 +455,95 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert [call[3] for call in projected] == [rope, rope]
     assert stored[0][1] is slot_mappings[0]
     assert stored[1][1] is slot_mappings[2]
+    can_fuse.assert_called_once()
+
+
+def test_context_kv_fuses_selected_layers_without_projecting_intermediates(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", lambda *a: True)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
+    layers = {
+        str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
+        for i in range(3)
+    }
+    raw = torch.arange(24, dtype=torch.bfloat16).reshape(2, 12)
+    model = SimpleNamespace(
+        context_wkv_proj=lambda x: raw,
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+        _project_shared_kv=MagicMock(),
+        _store_standard_swa_kv=MagicMock(),
+    )
+    slots = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(model, torch.ones(2, 4), torch.arange(2), slots)
+    assert fused.call_count == 1
+    assert fused.call_args.args[-1] == [0, 2]
+    assert fused.call_args.kwargs == {"partial_rope": True}
+    assert fused.call_args.args[0].stride() == (12, 4, 1)
+    model._project_shared_kv.assert_not_called()
+    model._store_standard_swa_kv.assert_not_called()
+
+
+def test_context_kv_fallback_preserves_strict_layer_count_check(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
+    can_fuse = MagicMock(return_value=True)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
+    layers = {
+        str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
+        for i in range(2)
+    }
+    model = SimpleNamespace(
+        context_wkv_proj=lambda x: torch.zeros(2, 12, dtype=torch.bfloat16),
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+        _project_shared_kv=MagicMock(return_value=torch.empty(2, 1, 4)),
+        _store_standard_swa_kv=MagicMock(),
+    )
+    with pytest.raises(ValueError, match="zip"):
+        DeepseekV41DSparkModel.precompute_and_store_context_kv(
+            model, torch.ones(2, 4), torch.arange(2), [torch.arange(2), torch.arange(2)]
+        )
+    can_fuse.assert_not_called()
+    fused.assert_not_called()
+
+
+def test_context_kv_uses_per_layer_path_above_fused_token_limit(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
+    can_fuse = MagicMock(return_value=True)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
+    num_tokens = 4097
+    layers = {
+        str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
+        for i in range(3)
+    }
+    model = SimpleNamespace(
+        context_wkv_proj=lambda x: torch.zeros(num_tokens, 12, dtype=torch.bfloat16),
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+        _project_shared_kv=MagicMock(),
+        _store_standard_swa_kv=MagicMock(),
+    )
+    slots = [torch.arange(num_tokens), None, torch.arange(num_tokens)]
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(
+        model, torch.ones(num_tokens, 4), torch.arange(num_tokens), slots
+    )
+    can_fuse.assert_not_called()
+    fused.assert_not_called()
+    assert model._project_shared_kv.call_count == 2
+    assert model._store_standard_swa_kv.call_count == 2
+
+
+def test_context_kv_fusion_rejects_cpu_and_single_layer():
+    from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv
+
+    cpu_kv = torch.empty(2, 3, 512, dtype=torch.bfloat16)
+    assert not can_fuse_dspark_context_kv(cpu_kv, [], [], None)
+    assert not can_fuse_dspark_context_kv(cpu_kv, [object()], [torch.tensor([0, 1])], None)

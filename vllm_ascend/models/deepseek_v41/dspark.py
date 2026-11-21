@@ -53,6 +53,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv, fused_dspark_context_kv
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
@@ -350,13 +351,39 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
-        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
-            layer_context_slot_mapping = context_slot_mapping[layer_idx]
-            if layer_context_slot_mapping is None:
-                continue
-            attn = layer.self_attn
-            shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
-            self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+        layers = list(self.layers.values())
+        fused_indices = []
+        # Keep larger token batches on the original path.
+        if all_kv.shape[0] <= 4096 and all_kv.shape[1] == len(layers) and len(context_slot_mapping) >= len(layers):
+            fused_indices = [
+                idx for idx, mapping in enumerate(context_slot_mapping[: len(layers)]) if mapping is not None
+            ]
+            if not can_fuse_dspark_context_kv(
+                all_kv,
+                [layers[idx] for idx in fused_indices],
+                [context_slot_mapping[idx] for idx in fused_indices],
+                rope,
+            ):
+                fused_indices = []
+        if not fused_indices:
+            for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+                layer_context_slot_mapping = context_slot_mapping[layer_idx]
+                if layer_context_slot_mapping is None:
+                    continue
+                attn = layer.self_attn
+                shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
+                self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
+            return
+
+        fused_dspark_context_kv(
+            all_kv,
+            [layers[idx] for idx in fused_indices],
+            [context_slot_mapping[idx] for idx in fused_indices],
+            rope,
+            fused_indices,
+            partial_rope=True,
+        )
+        return
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
