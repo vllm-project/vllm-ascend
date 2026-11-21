@@ -173,10 +173,6 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
-    # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
-    # A2, A3, and A5 validated parity and a performance benefit at the
-    # family-specific dispatch threshold; other profiles retain one-row dispatch.
-    QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -328,9 +324,6 @@ class HardwareProfile:
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
     gdn_fixed_spec_recurrent_fallback_min_query_len: int | None = None
-    # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
-    # faster than the one-row kernel on this hardware family.
-    qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -400,7 +393,6 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
-    HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
@@ -427,7 +419,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             | {
                 HardwareCapability.FLASH_ATTN_NPU_3,
                 HardwareCapability.MM_REDUCE_SCATTER_BF16,
-                HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                 HardwareCapability.RMS_NORM_CAST,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },
@@ -483,7 +474,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             # TODO: Route Step5 back to CANN flash_attn and remove this exception
             # once CANN supports Step5 and the integration is validated.
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.STEP5}),
-            qwen4exp_hc_gate_mix_row_block_min_rows=1024,
             requires_2d_nz_linear_input=True,
             minimax_m3_gbsa_bf16_softmax_precision=1,
             attention_backend_family=AttentionBackendFamily.STANDARD,
@@ -533,7 +523,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MM_REDUCE_SCATTER_BF16,
                     HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
                     HardwareCapability.NPUGRAPH_EX,
-                    HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,

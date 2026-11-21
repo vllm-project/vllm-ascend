@@ -152,7 +152,7 @@ configuration rather than the runner input or sampling interface.
 | [query_gather_prep.py](query_gather_prep.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/fia.py](qwen4_exp/fia.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/gbsa.py](qwen4_exp/gbsa.py) | Model/attention primitive or shared utility |
-| [qwen4_exp/hc.py](qwen4_exp/hc.py) | HyperConnection glue operators; row-block `gate_mix` is documented in [qwen4_exp_hc_gate_mix.md](docs/qwen4_exp_hc_gate_mix.md). |
+| [qwen4_exp/hc.py](qwen4_exp/hc.py) | Model/attention primitive or shared utility |
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
