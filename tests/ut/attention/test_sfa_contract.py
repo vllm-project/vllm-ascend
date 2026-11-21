@@ -36,7 +36,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
     ],
 )
 def test_lim_contract_matches_cpp_header(kernel, cpp_name, python_value):
-    header = REPO_ROOT / "csrc" / "attention" / kernel / "op_kernel" / f"{kernel}_constants.h"
+    kernel_dir = REPO_ROOT / "csrc" / "attention" / kernel / "op_kernel"
+    if kernel == "fused_quant_lightning_indexer_manage":
+        # The serving contract uses the A2/A3 implementation's constants.
+        kernel_dir /= "arch22"
+    header = kernel_dir / f"{kernel}_constants.h"
     # A missing/changed definition fails rather than silently skipping parity.
     matches = re.findall(rf"\bconstexpr\s+uint32_t\s+{cpp_name}\s*=\s*(\d+)U?\s*;", header.read_text(encoding="utf-8"))
     assert len(matches) == 1, f"Missing or ambiguous {cpp_name} in {header}"
