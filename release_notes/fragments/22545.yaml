@@ -1,0 +1,4 @@
+pr: 22545
+entries:
+  - category: bugfix
+    text: Automatic KV cache sizing and startup recommendations now account for persistent allocations made outside model weight loading.
