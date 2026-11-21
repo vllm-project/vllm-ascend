@@ -49,8 +49,12 @@ class MappedHostTensor:
         self.closed = False
         self._memfabric_cleanup: ExitStack | None = None
         if memfabric_device_ptr is not None:
+            # Reuse the device address from the MemFabric arena's existing mapping.
+            # The arena releases the mapping during cleanup.
             self.device_ptr = memfabric_device_ptr
             return
+        # For native ACL, check AIV mapping support and register the pinned
+        # host range here. close() unregisters the mapping.
         self._lib = ctypes.CDLL("libascendcl.so")
         self._lib.aclrtHostRegister.argtypes = [
             ctypes.c_void_p,
