@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from vllm.logger import logger
@@ -87,9 +87,9 @@ class GvaDataPlane(LayerwiseDataPlane):
                 request.load_spec is None or not request.load_spec.layerwise_previous_step
             ):
                 worker._snapshot_keys.pop(request.req_id, None)
-            if self._alloc_gvas_for_save_for_request([request]) is False:
-                logger.error("Memcache save preparation failed for %s", request.req_id)
-                worker._save_disabled.set()
+        if self._alloc_gvas_for_save_batch(requests) is False:
+            logger.error("Memcache save preparation failed for the batch")
+            worker._save_disabled.set()
         if worker._save_disabled.is_set():
             # batch_alloc may return a shared allocation. Stop this step's
             # saves without deleting keys that another writer may have published.
@@ -103,10 +103,29 @@ class GvaDataPlane(LayerwiseDataPlane):
     def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
+        Kept for single-request callers (tests, direct instrumentation);
+        the step entry point batches all requests in ``_alloc_gvas_for_save``.
+        """
+        worker = self._worker
+        if not worker.use_layerwise_transfer:
+            return None
+        if not worker.can_put:
+            return None
+        return self._alloc_gvas_for_save_batch(requests)
+
+    def _alloc_gvas_for_save_batch(self, requests: list[ReqMeta]) -> bool | None:
+        """Allocate per-group GVA on the worker side right before batch_copy.
+
         For multi-group models, iterates all KV cache groups and allocates
         per-group GVAs. Key format: model@group_id@hash@head_or_tp_rank
         (multi-group) or model@hash@head_or_tp_rank (single-group, backward
         compat with PR #11585).
+
+        Two phases so the store sees one exists check and one allocation
+        per step instead of one round trip per request: collect every
+        group's candidate keys without I/O, issue the merged checks, then
+        distribute the replies in the collection order (which preserves
+        per-request transfer ordering).
 
         batch_alloc is idempotent, so every write target is allocated fresh
         within the step and no cross-step GVA cache is kept. Blocks already
@@ -114,10 +133,8 @@ class GvaDataPlane(LayerwiseDataPlane):
         exists check to avoid re-transferring them.
         """
         worker = self._worker
-        if not worker.use_layerwise_transfer:
-            return None
-        if not worker.can_put:
-            return None
+        # Per (request, group) I/O-free collection result.
+        works: list[dict[str, Any]] = []
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -201,101 +218,163 @@ class GvaDataPlane(LayerwiseDataPlane):
                     all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
                     all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
                     continue
-                # Skip blocks already committed in the pool. The exists check
-                # is medium-agnostic on purpose: a committed block (DRAM or
-                # SSD) does not need re-saving, and the load path rewarms
-                # SSD blocks on read.
-                missing_keys = worker._pool_keys_missing(candidate_keys)
-                transfer_blocks = [
-                    block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
-                ]
-
-                # batch_alloc is idempotent: allocating an existing key
-                # returns its current, client-registered GVA. Every write
-                # target is therefore allocated fresh within this step; no
-                # cross-step GVA cache is kept.
-                block_gvas: list[int] = []
-                if transfer_blocks:
-                    transfer_keys = [key for key in candidate_keys if key in missing_keys]
-                    transfer_gvas = worker.m_store.batch_alloc(
-                        transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
-                    )
-                    if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
-                        return False
-                    if any(gva <= 0 for gva in transfer_gvas):
-                        logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
+                # Hold this group's slot so the published per-group lists keep
+                # group order; the distribute phase replaces the placeholder.
+                all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
+                all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+                works.append(
+                    {
+                        "request": request,
+                        "group_id": group_id,
+                        "block_ids": block_ids_by_group,
+                        "candidate_blocks": candidate_blocks,
+                        "candidate_keys": candidate_keys,
+                        "partial_key": partial_key,
+                        "partial_block_index": partial_block_index,
+                        "alloc_size": alloc_size,
+                        "all_group_gvas": all_group_gvas,
+                        "all_group_block_ids": all_group_block_ids,
+                        "all_group_save_keys": all_group_save_keys,
+                        "log": (
                             request.req_id,
                             group_id,
-                            alloc_size,
-                            len(transfer_keys),
-                            transfer_gvas[:5],
-                            sum(1 for g in transfer_gvas if g <= 0),
-                        )
-                    # 0 means allocation failed; UINT64_MAX means a readable
-                    # SSD hit. Filter both before converting GVAs to np.int64.
-                    block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in transfer_gvas]
-                    for key, gva in zip(transfer_keys, block_gvas):
-                        if gva > 0:
-                            all_group_save_keys.append(key)
-                    if worker.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
-                        return False
+                            effective_block_size,
+                            save_start_block,
+                            save_end_block,
+                            group_store_mask is not None,
+                        ),
+                    }
+                )
+            # Publish the per-request group lists up front; owner groups are
+            # appended later, in the distribute phase after the merged I/O.
+            request.transfer.save_keys = all_group_save_keys
+            request.transfer.block_gvas_by_group_np = all_group_gvas
+            request.transfer.block_ids_by_group_np = all_group_block_ids
+            if all_group_gvas:
+                request.transfer.block_gvas_np = all_group_gvas[0]
+            request.transfer.gva_block_offset = 0
+        if not works:
+            return None
 
-                if partial_key is not None:
-                    # Partial keys are request-scoped: allocate fresh each step.
-                    allocated = worker.m_store.batch_alloc(
-                        [partial_key],
-                        [alloc_size],
-                        LAYERWISE_READ_LEASE_TTL_MS,
-                    )
-                    if not allocated or len(allocated) != 1:
-                        return False
-                    partial_gva = allocated[0]
-                    if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
-                        all_group_save_keys.append(partial_key)
-                    elif partial_gva <= 0:
-                        logger.error(
-                            "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
-                            request.req_id,
-                            group_id,
-                            partial_block_index,
-                            partial_gva,
-                        )
-                    if worker.layerwise_offload and partial_gva <= 0:
-                        return False
-                    request.transfer.partial_save_gva_per_group[group_id] = (
-                        partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
-                    )
+        # Merged exists check for every candidate key of every request.
+        all_candidate_keys: list[str] = []
+        for work in works:
+            all_candidate_keys.extend(work["candidate_keys"])
+        missing_keys = worker._pool_keys_missing(all_candidate_keys)
 
-                logger.debug(
-                    "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "transfer_keys=%d committed=%d masked=%s alloc_size=%d",
-                    request.req_id,
-                    group_id,
-                    effective_block_size,
-                    save_start_block,
-                    save_end_block,
-                    len(transfer_blocks),
-                    len(candidate_blocks) - len(transfer_blocks),
-                    group_store_mask is not None,
+        # Skip blocks already committed in the pool. The exists check
+        # is medium-agnostic on purpose: a committed block (DRAM or
+        # SSD) does not need re-saving, and the load path rewarms
+        # SSD blocks on read.
+        for work in works:
+            work["transfer_blocks"] = [
+                block_idx
+                for block_idx, key in zip(work["candidate_blocks"], work["candidate_keys"])
+                if key in missing_keys
+            ]
+
+        # One allocation round trip for every missing key of every request.
+        # batch_alloc is idempotent: allocating an existing key
+        # returns its current, client-registered GVA. Every write
+        # target is therefore allocated fresh within this step; no
+        # cross-step GVA cache is kept.
+        transfer_keys: list[str] = []
+        transfer_sizes: list[int] = []
+        for work in works:
+            work_missing = [key for key in work["candidate_keys"] if key in missing_keys]
+            transfer_keys.extend(work_missing)
+            transfer_sizes.extend([work["alloc_size"]] * len(work_missing))
+        transfer_gvas: list[int] | None = []
+        if transfer_keys:
+            transfer_gvas = worker.m_store.batch_alloc(transfer_keys, transfer_sizes, LAYERWISE_READ_LEASE_TTL_MS)
+            if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
+                return False
+        gva_by_key: dict[str, int] = {}
+        for key, gva in zip(transfer_keys, transfer_gvas or []):
+            gva_by_key[key] = gva
+
+        for work in works:
+            request = work["request"]
+            group_id = work["group_id"]
+            group_block_ids: np.ndarray = work["block_ids"]
+            alloc_size = work["alloc_size"]
+            req_id, gid, effective_block_size, save_start_block, save_end_block, masked = work["log"]
+            candidate_keys = work["candidate_keys"]
+            transfer_blocks = work["transfer_blocks"]
+            block_gvas = [gva_by_key[key] for key in candidate_keys if key in missing_keys]
+            if any(gva <= 0 for gva in block_gvas):
+                logger.error(
+                    "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
+                    req_id,
+                    gid,
                     alloc_size,
+                    len(block_gvas),
+                    block_gvas[:5],
+                    sum(1 for g in block_gvas if g <= 0),
+                )
+            # The failure gate reads the RAW replies: a UINT64_MAX sentinel is
+            # a readable SSD hit, not a failure, even though it filters to 0.
+            if worker.layerwise_offload and any(gva <= 0 for gva in block_gvas):
+                return False
+            # 0 means allocation failed; UINT64_MAX means a readable
+            # SSD hit. Filter both before converting GVAs to np.int64.
+            block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in block_gvas]
+            work["all_group_save_keys"].extend(
+                key for key, gva in zip((k for k in candidate_keys if k in missing_keys), block_gvas) if gva > 0
+            )
+
+            partial_key = work["partial_key"]
+            if partial_key is not None:
+                # Partial keys are request-scoped: allocate fresh each step.
+                allocated = worker.m_store.batch_alloc(
+                    [partial_key],
+                    [alloc_size],
+                    LAYERWISE_READ_LEASE_TTL_MS,
+                )
+                if not allocated or len(allocated) != 1:
+                    return False
+                partial_gva = allocated[0]
+                if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
+                    work["all_group_save_keys"].append(partial_key)
+                elif partial_gva <= 0:
+                    logger.error(
+                        "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
+                        req_id,
+                        gid,
+                        work["partial_block_index"],
+                        partial_gva,
+                    )
+                if worker.layerwise_offload and partial_gva <= 0:
+                    return False
+                request.transfer.partial_save_gva_per_group[group_id] = (
+                    partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
                 )
 
-                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
-                full_gvas = [0] * len(block_ids_by_group)
-                for blk_idx, gva in zip(transfer_blocks, block_gvas):
-                    if blk_idx < len(full_gvas):
-                        full_gvas[blk_idx] = gva
+            logger.debug(
+                "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
+                "transfer_keys=%d committed=%d masked=%s alloc_size=%d",
+                req_id,
+                gid,
+                effective_block_size,
+                save_start_block,
+                save_end_block,
+                len(transfer_blocks),
+                len(candidate_keys) - len(transfer_blocks),
+                masked,
+                alloc_size,
+            )
 
-                all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+            # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
+            full_gvas = [0] * len(group_block_ids)
+            for blk_idx, gva in zip(transfer_blocks, block_gvas):
+                if blk_idx < len(full_gvas):
+                    full_gvas[blk_idx] = gva
 
-            if all_group_gvas:
-                request.transfer.save_keys = all_group_save_keys
-                request.transfer.block_gvas_by_group_np = all_group_gvas
-                request.transfer.block_ids_by_group_np = all_group_block_ids
-                request.transfer.block_gvas_np = all_group_gvas[0]
-                request.transfer.gva_block_offset = 0
+            work["all_group_gvas"][group_id] = np.asarray(full_gvas, dtype=np.int64)
+            work["all_group_block_ids"][group_id] = np.asarray(group_block_ids, dtype=np.int64)
+            # The group-0 view is only valid once at least one group landed.
+            if work["all_group_gvas"]:
+                request.transfer.block_gvas_np = work["all_group_gvas"][0]
         return None
 
     # --- load path -----------------------------------------------------------
