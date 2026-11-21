@@ -39,6 +39,7 @@
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
+#include "gmm/gmm_swiglu_oai_mx_quant/gmm_swiglu_oai_mx_quant_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "aclnn_torch_adapter/gbsa_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
@@ -2908,6 +2909,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
+
+    ops.def(
+        "gmm_swiglu_oai_mx_quant(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale, "
+        "Tensor group_list, int? group_list_type=None, float? clamp_limit=None, float? glu_alpha=None, "
+        "float? glu_bias=None, float? dst_type_max=None) -> (Tensor output, Tensor output_scale)");
+    ops.impl("gmm_swiglu_oai_mx_quant", torch::kPrivateUse1, &vllm_ascend::gmm_swiglu_oai_mx_quant);
 
     ops.def(
         "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
