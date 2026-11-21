@@ -1,7 +1,12 @@
+import uuid
+
 from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ReqMeta
+
+# Keep the first eight hexadecimal digits of the 128-bit UUID.
+_SAVE_EVENT_ID_SHIFT = 128 - 32
 
 
 class InFlightSaveBlockTracker:
@@ -9,7 +14,6 @@ class InFlightSaveBlockTracker:
 
     def __init__(self, expected_worker_count: int) -> None:
         self.expected_worker_count = expected_worker_count
-        self.next_event_id = 0
         self.sending_blocks: dict[int, list[int]] = {}
         self.sending_events: dict[int, int] = {}
 
@@ -32,8 +36,9 @@ class InFlightSaveBlockTracker:
             block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
 
         assert block_pool is not None
-        event_id = self.next_event_id
-        self.next_event_id += 1
+        event_id = uuid.uuid4().int >> _SAVE_EVENT_ID_SHIFT
+        while event_id in self.sending_events:
+            event_id = uuid.uuid4().int >> _SAVE_EVENT_ID_SHIFT
         req_meta.event_id = event_id
         logger.debug("event: %s touch blocks: %s", event_id, block_ids)
         block_pool.touch([block_pool.blocks[block_id] for block_id in block_ids])
