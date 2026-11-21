@@ -18,6 +18,8 @@
 import threading
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
 from logging import Logger
 from typing import Any, Literal, TypedDict, cast
 
@@ -64,6 +66,11 @@ def is_dummy_tensor(tensor: torch.Tensor) -> bool:
         bool: True if ``tensor`` is the dummy placeholder (by identity or by being empty).
     """
     return tensor.numel() == 0 or tensor.data_ptr() == _DUMMY_TENSOR.data_ptr()
+
+
+def has_real_tensor(tensors: Sequence[torch.Tensor]) -> bool:
+    """Check whether any tensor in the sequence is a real (non-dummy) tensor."""
+    return any(not is_dummy_tensor(t) for t in tensors)
 
 
 class _TensorRepr:
@@ -431,3 +438,123 @@ def get_layer_weights(
         if weights:
             return weights
     return []
+
+
+def _ensure_nd(t: torch.Tensor) -> torch.Tensor:
+    """Return ``t`` in ND layout (row ops on FRACTAL_NZ tensors would corrupt data)."""
+    if torch_npu.get_npu_format(t) == torch_npu.Format.FRACTAL_NZ:  # type: ignore[attr-defined]
+        return torch_npu.npu_format_cast(t, torch_npu.Format.ND)  # type: ignore[attr-defined]
+    return t
+
+
+def _to_fp32(t: torch.Tensor) -> torch.Tensor:
+    """Cast a weight/bias tensor to fp32 (GLM5 indexer / MHC params are fp32-native)."""
+    return _ensure_nd(t).to(torch.float32)
+
+
+@dataclass(frozen=True)
+class MatmulSlot:
+    """One matmul binding: source path plus its row/dtype/quant contract."""
+
+    xlite: str
+    source: str
+    row_slice: tuple[int, int] | None = None
+    row_repack: Callable[[torch.Tensor], torch.Tensor] | None = None
+    weight_dtype: torch.dtype | None = None
+    allow_quant: bool = True
+
+
+def transform_deq_scale(deq_scale: torch.Tensor) -> torch.Tensor:
+    """Repack a dequantization scale into the fixpipe hardware's expected format.
+
+    Data is stored in ``uint64_t``: the upper 32 bits are 0 and the lower 32 bits hold an FP32 value whose lower 10
+    bits are not involved in computation, making the effective data format TF32.
+
+    Args:
+        deq_scale (torch.Tensor): The original dequantization scale tensor.
+
+    Returns:
+        torch.Tensor: The repacked scale tensor for fixpipe computation.
+    """
+    if deq_scale.dtype == torch.int64:
+        return deq_scale
+    deq_scale_fp32 = deq_scale.to(torch.float32)
+    scale = deq_scale_fp32.new_zeros(deq_scale.shape[0] * 2)
+    scale[0::2] = deq_scale_fp32[0::1]
+    return scale
+
+
+def slot_transform(slot: MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
+    """Apply the slot's row contract to one weight/side tensor (slice, then repack, then cast)."""
+    if tensor.ndim == 0 or tensor.numel() == 0:
+        return tensor
+    if slot.row_slice is not None:
+        start, length = slot.row_slice
+        tensor = _ensure_nd(tensor)[start : start + length].contiguous()
+    if slot.row_repack is not None:
+        tensor = slot.row_repack(tensor)
+    if slot.weight_dtype is not None:
+        tensor = _ensure_nd(tensor).to(slot.weight_dtype)
+    return tensor
+
+
+def slot_deq_transform(slot: MatmulSlot, tensor: torch.Tensor) -> torch.Tensor:
+    """Slot row contract followed by the fixpipe repack, for deq_scale-like side tensors."""
+    return transform_deq_scale(slot_transform(slot, tensor))
+
+
+def init_matmul_weights(
+    model: Model,
+    layers: Sequence[nn.Module],
+    slot: MatmulSlot,
+    *,
+    mask: Sequence[bool] | None = None,
+    quantized: bool,
+) -> None:
+    """Bind one matmul slot: main weight plus quant side tensors (when ``quantized``).
+
+    Args:
+        model (Model): The xlite model to write the bound weights into.
+        layers (Sequence[nn.Module]): The transformer layers to extract weights from.
+        slot (MatmulSlot): The slot to bind (xlite attribute name, source path, row/dtype/quant contract).
+        mask (Sequence[bool] | None): Optional mask to select specific layers for weight extraction. See
+            :meth:`get_layer_weights` for details.
+        quantized (bool): Whether the checkpoint serves quantized matmuls (binds the side tensors when True).
+    """
+    source = slot.source
+    row_contract = partial(slot_transform, slot)
+    deq_contract = partial(slot_deq_transform, slot)
+    setattr(model, slot.xlite, get_layer_weights(layers, f"{source}.weight", mask=mask, post_processor=row_contract))
+    if not quantized:
+        return
+
+    # DSA's indexer has shared layers (no own weights), so `mask` pads them with `_DUMMY_TENSOR`; the list is
+    # thus never empty and a naive `len() > 0` check would misclassify dynamic-quant matmuls as static. Static
+    # quant is when `aclnn_input_scale_reciprocal` exists and at least one entry is a real (non-dummy) tensor.
+    input_scale = get_layer_weights(layers, f"{source}.aclnn_input_scale_reciprocal", mask=mask)
+    if not slot.allow_quant:
+        scale_path = f"{source}.weight_scale"
+        scales = input_scale if has_real_tensor(input_scale) else get_layer_weights(layers, scale_path, mask=mask)
+        if has_real_tensor(scales):
+            raise ValueError(
+                f"xlite: {source} is quantized in this checkpoint, but this slot only supports native-dtype weights"
+            )
+    static = has_real_tensor(input_scale)
+    if static:
+        setattr(model, f"{slot.xlite}_input_scale", input_scale)
+        setattr(
+            model,
+            f"{slot.xlite}_input_offset",
+            get_layer_weights(layers, f"{source}.aclnn_input_offset", mask=mask),
+        )
+        setattr(
+            model,
+            f"{slot.xlite}_quant_bias",
+            get_layer_weights(layers, f"{source}.quant_bias", mask=mask, post_processor=row_contract),
+        )
+    deq_source = f"{source}.deq_scale" if static else f"{source}.weight_scale"
+    setattr(
+        model,
+        f"{slot.xlite}_deq_scale",
+        get_layer_weights(layers, deq_source, mask=mask, post_processor=deq_contract),
+    )
