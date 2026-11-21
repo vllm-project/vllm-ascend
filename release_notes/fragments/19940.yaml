@@ -1,0 +1,7 @@
+pr: 19940
+entries:
+  - category: bugfix
+    text: >-
+      Avoid false capacity rejection when external Mamba state loading continues
+      within the same aligned state block, while retaining capacity accounting
+      for genuine block crossings.
