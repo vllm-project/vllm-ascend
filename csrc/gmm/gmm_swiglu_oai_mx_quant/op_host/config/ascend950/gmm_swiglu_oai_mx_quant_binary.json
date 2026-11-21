@@ -1,0 +1,235 @@
+{
+  "op_type": "GmmSwigluOaiMxQuant",
+  "op_list": [
+    {
+      "bin_filename": "GmmSwigluOaiMxQuant_float4_e2m1",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float4_e2m1",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "x_scale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "group_list",
+          "index": 2,
+          "dtype": "int64",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        [
+          {
+            "name": "weight",
+            "index": 3,
+            "dtype": "float4_e2m1",
+            "format": "FRACTAL_NZ",
+            "paramType": "dynamic",
+            "shape": [
+              -2
+            ],
+            "format_match_mode": "FormatDefault"
+          }
+        ],
+        [
+          {
+            "name": "weight_scale",
+            "index": 4,
+            "dtype": "float8_e8m0",
+            "format": "ND",
+            "paramType": "dynamic",
+            "shape": [
+              -2
+            ],
+            "format_match_mode": "FormatAgnostic"
+          }
+        ]
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float4_e2m1",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "y_scale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "group_list_type",
+          "dtype": "int",
+          "value": null
+        },
+        {
+          "name": "clamp_limit",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "glu_alpha",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "glu_bias",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "dst_type_max",
+          "dtype": "float",
+          "value": null
+        }
+      ]
+    },
+    {
+      "bin_filename": "GmmSwigluOaiMxQuant_float8_e4m3fn",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "float8_e4m3fn",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "x_scale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "group_list",
+          "index": 2,
+          "dtype": "int64",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        [
+          {
+            "name": "weight",
+            "index": 3,
+            "dtype": "float8_e4m3fn",
+            "format": "FRACTAL_NZ",
+            "paramType": "dynamic",
+            "shape": [
+              -2
+            ],
+            "format_match_mode": "FormatDefault"
+          }
+        ],
+        [
+          {
+            "name": "weight_scale",
+            "index": 4,
+            "dtype": "float8_e8m0",
+            "format": "ND",
+            "paramType": "dynamic",
+            "shape": [
+              -2
+            ],
+            "format_match_mode": "FormatAgnostic"
+          }
+        ]
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float8_e4m3fn",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "y_scale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {
+          "name": "group_list_type",
+          "dtype": "int",
+          "value": null
+        },
+        {
+          "name": "clamp_limit",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "glu_alpha",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "glu_bias",
+          "dtype": "float",
+          "value": null
+        },
+        {
+          "name": "dst_type_max",
+          "dtype": "float",
+          "value": null
+        }
+      ]
+    }
+  ]
+}

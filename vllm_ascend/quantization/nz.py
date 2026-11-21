@@ -69,6 +69,11 @@ def fp4_semantic_nz() -> NzCastSpec:
     return NzCastSpec(customize_dtype=torch.float8_e4m3fn, input_dtype=torch.float4_e2m1fn_x2)
 
 
+def cast_mxfp4_swiglu_oai_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Tile packed K bytes in groups of 32 for the MXFP4 TensorAPI kernel."""
+    return NzCastSpec(customize_dtype=torch.int8).cast(weight.view(torch.int8))
+
+
 def fp4_nz_for_dtype(dtype: torch.dtype) -> NzCastSpec:
     """The FP4 recipe matching how ``dtype`` already presents its values.
 

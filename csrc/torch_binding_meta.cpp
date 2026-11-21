@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl_base_rt.h"
+#include "gmm/gmm_swiglu_oai_mx_quant/gmm_swiglu_oai_mx_quant_common.h"
 #include "utils.h"
 
 /*
@@ -1798,6 +1799,16 @@ void npu_indexer_region_score_ids_out_meta(
     }
 }
 
+std::tuple<at::Tensor, at::Tensor> gmm_swiglu_oai_mx_quant_meta(
+    const at::Tensor& x, at::TensorList weight, at::TensorList weightScale, const at::Tensor& xScale,
+    const at::Tensor& groups, c10::optional<int64_t> groupListType, c10::optional<double> clampLimit,
+    c10::optional<double> gluAlpha, c10::optional<double> gluBias, c10::optional<double> dstTypeMax)
+{
+    const bool fp4 = gmm_swiglu_oai::ValidateInputs(x, weight, weightScale, xScale, groups);
+    gmm_swiglu_oai::ValidateAttrs(fp4, groupListType, clampLimit, gluAlpha, gluBias, dstTypeMax);
+    return gmm_swiglu_oai::MakeOutput(x, weight[0], fp4);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1831,6 +1842,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    ops.impl("gmm_swiglu_oai_mx_quant", &vllm_ascend::meta::gmm_swiglu_oai_mx_quant_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
