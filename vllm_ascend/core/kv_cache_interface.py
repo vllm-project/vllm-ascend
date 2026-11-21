@@ -142,6 +142,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+    # DSpark draft layers share full-history block IDs with their target but
+    # keep separate physical tensors; paired planning keys off this flag.
+    is_dspark_draft: bool = False
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:
@@ -188,6 +191,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
+                spec.is_dspark_draft,
             )
             for spec in specs
         }
@@ -210,6 +214,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            is_dspark_draft=first_spec.is_dspark_draft,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -262,6 +267,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
+        storage_block_size_set = set(spec.storage_block_size for spec in specs)
         sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
@@ -270,11 +276,12 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
+            and len(storage_block_size_set) == 1
             and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, LI quant flags "
-            "and DCP replication size."
+            "the same dtype, scale layout, quantization method, LI quant flags, "
+            "DCP replication size, and storage block size."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -286,6 +293,7 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
+            storage_block_size=storage_block_size_set.pop(),
             sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 
