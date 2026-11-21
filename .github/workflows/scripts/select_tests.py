@@ -97,8 +97,8 @@ PartitionKey = str
 _DEFAULT_KEY: PartitionKey = "cpu-0"
 
 # The coverage-based recommendation emits this batch label (not a real pytest
-# path) to represent the always-on CPU UT suite. Map it to ``tests/ut`` so
-# the ``--test-list-file`` flow runs the CPU UT suite. All UTs run on CPU.
+# path) to represent the CPU UT suite. Map it to ``tests/ut`` so the
+# ``--test-list-file`` flow runs that suite. All UTs run on CPU.
 CPU_UT_BATCH_ALIAS = "cpu-ut"
 CPU_UT_BATCH_PATH = "tests/ut"
 
@@ -106,10 +106,11 @@ CPU_UT_BATCH_PATH = "tests/ut"
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 
 # When set via --skip-cpu-ut, tests/ut targets are dropped from every selection
-# mode. CPU UTs are executed by the cpu-ut job on every PR; the PR test
-# scheduling path must not reserve a runner for them. Scheduled full-suite
-# coverage runs (schedule_test_coverage.yaml) do NOT pass this flag, so their
-# --all-tests runs keep collecting CPU UT coverage.
+# mode. The PR workflow uses --separate-cpu-ut instead: CPU UT stays in the
+# selection, but is emitted separately so it can run before E2E and only when
+# the selection actually contains UT. Scheduled full-suite coverage runs
+# (schedule_test_coverage.yaml) pass neither flag, so their --all-tests runs
+# keep collecting CPU UT coverage in the main matrix.
 _SKIP_CPU_UT = False
 
 # Generic ``linux-aarch64-a3-N`` labels are mixed pools of 560T and 752T
@@ -652,9 +653,29 @@ def _resolve_to_runners(
     return result
 
 
+def _separate_cpu_ut_groups(test_groups: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split CPU UT groups out of the E2E matrix.
+
+    The PR workflow runs the CPU groups in the cpu-ut job, and only when this
+    list is non-empty. ``partition_name`` is renamed to ``cpu-ut`` so the
+    reusable-workflow job name still matches the ci-gate check.
+    """
+    ut_groups: list[dict] = []
+    other_groups: list[dict] = []
+    for group in test_groups:
+        if group.get("npu_type") == NpuType.CPU.value:
+            ut_group = dict(group)
+            ut_group["partition_name"] = "cpu-ut"
+            ut_groups.append(ut_group)
+        else:
+            other_groups.append(group)
+    return ut_groups, other_groups
+
+
 def _write_output(
     test_groups: list[dict],
     matched_modules: list[str],
+    ut_groups: list[dict] | None = None,
 ) -> None:
     has_tests = len(test_groups) > 0
     groups_json = json.dumps(test_groups, separators=(",", ":"))
@@ -666,6 +687,9 @@ def _write_output(
         "csrc_cache_target_ids": json.dumps(cache_target_ids, separators=(",", ":")),
         "matched_modules": ",".join(matched_modules),
     }
+    if ut_groups is not None:
+        outputs["ut_test_groups"] = json.dumps(ut_groups, separators=(",", ":"))
+        outputs["has_ut"] = str(bool(ut_groups)).lower()
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
@@ -676,13 +700,14 @@ def _write_output(
         for key, value in outputs.items():
             print(f"{key}={value}")
 
-    _print_summary(test_groups, matched_modules, has_tests)
+    _print_summary(test_groups, matched_modules, has_tests, ut_groups)
 
 
 def _print_summary(
     test_groups: list[dict],
     matched_modules: list[str],
     has_tests: bool,
+    ut_groups: list[dict] | None = None,
 ) -> None:
     divider = "=" * 60
     print(f"\n{divider}", file=sys.stderr)
@@ -690,8 +715,10 @@ def _print_summary(
     print(divider, file=sys.stderr)
     print(f"Matched modules: {matched_modules or '(none)'}", file=sys.stderr)
     print(f"Has tests to run: {has_tests}", file=sys.stderr)
+    if ut_groups is not None:
+        print(f"Has CPU UT to run: {bool(ut_groups)}", file=sys.stderr)
 
-    for group in test_groups:
+    for group in list(ut_groups or []) + list(test_groups):
         runner = group["runner"]
         tests = group["tests"].split()
         partition_name = group["partition_name"]
@@ -759,10 +786,16 @@ def main():
     parser.add_argument(
         "--skip-cpu-ut",
         action="store_true",
-        help="Drop tests/ut targets from every selection mode. Used by the PR "
-        "scheduling path, where CPU UTs run in the cpu-ut job instead of "
-        "on a reserved runner. Scheduled full-suite coverage runs do not pass "
-        "this flag, so --all-tests keeps collecting CPU UT coverage.",
+        help="Drop tests/ut targets from every selection mode. Scheduled "
+        "full-suite coverage runs do not pass this flag, so --all-tests keeps "
+        "collecting CPU UT coverage.",
+    )
+    parser.add_argument(
+        "--separate-cpu-ut",
+        action="store_true",
+        help="Emit CPU UT groups as ut_test_groups/has_ut and keep test_groups "
+        "for the remaining runners. The PR workflow runs UT only when has_ut "
+        "is true, then runs E2E after that UT succeeds.",
     )
     parser.add_argument(
         "--skip-a5",
@@ -771,6 +804,8 @@ def main():
         "A5 capacity is limited; A5 tests run separately under ready-a5.",
     )
     args = parser.parse_args()
+    if args.skip_cpu_ut and args.separate_cpu_ut:
+        parser.error("--skip-cpu-ut and --separate-cpu-ut cannot be used together")
     global _SKIP_CPU_UT
     _SKIP_CPU_UT = args.skip_cpu_ut
     meta = yaml.safe_load(args.config.read_text()) or {}
@@ -888,7 +923,11 @@ def main():
     if args.skip_a5:
         test_groups = [group for group in test_groups if group["npu_type"] != NpuType.A5.value]
 
-    _write_output(test_groups, matched_modules)
+    ut_groups = None
+    if args.separate_cpu_ut:
+        ut_groups, test_groups = _separate_cpu_ut_groups(test_groups)
+
+    _write_output(test_groups, matched_modules, ut_groups)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,23 @@ from .test_push_dcp import configure, metadata
 worker = test_push_sending.worker
 
 
+class _RecordingMock(Mock):
+    """Record push-pool calls without losing updates.
+
+    One producer notifies every D rank from its write pool. ``Mock.call_count``
+    is a read-modify-write, so those overlapping calls can under-count and fail
+    the completion check even though every DONE was sent.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "_record_lock", threading.Lock())
+
+    def __call__(self, *args, **kwargs):
+        with object.__getattribute__(self, "_record_lock"):
+            return super().__call__(*args, **kwargs)
+
+
 @pytest.fixture
 def producers(worker, monkeypatch):
     created = []
@@ -62,7 +79,8 @@ def producers(worker, monkeypatch):
                 )
             obj.kv_cache_specs = [spec]
             monkeypatch.setattr(obj, "_get_remote_metadata", lambda _: remote)
-            monkeypatch.setattr(obj, "_send_done", Mock(return_value=True))
+            monkeypatch.setattr(obj, "_send_done", _RecordingMock(return_value=True))
+            obj.engine.batch_transfer_sync_write = _RecordingMock(return_value=0)
         return created
 
     yield make
@@ -149,6 +167,7 @@ def test_bilateral_chunks_copy_each_token_once(
             [ctypes.addressof(target)]
         ]
     writes: list[int] = []
+    write_lock = threading.Lock()
 
     def copy(session, src, dst, lengths):
         for source_addr, target_addr, size in zip(src, dst, lengths):
@@ -160,7 +179,8 @@ def test_bilateral_chunks_copy_each_token_once(
                 ctypes.addressof(buf) <= target_addr < target_addr + size <= ctypes.addressof(buf) + 1024
                 for buf in targets
             )
-            writes.extend(range(target_addr, target_addr + size))
+            with write_lock:
+                writes.extend(range(target_addr, target_addr + size))
             ctypes.memmove(target_addr, source_addr, size)
         return 0
 
@@ -176,7 +196,8 @@ def test_bilateral_chunks_copy_each_token_once(
             sender.start_load_kv(meta)
             sender.save_kv_layer("model.layers.0.attn")
             sender.wait_for_save()
-            assert all(call.args[1] is None for call in sender._send_done.call_args_list)
+            done_errors = [call.args[1] for call in sender._send_done.call_args_list]
+            assert done_errors == [None] * len(done_errors)
             if end < 29:
                 for destination in sender._reqs_send_state["d-request"].destinations.values():
                     if destination.required_layers:
