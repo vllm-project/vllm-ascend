@@ -1,0 +1,4 @@
+pr: 14367
+entries:
+  - category: bugfix
+    text: Warn when Lightning Indexer C8 is enabled but checkpoint quantization metadata selects no eligible layers, without changing quantization eligibility.
