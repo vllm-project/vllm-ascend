@@ -12,7 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices, prepare_chunk_offsets, safe_exp
+from .utils import prepare_chunk_indices_dev, prepare_chunk_offsets, safe_exp
 
 _CONDITIONS = ("seq7168",)
 
@@ -226,7 +226,7 @@ def chunk_gated_delta_rule_fwd_h(
     BT = chunk_size
 
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None

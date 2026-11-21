@@ -27,7 +27,7 @@ from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
 from .gate import DEFAULT_KDA_LOWER_BOUND, apply_kda_gate
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril_kda
-from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices
+from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices_dev
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [4, 8, 16, 32]
@@ -905,7 +905,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
     assert K <= 256
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, BT)
     NT = cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BC = min(16, BT)
@@ -1120,7 +1120,7 @@ def recompute_w_u_fwd(
     BV = 64
 
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, BT)
     NT = cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     w = torch.empty_like(k)
@@ -1278,7 +1278,7 @@ def chunk_gla_fwd_o_gk(
     BT = chunk_size
 
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        chunk_indices = prepare_chunk_indices_dev(cu_seqlens, T, chunk_size)
     NT = cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     def grid(meta):

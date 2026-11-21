@@ -14,7 +14,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
-from .utils import prepare_chunk_indices
+from .utils import prepare_chunk_indices_dev
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -359,7 +359,7 @@ def solve_tril(
     LARGE_BLOCK_T = 608 * 2
 
     if cu_seqlens is not None and chunk_indices_large_block is None:
-        chunk_indices_large_block = prepare_chunk_indices(cu_seqlens, LARGE_BLOCK_T)
+        chunk_indices_large_block = prepare_chunk_indices_dev(cu_seqlens, T, LARGE_BLOCK_T)
     chunk_indices = chunk_indices_large_block
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
 
@@ -384,7 +384,7 @@ def solve_tril(
     Ai = torch.empty(B, T, H, BT, device=A.device, dtype=output_dtype)
     merge_fn = merge_16x16_to_32x32_inverse_kernel if BT == 32 else merge_16x16_to_64x64_inverse_kernel
     if cu_seqlens is not None and chunk_indices_bt is None:
-        chunk_indices_bt = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices_bt = prepare_chunk_indices_dev(cu_seqlens, T, BT)
     chunk_indices = chunk_indices_bt
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
