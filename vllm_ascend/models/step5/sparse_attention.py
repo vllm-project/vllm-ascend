@@ -423,13 +423,17 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
         num_input_tokens = (
             getattr(common_attn_metadata, "num_input_tokens", 0) or common_attn_metadata.num_actual_tokens
         )
-        graph_shape = num_input_tokens in self.capture_sizes
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
             require_uniform=True,
         )
+        # Only a pure-decode batch guarantees rows == active_decodes (padded
+        # uniform decode counts as all-decodes). A mixed decode+prefill step can
+        # also land on a capture size; deriving rows from the token count there
+        # mismatches the decode tensors.
+        graph_shape = num_input_tokens in self.capture_sizes and num_prefills == 0
 
         prefill_metadata: AscendStep5DSAPrefillMetadata | None = None
         active_prefills = 0

@@ -1,0 +1,5 @@
+pr: 22389
+entries:
+  - category: bugfix
+    text: Fixed a Step5-Preview sparse-attention crash (shape mismatch inside the block-sparse attention operator) when a decode step mixed decode and prefill requests onto a capture-size token bucket under full decode graphs.
+    model: step-5-preview
