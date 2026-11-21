@@ -578,6 +578,41 @@ def test_build_fia_params_decode():
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
 
 
+@pytest.mark.parametrize("target_dcp_size", [1, 2])
+def test_attn_vllm_config_preserves_target_parallel_config(target_dcp_size):
+    """Draft attention must not replace the target runner's parallel config."""
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    target_parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        pipeline_parallel_size=4,
+        decode_context_parallel_size=target_dcp_size,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    target_parallel_values = vars(target_parallel_config).copy()
+    target_config = SimpleNamespace(parallel_config=target_parallel_config, cache_config=object())
+    draft_parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        pipeline_parallel_size=1,
+        decode_context_parallel_size=1,
+        enable_expert_parallel=False,
+        enable_eplb=False,
+    )
+    speculator.vllm_config = target_config
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=draft_parallel_config)
+    speculator.speculative_config = SimpleNamespace(moe_backend=None, attention_backend=None, kv_cache_dtype=None)
+
+    # Exercise the real upstream getter on both the release and main UT lanes.
+    for _ in range(2):
+        config = speculator.attn_vllm_config
+        assert config is not target_config
+        assert config.parallel_config is draft_parallel_config
+        assert config.cache_config is target_config.cache_config
+        assert speculator.vllm_config is target_config
+        assert target_config.parallel_config is target_parallel_config
+        assert vars(target_parallel_config) == target_parallel_values
+
+
 def test_set_attn_detects_architecture():
     """Test detection of the attention architecture."""
     cases = [
@@ -588,8 +623,13 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-        speculator.vllm_config = SimpleNamespace()
-        speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+        target_parallel_config = SimpleNamespace(pipeline_parallel_size=4, enable_expert_parallel=True)
+        target_config = SimpleNamespace(parallel_config=target_parallel_config)
+        draft_parallel_config = SimpleNamespace(
+            pipeline_parallel_size=1, decode_context_parallel_size=1, enable_expert_parallel=False
+        )
+        speculator.vllm_config = target_config
+        speculator.draft_vllm_config = SimpleNamespace(parallel_config=draft_parallel_config)
         speculator.attn_groups = object()
         speculator.speculative_config = SimpleNamespace(  # type: ignore[assignment]
             moe_backend=None, attention_backend=None, kv_cache_dtype=None
@@ -598,7 +638,7 @@ def test_set_attn_detects_architecture():
             patch(
                 "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.set_current_vllm_config",
                 return_value=nullcontext(),
-            ),
+            ) as set_current_config,
             patch.object(TargetDependentARSpeculator, "set_attn"),
             patch(
                 "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator._get_graph_update_backend",
@@ -608,6 +648,13 @@ def test_set_attn_detects_architecture():
             speculator.set_attn(object(), object(), object(), object(), object())
         assert speculator.attn_backend is backend
         assert speculator.attn_architecture == expected
+        attn_config = set_current_config.call_args.args[0]
+        assert attn_config is not target_config
+        assert attn_config.parallel_config is draft_parallel_config
+        assert speculator.vllm_config is target_config
+        assert target_config.parallel_config is target_parallel_config
+        assert target_parallel_config.pipeline_parallel_size == 4
+        assert target_parallel_config.enable_expert_parallel is True
 
 
 def test_capture_single_step_only_captures_prefill():
