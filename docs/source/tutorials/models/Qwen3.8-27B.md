@@ -486,6 +486,25 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
+### 5.2 Troubleshooting: `libm.so.6` Linker Error on 950DT
+
+When starting the service with the 950DT Qwen3.8 image, compilation may fail with:
+
+```text
+RuntimeError: Failed to compile /tmp/.../npu_utils.cpp, error:
+/usr/bin/ld: cannot find /lib64/libm.so.6: No such file or directory
+/usr/bin/ld: cannot find /lib64/libmvec.so.1: No such file or directory
+clang: error: linker command failed with exit code 1
+```
+
+The 950DT Qwen3.8 image already ships these math libraries under `/usr/lib64/`,
+but the linker looks for them under `/lib64/` by default. Create the symlink
+before launching the container:
+
+```bash
+ln -sf /usr/lib64 /lib64
+```
+
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat/completions`. Use the `--served-model-name` you configured (`qwen3.8` for `Qwen3.8-27B`).
