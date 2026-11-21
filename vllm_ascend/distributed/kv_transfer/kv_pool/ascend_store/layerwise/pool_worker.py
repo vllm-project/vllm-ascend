@@ -1140,27 +1140,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return
 
         results_by_key = dict(zip(keys, results, strict=True))
-        failures = [(key, result) for key, result in results_by_key.items() if result != 0]
-        if failures:
-            failed_keys = {key for key, _ in failures}
-            details = dict(
-                failed_keys=len(failures),
-                result_samples=[result for _, result in failures[:8]],
-                private_snapshot_failures=sum("offload_v1:" in key for key in failed_keys),
-                request_samples=[
-                    dict(
-                        request=request.req_id,
-                        block=block_id,
-                        previous_step=bool(request.load_spec and request.load_spec.layerwise_previous_step),
-                        endpoint=request.load_spec.kvpool_cached_tokens if request.load_spec else None,
-                        private_snapshot="offload_v1:" in key,
-                        key=key,
-                    )
-                    for request, key, block_id, _ in request_key_slots
-                    if key in failed_keys
-                ][:8],
-            )
-            logger.error("Layerwise GET session rejected: %s", details)
         for key, result in results_by_key.items():
             self._layerwise_session_tracker.record_get_result(key, request_ids_by_key[key], succeeded=result == 0)
         request_load_keys: dict[int, list[str]] = {}
