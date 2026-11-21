@@ -128,7 +128,8 @@ def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
     resolve_type = getattr(impl, "_fused_preprocess_type", None)
     if resolve_type is None:
         return
-    managed = resolve_type() is not None
+    impl._fused_preprocess_planned_type = resolve_type()
+    managed = impl._fused_preprocess_planned_type is not None
     for layer in (impl.fused_qkv_a_proj, impl.q_proj):
         if layer is not None:
             layer._fused_preprocess_managed = managed
