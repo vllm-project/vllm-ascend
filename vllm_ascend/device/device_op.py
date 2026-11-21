@@ -1024,6 +1024,8 @@ class BaseDeviceAdaptor:
             q, k, v = (x.contiguous() for x in (q, k, v))
             layout = "BSND"
         g = g.to(torch.float32).contiguous()
+        # fused_gdn_gating already emits sigmoid(beta), so beta is forwarded
+        # as-is and the kernel must not apply the sigmoid a second time.
         beta = beta.to(v.dtype).contiguous()
         initial_state = initial_state.contiguous()
 
@@ -1050,7 +1052,7 @@ class BaseDeviceAdaptor:
             layout=layout,
             use_exp2=False,
             use_qk_l2norm_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
+            use_beta_sigmoid_in_kernel=False,
             allow_neg_eigval=False,
             disable_recompute=False,
             state_v_first=True,

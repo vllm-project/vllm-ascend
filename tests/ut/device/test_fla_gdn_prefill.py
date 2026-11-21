@@ -21,7 +21,8 @@ kernel, verifying the optimized parameter contract:
 * q/k/v are handed over head-first (BNSD) without copying when the transpose
   is already contiguous, and as sequence-major (BSND) otherwise;
 * q/k normalization is delegated to the kernel (use_qk_l2norm_in_kernel=True);
-* beta sigmoid is delegated to the kernel (use_beta_sigmoid_in_kernel=True);
+* beta arrives already sigmoided from fused_gdn_gating, so the kernel must not
+  apply it again (use_beta_sigmoid_in_kernel=False);
 * the recurrent state keeps its [N, Hv, Dk, Dv] layout (state_v_first=True);
 * use_exp2=False, disable_recompute=False for the A2/A3 optimized path.
 """
@@ -94,7 +95,9 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         self.assertEqual(call["chunk_size"], 64)
         self.assertFalse(call["use_exp2"])
         self.assertTrue(call["use_qk_l2norm_in_kernel"])
-        self.assertTrue(call["use_beta_sigmoid_in_kernel"])
+        # fused_gdn_gating already emits sigmoid(beta), so re-applying it in the
+        # kernel would double-sigmoid the values.
+        self.assertFalse(call["use_beta_sigmoid_in_kernel"])
         self.assertFalse(call["disable_recompute"])
         self.assertTrue(call["state_v_first"])
         self.assertFalse(call["allow_neg_eigval"])
