@@ -32,6 +32,8 @@ from vllm.model_executor.utils import set_weight_attrs
 # Upstream #56741 normalized the V4.1 model package name.
 from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
+from vllm_ascend.distributed.weight_transfer.update_window import engram_weight_update_active
+
 from .local_shared_vmm import (
     EngramSharedInitError,
     LocalSharedVmmBuffer,
@@ -390,10 +392,70 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self._checkpoint_key = key
 
     def _weight_loader(self, param, loaded_weight) -> None:
+        """Install the tensor a load hands us, or stream the bound shard.
+
+        A weight update (``start_weight_update`` .. ``finish_weight_update``) owns
+        the model: the payload is in ``loaded_weight`` and the checkpoint on disk
+        is stale, so the rows have to be installed from it. Startup keeps
+        streaming from the bound shard, because the loader there either receives a
+        profiling dummy or would have to materialize a multi-GiB table first.
+        """
         if getattr(self, "_remote_reader", None) is not None:
+            return
+        if getattr(self, "_shared_pool_client", None) is not None:
+            return
+        if engram_weight_update_active() or self._host_storage_was_replaced(param):
+            self._copy_loaded_rows(param, loaded_weight)
             return
         if param is self.weight:
             self.load_checkpoint(self._checkpoint_path, self._checkpoint_key)
+
+    def _host_storage_was_replaced(self, param) -> bool:
+        """Whether ``param`` no longer aliases the host range it was built on.
+
+        A layerwise reload rebuilds the parameters as fresh tensors, so this is
+        true exactly while an update installs them. It is only meaningful for
+        ``cpu_offload``; other parameters have no host range and keep streaming.
+        """
+        holder = self._codes_uva if param is self.weight else self._scales_uva
+        storage = getattr(holder, "tensor", None)
+        return storage is not None and param.data_ptr() != storage.data_ptr()
+
+    def _copy_loaded_rows(self, param, loaded_weight) -> None:
+        """Install this rank's head bucket from a weight update's tensor.
+
+        Every rank writes its own rows, including when the table is shared across
+        DP replicas: the replicas hold the same values for the same head shard, so
+        the copies are idempotent, and a rank that wrote nothing would be counted
+        as not loading the layer. That count drives vLLM's layerwise reload
+        (``get_numel_loaded``), and a rank that skips the copy never reaches the
+        layer's total, so it would not materialise the layer while its peers replay
+        the loader. A collective in a weight loader is unsafe for the same reason:
+        the loader runs once for counting and again on the materialised tensors, so
+        ranks can enter it at different points.
+        """
+        # A torch build without the ue8m0 dtype (or a payload that never uses it)
+        # must not turn this into an AttributeError.
+        e8m0 = getattr(torch, "float8_e8m0fnu", None)
+        if e8m0 is not None and loaded_weight.dtype == e8m0:
+            # ue8m0 scales arrive in that dtype while the parameter stores bytes.
+            loaded_weight = loaded_weight.view(torch.uint8)
+        if loaded_weight.dtype != param.dtype:
+            raise ValueError(
+                f"Engram update payload is {loaded_weight.dtype} but the table stores {param.dtype}; "
+                "a checkpoint whose Engram rows are FP8/E8M0 needs the payload quantized to the "
+                "table's INT8/FP32 storage first (the startup path decodes and requantizes it), "
+                "or native MXFP8 storage so the bits can be copied."
+            )
+        part_rows = param.shape[0]
+        # The loader is bound with the attribute, but a parameter rebuilt outside
+        # `_bind_parameters` (a reload in a future engine) may not carry it.
+        vocab_start = getattr(param, "engram_vocab_start", None)
+        if vocab_start is None:
+            vocab_start = self.vocab_start_idx
+        shard = loaded_weight.narrow(0, vocab_start, part_rows)
+        assert shard.shape == param.shape, f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
+        param.data.copy_(shard)
 
     def load_checkpoint(self, model_path, key, chunk_rows=65536):
         """Stream assigned rows, preserving BF16 in non-quantized models.
