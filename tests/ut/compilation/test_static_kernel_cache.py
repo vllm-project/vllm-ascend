@@ -21,16 +21,88 @@ new ``ts<timestamp>_pid<pid>_outputs`` directory behind.
 The tests below drive the real ``npugraph_ex`` classes and the real torch_npu
 decision function, so they fail on the pre-fix code even though the fix lives
 in vllm-ascend.
+
+``npugraph_ex`` is vendored in torch_npu and is only present on the NPU
+images, so the tests that need it are skipped on the CPU runners. The cache
+directory and cache option helpers are pure Python, so they are tested
+everywhere: ``compiler_interface`` imports ``npugraph_ex`` at module level, so
+it is stubbed out when the package is missing, the same way
+``test_compiler_interface.py`` does it.
 """
 
 import os
-from unittest.mock import Mock, patch
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
-from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+try:
+    import npugraph_ex._acl_concrete_graph.fx2acl_converter  # noqa: F401
+
+    npugraph_ex_available = True
+except ImportError:
+    npugraph_ex_available = False
+
+needs_npugraph_ex = pytest.mark.skipif(
+    not npugraph_ex_available,
+    reason="npugraph_ex is only available on the NPU images",
+)
+
+_installed_stub_names: tuple[str, ...] = ()
+if not npugraph_ex_available:
+    # CPU CI has no npugraph_ex (it is vendored in torch_npu). Stub the
+    # symbols compiler_interface imports at module level so the pure-Python
+    # helpers stay testable on the CPU runners.
+
+    class _StaticKernelStub(ModuleType):
+        _set_static_kernel_blacklist = MagicMock()
+
+    _installed_stub_names = (
+        "npugraph_ex",
+        "npugraph_ex._acl_concrete_graph",
+        "npugraph_ex._acl_concrete_graph.static_kernel",
+    )
+    sys.modules.setdefault("npugraph_ex", ModuleType("npugraph_ex"))
+    sys.modules.setdefault("npugraph_ex._acl_concrete_graph", ModuleType("npugraph_ex._acl_concrete_graph"))
+    sys.modules["npugraph_ex._acl_concrete_graph.static_kernel"] = _StaticKernelStub(
+        "npugraph_ex._acl_concrete_graph.static_kernel"
+    )
+
+from vllm_ascend.compilation import compiler_interface  # noqa: E402
+
+for _name in _installed_stub_names:
+    # Drop the temporary stubs again so importlib.util.find_spec() keeps
+    # reporting npugraph_ex as absent for later collectors (a spec-less
+    # sys.modules entry makes find_spec raise ValueError).
+    sys.modules.pop(_name, None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_static_kernel_cache_patch():
+    """Keep the tests independent of each other and of their order.
+
+    The patch replaces torch_npu's compiler functions and sets a module-level
+    flag, so both have to be restored after every test.
+    """
+    original_flag = compiler_interface._STATIC_KERNEL_CACHE_PATCHED
+    if npugraph_ex_available:
+        from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+        from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
+
+        original_compile_static_kernel = static_kernel.compile_static_kernel
+        original_normalize_config = AclConcreteGraph.normalize_config
+    try:
+        yield
+    finally:
+        if npugraph_ex_available:
+            static_kernel.compile_static_kernel = original_compile_static_kernel
+            acl_graph.compile_static_kernel = original_compile_static_kernel
+            AclConcreteGraph.normalize_config = original_normalize_config
+        compiler_interface._STATIC_KERNEL_CACHE_PATCHED = original_flag
 
 
 class _StubConfig:
@@ -45,44 +117,15 @@ class _StubConfig:
 
 def _enable_cache():
     """Apply the vllm-ascend static kernel cache patch."""
-    from vllm_ascend.compilation.compiler_interface import _enable_static_kernel_run_package_cache
-
-    _enable_static_kernel_run_package_cache()
-
-
-@pytest.fixture(autouse=True)
-def _reset_static_kernel_cache_patch():
-    """Keep the tests independent of each other and of their order.
-
-    The patch replaces torch_npu's compiler functions and sets a module-level
-    flag, so both have to be restored after every test.
-    """
-    from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
-
-    from vllm_ascend.compilation import compiler_interface
-
-    original_compile_static_kernel = static_kernel.compile_static_kernel
-    original_normalize_config = AclConcreteGraph.normalize_config
-    original_flag = compiler_interface._STATIC_KERNEL_CACHE_PATCHED
-    try:
-        yield
-    finally:
-        static_kernel.compile_static_kernel = original_compile_static_kernel
-        acl_graph.compile_static_kernel = original_compile_static_kernel
-        AclConcreteGraph.normalize_config = original_normalize_config
-        compiler_interface._STATIC_KERNEL_CACHE_PATCHED = original_flag
+    compiler_interface._enable_static_kernel_run_package_cache()
 
 
 def _cache_dir():
-    from vllm_ascend.compilation.compiler_interface import _static_kernel_cache_dir
-
-    return _static_kernel_cache_dir()
+    return compiler_interface._static_kernel_cache_dir()
 
 
 def _cache_options():
-    from vllm_ascend.compilation.compiler_interface import _static_kernel_cache_options
-
-    return _static_kernel_cache_options()
+    return compiler_interface._static_kernel_cache_options()
 
 
 def test_cache_dir_follows_vllm_cache_root(monkeypatch):
@@ -112,6 +155,7 @@ def test_cache_options_track_the_deterministic_setting(monkeypatch):
         assert _cache_options()["static_kernel_compile.deterministic"] is True
 
 
+@needs_npugraph_ex
 def test_cache_keys_reach_the_runtime_config():
     """The keys must land in the config dict the static kernel compiler reads.
 
@@ -136,6 +180,7 @@ def test_cache_keys_reach_the_runtime_config():
     assert "static_kernel_compile.deterministic" in configs
 
 
+@needs_npugraph_ex
 def test_cache_keys_are_absent_without_static_kernel():
     """Without static kernel the keys must not be added."""
     from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
@@ -153,6 +198,7 @@ def test_cache_keys_are_absent_without_static_kernel():
     assert "static_kernel_compile.use_cache_compile" not in configs
 
 
+@needs_npugraph_ex
 def test_static_kernel_compiler_takes_the_cache_path_under_force_eager():
     """The whole point of the fix: force_eager must not disable the cache.
 
@@ -186,6 +232,7 @@ def test_static_kernel_compiler_takes_the_cache_path_under_force_eager():
     assert calls == ["cache"]
 
 
+@needs_npugraph_ex
 def test_static_kernel_compiler_without_cache_keys_still_compiles():
     """Without the cache keys the compiler must keep the upstream behaviour."""
     from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
@@ -207,9 +254,11 @@ def test_static_kernel_compiler_without_cache_keys_still_compiles():
     assert calls == ["compile"]
 
 
+@needs_npugraph_ex
 def test_the_patch_is_applied_only_once():
     """initialize_cache() can run more than once; the wrappers must not stack."""
     from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
+    from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
 
     original_compile_static_kernel = static_kernel.compile_static_kernel
     original_normalize_config = AclConcreteGraph.normalize_config
@@ -230,6 +279,7 @@ def test_the_patch_is_applied_only_once():
         AclConcreteGraph.normalize_config = original_normalize_config
 
 
+@needs_npugraph_ex
 def test_a_missing_config_object_does_not_add_the_cache_keys():
     """The config object belongs to npugraph_ex, so read it defensively.
 
@@ -253,6 +303,7 @@ def test_a_missing_config_object_does_not_add_the_cache_keys():
     assert "static_kernel_compile.use_cache_compile" not in configs
 
 
+@needs_npugraph_ex
 def test_a_config_object_without_the_flag_does_not_add_the_cache_keys():
     """A config object without the flag must not get the cache keys."""
     from npugraph_ex._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
@@ -270,6 +321,7 @@ def test_a_config_object_without_the_flag_does_not_add_the_cache_keys():
     assert "static_kernel_compile.use_cache_compile" not in configs
 
 
+@needs_npugraph_ex
 def test_the_compiler_falls_back_when_the_install_path_fails():
     """A failure in the private install API must not fail the compilation."""
     from npugraph_ex._acl_concrete_graph import acl_graph, static_kernel
