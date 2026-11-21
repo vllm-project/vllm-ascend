@@ -42,9 +42,14 @@ from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.large_head_paged_verify import (
+    AscendLargeHeadPagedMetadata,
+    large_head_decode_graph_params,
+    large_head_verify_graph_params,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import model_supports_dcp, vllm_version_is
+from vllm_ascend.utils import model_supports_dcp, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -624,6 +629,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         is_draft_model_prefill: bool,
     ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
+        del num_tokens_padded
         attn_metadata = self.model_state.attn_metadata
         attn_metadata = {
             name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
@@ -631,6 +637,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
         if is_draft_model_prefill:
             return [attn_metadata]
+
+        attn_backend = getattr(self, "attn_backend", None)
+        if attn_backend is not None and use_updatable_graph(attn_backend):
+            fast_meta = self._build_gqa_updatable_decode_metadata(attn_metadata, num_reqs_padded)
+            if fast_meta is not None:
+                return [fast_meta]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
@@ -640,6 +652,53 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             self._update_decode_attn_metadata(per_step_attn_metadata, step, self.input_batch.num_reqs)
 
         return draft_attn_metadatas
+
+    def _build_gqa_updatable_decode_metadata(
+        self,
+        attn_metadata: dict[str, Any] | None,
+        num_reqs_padded: int,
+    ) -> dict[str, Any] | None:
+        """Build draft decode metadata for GQA UpdatableGraph without full metadata rebuilds."""
+        if self.attn_architecture != "GQA" or self.use_dcp or not attn_metadata:
+            return None
+        metadatas = list(attn_metadata.values())
+        if any(metadata is None or getattr(metadata, "use_pa_graph", False) for metadata in metadatas):
+            return None
+        if all(
+            metadata.block_tables is not None and metadata.block_tables.shape[0] == num_reqs_padded
+            for metadata in metadatas
+        ):
+            return attn_metadata
+
+        layer_to_group = getattr(self, "_draft_layer_to_kv_group", None)
+        if layer_to_group is None:
+            attn_groups = getattr(self, "attn_groups", None)
+            if not attn_groups:
+                return None
+            layer_to_group = {
+                layer_name: gid
+                for gid, groups in enumerate(attn_groups)
+                for group in groups
+                for layer_name in group.layer_names
+            }
+            self._draft_layer_to_kv_group = layer_to_group
+
+        input_block_tables = getattr(getattr(self, "block_tables", None), "input_block_tables", None)
+        if not input_block_tables:
+            return None
+
+        padded_metadata: dict[str, Any] = {}
+        for layer_name, metadata in attn_metadata.items():
+            if metadata.block_tables is not None and metadata.block_tables.shape[0] == num_reqs_padded:
+                padded_metadata[layer_name] = metadata
+                continue
+            gid = layer_to_group.get(layer_name)
+            if gid is None or gid >= len(input_block_tables) or input_block_tables[gid].shape[0] < num_reqs_padded:
+                return None
+            copied = copy(metadata)
+            copied.block_tables = input_block_tables[gid][:num_reqs_padded]
+            padded_metadata[layer_name] = copied
+        return padded_metadata
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize per-step decode attention metadata for graph mode."""
@@ -709,7 +768,15 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         seq_lens_cpu = self._get_seq_lens_cpu(num_reqs_padded)
         if num_reqs is None:
             num_reqs = num_reqs_padded
-        next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
+        # Query-only drafters (such as Gemma4 MTP) read the shared target KV
+        # cache at a fixed length across draft steps instead of advancing +1.
+        step_offset = step if self.advance_draft_positions else 0
+        next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step_offset)
+        if not self.advance_draft_positions:
+            # Capture warmups can leave active request lengths at zero before a
+            # real batch populates seq_lens_cpu; keep active rows >= 1 while
+            # leaving padded rows at zero.
+            next_seq_lens_cpu[:num_reqs].clamp_(min=1)
 
         dcp_local_seq_lens_cpu = None
         if self.use_dcp:
@@ -748,10 +815,14 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
-        block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             prefill_fia_params: list[dict[str, Any]] = []
             for layer_name, metadata in draft_attn_metadata.items():
+                if isinstance(metadata, AscendLargeHeadPagedMetadata):
+                    prefill_fia_params.append(
+                        {"layer_name": layer_name, **large_head_verify_graph_params(layer_name, metadata)}
+                    )
+                    continue
                 is_mla = isinstance(metadata, AscendMLAMetadata)
                 prefill_metadata = metadata.decode if is_mla else metadata
                 assert prefill_metadata is not None
@@ -771,12 +842,20 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
         fia_params: list[dict[str, Any]] = []
+        step_offset = 1 if self.advance_draft_positions else 0
         for step in range(1, self.num_speculative_steps):
+            delta = step * step_offset
             seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                min(int(seq_len) + delta, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            for layer_name in self.draft_attn_layer_names:
+            for layer_name, metadata in draft_attn_metadata.items():
+                if isinstance(metadata, AscendLargeHeadPagedMetadata):
+                    fia_params.append({"layer_name": layer_name, **large_head_decode_graph_params(metadata, seq_lens)})
+                    continue
+                is_mla = isinstance(metadata, AscendMLAMetadata)
+                decode_metadata = metadata.decode if is_mla else metadata
+                assert decode_metadata is not None
                 fia_params.append(
                     {
                         "layer_name": layer_name,
@@ -784,7 +863,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "actual_seq_lengths_kv": seq_lens,
                         "actual_seq_qlen": query_start_loc,
                         "actual_seq_kvlen": seq_lens,
-                        "block_table": block_table,
+                        "block_table": decode_metadata.block_table if is_mla else metadata.block_tables,
                     }
                 )
         return fia_params

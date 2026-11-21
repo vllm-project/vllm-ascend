@@ -145,6 +145,7 @@ def selection(monkeypatch, profiles):
         ),
         "_validate_fa3_backend": lambda *args: False,
         "_validate_flash_attn_backend": lambda *args: False,
+        "_should_use_large_head_paged_backend": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(

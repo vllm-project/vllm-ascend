@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import torch
@@ -40,17 +40,21 @@ class ContextSource:
 @dataclass(frozen=True, slots=True)
 class SharedSource:
     params: Sequence[Params]
+    _by_layer: dict[str | None, list[Params]] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        by_layer: dict[str | None, list[Params]] = {}
+        for param in self.params:
+            layer_name = param.get("layer_name")
+            entry = {k: v for k, v in param.items() if k != "layer_name"}
+            by_layer.setdefault(layer_name, []).append(entry)
+        object.__setattr__(self, "_by_layer", by_layer)
 
     def get(
         self,
         _provider: ParamProvider,
     ) -> Sequence[Params]:
-        layer_name = getattr(_provider, "layer_name", None)
-        return [
-            {k: v for k, v in param.items() if k != "layer_name"}
-            for param in self.params
-            if layer_name == param.get("layer_name")
-        ]
+        return self._by_layer.get(getattr(_provider, "layer_name", None), ())
 
 
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)
@@ -66,8 +70,18 @@ class GraphUpdateTask:
     event: Any
 
     def bind(self, params: Params) -> "GraphUpdateTask":
-        runtime_kwargs = {k: params.get(k, v) for k, v in self.kwargs.items()}
-        return replace(self, kwargs=runtime_kwargs)
+        runtime_kwargs = self.kwargs.copy()
+        for k, v in params.items():
+            if k in runtime_kwargs:
+                runtime_kwargs[k] = v
+        return GraphUpdateTask(
+            self.operation,
+            runtime_kwargs,
+            self.provider,
+            self.provider_index,
+            self.handle,
+            self.event,
+        )
 
     def apply(self, update_stream) -> None:
         torch.npu.graph_task_update_begin(update_stream, self.handle)

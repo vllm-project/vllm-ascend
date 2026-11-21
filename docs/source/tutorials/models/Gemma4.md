@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. MXFP4 quantization is supported on 950PR&950DT Products.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported. Speculative decoding (`--speculative-config '{"method": "mtp", ...}'`) is supported on Atlas A2, Atlas A3, and 950PR&950DT Products; on Atlas A2/A3, 512-dim global attention layers automatically route MTP verification and draft decode steps to the paged BNSD/PA ACLGraph path without extra environment variables. MXFP4 quantization is supported on 950PR&950DT Products.
 
 ## 3 Prerequisites
 
@@ -338,6 +338,7 @@ Recommended tuning order:
 | Optimization | Enablement | Benefit | Notes |
 | ------------ | ---------- | ------- | ----- |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` | Reduces decode dispatch overhead. | Recommended when decode tokens are generated. |
+| Speculative decoding (MTP) | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3, ...}'` | Accelerates decode throughput by verifying `k + 1` tokens in parallel. | Supported on Atlas A2, Atlas A3, and 950PR&950DT Products with `FULL_DECODE_ONLY`, `FULL`, and eager execution; 512-dim global layers use paged verify/decode automatically on A2/A3. |
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
