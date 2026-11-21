@@ -1,3 +1,7 @@
+#!/usr/bin/env bash
+
+# Arguments: devices, API port, DP size, DP rank, DP address, DP RPC port, TP, PCP, PP.
+# PCP and PP default to 1 for direct calls using the original seven arguments.
 export HCCL_IF_IP=your_ip_here
 export GLOO_SOCKET_IFNAME=your_socket_ifname_here
 export TP_SOCKET_IFNAME=your_socket_ifname_here
@@ -10,16 +14,18 @@ export HCCL_DETERMINISTIC=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-export ASCEND_RT_VISIBLE_DEVICES=$1
+export ASCEND_RT_VISIBLE_DEVICES="$1"
 
 vllm serve model_path \
     --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
+    --port "$2" \
+    --data-parallel-size "$3" \
+    --data-parallel-rank "$4" \
+    --data-parallel-address "$5" \
+    --data-parallel-rpc-port "$6" \
+    --tensor-parallel-size "$7" \
+    --prefill-context-parallel-size "${8:-1}" \
+    --pipeline-parallel-size "${9:-1}" \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \
