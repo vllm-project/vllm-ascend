@@ -292,6 +292,18 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         # vocab-parallel argmax, no full-vocab logits.
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Identify weights the draft loader can skip before opening a shard for tensor reads."""
+        if "rotary_emb.inv_freq" in name:
+            return True
+        if name == "rot.weight":
+            return not self.is_rot_weight_used
+        if name.startswith("model.language_model."):
+            name = name.replace("model.language_model.", "model.", 1)
+        if name == "model.embed_tokens.weight":
+            return False
+        return get_spec_layer_idx_from_weight_name(self.config, name) is None
+
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [
             "embed_tokens",
