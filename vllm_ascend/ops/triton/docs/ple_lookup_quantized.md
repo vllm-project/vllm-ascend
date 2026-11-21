@@ -14,7 +14,7 @@
   `s = 0`; `s = 255` represents NaN. Non-owned IDs produce zero.
 - **Algorithm flow**: One program handles one requested row, checks shard
   ownership, selects the host allocation chunk through device pointer tables,
-  loads the requested columns and one scale per group, broadcasts scales
+  loads the requested columns from host and one scale per group from the rank-local NPU parameter, broadcasts scales
   across each group of 32 columns, and writes BF16 results. Columns
   outside the width are masked. The caller owns cross-rank reduction.
   Both INT8 and MXFP8 specializations branch on shard ownership before host
@@ -34,7 +34,7 @@ All parameters are required; `is_mxfp8` is keyword-only for `lookup_quantized`.
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `code_chunk_ptrs` | Input | Device addresses of registered host code chunks | NPU INT64 | Contiguous 1-D |
-| `scale_chunk_ptrs` | Input | Device addresses of registered host scale chunks; quantized entry only | NPU INT64 | Contiguous 1-D |
+| `scale_chunk_ptrs` | Input | Local scale shard in HBM, or legacy chunk addresses | NPU UINT8 (MXFP8), FP32 (INT8), or INT64 addresses | Contiguous 2-D scales or 1-D addresses |
 | `embedding_ids` | Input | Global embedding IDs; non-owned IDs produce zero | NPU INT32/INT64 | Any shape; copied to contiguous if needed |
 | `output` | Output | Requested rows, written in place | NPU BF16 | `(*embedding_ids.shape, width)`, contiguous for quantized lookup |
 | `shard_start`, `shard_end` | Attribute | Inclusive/exclusive global bounds of the owned shard | Python int | `0 <= shard_start < shard_end` |
@@ -72,7 +72,7 @@ fixed tile size and does not use those properties to select its grid or tile.
   the model caller selects the operator before invocation. `is_mxfp8` selects
   the INT8 or MXFP8 quantized format at compile time, not BF16 versus quantized
   lookup at runtime.
-- **Differences**: Keeps compressed codes and scales in separate host buffers,
+- **Differences**: Keeps compressed codes in registered host memory and scales in rank-local HBM,
   decodes selected rows, preserves out-of-shard zeroing, and retains upstream
   reduction and host-buffer ownership. It is a model-support feature; there is
   no unconditional throughput improvement claim. No autotuning is used.
