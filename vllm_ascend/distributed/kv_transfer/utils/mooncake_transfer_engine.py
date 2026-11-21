@@ -86,5 +86,13 @@ class GlobalTE:
 
             self.is_register_buffer = True
 
+    def disconnect_all_peers(self) -> None:
+        with self.register_buffer_lock:
+            if self.transfer_engine is None:
+                return
+            ret = self.transfer_engine.disconnect_all_peers()
+            if ret != 0:
+                raise RuntimeError(f"Mooncake peer disconnection failed with ret_value: {ret}")
+
 
 global_te = GlobalTE()
