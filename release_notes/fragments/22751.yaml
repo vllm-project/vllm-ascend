@@ -1,0 +1,9 @@
+pr: 22751
+entries:
+  - category: performance
+    text: >-
+      Added an opt-in decode limit for mixed prefill and decode steps in
+      colocated Ascend serving. Set
+      `scheduler_config.max_num_decode_seqs_in_mixed_batch` via
+      `--additional-config` to bound decode rows and give deferred decode
+      requests a chance to advance in the following step.
