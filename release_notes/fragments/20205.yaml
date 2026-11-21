@@ -1,0 +1,6 @@
+pr: 20205
+entries:
+  - category: feature
+    text: Added support for updating speculative draft model weights through HCCL weight-transfer sessions.
+  - category: bugfix
+    text: Preserved shared HC head parameters when reloading DeepSeek V4 DSpark draft weights.

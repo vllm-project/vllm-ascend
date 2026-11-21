@@ -169,6 +169,26 @@ FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
 
+### Speculative draft weight updates
+
+With a model-based speculative decoder and the HCCL weight-transfer backend,
+call `start_draft_weight_update()` instead of
+`start_weight_update()`. Send the draft model's weight chunks through the same
+`update_weights()` interface, then call `finish_weight_update()`. The worker
+selects the draft model and its model configuration for that session and
+restores the transfer engine's target model afterward.
+
+Draft weight updates require Model Runner V2. The worker selects and restores
+the receiver through the transfer engine's public target-selection interfaces.
+Ordinary target updates retain the existing Ascend lifecycle. This feature
+does not enable draft updates for IPC or other transfer backends.
+
+Generation must remain paused throughout the update. Overlapping target and
+draft update sessions are rejected. Failed updates do not roll back partially
+loaded weights or guarantee that the reload state is reusable. After a failed
+weight update, restart the affected inference workers and load a complete,
+known-good checkpoint before resuming generation.
+
 #### Sparse HCCL
 
 For sparse checkpoint updates, follow the upstream [Sparse NCCL guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl) for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl` and enable RL mode:

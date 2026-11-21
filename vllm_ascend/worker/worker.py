@@ -254,6 +254,7 @@ class NPUWorker(GPUWorker):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
+        self._draft_weight_update_active = False
         self.npugraph_memory_bytes = 0
         # Buffers and parameters saved before sleep.
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -332,13 +333,67 @@ class NPUWorker(GPUWorker):
             reset_fn()
 
     def get_draft_model(self) -> nn.Module | None:
-        raise NotImplementedError("GPUWorker.get_draft_model is not validated on Ascend.")
+        if not self.use_v2_model_runner:
+            raise RuntimeError("Draft weight updates require Model Runner V2.")
+        return self.model_runner.get_draft_model()
 
     def supports_draft_weight_updates(self) -> bool:
-        return False
+        config = self.vllm_config.weight_transfer_config
+        speculative_config = self.vllm_config.speculative_config
+        return (
+            self.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size == 1
+            and config is not None
+            and config.backend == "hccl"
+            and self.weight_transfer_engine is not None
+            and self.weight_transfer_engine.supports_draft_weight_update
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+            and not getattr(speculative_config, "prefill_context_kv_only", False)
+            and self.get_draft_model() is not None
+        )
 
     def _set_draft_weight_update_target(self) -> None:
-        raise NotImplementedError("GPUWorker._set_draft_weight_update_target is not validated on Ascend.")
+        draft_model = self.get_draft_model()
+        speculative_config = self.vllm_config.speculative_config
+        if draft_model is None or speculative_config is None:
+            raise RuntimeError("No draft model is configured for weight updates.")
+        if getattr(speculative_config, "prefill_context_kv_only", False):
+            raise RuntimeError("Draft weights are unavailable with prefill_context_kv_only.")
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
+
+    def start_draft_weight_update(self) -> None:
+        self._check_weight_transfer_engine()
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise RuntimeError("Draft weight updates do not support pipeline parallelism.")
+        if self._weight_update_active:
+            raise RuntimeError("A weight update is already active. Call finish_weight_update first.")
+        if not self.supports_draft_weight_updates():
+            raise RuntimeError(
+                "Draft weight updates are supported only by the HCCL Model Runner V2 path "
+                "with a configured draft model."
+            )
+        self._check_nz_disabled()
+        assert self.weight_transfer_engine is not None
+        try:
+            self._set_draft_weight_update_target()
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            raise
+        self._draft_weight_update_active = True
+        self._weight_update_active = True
+
+    def _restore_draft_weight_update_target(self) -> None:
+        assert self.weight_transfer_engine is not None
+        try:
+            self.weight_transfer_engine.reset_weight_update_target()
+        finally:
+            self._draft_weight_update_active = False
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
 
     def get_compilation_match_table(self) -> dict[str, int]:
         raise NotImplementedError("GPUWorker.get_compilation_match_table is not validated on Ascend.")
@@ -366,12 +421,6 @@ class NPUWorker(GPUWorker):
 
     def shutdown_weight_transfer_engine(self) -> None:
         raise NotImplementedError("GPUWorker.shutdown_weight_transfer_engine is not validated on Ascend.")
-
-    def start_draft_weight_update(self) -> None:
-        raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
-
-    def _start_weight_update(self, is_draft: bool = False) -> None:
-        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")
@@ -558,6 +607,8 @@ class NPUWorker(GPUWorker):
             self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
             self._weight_update_active = False
+            if getattr(self, "_draft_weight_update_active", False):
+                self._restore_draft_weight_update_target()
             raise
 
     def finish_weight_update(self) -> None:
@@ -568,6 +619,13 @@ class NPUWorker(GPUWorker):
             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
+        if getattr(self, "_draft_weight_update_active", False):
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            finally:
+                self._weight_update_active = False
+                self._restore_draft_weight_update_target()
+            return
         self.weight_transfer_engine.finish_weight_update()
         if vllm_version_is("0.33.0"):
             self.model_runner.reset_lora_state()

@@ -3,12 +3,17 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
+import hashlib
 import json
+from collections.abc import Callable
 from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+import torch
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
@@ -102,6 +107,7 @@ def reference_serve_args(
     return [
         "--tokenizer",
         case.model,
+        *case.extra_server_args,
         "--served-model-name",
         case.model,
         *_common_serve_args(
@@ -261,3 +267,104 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class WeightUpdateTestWorkerExtension:
+    """Read real worker parameters through the development collective RPC."""
+
+    if TYPE_CHECKING:
+        # Supplied by the worker class when the extension is composed at runtime.
+        get_model: Callable[[], torch.nn.Module]
+        get_draft_model: Callable[[], torch.nn.Module | None]
+
+    def draft_model_architecture(self):
+        return type(self.get_draft_model()).__name__
+
+    def snapshot_draft_context_projections(self):
+        draft_model = self.get_draft_model()
+        assert draft_model is not None, "Draft model is missing"
+        model = draft_model.model
+        return {
+            name: hashlib.sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+            for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight")
+            if isinstance(value := getattr(model, name, None), torch.Tensor)
+        }
+
+    def snapshot_weight_update_models(self):
+        result = {}
+        for name, model in (("target", self.get_model()), ("draft", self.get_draft_model())):
+            assert model is not None, f"{name} model is missing"
+            result[name] = {
+                key: {
+                    "digest": hashlib.sha256(
+                        value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    ).hexdigest(),
+                    "data_ptr": value.data_ptr(),
+                }
+                for key, value in model.named_parameters()
+            }
+        return result
+
+
+def snapshot_weight_update_models(server):
+    response = post_control(server, "collective_rpc", json={"method": "snapshot_weight_update_models"})
+    results = response.json()["results"]
+    assert len(results) == 1
+    return results[0]
+
+
+def parameter_digests(snapshot):
+    return {model: {name: value["digest"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def parameter_addresses(snapshot):
+    return {model: {name: value["data_ptr"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+    case = speculative_case.target
+    args = [
+        "--tokenizer",
+        case.model,
+        *case.server_args(),
+        "--served-model-name",
+        case.id,
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "128",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--kv-cache-memory-bytes",
+        str(128 * 2**20),
+        "--port",
+        str(port),
+        "--additional-config",
+        '{"rl_config": {"enabled": true}}',
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": speculative_case.method,
+                "model": str(checkpoint / "draft"),
+                "num_speculative_tokens": speculative_case.num_speculative_tokens,
+                "draft_sample_method": speculative_case.draft_sample_method,
+            }
+        ),
+        "--worker-extension-cls",
+        "tests.e2e.common.rlhf.weight_transfer.reference_check.WeightUpdateTestWorkerExtension",
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    else:
+        args += [
+            "--compilation-config",
+            '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        ]
+    if live:
+        args += ["--weight-transfer-config", '{"backend": "hccl"}']
+    return args

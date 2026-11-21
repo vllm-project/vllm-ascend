@@ -292,6 +292,7 @@ class TestNPUWorker(TestBase):
                 6172,
             )
 
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
@@ -312,9 +313,11 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions,
         mock_ops,
         mock_adapt_patch,
+        mock_hardware_profile,
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
+        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
         self.model_config_mock.enable_sleep_mode = False
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()

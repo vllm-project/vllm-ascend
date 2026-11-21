@@ -321,6 +321,117 @@ class TestNPUWorkerV2(TestBase):
         worker.model_runner.pool.assert_called_once_with()
 
 
+class TestNPUWorkerV2WeightUpdate(TestBase):
+    @staticmethod
+    def _make_worker():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        draft = torch.nn.Linear(2, 2)
+        worker.weight_transfer_engine = MagicMock(supports_draft_weight_update=True)
+        worker._weight_update_active = False
+        worker._draft_weight_update_active = False
+        worker.use_v2_model_runner = True
+        worker.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
+        worker.vllm_config = SimpleNamespace(
+            weight_transfer_config=SimpleNamespace(backend="hccl"),
+            speculative_config=SimpleNamespace(draft_model_config=object()),
+        )
+        worker.model_runner = SimpleNamespace(
+            get_draft_model=lambda: draft,
+            reset_lora_state=MagicMock(),
+        )
+        return worker, draft
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_draft_update_then_target_update(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        worker, draft = self._make_worker()
+        engine = worker.weight_transfer_engine
+        worker.start_draft_weight_update()
+        engine.set_weight_update_target.assert_called_once_with(
+            draft, worker.vllm_config.speculative_config.draft_model_config
+        )
+        worker.update_weights({})
+        worker.finish_weight_update()
+        self.assertFalse(worker._weight_update_active)
+        self.assertFalse(worker._draft_weight_update_active)
+        worker.model_runner.reset_lora_state.assert_not_called()
+        engine.reset_weight_update_target.assert_called_once_with()
+
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        engine.update_weights.assert_called_once_with({})
+        self.assertEqual(engine.start_weight_update.call_count, 2)
+        self.assertEqual(engine.finish_weight_update.call_count, 2)
+        engine.reset_weight_update_target.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_failed_draft_update_restores_routing(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 0
+        for operation in ("start_weight_update", "update_weights", "finish_weight_update"):
+            with self.subTest(operation=operation):
+                worker, _ = self._make_worker()
+                engine = worker.weight_transfer_engine
+                getattr(engine, operation).side_effect = RuntimeError("reload failed")
+                with self.assertRaisesRegex(RuntimeError, "reload failed"):
+                    worker.start_draft_weight_update()
+                    worker.update_weights({})
+                    worker.finish_weight_update()
+                engine.reset_weight_update_target.assert_called_once_with()
+                self.assertFalse(worker._weight_update_active)
+                self.assertFalse(worker._draft_weight_update_active)
+                worker.model_runner.reset_lora_state.assert_not_called()
+
+    def test_draft_capability_is_limited_to_validated_backend(self):
+        for backend, use_v2, engine_support, supported in (
+            ("hccl", True, True, True),
+            ("ipc", True, True, False),
+            ("npu_ipc", True, True, False),
+            ("hccl", False, True, False),
+            ("hccl", True, False, False),
+        ):
+            with self.subTest(backend=backend, use_v2=use_v2, engine_support=engine_support):
+                worker, _ = self._make_worker()
+                worker.vllm_config.weight_transfer_config.backend = backend
+                worker.use_v2_model_runner = use_v2
+                worker.weight_transfer_engine.supports_draft_weight_update = engine_support
+                self.assertEqual(worker.supports_draft_weight_updates(), supported)
+                if not supported:
+                    with self.assertRaisesRegex(RuntimeError, "supported only"):
+                        worker.start_draft_weight_update()
+                    worker.weight_transfer_engine.set_weight_update_target.assert_not_called()
+
+    def test_draft_update_rejects_runner_without_draft_model(self):
+        worker, _ = self._make_worker()
+        worker.model_runner.get_draft_model = lambda: None
+        self.assertFalse(worker.supports_draft_weight_updates())
+        with self.assertRaisesRegex(RuntimeError, "configured draft model"):
+            worker.start_draft_weight_update()
+        worker.weight_transfer_engine.start_weight_update.assert_not_called()
+
+    def test_draft_update_rejects_pipeline_parallelism(self):
+        for has_draft in (True, False):
+            with self.subTest(has_draft=has_draft):
+                worker, _ = self._make_worker()
+                worker.parallel_config.pipeline_parallel_size = 2
+                if not has_draft:
+                    worker.model_runner.get_draft_model = lambda: None
+                self.assertFalse(worker.supports_draft_weight_updates())
+                with self.assertRaisesRegex(RuntimeError, "do not support pipeline parallelism"):
+                    worker.start_draft_weight_update()
+                worker.weight_transfer_engine.start_weight_update.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_draft_update_rejects_nz(self, ascend_config):
+        ascend_config.return_value.weight_nz_mode = 1
+        worker, _ = self._make_worker()
+        with self.assertRaises(ValueError):
+            worker.start_draft_weight_update()
+        worker.weight_transfer_engine.start_weight_update.assert_not_called()
+
+
 @pytest.mark.parametrize("with_kv_transfer", [False, True])
 @pytest.mark.parametrize("use_compress", [False, True])
 def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_transfer, use_compress):

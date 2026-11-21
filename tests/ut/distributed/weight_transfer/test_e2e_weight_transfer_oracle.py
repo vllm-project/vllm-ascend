@@ -24,17 +24,26 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from safetensors.torch import load_file
+from transformers import Qwen3Config
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.case import DRAFT_MODEL_CASES, MODEL_CASES, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
+    draft_serve_args,
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
+from tests.e2e.common.rlhf.weight_transfer.weight_source import FixedRandomWeightSource
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -187,3 +196,82 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.fixture
+def random_weight_case(tmp_path):
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        tie_word_embeddings=False,
+    ).save_pretrained(tmp_path)
+    return WeightUpdateModelCase(id="target", model=str(tmp_path), hf_overrides={})
+
+
+@pytest.mark.parametrize("use_modelscope", [False, True])
+def test_draft_checkpoint_matches_payload_and_applies_overrides(random_weight_case, tmp_path, use_modelscope):
+    case = random_weight_case
+    draft_case = replace(case, id="draft", hf_overrides={"num_hidden_layers": 1, "layer_types": ["full_attention"]})
+    device = torch.device("cpu")
+    source = FixedRandomWeightSource(case, device, draft_case=draft_case)
+    destination = tmp_path / "checkpoint"
+    original_config = (Path(case.model) / "config.json").read_bytes()
+    download = "modelscope.model_file_download" if use_modelscope else "huggingface_hub.hf_hub_download"
+    with (
+        patch("vllm.envs.VLLM_USE_MODELSCOPE", use_modelscope),
+        patch(download, return_value=str(Path(case.model) / "config.json")),
+    ):
+        source.write_checkpoint(destination)
+
+    assert source.draft_source is not None
+    for directory, payload in (
+        (destination, dict(FixedRandomWeightSource(case, device))),
+        (destination / "draft", dict(source.draft_source)),
+    ):
+        checkpoint = load_file(str(directory / "model.safetensors"))
+        assert checkpoint.keys() == payload.keys()
+        for name, tensor in payload.items():
+            torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
+
+    assert (destination / "config.json").read_bytes() == original_config
+    assert (Path(case.model) / "config.json").read_bytes() == original_config
+    draft_config = Qwen3Config.from_pretrained(destination / "draft")
+    assert draft_config.num_hidden_layers == 1
+    assert draft_config.layer_types == ["full_attention"]
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_hccl_client_selects_only_the_start_endpoint(is_draft):
+    from tests.e2e.common.rlhf.weight_transfer import hccl
+
+    client = hccl.WeightUpdateClient("http://unused")
+    client.is_draft = is_draft
+    with patch.object(client, "_post") as post:
+        client.start_weight_update()
+        client.update_weights({"names": ["model.norm.weight"]})
+        client.finish_weight_update()
+    assert [call.args[0] for call in post.call_args_list] == [
+        "start_draft_weight_update" if is_draft else "start_weight_update",
+        "update_weights",
+        "finish_weight_update",
+    ]
+
+
+@pytest.mark.parametrize("speculative_case", DRAFT_MODEL_CASES, ids=lambda case: case.id)
+def test_four_draft_cases_select_the_actual_speculative_method(speculative_case, tmp_path):
+    for eager in (True, False):
+        reference = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=False))
+        lane = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=True))
+        assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
+        assert lane == reference
+        assert json.loads(cast(str, lane["--hf-overrides"])) == speculative_case.target.hf_overrides
+        spec = json.loads(cast(str, lane["--speculative-config"]))
+        assert spec["method"] == speculative_case.method
+        assert spec["method"] != "draft_model"
+        assert spec["draft_sample_method"] == speculative_case.draft_sample_method
