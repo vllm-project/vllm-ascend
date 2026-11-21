@@ -71,7 +71,7 @@ class HbmUceNonKvFault(HbmUceUnrecoverableFault):
 
 
 def classify_uce_after_stop(registry: KvCacheRegionRegistry | None, device_id: int | None = None) -> HbmUceFault | None:
-    """Classify HBM UCE after stop_device, following MindIE's recovery timing."""
+    """Query UCE after device stop, mark fully KV-covered tensors safe, and return the fault classification."""
     check_result = _check_uce_in_memory(device_id)
     if check_result == _UCE_NO_ADDRESS:
         logger.debug("No torch_npu UCE address after stop_device; continue retry as a normal device reset")

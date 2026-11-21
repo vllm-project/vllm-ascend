@@ -34,6 +34,7 @@ def recover_acl_graphs(worker, request_id: str) -> None:
 
 
 def _recover_v2_graphs(worker, request_id: str) -> None:
+    """Discard old V2 graphs, rebuild MC2 and the graph pool, then recapture and verify every graph replay."""
     runner = worker.model_runner
     graph_manager = runner.cudagraph_manager
     if graph_manager is None:
@@ -81,6 +82,7 @@ def _renew_graph_pool(runner) -> None:
     # The last graph release retires its allocator pool (use_count == 0).
     # Reusing that handle for capture triggers create_or_incref_pool's assert.
     # Persistent model/KV allocations stay intact; only graph temporaries move.
+    """Replace the released graph pool and update its users while preserving model and KV allocations."""
     pool = current_platform.graph_pool_handle()
     type(current_platform)._global_graph_pool = pool
     for wrapper in list(acl_graph._acl_graph_wrappers):

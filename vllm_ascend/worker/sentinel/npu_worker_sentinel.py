@@ -158,10 +158,12 @@ class WorkerSentinel(GPUWorkerSentinel):
         return {"mask": get_ep_all2all_manager().query_active_mask().tolist()}
 
     def _stop_device(self) -> None:
+        """Stop this worker device before querying and classifying UCE memory."""
         NPUPlatform.set_device(self.device)
         torch_npu.npu.stop_device(self.device.index)
 
     def _classify_uce(self) -> None:
+        """Classify current UCE ranges, mark recoverable KV tensors safe, and retain unrecoverable faults."""
         if self._unrecoverable_uce is not None:
             raise self._unrecoverable_uce
         registry = getattr(self.worker.model_runner, "kv_cache_region_registry", None)
@@ -177,6 +179,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise fault
 
     def _restart_device(self) -> None:
+        """Restart the device, reinitialize its process groups, and wait for completion."""
         torch_npu.npu.restart_device(self.device.index)
         torch_npu.distributed.reinit_process_group(None, False)
         torch.npu.synchronize()
@@ -199,6 +202,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             time.sleep(_RETRY_CLASSIFICATION_POLL_SEC)
 
     def _build_retry_context(self, ft_request: FaultToleranceRequest) -> _RetryContext:
+        """Validate retry membership and connect to the store for this recovery round."""
         params = ft_request.params
         round_id = params["recovery_round"]
         if not round_id or round_id != ft_request.request_id:
@@ -233,6 +237,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         )
 
     def _classify_and_report_local_blocks(self, context: _RetryContext) -> "KvCacheRegionRegistry | None":
+        """Classify UCE, mark recoverable KV tensors safe, and publish worker-local affected blocks to the store."""
         decision_key = f"{context.prefix}/decision"
         local_blocks = []
         classification = _RETRY_CLASSIFICATION_RECOVERABLE
@@ -263,6 +268,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         return registry
 
     def _wait_for_classification(self, context: _RetryContext, deadline: float) -> None:
+        """Await all worker classifications, rejecting errors or repairing non-KV faults before failing retry."""
         decision_key = f"{context.prefix}/decision"
         ready_keys = [
             f"{context.prefix}/ready/{dp}/{rank}" for dp in range(context.dp_size) for rank in range(context.local_size)
@@ -295,6 +301,7 @@ class WorkerSentinel(GPUWorkerSentinel):
     def _agree_dp_aliases(
         self, context: _RetryContext, registry: "KvCacheRegionRegistry", blocks: set[int], deadline: float
     ) -> set[int]:
+        """Expand and exchange block aliases within this DP until every worker agrees on the same set."""
         iteration = 0
         while True:
             expanded = registry.expand_aliases(blocks)
@@ -316,6 +323,7 @@ class WorkerSentinel(GPUWorkerSentinel):
     def _build_and_agree_cache_plan(
         self, context: _RetryContext, registry: "KvCacheRegionRegistry", deadline: float
     ) -> None:
+        """Merge DP-local blocks, agree on aliases, and publish plan readiness before allowing device restart."""
         cache_decision_key = f"{context.prefix}/cache_decision"
         reports = [
             json.loads(context.store.get(f"{context.prefix}/blocks/{context.dp_rank}/{rank}"))
@@ -373,6 +381,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         logger.info("[FT] HBM retry classification approved for all workers: request_id=%s", context.round_id)
 
     def retry(self, ft_request: FaultToleranceRequest):
+        """Restore worker state and, for HBM retry, clear damaged KV blocks and rebuild communication and graphs."""
         logger.info(
             "[FT] Worker recovery received: request_id=%s instruction=%s rank=%s",
             ft_request.request_id,
@@ -414,6 +423,7 @@ class WorkerSentinel(GPUWorkerSentinel):
             completed.clear()
 
     def _clean_worker_state(self):
+        """Reset device metadata and delegate remaining worker cleanup to the existing FT implementation."""
         metadata = getattr(self.worker.model_runner.model_state, "device_metadata", None)
         if metadata is not None:
             metadata.reset_after_recovery()

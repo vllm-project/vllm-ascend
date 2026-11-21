@@ -33,10 +33,12 @@ class BlockBytes:
     count: int
 
     def interval(self, block: int) -> tuple[int, int]:
+        """Return this block span as a half-open byte interval relative to the allocation."""
         start = self.offset + block * self.stride
         return start, start + self.length
 
     def intersect(self, start: int, end: int) -> range:
+        """Return block IDs whose spans overlap the given allocation-relative byte interval."""
         if self.stride == 0:
             return range(self.count) if self.offset < end and start < self.offset + self.length else range(0)
         first = max(0, (start - self.offset - self.length) // self.stride + 1)
@@ -53,11 +55,13 @@ class CacheAllocation:
     views: list[torch.Tensor] = field(default_factory=list)
 
     def owners(self, start: int, end: int) -> set[int]:
+        """Return all block IDs owning bytes in the allocation-relative interval, including padding."""
         result = {block for span in self.spans for block in span.intersect(start, end)}
         result.update(block for lo, hi, block in self.padding if lo < end and start < hi)
         return result
 
     def ranges(self, blocks: set[int]) -> list[tuple[int, int]]:
+        """Return merged allocation-relative byte intervals that clearing the given blocks would modify."""
         return merge_ranges(
             [span.interval(block) for span in self.spans for block in blocks]
             + [(lo, hi) for lo, hi, block in self.padding if block in blocks]
@@ -302,6 +306,7 @@ class KvCacheRegionRegistry:
         return next((region for region in self.regions if region.contains(addr)), None)
 
     def _covered_allocations(self, start: int, size: int) -> list[int]:
+        """Return region indices fully covering the UCE address range, rejecting any gap outside KV memory."""
         if size <= 0:
             raise ValueError("UCE range must have positive size")
         cursor = start
@@ -322,6 +327,7 @@ class KvCacheRegionRegistry:
     def recover_uce_addresses(self, addr_entries: list[dict]) -> KvCacheRegion | None:
         # Validate every range, including multi-allocation faults, before making
         # any storage safe. A range crossing a non-KV gap is not recoverable.
+        """Validate all UCE ranges, save them, mark matched tensors safe, and return one representative region."""
         matches = set()
         ranges = []
         try:
@@ -342,6 +348,7 @@ class KvCacheRegionRegistry:
 
     @staticmethod
     def _update_tensor_to_safe(tensor: torch.Tensor, region: KvCacheRegion) -> None:
+        """Mark a KV tensor safe through torch_npu recovery without clearing its contents."""
         import torch_npu
 
         torch_npu.npu._recovery.update_npu_tensor_to_safe(tensor)
@@ -350,16 +357,19 @@ class KvCacheRegionRegistry:
     def refresh_pointers(self) -> None:
         # A reset must preserve storage identity for retained prefixes. Moving
         # allocations without rebuilding the ownership map cannot be accepted.
+        """Reject allocations whose address or size changed since KV region registration."""
         for region, tensor in zip(self.regions, self._tensors):
             if tensor.data_ptr() != region.data_ptr or tensor.numel() != region.nbytes:
                 raise RuntimeError("KV allocation changed during device recovery")
 
     def validate_block_space(self, num_blocks: int) -> None:
+        """Validate the requested block count against the registered layout and check storage identity."""
         if not self._allocations or self.num_blocks != num_blocks:
             raise RuntimeError("KV allocation and scheduler block spaces differ")
         self.refresh_pointers()
 
     def partial_block_ids(self, num_blocks: int) -> set[int]:
+        """Map saved UCE address ranges to local block IDs and include all byte-sharing aliases."""
         self.validate_block_space(num_blocks)
         blocks = set()
         for start, size in self.uce_ranges:
@@ -386,6 +396,7 @@ class KvCacheRegionRegistry:
         return result
 
     def invalidate_blocks(self, block_ids: list[int]) -> None:
+        """Validate the agreed block plan and zero its local byte ranges without reallocating KV storage."""
         blocks = set(block_ids)
         if not blocks:
             return
