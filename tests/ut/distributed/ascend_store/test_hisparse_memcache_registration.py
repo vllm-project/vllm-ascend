@@ -75,6 +75,72 @@ def test_hisparse_pool_keys_track_checkpoint_identity():
     assert key() != with_draft
 
 
+@pytest.mark.parametrize("model_role", ["target", "draft"])
+@pytest.mark.parametrize(
+    ("config_attr", "field", "original", "override"),
+    [
+        ("hf_config", "rope_theta", 10000.0, 20000.0),
+        (
+            "hf_text_config",
+            "rope_scaling",
+            {"rope_type": "linear", "factor": 2.0},
+            {"rope_type": "linear", "factor": 4.0},
+        ),
+        (
+            "hf_text_config",
+            "rope_parameters",
+            {"full_attention": {"rope_theta": 10000.0, "rope_type": "default"}},
+            {"full_attention": {"rope_theta": 20000.0, "rope_type": "default"}},
+        ),
+        ("hf_text_config", "rms_norm_eps", 1e-6, 1e-5),
+    ],
+)
+def test_hisparse_pool_keys_track_effective_model_config(model_role, config_attr, field, original, override):
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    target = _checkpoint("team/glm")
+    draft = _checkpoint("draft/glm")
+    config = SimpleNamespace(model_config=target, speculative_config=SimpleNamespace(draft_model_config=draft))
+    model = target if model_role == "target" else draft
+    config_values = {field: original}
+    setattr(model, config_attr, SimpleNamespace(to_dict=lambda: config_values))
+    before = build_pool_key_namespace(config, cache, 1, 128)
+
+    config_values[field] = override
+
+    assert build_pool_key_namespace(config, cache, 1, 128) != before
+    assert build_pool_key_namespace(config, None, 1, 128) == "glm"
+
+
+def test_hisparse_pool_keys_ignore_hf_config_metadata_and_field_order():
+    cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
+    model = _checkpoint("team/glm")
+    config = SimpleNamespace(model_config=model, speculative_config=None)
+    first_config = {
+        "_name_or_path": "/tmp/worker-1",
+        "text_config": {
+            "_name_or_path": "/tmp/worker-1",
+            "transformers_version": "5.1.0",
+            "rope_parameters": {"rope_type": "linear", "factor": 2.0},
+        },
+    }
+    second_config = {
+        "text_config": {
+            "rope_parameters": {"factor": 2.0, "rope_type": "linear"},
+            "transformers_version": "5.2.0",
+            "_name_or_path": "/tmp/worker-2",
+        },
+        "_name_or_path": "/tmp/worker-2",
+    }
+    model.hf_config = SimpleNamespace(to_dict=lambda: first_config)
+    before = build_pool_key_namespace(config, cache, 1, 128)
+
+    model.hf_config = SimpleNamespace(to_dict=lambda: second_config)
+
+    assert build_pool_key_namespace(config, cache, 1, 128) == before
+    assert first_config["_name_or_path"] == "/tmp/worker-1"
+    assert second_config["_name_or_path"] == "/tmp/worker-2"
+
+
 def test_relative_checkpoint_keys_follow_the_local_directory(tmp_path, monkeypatch):
     cache = KVCacheConfig(2, [], [], hisparse_host_num_blocks=3)
     keys = []

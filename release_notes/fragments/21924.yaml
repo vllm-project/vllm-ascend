@@ -15,6 +15,7 @@ entries:
       disaggregation, multi-node deployments, additional connector types,
       layerwise transfers, other Store backends and other MemCache protocols. Mooncake FabricMem and
       SSD modes are excluded from this combination. The hisparse-v4 pool namespace
-      separates target and draft checkpoints, revisions and page layouts. Older
+      separates target and draft checkpoints, revisions, effective model
+      configurations such as RoPE settings, and page layouts. Older
       objects, including hisparse-v3 entries, miss until the new pool is populated.
     hardware: [A5]
