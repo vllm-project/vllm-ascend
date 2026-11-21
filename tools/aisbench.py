@@ -175,10 +175,7 @@ class AisbenchRunner:
                 elif self.verify_mode == "ge":
                     self._accuracy_verify_ge()
                 else:
-                    raise ValueError(
-                        f"Invalid verify_mode: {self.verify_mode}. "
-                        "Expected 'ge' or 'range'."
-                    )
+                    raise ValueError(f"Invalid verify_mode: {self.verify_mode}. Expected 'ge' or 'range'.")
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold")
                 self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
@@ -415,8 +412,7 @@ class AisbenchRunner:
         )
         if self.threshold is not None and acc_value > self.baseline + self.threshold:
             logging.info(
-                "Accuracy of %s is %s, above baseline %s + threshold %s; "
-                "consider re-baselining this case.",
+                "Accuracy of %s is %s, above baseline %s + threshold %s; consider re-baselining this case.",
                 self.dataset_path,
                 acc_value,
                 self.baseline,
