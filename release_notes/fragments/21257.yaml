@@ -1,0 +1,4 @@
+pr: 21257
+entries:
+  - category: bugfix
+    text: Fixed zero-token scheduling at prefix-cache boundaries in hybrid Mooncake layerwise PD by normalizing producer prompts before cache lookup.
