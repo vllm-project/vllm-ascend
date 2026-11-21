@@ -1310,28 +1310,28 @@ Select the tab that matches the deployment hardware.
 
             ```shell
             # change ip to your own
-            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         6. Decode node 1
 
             ```shell
             # change ip to your own
-            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         7. Decode node 2
 
             ```shell
             # change ip to your own
-            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
         8. Decode node 3
 
             ```shell
             # change ip to your own
-            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+            python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
             ```
 
     4. Deploy the P-D disaggregation proxy.
@@ -2521,16 +2521,16 @@ Select the tab that matches the deployment hardware.
 
     ```shell
     # Decode node 0
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 0 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
 
     # Decode node 1
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 1 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
 
     # Decode node 2
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 2 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
 
     # Decode node 3
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 8000
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 1 --dp-rank-start 3 --dp-address xx.xx.xx.5 --dp-rpc-port 12321 --vllm-start-port 8000
     ```
 
     ##### Startup and Verification
