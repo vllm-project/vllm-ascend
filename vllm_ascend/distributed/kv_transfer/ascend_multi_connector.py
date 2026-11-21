@@ -12,12 +12,42 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
+    @classmethod
+    def _get_connector_classes_and_configs(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[tuple[type["KVConnectorBaseType"], "VllmConfig"]]:
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+        children = super()._get_connector_classes_and_configs(vllm_config)
+        for index, (connector_cls, config) in enumerate(children):
+            if connector_cls is MooncakeConnectorV2:
+                assert config.kv_transfer_config is not None
+                selected = MooncakeConnectorV2._get_connector_cls(config.kv_transfer_config)
+                # Keep the public V2 class as the Prometheus key for private HiSparse Pull.
+                if selected is not _HiSparseMooncakePullConnector:
+                    children[index] = selected, config
+        return children
+
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+        stats = super().get_kv_connector_stats()
+        if stats is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.hisparse_pd import _HiSparseMooncakePullConnector
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakeConnectorV2
+
+            hisparse_stats = stats.data.pop(_HiSparseMooncakePullConnector.__name__, None)
+            if hisparse_stats is not None:
+                stats.data[MooncakeConnectorV2.__name__] = hisparse_stats
+        return stats
+
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
         super().__init__(
             vllm_config=vllm_config,

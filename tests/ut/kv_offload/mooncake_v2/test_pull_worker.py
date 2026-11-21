@@ -382,7 +382,7 @@ def test_build_remote_layout_rejects_missing_local_layer() -> None:
 
 def test_expand_block_ids_and_round_robin_candidate_selection() -> None:
     assert MooncakePullRecvingThread._expand_block_ids([3, 5], 2) == [6, 7, 10, 11]
-    assert MooncakePullRecvingThread._select_remote_tp_rank([2, 3, 4], 4) == 3
+    assert make_thread()._select_remote_tp_rank([2, 3, 4], 4) == 3
 
 
 def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica() -> None:
@@ -1799,9 +1799,9 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         fake_register,
     )
     monkeypatch.setattr(
-        pull_worker,
-        "MooncakePullRecvingThread",
-        fake_thread,
+        pull_worker.MooncakePullConnectorWorker,
+        "receiving_thread_cls",
+        staticmethod(fake_thread),
     )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))
 
