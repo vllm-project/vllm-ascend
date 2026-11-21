@@ -874,7 +874,7 @@ vLLM Ascend revision.
     engines.
 
     For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
-    launcher, connector layouts, and proxy endpoints to match that topology.
+    launcher and proxy endpoints to match that topology.
 
     #### 5.2.1.1 Prepare the DP Launcher
 
@@ -981,10 +981,14 @@ vLLM Ascend revision.
 
     On the Prefill node, save the following script as `run_dp_template.sh`. Set
     `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH` to the Prefill node's service IP,
-    network interface, and local checkpoint path.
+    network interface, and local checkpoint path. Start both containers with
+    `--ulimit memlock=-1` so the scripts can set unlimited locked memory.
 
     ```shell
     #!/usr/bin/env bash
+
+    set -euo pipefail
+    ulimit -l unlimited
 
     unset https_proxy
     unset http_proxy
@@ -999,23 +1003,31 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --prefill-context-parallel-size $8 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
         --enable-expert-parallel \
+        --enable-eplb \
+        --eplb-config '{
+            "window_size":64,
+            "step_interval":128,
+            "policy":"stair",
+            "num_redundant_experts":16
+        }' \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
@@ -1037,18 +1049,15 @@ vLLM Ascend revision.
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
             "enable_cpu_binding":true,
+            "weight_nz_mode":2,
             "enable_fused_mc2":2,
             "enable_flashcomm1":false,
             "multistream_overlap_shared_expert":false
         }' \
         --kv-transfer-config '{
-            "kv_connector":"MooncakeHybridConnector",
+            "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_producer",
-            "kv_port":"30000",
-            "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":1},
-                "decode":{"dp_size":16,"tp_size":1}
-            }
+            "kv_port":"30000"
         }'
     ```
 
@@ -1078,6 +1087,9 @@ vLLM Ascend revision.
     ```shell
     #!/usr/bin/env bash
 
+    set -euo pipefail
+    ulimit -l unlimited
+
     unset https_proxy
     unset http_proxy
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/lib/"
@@ -1087,6 +1099,7 @@ vLLM Ascend revision.
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_USE_FASTOKENS=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_IF_IP="$LOCAL_IP"
@@ -1094,24 +1107,24 @@ vLLM Ascend revision.
     export TP_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=4096
-    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_RT_VISIBLE_DEVICES="$1"
 
     # Ensure the model path matches the directory recorded during download
     vllm serve "$MODEL_PATH" \
         --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --prefill-context-parallel-size $8 \
+        --port "$2" \
+        --data-parallel-size "$3" \
+        --data-parallel-rank "$4" \
+        --data-parallel-address "$5" \
+        --data-parallel-rpc-port "$6" \
+        --tensor-parallel-size "$7" \
+        --prefill-context-parallel-size "$8" \
         --enable-expert-parallel \
         --seed 1024 \
         --served-model-name dsv41 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 512 \
-        --max-num-seqs 72 \
+        --max-num-batched-tokens 280 \
+        --max-num-seqs 40 \
         --async-scheduling \
         --block-size 128 \
         --no-enable-prefix-caching \
@@ -1127,13 +1140,9 @@ vLLM Ascend revision.
         --speculative-config '{"num_speculative_tokens":5,"method":"dspark"}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --kv-transfer-config '{
-            "kv_connector":"MooncakeHybridConnector",
+            "kv_connector":"MooncakeConnectorV2",
             "kv_role":"kv_consumer",
-            "kv_port":"30100",
-            "kv_connector_extra_config":{
-                "prefill":{"dp_size":4,"tp_size":1},
-                "decode":{"dp_size":16,"tp_size":1}
-            }
+            "kv_port":"30100"
         }' \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --additional-config '{
@@ -1142,6 +1151,7 @@ vLLM Ascend revision.
                 "enable_static_kernel":false
             },
             "enable_cpu_binding":true,
+            "weight_nz_mode":2,
             "multistream_overlap_shared_expert":true,
             "recompute_scheduler_enable":true
         }'
@@ -1169,7 +1179,9 @@ vLLM Ascend revision.
     in [Prefill-Decode Disaggregation (DeepSeek)](../features/pd_disaggregation_mooncake_multi_node.md).
     Configure the proxy with Prefill endpoints `<PREFILL_NODE_IP>:7100` through
     `<PREFILL_NODE_IP>:7103` and Decode endpoints `<DECODE_NODE_IP>:7100` through
-    `<DECODE_NODE_IP>:7115`.
+    `<DECODE_NODE_IP>:7115`. Add `--workers 4` to the proxy command to run four
+    proxy worker processes with shared scheduling state. This does not change
+    the number of Prefill or Decode engines.
 
     #### 5.2.1.5 Key Parameter Descriptions
 
@@ -1177,6 +1189,13 @@ vLLM Ascend revision.
       to 36,000 seconds to finish startup. This includes weight loading and Decode
       graph preparation.
     - `VLLM_USE_V2_MODEL_RUNNER=1` selects model runner V2 on both roles.
+    - `VLLM_USE_FASTOKENS=1` enables the fastokens tokenizer backend. Both
+      containers must include `fastokens>=0.3.5`.
+    - `--enable-eplb` enables expert parallel load balancing on Prefill. The
+      `stair` policy uses a 64-step load window and a 128-step rearrangement
+      interval, with 16 redundant experts across the EP group. Redundant
+      experts consume additional device memory; tune these values for the
+      workload. See [Expert Parallel Load Balancing](../../user_guide/feature_guide/expert_parallelism_load_balancer.md).
     - `--data-parallel-size`, `--prefill-context-parallel-size`, and
       `--tensor-parallel-size` define DP4/PCP4/TP1 on Prefill and DP16/PCP1/TP1
       on Decode. Their product is 16 on each node. The launcher assigns four
@@ -1190,16 +1209,15 @@ vLLM Ascend revision.
       `7100-7115` on Decode. These endpoints must be reachable by the PD proxy.
     - Both roles use `--max-model-len 1048576`. Prefill uses
       `--max-num-batched-tokens 8192` and `--max-num-seqs 16` to favor prompt
-      throughput, while Decode uses `512` and `72` respectively to favor decode
-      concurrency. Tune these role-specific scheduler limits independently.
-    - `MooncakeHybridConnector` transfers KV cache between the two roles.
+      throughput, while Decode uses `280` and `40` respectively to limit the
+      per-step token budget and active sequences. Tune these role-specific
+      scheduler limits independently for the workload's latency and throughput.
+    - `MooncakeConnectorV2` transfers KV cache between the two roles using its
+      default non-layerwise pull mode.
       `kv_role` must be `kv_producer` on Prefill and `kv_consumer` on Decode.
       `kv_port` must be reachable and must not conflict with another service.
-    - `kv_connector_extra_config` must match the actual global layouts on both
-      sides: Prefill DP4/TP1 and Decode DP16/TP1. PCP4 is configured separately
-      with `--prefill-context-parallel-size`; it does not change `tp_size` in the
-      connector configuration. Keep both connector layouts identical in the
-      Prefill and Decode commands.
+    - Both roles use the same connector implementation. Configure the
+      DP/PCP/TP topology through the launcher arguments shown above.
     - Both roles use DSpark with five speculative tokens. Prefill runs the target
       model in eager mode. Decode uses `FULL_DECODE_ONLY` for the target model
       and allows graph execution for the DSpark draft model as well.
@@ -1212,6 +1230,9 @@ vLLM Ascend revision.
       Decode path while Prefill remains outside the captured graph.
     - Prefix caching is enabled only on Prefill. Decode disables it and enables
       `recompute_scheduler_enable` so Prefill can recompute unavailable KV cache.
+    - Both roles set `weight_nz_mode: 2` to allow NZ conversion for supported
+      FP16/BF16 weights as well as quantized weights. This is a runtime weight
+      format setting; continue to use the same W4A8 checkpoint on both roles.
     - Prefill uses the following `--additional-config` options:
 
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
