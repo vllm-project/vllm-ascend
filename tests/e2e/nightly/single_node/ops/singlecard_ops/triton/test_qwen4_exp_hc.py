@@ -236,10 +236,11 @@ def _legacy_combine_norm(
     reason="Qwen4Exp HC row-wise combine-norm is not enabled for this hardware profile",
 )
 @pytest.mark.parametrize(
-    ("rows", "row_strided", "has_injection"),
+    ("rows", "row_strided", "has_injection", "force_wide_offsets"),
     (
-        (512, False, False),
-        (513, True, True),
+        (512, False, False, False),
+        (513, True, True, False),
+        (513, True, True, True),
     ),
 )
 @torch.inference_mode()
@@ -247,7 +248,14 @@ def test_hc_combine_norm_row_wise_matches_legacy_kernel(
     rows: int,
     row_strided: bool,
     has_injection: bool,
+    force_wide_offsets: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        hc_module,
+        "_hc_combine_norm_needs_wide_offsets",
+        lambda *_: force_wide_offsets,
+    )
     residual = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=row_strided)
     block_output = _make_input(rows, GROUP_DIM, row_strided=row_strided)
     injection_logits = _make_input(rows, HC_COUNT, row_strided=row_strided) if has_injection else None

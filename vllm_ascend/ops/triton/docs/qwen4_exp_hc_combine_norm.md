@@ -55,6 +55,7 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
 | `WEIGHT_SHARED` | Internal compile-time attribute | Whether all streams share one norm weight | Boolean | Scalar |
 | `BLOCK_SIZE` | Internal compile-time attribute | `next_power_of_2(group_dim)`; production value is `4096` | Integer | Scalar |
 | `EPS` | Internal compile-time attribute | Normalization epsilon | Float | Scalar |
+| `WIDE_OFFSETS` | Internal compile-time attribute | Uses INT64 row addressing when any tensor's maximum offset exceeds INT32 | Boolean | Scalar |
 
 ## Constraints
 
@@ -73,9 +74,10 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   arguments. Refreshing input values before replay is supported and tested.
 - Row count is not a kernel scalar argument and only changes the launch grid.
   The principal JIT keys are tensor dtypes and alignment, row strides,
-  `GROUP_DIM`, `HC_COUNT`, `HAS_INJECTION`, `WEIGHT_SHARED`, `BLOCK_SIZE`, and
-  `EPS`. The nightly compile-reuse test verifies that row counts `512`, `513`,
-  `520`, and `521` reuse one compiled variant.
+  `GROUP_DIM`, `HC_COUNT`, `HAS_INJECTION`, `WEIGHT_SHARED`, `BLOCK_SIZE`,
+  `EPS`, and `WIDE_OFFSETS`. The nightly compile-reuse test verifies that row
+  counts `512`, `513`, `520`, and `521` reuse one compiled variant. Large row
+  offsets use INT64 addressing; ordinary production shapes retain INT32.
 - No dedicated warmup registration is added. The same public wrapper is used
   for compilation and runtime; normal startup, graph capture, or the first
   long-prefill request prepares the required variant.
@@ -126,9 +128,10 @@ pytest -q \
 ```
 
 Coverage includes the 512-row dispatch boundary, row tails, padded row strides,
-per-stream weights with present and absent injection, NPUGraph replay with
-refreshed inputs, and compile reuse across row counts. CPU dispatch tests cover
-the shared-weight fallback.
+per-stream weights with present and absent injection, forced INT64 addressing,
+NPUGraph replay with refreshed inputs, and compile reuse across row counts. CPU
+dispatch tests cover the shared-weight fallback and wide-offset detection for
+every row-addressed tensor.
 
 CPU dispatch tests use mocked launch entry points:
 

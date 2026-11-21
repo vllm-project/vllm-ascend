@@ -171,3 +171,49 @@ def test_hc_combine_norm_row_wise_dispatch(
     assert args[2] is injection
     assert kwargs["HAS_INJECTION"] is True
     assert kwargs["WEIGHT_SHARED"] is weight_shared
+    if expected_kernel == "row_wise":
+        assert kwargs["WIDE_OFFSETS"] is False
+    else:
+        assert "WIDE_OFFSETS" not in kwargs
+
+
+@pytest.mark.parametrize("wide_tensor", ("residual", "block", "injection", "combined", "normalized"))
+def test_hc_combine_norm_detects_wide_offsets_for_all_tensors(wide_tensor: str) -> None:
+    strides = {
+        "residual": 40,
+        "block": 10,
+        "injection": 4,
+        "combined": 40,
+        "normalized": 40,
+    }
+    strides[wide_tensor] = hc._INT32_MAX
+
+    assert hc._hc_combine_norm_needs_wide_offsets(
+        2,
+        40,
+        10,
+        4,
+        strides["residual"],
+        strides["block"],
+        strides["injection"],
+        strides["combined"],
+        strides["normalized"],
+        True,
+    )
+
+
+def test_hc_combine_norm_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    row_wise = _KernelRecorder()
+    profile = SimpleNamespace(qwen4exp_hc_combine_norm_row_wise_min_rows=512)
+    monkeypatch.setattr(hc, "_hc_combine_norm_row_wise_kernel", row_wise)
+    monkeypatch.setattr(hc, "_hc_combine_norm_needs_wide_offsets", lambda *_: True)
+    monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
+
+    residual = torch.empty((512, 40), dtype=torch.bfloat16)
+    block_output = torch.empty((512, 10), dtype=torch.bfloat16)
+    injection = torch.empty((512, 4), dtype=torch.bfloat16)
+    norm_weight = torch.empty(40, dtype=torch.bfloat16)
+    hc._hc_combine_norm(residual, block_output, injection, norm_weight, 1e-6, 4)
+
+    _, _, kwargs = row_wise.launches[0]
+    assert kwargs["WIDE_OFFSETS"] is True
