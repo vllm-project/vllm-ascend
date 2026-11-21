@@ -198,7 +198,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
     impl_class = dsa_v41.AscendDSAV41Impl
     impl = impl_class.__new__(impl_class)
     impl.multistream_dsv4_dsa_overlap = overlap
-    impl.role = SimpleNamespace(is_kv_source=False, has_long_context=False)
+    impl.role = SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False)
 
     expected_qr = attn.q_norm(qa(hidden))
     expected_q = qb(expected_qr).unflatten(-1, (2, 4))

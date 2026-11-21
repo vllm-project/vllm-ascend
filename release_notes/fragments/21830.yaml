@@ -1,0 +1,4 @@
+pr: 21830
+entries:
+  - category: feature
+    text: Add an opt-in fused indexer QW prologue for DeepSeek V4.1 Flash on A5.
