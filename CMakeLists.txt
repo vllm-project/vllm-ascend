@@ -225,7 +225,13 @@ else()
   )
 endif()
 
-target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
+# Let CMake handle $ORIGIN escaping for build and installed artifacts.
+set_target_properties(vllm_ascend_C PROPERTIES
+    BUILD_RPATH
+        "$ORIGIN;$ORIGIN/lib;$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib"
+    INSTALL_RPATH
+        "$ORIGIN;$ORIGIN/lib;$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib"
+)
 
 # A3 shared host Engram uses the optional CANN Fabric-handle API.
 if(SOC_VERSION MATCHES "ascend910_93.*")
