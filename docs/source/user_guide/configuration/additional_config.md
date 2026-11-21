@@ -177,6 +177,13 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 | `dyntra_lb_config` | dict | `{}` | Configuration options for DyntraLB load balancing on PD-disaggregated decode nodes. |
+| `max_num_decode_seqs_in_mixed_batch` | positive int or null | `null` | Limits decode requests in a step that may carry prefill. When this limit defers decodes, the next scheduler step holds regular prefill work so runnable decodes can advance within the usual token and KV-cache budgets. |
+
+For colocated serving with FCFS, DP=PP=1, and local KV caching, set
+`--additional-config '{"scheduler_config":{"max_num_decode_seqs_in_mixed_batch":2}}'`
+to limit a potential mixed step to two decode requests. A following decode step
+can increase prefill wait time under load. The option uses the default scheduler's
+allocation and accounting and is configured independently of the prefix match unit.
 
 **scheduler_config.dyntra_lb_config**
 
