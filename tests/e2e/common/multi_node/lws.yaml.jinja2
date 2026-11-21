@@ -3,6 +3,8 @@ kind: LeaderWorkerSet
 metadata:
   name: {{ lws_name | default("vllm") }}
   namespace: vllm-project
+  labels:
+    app.kubernetes.io/managed-by: vllm-ascend-ci
 spec:
   replicas: {{ replicas | default(1) }}
   leaderWorkerTemplate:
