@@ -56,6 +56,7 @@ from __future__ import annotations
 import atexit as _atexit_sc
 import dataclasses
 import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import torch
@@ -497,7 +498,7 @@ class _LayerWeightState:
             self.fulls[spec.name] = full
             self.aliases[spec.name] = _packed_alias(home, slot, dev, spec)
 
-        self._w13_src = w13  # key of the runtime's _state_by_w13 index
+        self._w13_src = w13  # keep the original Parameter identity for layer lookup
         self._w2_src = layer.w2_weight
         self._published = False
         self._layer = layer
@@ -791,13 +792,7 @@ def _pf_prefetch(buffer, state, plan):
     buffer.prefetch_projections(plan=plan, projections=state.prefetch_views())
 
 
-def _pf_state_for(key):
-    from vllm_ascend.ops.fused_moe.moonep_comm import _MOONEP_RUNTIME
-
-    return getattr(_MOONEP_RUNTIME, "_state_by_w13", {}).get(key)
-
-
-def maybe_install_pf_stream(model) -> None:
+def maybe_install_pf_stream(decoder_layers: Iterable[torch.nn.Module]) -> None:
     """Let the real-plan prefetch hook identify the current MoE layer.
 
     钩子在库的 `_run_dispatch_on_current_stream` 里触发（planning 之后、
@@ -816,9 +811,7 @@ def maybe_install_pf_stream(model) -> None:
     if get_ep_group().world_size <= 1:
         return
     try:
-        from vllm_ascend.ops.fused_moe import moonep_comm as mc
-
-        layers = mc._early_layers(model)
+        layers = list(decoder_layers)
         if not layers:
             print("[pf-stream] no decoder layers found; disabled", flush=True)
             return
@@ -882,7 +875,7 @@ def udma_prefetch_overlap_requested(use_udma: bool, slot_mode: bool) -> bool:
     return bool(use_udma and slot_mode and _PREFETCH_OVERLAP != "none")
 
 
-def _pf_stream_hook(buffer):
+def _pf_stream_hook(buffer, lookup_slot_state: Callable[[int], _LayerWeightState | None]):
     """装在库的 `after_planning_hook` 上的回调：在 side stream 上发 prefetch。
 
     为什么必须挂在这里：prefetch 要读 planning 产出的 `experts_to_copy`，又希望
@@ -904,7 +897,7 @@ def _pf_stream_hook(buffer):
             raise RuntimeError("UDMA prefetch overlap requires dedicated QP initialization")
         try:
             key = _PF.get("cur_key")
-            state = _pf_state_for(key) if key is not None else None
+            state = lookup_slot_state(key) if key is not None else None
             if state is None:  # 本层第一次跑，还没建权重状态
                 return
             import torch_npu
@@ -949,6 +942,7 @@ def _pf_stream_hook(buffer):
 def run_slot_forward(
     *,
     state: _LayerWeightState,
+    lookup_slot_state: Callable[[int], _LayerWeightState | None],
     buffer,
     plan,
     token_dispatch_output,
@@ -988,7 +982,7 @@ def run_slot_forward(
     if _PREFETCH_OVERLAP != "none":
         _pf_ctx = buffer._require_ctx()
         if _pf_ctx.get("after_planning_hook") is None:
-            _pf_ctx["after_planning_hook"] = _pf_stream_hook(buffer)
+            _pf_ctx["after_planning_hook"] = _pf_stream_hook(buffer, lookup_slot_state)
         prefetched = _pf_ctx.pop("slot_prefetch_ready", None)
     pf_ev = None
     if prefetched is not None:

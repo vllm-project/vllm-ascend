@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import torch
@@ -108,8 +109,8 @@ _SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
 # capacity remains independent of the rows included in routing and computation.
 
 
-def _early_layers(model):
-    """Enumerate decoder layers for the real-plan prefetch hook; no routing prediction."""
+def iter_prefetch_layers(model) -> Iterator[torch.nn.Module]:
+    """Defer decoder traversal until prefetch hook installation is enabled."""
     for path in ("model.layers", "layers", "transformer.layers", "model.model.layers"):
         obj = model
         for part in path.split("."):
@@ -117,8 +118,8 @@ def _early_layers(model):
             if obj is None:
                 break
         if obj is not None and len(obj):
-            return list(obj)
-    return []
+            yield from obj
+            return
 
 
 # Step-adaptive dispatch capacity (upstream MoonEPBufferPool equivalent).
@@ -339,6 +340,10 @@ class _MoonEPRuntime:
         self._fail: Exception | None = None
         self._buffers: dict[tuple, object] = {}
         self._pads: dict[tuple, dict] = {}
+        self._state_by_w13: dict = {}
+
+    def lookup_slot_state(self, weight_id: int):
+        return self._state_by_w13.get(weight_id)
 
     def _slot_states(self) -> list:
         return getattr(self, "_states", [])
@@ -931,7 +936,8 @@ class MoonEPCommImpl(MoECommMethod):
             raise RuntimeError("MoonEP v0.30 requires the routed-expert layer and quant method")
         if fused_experts_input.lora_context is not None:
             raise NotImplementedError("MoonEP Slot does not support MoE LoRA")
-        state = getattr(_MOONEP_RUNTIME, "_state_by_w13", {}).get(id(layer.w13_weight))
+        lookup_slot_state = _MOONEP_RUNTIME.lookup_slot_state
+        state = lookup_slot_state(id(layer.w13_weight))
         if state is None:
             raise RuntimeError("MoonEP balance state missing: initialize after expert weight loading")
         from vllm_ascend.ops.fused_moe.moonep_balance import select_prefetch_layer
@@ -951,6 +957,7 @@ class MoonEPCommImpl(MoECommMethod):
             meta = disp.combine_metadata
             mlp_rows, before_gmm2_evt = run_slot_forward(
                 state=meta.state,
+                lookup_slot_state=lookup_slot_state,
                 buffer=meta.buffer,
                 plan=meta.plan,
                 token_dispatch_output=disp,

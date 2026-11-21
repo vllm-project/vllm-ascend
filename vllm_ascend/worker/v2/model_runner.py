@@ -338,7 +338,10 @@ class NPUModelRunner(GPUModelRunner):
                     super().load_model(load_dummy_weights, *args, **kwargs)
                     if getattr(get_ascend_config(), "enable_moonep", False):
                         from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_pf_stream
-                        from vllm_ascend.ops.fused_moe.moonep_comm import ensure_runtime_initialized
+                        from vllm_ascend.ops.fused_moe.moonep_comm import (
+                            ensure_runtime_initialized,
+                            iter_prefetch_layers,
+                        )
 
                         # The parent measured live Torch allocations before MoonEP built its
                         # pools and handed expert storage to SHMEM. Count the net change
@@ -346,7 +349,7 @@ class NPUModelRunner(GPUModelRunner):
                         allocated_before = torch.npu.memory_allocated(self.device)
                         ensure_runtime_initialized()
                         self.model_memory_usage += torch.npu.memory_allocated(self.device) - allocated_before
-                        maybe_install_pf_stream(self.model)
+                        maybe_install_pf_stream(iter_prefetch_layers(self.model))
                 except BaseException:
                     # self.model may not exist yet. Close every recorded owner
                     # without collectives and retain failures for shutdown retry.
