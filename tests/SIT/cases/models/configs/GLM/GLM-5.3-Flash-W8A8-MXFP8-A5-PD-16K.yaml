@@ -1,0 +1,208 @@
+# Two-node A5 PD deployment from docs/source/tutorials/models/GLM5.3-Flash.md.
+# P: TP1/PCP8/DP1; D: TP1/PCP1/DP8. Eight NPUs per node.
+test_name: GLM-5.3-Flash-W8A8-MXFP8-A5-PD-16K
+model: Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: external
+routing:
+  type: disaggregated_prefill
+  groups:
+    prefiller:
+      - 0
+    decoder:
+      - 1
+config:
+  - node_index: 0
+    port_start: 8000
+    dp_rpc_port: 12325
+    dp_size: 1
+    dp_size_local: 1
+    dp_rank_start: 0
+    tp_size: 1
+    cp_size: 8
+    dp_address: ${NODE_0_IP}
+  - node_index: 1
+    port_start: 8000
+    dp_rpc_port: 12325
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    cp_size: 1
+    dp_address: ${NODE_1_IP}
+templates:
+  - node_index: 0
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '3072'
+      HCCL_OP_EXPANSION_MODE: AIV
+      ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+      # Required for the checked prefix-cache resets in this CI case.
+    VLLM_SERVER_DEV_MODE: '1'
+    server_cmd_template:
+      - --host
+      - 0.0.0.0
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --safetensors-load-strategy
+      - prefetch
+      - --kv-cache-dtype
+      - fp8
+      - --attention-config.indexer_kv_dtype
+      - fp8
+      - --max-num-seqs
+      - '32'
+      - --max-model-len
+      - '1048576'
+      - --max-num-batched-tokens
+      - '32768'
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --tool-call-parser
+      - glm47
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - glm47
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt
+      - '{"image":7,"video":0}'
+      - --gpu-memory-utilization
+      - '0.95'
+      - --enforce-eager
+      - --use-replayssm
+      - --speculative-config
+      - '{"num_speculative_tokens":5,"method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"enable_cpu_binding":true,"enable_flashcomm1":true,"enable_fused_mc2":2,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","engine_id":"${NODE_INDEX}-${DP_RANK}","kv_port":"30100","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":1,"pcp_size":8},"decode":{"dp_size":8,"tp_size":1,"pcp_size":1}}}'
+  - node_index: 1
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '2048'
+      HCCL_OP_EXPANSION_MODE: AIV
+      ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    server_cmd_template:
+      - --host
+      - 0.0.0.0
+      - --port
+      - ${PORT}
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - '1024'
+      - --served-model-name
+      - ${MODEL}
+      - --safetensors-load-strategy
+      - prefetch
+      - --kv-cache-dtype
+      - fp8
+      - --attention-config.indexer_kv_dtype
+      - fp8
+      - --max-num-seqs
+      - '60'
+      - --max-model-len
+      - '1048576'
+      - --max-num-batched-tokens
+      - '360'
+      - --trust-remote-code
+      - --quantization
+      - ascend
+      - --tool-call-parser
+      - glm47
+      - --enable-auto-tool-choice
+      - --reasoning-parser
+      - glm47
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt
+      - '{"image":7,"video":0}'
+      - --gpu-memory-utilization
+      - '0.95'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --use-replayssm
+      - --speculative-config
+      - '{"num_speculative_tokens":5,"method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"enable_fused_mc2":0,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false,"enable_super_kernel":false}}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","engine_id":"${NODE_INDEX}-${DP_RANK}","kv_port":"30800","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":1,"pcp_size":8},"decode":{"dp_size":8,"tp_size":1,"pcp_size":1}}}'
+
+# Workloads follow the 16K PD and GPQA stages of PR21339.
+# Verify actual input token lengths with the Flash checkpoint.
+# Throughput needs hardware calibration; no baseline is invented.
+# GPQA floor: tutorial reference 91.2 minus 5 points, pending calibration.
+benchmarks:
+  pd_16k_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  reset_before_pd_16k:
+    case_type: curl_cmd
+    cmds:
+      - python3 -c "import json; from urllib.request import Request, urlopen; from tests.e2e.common.multi_node.utils import get_cluster_ips; host
+        = get_cluster_ips(2)[0]; response = urlopen(Request('http://' + host + ':8000/reset_prefix_cache', method='POST'), timeout=120); result
+        = json.load(response); print(result); assert result.get('success') is True, 'prefix cache reset failed'"
+  pd_16k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 64
+    max_out_len: 1024
+    batch_size: 16
+    request_rate: 0
+  reset_before_gpqa:
+    case_type: curl_cmd
+    cmds:
+      - python3 -c "import json; from urllib.request import Request, urlopen; from tests.e2e.common.multi_node.utils import get_cluster_ips; host
+        = get_cluster_ips(2)[0]; response = urlopen(Request('http://' + host + ':8000/reset_prefix_cache', method='POST'), timeout=120); result
+        = json.load(response); print(result); assert result.get('success') is True, 'prefix cache reset failed'"
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 131072
+    temperature: 1.0
+    top_p: 0.95
+    batch_size: 32
+    baseline: 86.2
+    verify_mode: ge
