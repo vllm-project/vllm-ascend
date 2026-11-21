@@ -1,0 +1,9 @@
+pr: 21256
+entries:
+  - category: feature
+    text: >-
+      Added layerwise KV cache offload for GLM-5.3-Flash prefill workers using
+      the MemCache backend to reduce NPU memory usage. In AscendStoreConnector,
+      set `use_layerwise` to `true` and configure `layerwise_num_shared_buffers`
+      to enable offload.
+    model: glm-5.3-flash

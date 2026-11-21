@@ -24,17 +24,12 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
-from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
-from vllm_ascend.utils import is_rc_device, vllm_version_is
-from vllm_ascend.worker.memory_profiling import validate_memory_profile
-from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+# KV-cache planning lives in kv_cache_planning on both supported versions.
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
-# vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
-# v0.32.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
-else:
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
+from vllm_ascend.utils import is_rc_device
+from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
@@ -54,17 +49,10 @@ class NPUWorker310(NPUWorker):
         return super()._scale_kv_cache_memory_for_multi_group(available_memory)
 
     def _create_model_runner(self):
-        if self.use_v2_model_runner:
-            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+        from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
-            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
-            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
-            return model_runner
-
-        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
-
-        model_runner = NPUModelRunner310(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
         return model_runner
 
     def init_device(self):
@@ -117,9 +105,14 @@ class NPUWorker310(NPUWorker):
         self.peak_activation_memory = profile_result.torch_peak_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
-        validate_memory_profile(
-            init_free_memory=self.init_snapshot.free_memory,
-            after_profile_free_memory=free_gpu_memory,
+        assert self.init_snapshot.free_memory > free_gpu_memory, (
+            "Error in memory profiling. "
+            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
+            f"current free memory {GiB(free_gpu_memory)} GiB. "
+            "This happens when other processes sharing the same container "
+            "release GPU memory while vLLM is profiling during initialization. "
+            "To fix this, ensure consistent GPU memory allocation or "
+            "isolate vLLM in its own container."
         )
 
         # Divide the available memory by 2, to reserved more memory for other operators workspace and other cache
@@ -163,7 +156,7 @@ class NPUWorker310(NPUWorker):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if is_rc_device():
             self.init_snapshot.free_memory = psutil.virtual_memory().available
             logger.info_once("Root Complex (RC) mode: host and device memory are shared.")
@@ -174,7 +167,7 @@ class NPUWorker310(NPUWorker):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )

@@ -1,0 +1,4 @@
+pr: 21921
+entries:
+  - category: feature
+    text: Enabled static and super kernel under the PIECEWISE cudagraph mode (the default); prefill-shaped pieces are now compiled at the cudagraph capture sizes, improving cold prefill TTFT by 5-10% for short inputs on DeepSeek-series MoE models.

@@ -7,16 +7,18 @@
   then reconstruct only the accepted recurrent state after sampling. Commit also
   compacts the convolution history prepared by the caller. This supports GLM
   speculative decoding without keeping a full recurrent checkpoint per draft.
-- **Formula**: For one head, let `S` have shape `[V, K]`, and normalize nonzero
-  query/key vectors to unit L2 norm; zero vectors remain zero. Scale the normalized
-  query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
+  Kimi K3/K3.1 and GLM use request-indexed temporary records.
+- **Formula**: For one head, let `S` have shape `[V, K]`. Normalize each query/key
+  vector `z` as `z / sqrt(sum(z * z) + 1e-6)` over its `K` components. Scale the
+  normalized query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
 
   ```text
   g = lower_bound * sigmoid(a * x)       if lower_bound is not None
       -a * softplus(x)                  otherwise
   decay = exp(g)
   decayed_state = S * decay[None, :]
-  correction = sigmoid(raw_beta) * (v - decayed_state @ normalized_k)
+  beta = sigmoid(raw_beta)
+  correction = beta * (v - decayed_state @ normalized_k)
   next_state = decayed_state + correction[:, None] * normalized_k[None, :]
   output = next_state @ normalized_scaled_q
   ```
@@ -40,19 +42,24 @@
      accumulates decay/products and correction outer products, and writes the
      reconstructed recurrent checkpoint. `_commit_kda_state_grouped_kernel`
      performs the same operation for two adjacent heads per program on its A5
-     fast path.
+     fast path. All aligned contexts use two disjoint on-device request filters
+     to separate commits with and without a boundary snapshot. Non-crossing
+     requests use two matrix buffers; crossing requests retain the existing
+     six-buffer recovery path. A5 uses grouped heads for FP32 `H32/H64`,
+     `K=V=128`; other layouts use the ordinary kernel with UB-bounded value tiles.
 - **Supported modes**: Atlas A3 and Ascend 950DT (A5), inference only, eager and
   NPU graph execution. Atlas A2 and 950PR are not validated by these tests.
-  This operator-only change does not activate the GLM serving path. Model,
-  configuration and worker integration will be provided in a follow-up change.
-  The low-level optional align arguments do not establish serving support for
-  Mamba cache mode `align`.
+  Operator validation is separate from model/worker integration. Serving
+  configuration and restrictions are documented in the model-specific
+  RecoverSSM feature guide; low-level align arguments alone do not establish
+  model support.
 
 ## Parameters
 
 Notation: `B` speculative requests, `T` flattened tokens, `H` local heads,
 `K/V` key/value widths, `P` cache pages, `Q` speculative-window capacity,
-`L` local KDA layers, `C` convolution channels, `W` convolution history length.
+`L` local KDA layers, `C` convolution channels, `W` convolution history length,
+`R` temporary record slots (`R >= B`).
 An optional argument's default is part of its description.
 
 ### `kda_recoverssm_verify`
@@ -61,13 +68,13 @@ An optional argument's default is part of its description.
 | --- | --- | --- | --- | --- |
 | `q`, `k`, `raw_g` | Input | Query, raw key, raw gate, each `[1, T, H, K]` | BF16 / FP16 | ND; token-strided views allowed |
 | `v` | Input | Values `[1, T, H, V]` | Same activation dtype | ND |
-| `raw_beta` | Input | Raw update gate `[1, T, H]`; sigmoid is applied internally | Same activation dtype | ND |
+| `raw_beta` | Input | Update gate `[1, T, H]`; sigmoid is applied internally | Activation dtype / FP32 | ND |
 | `A_log` | Input | Per-head log decay scale `[H]` | FP32 in validated callers | Contiguous ND |
 | `dt_bias` | Input | Gate bias with `H * K` elements | FP32 in validated callers | Contiguous ND |
 | `lower_bound` | Attribute | Gate lower bound; `None` selects negative softplus instead of bounded sigmoid | Python float / `None` | Scalar / N/A |
 | `checkpoint_state` | Input | Persistent recurrent state `[P, H, V, K]`, read-only during verification | FP32 / BF16 | Paged ND, explicit strides |
-| `correction_cache` | Output | Per-token correction records `[P, H, Q, V]` | FP32 | Paged ND, explicit strides |
-| `kg_cache` | Output | Raw key and raw gate concatenated on the last axis, `[P, H, Q, 2 * K]` | Same dtype as `k` | Paged ND, explicit strides |
+| `correction_cache` | Output | Per-token correction records `[R, H, Q, V]` indexed by request | FP32 | ND, explicit strides |
+| `kg_cache` | Output | Raw key and gate, `[R, H, Q, 2 * K]` indexed by request | Same dtype as `k` | ND, explicit strides |
 | `query_start_loc` | Input | Nondecreasing token offsets `[B + 1]` | INT32 / INT64 | Strided 1D |
 | `state_indices` | Input | Source page per speculative row `[B]`; values at or below `NULL_BLOCK_ID` select null rows | INT32 | Strided 1D |
 | `spec_query_len` | Attribute | `Q`, normally `num_speculative_tokens + 1` | Python int | Positive scalar |
@@ -88,12 +95,13 @@ Required layer fields:
 | --- | --- | --- | --- | --- |
 | `kv_cache[0]` | Input/Output | Convolution state; normalized view `[P, C, Q + W - 1]` | BF16 in validated callers | Paged ND; channel-first or token-first physical layout |
 | `kv_cache[1]` | Input/Output | Recurrent checkpoint `[P, H, V, K]` | FP32 / BF16 | Paged ND |
-| `kv_cache[2]` | Input | Correction records from verification `[P, H, Q, V]` | FP32 | Paged ND |
-| `kv_cache[3]` | Input | Key/gate records from verification `[P, H, Q, 2 * K]` | BF16 / FP16 | Paged ND |
+| `recoverssm_records` | Input | Correction and key/gate scratch buffers with `R >= max_num_reqs` | FP32 and activation dtype | Request-indexed ND |
 | `A_log` | Input | Decay parameter with `H` elements, stacked as `[L, H]` internally | FP32 in validated callers | ND |
 | `dt_bias` | Input | Gate bias with `H * K` elements, stacked as `[L, H, K]` internally | FP32 in validated callers | ND |
 | `gate_lower_bound` | Attribute | Shared `lower_bound` across layers | Python float / `None` | Scalar / N/A |
 | `local_num_heads`, `head_dim` | Attribute | `H` and `K`, used to view gate parameters | Python int | Positive scalars |
+
+Each context uses two cache tensors plus request-indexed `recoverssm_records`.
 
 ### `KDARecoverSSMCommitContext.commit`
 
@@ -107,7 +115,7 @@ Required layer fields:
 | `num_computed_tokens` | Input | Optional prior token count per sampler row, used with `block_table`; default `None` | INT32 / `None` | Strided 1D / N/A |
 | `mamba_block_size` | Attribute | Optional token span per align block, at least `Q`; default `None` | Python int / `None` | Scalar / N/A |
 | Context checkpoint/convolution pages | Input/Output | Reconstructed state and compacted history are written in place; the method returns `None` | See layer fields | Paged ND |
-| Context plan arrays | Output | Accepted lengths, final page IDs, boundary page IDs and boundary recovery lengths | INT32 | Contiguous 1D |
+| Context plan arrays | Output | Full/non-boundary/boundary accepted lengths, final page IDs, boundary page IDs and boundary recovery lengths | INT32 | Contiguous 1D |
 
 Internal kernel arguments consist of the tensors above, INT64 base-address and
 per-layer stride tables, element-stride scalars, `NULL_BLOCK_ID` and shape/tile
@@ -116,6 +124,16 @@ attributes. `K`, `V`, `BK`, `BV`, `NUM_HEADS`, `SPEC_QUERY_LEN`, `UNROLL_COMMIT`
 `BH` specialize their respective kernels. The plan's `HAS_REQUEST_INDICES` and `ALIGN_MODE` are derived
 from optional pointer presence by `triton.heuristics`. Address tables and context
 buffers are implementation-owned, not user outputs to replace between replays.
+The existing plan kernel also produces two predicated accepted-length arrays:
+one for requests without a boundary snapshot, and one for requests with one.
+Their nonzero entries are disjoint and sum to the ordinary accepted lengths.
+Inactive state programs read one zero length and return before loading page IDs.
+No constexpr parameter is added; accepted lengths, page IDs and boundary membership
+remain device data, including during graph replay. State kernels explicitly
+flatten the value/layer/head/request coordinates into a one-dimensional launch,
+keeping request rows outermost across backend grid-order differences. Their
+`num_layers` argument is runtime-only and marked `do_not_specialize`, including
+for single-layer calls; it does not introduce a layer-count constexpr.
 
 ## Constraints
 
@@ -144,21 +162,28 @@ buffers are implementation-owned, not user outputs to replace between replays.
   absent or all be supplied. Low-level align can additionally write a boundary
   checkpoint/history; full align commit is not covered by the GLM `none`-mode
   serving validation. Compact's align copy path has separate exact-copy tests.
+  In `align` mode, the final checkpoint is written to the page containing the
+  last accepted token. If that token ends exactly at a page boundary, commit
+  writes the current page even when the next page has not been allocated.
 - Normalization and nonlinear arithmetic operate on FP32 values after existing
   load-time conversions. Output is stored in the activation dtype; checkpoints
   retain their storage dtype. This does not change caller tensor dtype/layout.
   Finite, non-overflowing inputs/intermediates are the validated numerical domain.
 - A3 verification/commit use value tiles no larger than 64. A5 can select 128
   where its occupancy/layout rules permit. Grouped commit requires A5, FP32 state,
-  no align table, `K = V = 128` and `H` in `{32, 64}`; the window is supplied by
+  `K = V = 128` and `H` in `{32, 64}`; an align table is supported through the
+  disjoint request filters.
+  The window is supplied by
   the caller rather than restricted to six tokens. Other supported cases use
   ordinary commit. A3 strided convolution compaction uses 256-channel
   tiles; A5 and contiguous-channel compaction retain 4096-channel tiles.
-  Ordinary commit further caps its value tile using the existing
+  Ordinary and aligned grouped commit cap their value tiles using the existing
   `triton_utils.get_ub_size_bytes()` result, the key tile and align buffers.
   A3 iterates accepted records at runtime to avoid compiler-expanded matrix
   lifetimes; A5 retains static unrolling for both ordinary and grouped commit.
-  The estimate covers two matrix buffers normally and six with align enabled.
+  The estimate covers two matrix buffers without boundary reconstruction and
+  six per head for the ordinary or grouped boundary recovery path.
+  Non-crossing aligned requests do not reserve boundary matrices.
   Two rows' worth of vector temporaries
   are reserved before rounding down to a power of two. Context creation initializes
   the shared device-property cache outside graph capture; kernel launch reads its UB budget.
@@ -179,9 +204,9 @@ buffers are implementation-owned, not user outputs to replace between replays.
   in `vllm_ascend/ops/triton/kda/recoverssm.py`. It implements the paged verify and
   accepted-state commit contracts for Ascend GLM KDA.
 - **Differences**:
-    - Q/K normalization follows AscendC KDA: no squared-norm epsilon is added to
-    nonzero vectors, and zero vectors normalize to zero.
-    - FP32 recurrent arithmetic, explicit strided paged records and batched
+    - Verify and both commit paths use the `1e-6` squared-norm epsilon from
+      AscendC RecurrentKDA.
+    - FP32 recurrent arithmetic, explicit strided request records and batched
     multi-layer commit are used for Ascend. Persistent state is not advanced
     during verification.
     - Verify avoids the final unnecessary full-state update. A3 ordinary commit
@@ -229,10 +254,24 @@ Pool-stride cases retain the recorded strides with B+2 pages and independent
 per-layer allocations; they do not reproduce every shared-pool address alias.
 The criteria themselves test the 99% boundary and independently failing the
 ratio or maximum-error gate.
+The request-indexed regression
+`test_request_records_recover_permuted_pages_and_sampler_rows` permutes physical
+cache pages and sampler rows independently of speculative request rows. It
+checks that verify and commit use the same request's scratch records, including
+rejected suffixes filled with NaNs, null pages, and eager/graph execution.
+`test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv` additionally
+checks sampler-row mapping and convolution compaction across layers.
+
 Window regressions explicitly check the selected ordinary/grouped path for
 Q1/Q2/Q4/Q6/Q8, both local head counts and eager/graph execution, with additional
 FP16 and unbounded-gate cases. This prevents a fixed-window fallback from masking
 missing grouped-kernel coverage.
+
+Aligned-routing tests cover H8/H16/H32/H64, FP32/BF16 states, K=V=128 and
+masked/non-square K/V dimensions, mixed boundary membership, strided metadata,
+in-place/out-of-place destinations and eager/NPU graph execution.
+They check that the disjoint accepted-length arrays sum to the full commit lengths
+and that ordinary/grouped dispatch preserves boundary snapshots and untouched pages.
 
 ```bash
 pytest -sv -o junit_family=xunit1 \
@@ -365,6 +404,6 @@ device-property cache and does not create a new per-iteration compilation parame
 The multi-layer and multi-step cases in
 `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_recoverssm_npu.py`
 show how to allocate page views, call `kda_recoverssm_verify`, construct a commit
-context and commit accepted prefixes. Model activation and configuration will be
-provided by the framework follow-up. This operator test does not establish
-model dataset accuracy or serving performance.
+context and commit accepted prefixes. Model activation and configuration are
+described in the model-specific feature guide. The operator test does not
+establish model dataset accuracy or serving performance.

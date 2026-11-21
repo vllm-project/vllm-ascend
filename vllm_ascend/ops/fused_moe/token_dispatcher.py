@@ -51,7 +51,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import requires_lmhead_dp_sync, should_skip_allreduce_across_dp_group
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
@@ -143,7 +143,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use global_bs=0 (uniform mode) and pass mc2_mask.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
-        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
+        # Keep the MC2 mode and masks aligned with the V2 runner's LMHead override.
+        # TODO: Merge the requires_lmhead_dp_sync interface into
+        # should_skip_allreduce_across_dp_group in a future refactor.
+        skip_dp_sync = should_skip_allreduce_across_dp_group(vllm_config) and not requires_lmhead_dp_sync(vllm_config)
+        self.global_bs = _max_global_bs if skip_dp_sync else 0
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""

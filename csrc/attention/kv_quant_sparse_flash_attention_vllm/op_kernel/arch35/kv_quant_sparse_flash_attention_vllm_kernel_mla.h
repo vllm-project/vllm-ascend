@@ -25,17 +25,24 @@
 #include "kv_quant_sparse_flash_attention_vllm_service_vector_mla.h"
 #include "kv_quant_sparse_flash_attention_vllm_common_arch35.h"
 #include "kv_quant_sparse_flash_attention_vllm_kvcache.h"
-#if __has_include("../../common/op_kernel/CopyInL1.h")
+// The installed AscendC package flattens each dependency's op_kernel directory.
+#if __has_include("../../common/CopyInL1.h")
+#include "../../common/CopyInL1.h"
+#elif __has_include("../../common/op_kernel/CopyInL1.h")
 #include "../../common/op_kernel/CopyInL1.h"
 #else
 #include "../../../common/op_kernel/CopyInL1.h"
 #endif
-#if __has_include("../../common/op_kernel/matmul.h")
+#if __has_include("../../common/matmul.h")
+#include "../../common/matmul.h"
+#elif __has_include("../../common/op_kernel/matmul.h")
 #include "../../common/op_kernel/matmul.h"
 #else
 #include "../../../common/op_kernel/matmul.h"
 #endif
-#if __has_include("../../common/op_kernel/FixpipeOut.h")
+#if __has_include("../../common/FixpipeOut.h")
+#include "../../common/FixpipeOut.h"
+#elif __has_include("../../common/op_kernel/FixpipeOut.h")
 #include "../../common/op_kernel/FixpipeOut.h"
 #else
 #include "../../../common/op_kernel/FixpipeOut.h"
@@ -154,6 +161,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
         constInfo.gSize = this->sharedParams.gSize;
         constInfo.s1Size = this->sharedParams.s1Size;
         constInfo.needInit = this->sharedParams.needInit;
+        constInfo.n2Size = this->sharedParams.n2Size;
         constInfo.dSizeV = 512;
     }
     vecBlock.CleanOutput(attentionOut, softmaxMax, softmaxSum, constInfo);
@@ -706,7 +714,8 @@ __aicore__ inline void KvQuantSparseFlashAttentionVllmMla<CubeBlockType, VecBloc
     // GS1合轴, 不切G, 只切S1
     runParam.s1oIdx = gS1Index * runParam.qSNumInOneBlock;
     if constexpr (IS_SPLIT_G) {
-        runParam.goIdx = (aicIdx % 2 == 0) ? 0 : 64; // N1=128场景，相邻cube核处理一个s1，第一个cube核承担0-63行g，第二个cube核承担后64行g
+        // The first cube core handles the extra head when G is odd.
+        runParam.goIdx = (aicIdx % 2 == 0) ? 0 : (this->constInfo.gSize + 1) / 2;
     } else {
         runParam.goIdx = 0;
     }

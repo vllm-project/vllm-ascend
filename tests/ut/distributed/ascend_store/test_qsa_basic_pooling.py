@@ -180,8 +180,11 @@ def worker_factory():
 def test_private_state_lookup_queries_the_restorable_boundary(backend_name, prompt_tokens, boundary, layerwise):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
     config = scheduler_tests.TestKVPoolScheduler()._make_config(block_size=1536, extra_config={"backend": backend_name})
-    with patch(module + ".importlib") as imports, patch(module + ".LookupKeyClient") as client:
-        imports.import_module.return_value = MagicMock()
+    backend_class = MemcacheBackend if backend_name == "memcache" else MooncakeBackend
+    with (
+        patch.object(backend_class, "create_scheduler_client"),
+        patch(module + ".LookupKeyClient") as client,
+    ):
         scheduler_cls = LayerwiseKVPoolScheduler if layerwise else scheduler_tests.KVPoolScheduler
         scheduler = scheduler_cls(config, use_layerwise=layerwise)
         scheduler.cacheable_group_ids = [0]

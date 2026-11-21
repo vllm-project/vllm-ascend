@@ -1,5 +1,4 @@
 pr: 18389
 entries:
   - category: bugfix
-    text: Fixed startup failures when memory-virtualized Ascend devices report unchanged free memory during profiling.
-    hardware: [A2]
+    text: Startup can proceed when free NPU memory stays unchanged during profiling and the model's allocation is accounted for. If memory reporting prevents automatic KV cache sizing, the startup error explains how to set a known-safe budget with `--kv-cache-memory-bytes`.

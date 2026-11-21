@@ -20,7 +20,6 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbLayerState
 from vllm_ascend.ops import register_custom_ops as custom_ops
-from vllm_ascend.ops.fused_moe import eplb as eplb_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
@@ -30,7 +29,6 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 )
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
@@ -53,6 +51,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_prepared_linear_input_import_does_not_cycle_through_moe():
@@ -101,12 +100,6 @@ def _build_weight_layer():
     )
 
 
-def test_comm_backend_selects_shared_activation_overlap_window():
-    assert MC2CommImpl.shared_activation_overlaps_routed_gmm1
-    assert AlltoAllCommImpl.shared_activation_overlaps_routed_gmm1
-    assert not AllGatherCommImpl.shared_activation_overlaps_routed_gmm1
-
-
 def _build_apply_layer():
     return SimpleNamespace(
         w13_weight=nn.Parameter(torch.randn(4, 3, 8)),
@@ -130,7 +123,6 @@ def _build_apply_layer():
 def _build_unquantized_method(*, dynamic_eplb: bool = False):
     method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     method.dynamic_eplb = dynamic_eplb
-    method.tid2eid = None
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     return method
@@ -166,22 +158,14 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     assert method.maybe_make_prepare_finalize() is None
 
 
-def test_ascend_routed_experts_uses_parent_unquantized_method_during_init(monkeypatch):
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    routed_experts.tid2eid = object()
-    moe_config = MagicMock()
-    parent_method = object()
-    parent_get_quant_method = MagicMock(return_value=parent_method)
-    monkeypatch.setattr(
-        routed_experts_module.RoutedExperts,
-        "_get_quant_method",
-        parent_get_quant_method,
-    )
+def test_ascend_routed_experts_uses_upstream_quant_method_resolution():
+    """Ascend must not override how a MoE layer resolves its quant method.
 
-    method = routed_experts._get_quant_method("model.layers.0.mlp", None, moe_config)
-
-    assert method is parent_method
-    parent_get_quant_method.assert_called_once_with("model.layers.0.mlp", None, moe_config)
+    ``RoutedExperts`` goes through vLLM's ``resolve_quant_method`` exactly like
+    Linear/Embedding layers; the only Ascend-specific step is swapping in the
+    unquantized method when the checkpoint carries no quantization config.
+    """
+    assert "_get_quant_method" not in AscendRoutedExperts.__dict__
 
 
 @pytest.mark.parametrize("quant_config", [None, object()])
@@ -225,42 +209,15 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         ),
     )
 
-    routed_experts = AscendRoutedExperts(tid2eid="tid2eid")
+    routed_experts = AscendRoutedExperts()
 
     assert init_methods == [parent_method]
     if quant_config is None:
         assert routed_experts.quant_method is ascend_method
-        ascend_method_factory.assert_called_once_with(moe_config, tid2eid="tid2eid")
+        ascend_method_factory.assert_called_once_with(moe_config)
     else:
         assert routed_experts.quant_method is parent_method
         ascend_method_factory.assert_not_called()
-
-
-def test_ascend_routed_experts_passes_tid2eid_to_quant_config():
-    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    routed_experts.tid2eid = object()
-    quant_config = MagicMock()
-    moe_config = MagicMock()
-
-    method = routed_experts._get_quant_method("model.layers.0.mlp", quant_config, moe_config)
-
-    assert method is quant_config.get_quant_method.return_value
-    quant_config.get_quant_method.assert_called_once_with(
-        routed_experts,
-        "model.layers.0.mlp",
-        tid2eid=routed_experts.tid2eid,
-    )
-
-
-def test_ascend_routed_experts_accepts_tid2eid_parameter_before_module_init(monkeypatch):
-    tid2eid = nn.Parameter(torch.zeros(2, 2), requires_grad=False)
-    parent_init = MagicMock(side_effect=RuntimeError("stop after parent init"))
-    monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
-
-    with pytest.raises(RuntimeError, match="stop after parent init"):
-        AscendRoutedExperts(tid2eid=tid2eid)
-
-    parent_init.assert_called_once()
 
 
 @pytest.mark.parametrize(("use_v2_model_runner", "legacy_init_calls"), [(True, 0), (False, 1)])
@@ -643,6 +600,7 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
 
 def _build_routing_replay_experts(router, log2phy):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    torch.nn.Module.__init__(routed_experts)
     routed_experts.router = router
     routed_experts.moe_config = SimpleNamespace(num_experts=4)
     routed_experts.global_redundant_expert_num = 0
@@ -1045,7 +1003,7 @@ def test_routed_experts_forward_impl_runs_current_flow(
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     record_expert_tokens = MagicMock()
-    monkeypatch.setattr(eplb_ops, "use_allgather_eplb", lambda enabled: False)
+    monkeypatch.setattr(routed_experts_module, "use_allgather_eplb", lambda: False)
     monkeypatch.setattr(torch.ops.vllm, "ascend_eplb_record_expert_tokens", record_expert_tokens)
 
     result = routed_experts.forward_impl(
@@ -2134,6 +2092,7 @@ def test_runner_selects_sp_multistream_custom_op(
     shared_executor = SimpleNamespace(
         multistream_overlap=multistream_overlap,
         parallel_mode=MagicMock(return_value=mode),
+        megamoe_shared_fusion=MagicMock(return_value=SimpleNamespace()),
     )
 
     def init_base_runner(
@@ -2149,6 +2108,8 @@ def test_runner_selects_sp_multistream_custom_op(
         routed_input_transform,
         routed_output_transform,
         routed_scaling_factor,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         nn.Module.__init__(runner)
         runner.layer_name = layer_name
@@ -2159,6 +2120,10 @@ def test_runner_selects_sp_multistream_custom_op(
         runner.routed_input_transform = routed_input_transform
         runner.routed_output_transform = routed_output_transform
         runner.routed_scaling_factor = routed_scaling_factor
+        if routed_scale_mode is not None:
+            runner.routed_scale_mode = routed_scale_mode
+            divide_shared_output_in_fp16 = routed_scale_mode.value == "output_fp16_guard"
+        runner.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         runner._forward_entry = upstream_forward_entry
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
@@ -3062,7 +3027,15 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
+def _stub_moe_runner_init(
+    monkeypatch,
+    *,
+    gate=None,
+    shared_experts=None,
+    fused_mc2_comm=None,
+    divide_shared_output_in_fp16=False,
+    routed_scale_mode=None,
+):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -3085,6 +3058,8 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         routed_input_transform,
         routed_output_transform,
         routed_scaling_factor,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         nn.Module.__init__(runner)
         runner.layer_name = layer_name
@@ -3096,6 +3071,10 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         runner.routed_input_transform = routed_input_transform
         runner.routed_output_transform = routed_output_transform
         runner.routed_scaling_factor = routed_scaling_factor
+        if routed_scale_mode is not None:
+            runner.routed_scale_mode = routed_scale_mode
+            divide_shared_output_in_fp16 = routed_scale_mode.value == "output_fp16_guard"
+        runner.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         runner._forward_entry = object()
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
@@ -3121,7 +3100,26 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         routed_experts=routed_experts,
         gate=gate,
         shared_experts=shared_experts,
+        divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+        routed_scale_mode=routed_scale_mode,
     )
+
+
+@pytest.mark.parametrize("divide_shared", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("with_shared", [False, True])
+def test_runner_preserves_native_shared_scaling(monkeypatch, divide_shared, dtype, with_shared):
+    runner = _stub_moe_runner_init(monkeypatch, divide_shared_output_in_fp16=divide_shared)
+    runner.routed_scaling_factor = 2.0
+    if not vllm_version_is("0.33.0"):
+        assert runner.divide_shared_output_in_fp16 is divide_shared
+    shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
+    fused = torch.full((2, 4), 3.0, dtype=dtype)
+    shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
+    divides = (vllm_version_is("0.33.0") or divide_shared) and with_shared and dtype == torch.float16
+    torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
+    if shared is not None:
+        torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
@@ -3377,3 +3375,26 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("mode_name", ["ROUTER", "OUTPUT", "OUTPUT_FP16_GUARD"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("with_shared", [False, True])
+def test_runner_preserves_native_routed_scale_mode(monkeypatch, mode_name, dtype, with_shared):
+    main = not vllm_version_is("0.33.0")
+    mode = None
+    if main:
+        from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
+
+        mode = RoutedScaleMode[mode_name]
+    runner = _stub_moe_runner_init(monkeypatch, routed_scale_mode=mode)
+    runner.routed_scaling_factor = 2.0
+    if main:
+        assert runner.routed_scale_mode is mode
+    shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
+    fused = torch.full((2, 4), 3.0, dtype=dtype)
+    shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
+    divides = (not main or mode_name == "OUTPUT_FP16_GUARD") and with_shared and dtype == torch.float16
+    torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
+    if shared is not None:
+        torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)

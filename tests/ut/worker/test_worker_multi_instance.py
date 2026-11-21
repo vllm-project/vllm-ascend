@@ -18,7 +18,10 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import torch
+from vllm.config.attention import AttentionConfig
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
 
 from tests.ut.base import TestBase
 
@@ -53,7 +56,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
 
-        worker.vllm_config = SimpleNamespace(kv_transfer_config=None, additional_config={})
+        worker.vllm_config = SimpleNamespace(
+            attention_config=AttentionConfig(), kv_transfer_config=None, additional_config={}
+        )
         worker._kvpp_cache_allocation_plan = None
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
@@ -64,6 +69,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker.cache_config = mock_cache_config
 
         worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3"))
+        worker.vllm_config.model_config = worker.model_config
 
         mock_snapshot = MagicMock()
         mock_snapshot.free_memory = init_free_memory
@@ -267,12 +273,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         )
 
     @patch("vllm_ascend.worker.worker.logger")
-    def test_raises_value_error_when_free_memory_increases_after_profile(self, mock_logger):
-        """
-        determine_available_memory() must raise ValueError when free memory
-        after profiling is greater than before (external process released memory
-        during profiling, invalidating the measurement).
-        """
+    def test_raises_when_free_memory_increases_after_profile(self, mock_logger):
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
         init_free = int(60 * GiB_bytes)
@@ -284,31 +285,67 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result), self.assertRaises(ValueError) as ctx:
+        with (
+            self._patch_memory_profiling(profile_result),
+            self.assertRaisesRegex(ValueError, "Free NPU memory increased"),
+        ):
             worker.determine_available_memory()
 
-        self.assertIn("Error in memory profiling", str(ctx.exception))
-
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
-    @patch("vllm_ascend.worker.worker.logger")
-    def test_unchanged_free_memory_after_profile_is_allowed(self, mock_logger, mock_get_ascend_config):
-        """An unchanged free-memory snapshot is valid for virtualized devices."""
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        total = int(64 * GiB_bytes)
-        requested_memory = int(total * 0.9)
-        init_free = int(60 * GiB_bytes)
-        non_kv_cache = int(0.5 * GiB_bytes)
-
-        worker = self._make_worker(requested_memory, init_free, total)
-        profile_result = self._make_profile_result(
-            free_memory_after=init_free,
-            non_kv_cache_memory=non_kv_cache,
+    def test_equal_free_memory_requires_consistent_allocator_accounting(self):
+        total_memory = 32 * GiB_bytes
+        requested_memory = 20 * GiB_bytes
+        weights_memory = 2 * GiB_bytes
+        initial_allocated = 3 * GiB_bytes
+        initial_reserved = 6 * GiB_bytes
+        # Device free and total, allocator reserved, allocated and peak increase, and expected budget, in GiB.
+        scenarios = (
+            ("weights fit in existing reserve", 24, 32, 6, 5, 1, 17),
+            ("reserved memory grew", 24, 32, 10, 5, 1, None),
+            ("weights missing from allocator", 24, 32, 6, 3, 1, None),
+            ("total memory changed", 24, 30, 6, 5, 1, None),
+            ("device omitted existing reserve", 32, 32, 6, 5, 1, None),
+            ("budget omitted live allocations", 24, 32, 6, 6, 0, None),
         )
-
-        with self._patch_memory_profiling(profile_result):
-            result = worker.determine_available_memory()
-
-        self.assertEqual(result, requested_memory - non_kv_cache)
+        for name, free, total, reserved, allocated, activations, expected_budget in scenarios:
+            with self.subTest(name=name):
+                initial_free_memory = free * GiB_bytes
+                worker = self._make_worker(requested_memory, initial_free_memory, total_memory, weights_memory)
+                profiled_total = total * GiB_bytes
+                profiled_reserved = reserved * GiB_bytes
+                profiled_allocated = allocated * GiB_bytes
+                profile_peak = (allocated + activations) * GiB_bytes
+                allocator_stats = (
+                    {"allocated_bytes.all.current": initial_allocated, "allocated_bytes.all.peak": initial_allocated},
+                    {"allocated_bytes.all.current": profiled_allocated, "allocated_bytes.all.peak": profiled_allocated},
+                    {"allocated_bytes.all.current": profiled_allocated, "allocated_bytes.all.peak": profile_peak},
+                )
+                with (
+                    patch("vllm.utils.mem_utils.current_platform.is_integrated_gpu", return_value=False),
+                    patch.object(torch.accelerator, "memory_stats", side_effect=allocator_stats),
+                    patch.object(
+                        torch.accelerator,
+                        "memory_reserved",
+                        side_effect=(initial_reserved, profiled_reserved, profiled_reserved),
+                    ),
+                    patch.object(
+                        torch.accelerator,
+                        "get_memory_info",
+                        side_effect=(
+                            (initial_free_memory, total_memory),
+                            (initial_free_memory, profiled_total),
+                            (initial_free_memory, profiled_total),
+                        ),
+                    ),
+                    patch.object(torch.accelerator, "empty_cache"),
+                    patch.object(torch.accelerator, "reset_peak_memory_stats"),
+                    patch.object(torch.npu, "memory_stats", return_value={"allocated_bytes.all.peak": profile_peak}),
+                ):
+                    worker.init_snapshot = MemorySnapshot(device=torch.device("npu:0"))
+                    if expected_budget is None:
+                        with self.assertRaisesRegex(ValueError, "Free NPU memory stayed.*--kv-cache-memory-bytes"):
+                            worker.determine_available_memory()
+                    else:
+                        self.assertEqual(worker.determine_available_memory(), expected_budget * GiB_bytes)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")

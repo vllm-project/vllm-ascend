@@ -19,6 +19,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -374,8 +375,10 @@ class Glm5NextVisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        input_norm: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
 
@@ -570,7 +573,7 @@ class Glm5NextVisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         if encoder_metadata is not None:

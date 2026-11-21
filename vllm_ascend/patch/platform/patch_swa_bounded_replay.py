@@ -53,6 +53,8 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
 
+from vllm_ascend.utils import vllm_version_is
+
 _EXPECTED_PARAMETERS = (
     "self",
     "running_reqs",
@@ -150,7 +152,7 @@ def _patch_make_cached_request_data() -> None:
     Scheduler._make_cached_request_data = _make_cached_request_data
 
 
-if _upstream_carries_replay_start():
+if vllm_version_is("0.33.0") and _upstream_carries_replay_start():
     # vLLM loads general plugins in the engine-core process and in every worker
     # (``load_general_plugins``), so this module reaches both sides of the
     # msgpack boundary -- the encoder needs the field declared to write it, the
