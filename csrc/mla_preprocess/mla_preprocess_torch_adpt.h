@@ -17,6 +17,8 @@
 #ifndef MLA_PREPROCESS_TORCH_ADPT_H
 #define MLA_PREPROCESS_TORCH_ADPT_H
 
+#include "mla_preprocess_validation.h"
+
 namespace vllm_ascend {
 namespace mla_preprocess_detail {
 
@@ -120,8 +122,10 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const c10::optional<at::Tensor> &q_nope_scale, c10::optional<c10::string_view> cache_mode,
     c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out,
     at::Tensor &q_out0, at::Tensor &kv_cache_out0, at::Tensor &q_out1,
-    at::Tensor &kv_cache_out1, at::Tensor &inner_out)
+    at::Tensor &kv_cache_out1, at::Tensor &inner_out, double q_epsilon, double kv_epsilon)
 {
+    mla_preprocess_detail::ValidateRmsNormEpsilon(q_epsilon, "q_epsilon");
+    mla_preprocess_detail::ValidateRmsNormEpsilon(kv_epsilon, "kv_epsilon");
     TORCH_CHECK(cos.has_value() == sin.has_value(),
                 "mla_preprocess requires cos and sin to both be tensors or both be None.");
 
@@ -183,6 +187,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         enableRope,
         kvCacheStride0,
         kvCacheRopeStride0,
+        q_epsilon,
+        kv_epsilon,
         q_out0,
         kv_cache_out0,
         q_out1,
