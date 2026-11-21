@@ -24,6 +24,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from vllm.v1.core.kv_cache_utils import BlockHash
+
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
         LayerwiseKVPoolWorker,
     )
@@ -78,6 +82,7 @@ class GvaDataPlane(LayerwiseDataPlane):
             return
         if worker.kv_role == "kv_consumer" and not worker.consumer_is_to_put:
             return
+        hash_str_cache: dict[BlockHash | str, str] = {}
         for request in requests:
             if worker._save_disabled.is_set():
                 break
@@ -87,7 +92,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 request.load_spec is None or not request.load_spec.layerwise_previous_step
             ):
                 worker._snapshot_keys.pop(request.req_id, None)
-            if self._alloc_gvas_for_save_for_request([request]) is False:
+            if self._alloc_gvas_for_save_for_request([request], hash_str_cache=hash_str_cache) is False:
                 logger.error("Memcache save preparation failed for %s", request.req_id)
                 worker._save_disabled.set()
         if worker._save_disabled.is_set():
@@ -100,7 +105,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                 request.can_save = False
                 request.save_keys = []
 
-    def _alloc_gvas_for_save_for_request(self, requests: list[ReqMeta]) -> bool | None:
+    def _alloc_gvas_for_save_for_request(
+        self,
+        requests: list[ReqMeta],
+        hash_str_cache: dict[BlockHash | str, str] | None = None,
+    ) -> bool | None:
         """Allocate per-group GVA on the worker side right before batch_copy.
 
         For multi-group models, iterates all KV cache groups and allocates
@@ -118,10 +127,21 @@ class GvaDataPlane(LayerwiseDataPlane):
             return None
         if not worker.can_put:
             return None
+        if hash_str_cache is None:
+            hash_str_cache = {}
+
+        def _cached_block_hash_to_str(block_hash: BlockHash | str) -> str:
+            cached = hash_str_cache.get(block_hash)
+            if cached is None:
+                cached = block_hash_to_str(block_hash)
+                hash_str_cache[block_hash] = cached
+            return cached
+
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
             block_hashes = request.block_hashes
+            group_hashes_by_block_size: dict[int, Sequence[BlockHash | str]] = {}
 
             all_group_gvas: list[np.ndarray] = []
             all_group_block_ids: list[np.ndarray] = []
@@ -151,7 +171,11 @@ class GvaDataPlane(LayerwiseDataPlane):
                     if endpoint_block >= len(block_ids_by_group) or block_ids_by_group[endpoint_block] == 0:
                         raise ValueError("Recurrent cache endpoint has no allocated state page")
                 alloc_size = worker._global_group_alloc_size(group_id)
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
+                cached_group_hashes = group_hashes_by_block_size.get(effective_block_size)
+                if cached_group_hashes is None:
+                    cached_group_hashes = get_block_hashes(block_hashes, effective_block_size, worker.hash_block_size)
+                    group_hashes_by_block_size[effective_block_size] = cached_group_hashes
+                group_block_hashes = cached_group_hashes
 
                 save_start_block = request.save_start_token // effective_block_size
                 partial_block_index = get_partial_block_index(
@@ -176,7 +200,7 @@ class GvaDataPlane(LayerwiseDataPlane):
                 candidate_keys = [
                     worker._make_layerwise_full_key(
                         group_id,
-                        block_hash_to_str(group_block_hashes[block_idx]),
+                        _cached_block_hash_to_str(group_block_hashes[block_idx]),
                     )
                     if block_idx < len(group_block_hashes)
                     else worker._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
@@ -210,17 +234,18 @@ class GvaDataPlane(LayerwiseDataPlane):
                 # SSD) does not need re-saving, and the load path rewarms
                 # SSD blocks on read.
                 missing_keys = worker._pool_keys_missing(candidate_keys)
-                transfer_blocks = [
-                    block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
+                transfer_pairs = [
+                    (block_idx, key) for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
                 ]
+                transfer_blocks = [block_idx for block_idx, _ in transfer_pairs]
 
                 # batch_alloc is idempotent: allocating an existing key
                 # returns its current, client-registered GVA. Every write
                 # target is therefore allocated fresh within this step; no
                 # cross-step GVA cache is kept.
                 block_gvas: list[int] = []
-                if transfer_blocks:
-                    transfer_keys = [key for key in candidate_keys if key in missing_keys]
+                if transfer_pairs:
+                    transfer_keys = [key for _, key in transfer_pairs]
                     transfer_gvas = worker.m_store.batch_alloc(
                         transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
                     )
