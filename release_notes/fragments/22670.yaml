@@ -1,0 +1,9 @@
+pr: 22670
+entries:
+  - category: breaking
+    text: >-
+      Direct ACLNN users of the bundled sparse flash attention operator must
+      switch to aclnnSparseFlashAttentionVllmGetWorkspaceSize /
+      aclnnSparseFlashAttentionVllm and aclnn_sparse_flash_attention_vllm.h,
+      and rebuild custom operators to avoid CANN symbol collisions.
+      The public Torch interface is unchanged.
