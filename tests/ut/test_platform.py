@@ -477,6 +477,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.compilation_config.max_decode_cudagraph_capture_requests = None
         mock_vllm_config.compilation_config.max_decode_cudagraph_capture_tokens = None
         mock_vllm_config.model_config = MagicMock()
+        mock_vllm_config.model_config.sleep_mode_backend = "cumem"
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
         mock_vllm_config.device_config = MagicMock()
