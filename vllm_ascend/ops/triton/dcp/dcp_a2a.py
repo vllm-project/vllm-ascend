@@ -323,14 +323,13 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
     lse_pack_dim = _lse_pack_dim(partial_output.dtype)
     total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Keep enough row tiles to occupy the vector cores. Feature-strided
-    # loads can regress with batching, especially for wide heads.
+    # Preserve the existing dtype, scatter, feature-size and row-count
+    # eligibility. One rectangular kernel handles all input strides.
     batched = (
         partial_output.dtype == torch.bfloat16
         and scatter_dim == 1
         and head_dim <= 2048
         and total_rows >= 8 * vector_cores
-        and (partial_output.stride(-1) == 1 or (head_dim == 512 and num_tokens >= 128))
     )
     if batched:
         launch(
@@ -345,17 +344,11 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
             softmax_lse.stride(1),
             sum_input.stride(0),
             sum_input.stride(1),
-            *send.stride(),
-            local_scatter_size,
-            head_dim,
+            num_tokens,
             num_heads,
-            total_rows,
-            SCATTER_TOKENS=scatter_dim == 0,
-            LSE_PACK_DIM=lse_pack_dim,
             FROM_STATS=softmax_sum is not None,
+            HEAD_DIM=head_dim,
             BLOCK_D=triton.next_power_of_2(head_dim),
-            BLOCK_ROWS=32 if head_dim == 512 and num_tokens >= 128 and partial_output.stride(-1) == 1 else 8,
-            OUTPUT_HEAD_MAJOR=head_dim == 512,
         )
         return
     launch(
