@@ -94,7 +94,7 @@ def test_upstream_context_creation_uses_ascend_patch_and_caches(monkeypatch):
     assert args == (layers,)
     assert kwargs["spec_query_len"] == 6
     assert kwargs["max_num_reqs"] == 12
-    # vLLM main forwards the commit backend; 0.32.0 does not.
+    # Both supported versions use the Triton commit backend.
     assert kwargs.get("backend", "triton") == "triton"
 
 

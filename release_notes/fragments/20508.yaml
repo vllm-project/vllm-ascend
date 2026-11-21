@@ -1,0 +1,14 @@
+pr: 20508
+entries:
+  - category: bugfix
+    text: >-
+      Build A5 mixed-quant MLA plans asynchronously from actual KV visibility
+      and serialize bounded replay planners that share scratch storage.
+    model: deepseek-v4.1
+    hardware: [A5]
+  - category: performance
+    text: >-
+      Overlap compact V4.1 bounded replay metadata preparation with model
+      execution, share compatible replay masks and plans across cache groups,
+      and build A5 plans for the compression ratios used by replay layers.
+    model: deepseek-v4.1

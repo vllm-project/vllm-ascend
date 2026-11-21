@@ -31,7 +31,7 @@ docker run --rm \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
 /bin/bash
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 4096 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 4096 &
 ```
 
 The vLLM server is started successfully, if you see logs as below:

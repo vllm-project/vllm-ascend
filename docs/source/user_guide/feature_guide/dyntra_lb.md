@@ -39,7 +39,6 @@ Configure DyntraLB only on Decode nodes. Do not add `dyntra_lb_config` with
 DyntraLB cannot be combined with:
 
 - `scheduler_config.enable_balance_scheduling`
-- `scheduler_config.profiling_chunk_config.enabled`
 
 The service rejects these unsupported combinations during startup.
 

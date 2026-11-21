@@ -228,7 +228,7 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             validated = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
         else:
             validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
@@ -344,7 +344,8 @@ def _apply_patch() -> None:
     _patch_model_runner_output()
     # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
-    _patch_scheduler_make_cached_request_data()
+    if vllm_version_is("0.33.0"):
+        _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
     _patch_model_config_validation()
 

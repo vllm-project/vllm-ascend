@@ -15,19 +15,19 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -47,24 +47,28 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    draft_metadata_request_count,
+    prepare_dflash_inputs_factory,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
-    disable_profiling_chunk_for_draft,
 )
 
 
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
+    _proposal_host_lengths: dict[tuple[int, int], torch.Tensor] | None = None
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
-    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
     # the group-agreed capacity and trim the logits back (no _sample_sequential
     # override, upstream sampling logic untouched).
     _lmhead_tp_sample_draft_supported = True
 
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -75,6 +79,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
+        self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
@@ -87,11 +92,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.attn_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     def load_draft_model(
@@ -99,8 +100,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
@@ -116,7 +116,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         DSpark feeds its vocab-sharded draft LM head directly through
         ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
         ``_sample_sequential_topk``), which bypasses the mixin's
-        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        speculator-level logits hook. Wrap the method instead of overriding the
         sampling loop: every rank feeds the group-agreed capacity
         (``max_num_reqs * num_speculative_steps``) into the LM-head
         collectives, then the logits are trimmed back to the real rows.
@@ -275,34 +275,49 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 block_tables,
             )
 
+    @contextmanager
+    def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
+        with draft_metadata_request_count(self, num_reqs):
+            previous = self._proposal_host_lengths
+            self._proposal_host_lengths = {}
+            try:
+                yield
+            finally:
+                self._proposal_host_lengths = previous
+
     def _prepare_draft_dcp_metadata_inputs(
         self, num_reqs: int, num_reqs_padded: int, step: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
-        if not self.use_dcp:
-            if self.attn_architecture == "MLA" and not self.use_flashmla:
-                # FIA requires exact host lengths; FlashMLA reads device lengths.
-                seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
-                seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
-                return seq_lens_cpu, is_prefilling
+        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu")
+        needs_host_lengths = not self.use_flashmla if self.attn_architecture == "MLA" else self.use_dcp
+        if not needs_host_lengths:
             return None, is_prefilling
-        assert self.dcp_manager is not None
-        return self.dcp_manager.prepare_draft_dcp_metadata_inputs(
-            target_seq_lens_cpu=self.target_input_buffers.seq_lens_cpu,
-            is_prefilling=is_prefilling,
-            num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            step=step,
-            max_model_len=self.max_model_len,
-        )
+
+        # FULL replay rebuilds metadata for the same prepared draft batch.
+        cache = self._proposal_host_lengths
+        shape = (num_reqs, num_reqs_padded)
+        if cache is not None and shape in cache:
+            return cache[shape], is_prefilling
+        seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+        seq_lens_cpu[:num_reqs].copy_(self.input_buffers.seq_lens[:num_reqs])
+        if cache is not None:
+            cache[shape] = seq_lens_cpu
+        return seq_lens_cpu, is_prefilling
 
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
+        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
+        if num_reqs is None:
+            num_reqs = self.input_batch.num_reqs
+        assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
-        seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-            self.input_batch.num_reqs, num_reqs_padded, self.num_query_per_req
-        )
+        # GQA and MLA supply both values inside _build_attn_metadata.
+        seq_lens_cpu, is_prefilling = None, None
+        if self.attn_architecture not in ("GQA", "MLA"):
+            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
+                num_reqs, num_reqs_padded, self.num_query_per_req
+            )
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
@@ -322,7 +337,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_reqs=num_reqs_padded,
             )
             attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+                num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
@@ -388,13 +403,24 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         return attn_metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Match FULL-graph query lengths to the padded request count."""
+        """Match padded Q lengths and align KV rows only for the FIA backend."""
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
+        for layer_name, metadata in attn_metadata.items():
             if getattr(metadata, "external_flashmla", None) is not None:
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # Backend subclasses can use different metadata contracts (e.g.
+            # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
+            if self.attn_backends[layer_name] is not AscendAttentionBackend:
+                continue
+            # The builder may append a synthetic request for the padded Q tail.
+            # Uniform Q already covers that tail, so discard its extra KV row.
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens_list[:num_reqs_padded]
+            decode_metadata.seq_lens = decode_metadata.seq_lens[:num_reqs_padded]
+            decode_metadata.seq_lens_cpu = decode_metadata.seq_lens_cpu[:num_reqs_padded]
+            if decode_metadata.block_tables is not None:
+                decode_metadata.block_tables = decode_metadata.block_tables[:num_reqs_padded]
         return attn_metadata
 
     def propose(
@@ -421,10 +447,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         assert self.input_batch is not None
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
-        # capacity independently, as adaptive verification also requires.
-        sync_state = dp_sync_state
-        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
-            sync_state = None
+        # capacity independently for PCP.
+        sync_state = None if self.pcp_manager is not None else dp_sync_state
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
@@ -432,21 +456,20 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-        seq_lens_cpu = None
+        # Upstream trims DP dummy draft requests before selecting its graph,
+        # while input_batch still describes the padded target batch. Replay
+        # metadata must use the same count without mutating the target batch.
+        num_draft_reqs = input_batch.num_reqs
+        if dummy_run and sync_state is not None:
+            num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
-        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
-            # DSpark drafts one block with a fixed step; zero unused request slots
-            # before upstream selects the padded batch size and slices this view.
-            seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
-                input_batch.num_reqs, self.max_num_reqs, self.num_query_per_req
-            )
         with (
+            self._proposal_metadata(num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
                 self.max_num_tokens,
                 is_prefilling,
-                seq_lens_cpu=seq_lens_cpu,
                 parallel_config=self.attn_vllm_config.parallel_config,
             ),
         ):
@@ -469,14 +492,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
-            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
-            # Older vLLM lacks that runner hook; keep its token/logit contract
-            # here until both supported lanes provide PCPManager.sync_drafts.
-            pcp_group = get_pcp_group()
-            pcp_group.broadcast(draft_tokens, src=0)
-            if self.draft_logits is not None:
-                logits = self.draft_logits[input_batch.idx_mapping]
-                pcp_group.broadcast(logits, src=0)
-                self.draft_logits[input_batch.idx_mapping] = logits
+        # vLLM 0.33.0 needs this call; newer runners synchronize after
+        # propose(). Never communicate during dummy runs.
+        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
+            assert isinstance(self.pcp_manager, AscendPCPManager)
+            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens

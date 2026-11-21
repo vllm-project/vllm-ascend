@@ -16,10 +16,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendC8AttentionBackendImpl,
     AscendMetadata,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import (
-    AscendAttentionDCPImpl,
-    AscendAttentionDCPMetadataBuilder,
-)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     cache_graph_workspace,
@@ -40,7 +36,7 @@ class TestAttentionGraphHelpers(TestBase):
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
         spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.float16)
-        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl, AscendAttentionDCPImpl):
+        for impl_cls in (AscendAttentionBackendImpl, AscendC8AttentionBackendImpl):
             with self.subTest(impl=impl_cls):
                 impl = impl_cls.__new__(impl_cls)
                 impl.sliding_window = None
@@ -140,18 +136,13 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
+        self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+        self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
@@ -159,20 +150,6 @@ class TestAscendAttentionBackend(TestBase):
                 return AscendC8AttentionBackendImpl
 
         self.assertFalse(OtherAttentionBackend.supports_pcp())
-
-    def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_impl_cls(),
-                AscendAttentionDCPImpl,
-            )
-
-    def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_builder_cls(),
-                AscendAttentionDCPMetadataBuilder,
-            )
 
     def test_get_kv_cache_shape(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
@@ -215,14 +192,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_device = "cpu:0"
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
-
-    def test_reorder_batch(self):
-        mock_input_batch = MagicMock()
-        mock_scheduler_output = MagicMock()
-
-        result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
-
-        self.assertFalse(result)
 
     def test_pcp_mode_is_initialized_from_config(self):
         self.assertFalse(self.builder.use_pcp)
@@ -381,7 +350,6 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder.decode_threshold = 1
     builder.use_pcp = True
     common_metadata = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=4,
         num_reqs=2,
         num_actual_tokens=5,
@@ -734,6 +702,209 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.forward_fused_infer_attention.assert_called_once()
         self.assertIs(result, output)
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_decode_fia_skips_attn_mask_and_uses_sparse_mode_zero(self, mock_fia, mock_get_forward_context):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [1, 2]
+        metadata.num_decodes = 2
+        metadata.num_prefills = 0
+        metadata.seq_lens_list = [10, 20]
+        metadata.max_query_len = 1
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_fia.return_value = (torch.empty_like(query), None)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.forward_fused_infer_attention(query, key, value, metadata, output)
+
+        self.assertIsNone(mock_fia.call_args.kwargs["atten_mask"])
+        self.assertEqual(mock_fia.call_args.kwargs["sparse_mode"], 0)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_multi_token_batch_labeled_decode_keeps_attn_mask_and_sparse_mode_three(
+        self, mock_fia, mock_get_forward_context
+    ):
+        # Multi-token batches labeled DecodeOnly (spec-decode draft/verify)
+        # still need the causal mask.
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [2, 2]
+        metadata.num_decodes = 2
+        metadata.num_prefills = 0
+        metadata.seq_lens_list = [10, 20]
+        metadata.max_query_len = 2
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_fia.return_value = (torch.empty_like(query), None)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.forward_fused_infer_attention(query, key, value, metadata, output)
+
+        self.assertIs(mock_fia.call_args.kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(mock_fia.call_args.kwargs["sparse_mode"], 3)
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_prefill_fia_keeps_attn_mask_and_sparse_mode_three(self, mock_fia, mock_get_forward_context):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [2]
+        metadata.num_decodes = 0
+        metadata.num_prefills = 1
+        metadata.seq_lens_list = [10]
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_fia.return_value = (torch.empty_like(query), None)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.forward_fused_infer_attention(query, key, value, metadata, output)
+
+        self.assertIs(mock_fia.call_args.kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(mock_fia.call_args.kwargs["sparse_mode"], 3)
+
+    @patch("vllm_ascend.attention.attention_v1.register_task")
+    @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_full_graph_fia_decode_capture_keeps_attn_mask_and_sparse_mode_three(
+        self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
+    ):
+        # FULL-graph capture dummies are always DecodeOnly with one query
+        # token per request (AscendInputBatch.make_dummy), but the captured
+        # graphs also replay multi-token batches (speculative-decode and
+        # adaptive-verification batches, chunked prefill). FIA graph replay
+        # cannot rebind atten_mask/sparse_mode, so capture must keep the
+        # right-aligned causal mask (sparse_mode=3), which is valid for every
+        # replay shape. Skipping the mask at capture corrupts spec-decode
+        # acceptance rates (test_dynamic dspark/dflash, cf. #17948).
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [1, 2]
+        metadata.num_actual_tokens = 2
+        metadata.seq_lens_list = [10, 20]
+        metadata.max_query_len = 1
+        mock_get_forward_context.return_value = MagicMock(capturing=True)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.full_graph_fia(query, key, value, metadata, output)
+
+        task_kwargs = mock_register_task.call_args[0][1]
+        self.assertIs(task_kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(task_kwargs["sparse_mode"], 3)
+
+    @patch("vllm_ascend.attention.attention_v1.register_task")
+    @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_full_graph_fia_spec_verify_capture_keeps_attn_mask_and_sparse_mode_three(
+        self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
+    ):
+        # Spec-decode verify batches replay the same FULL graphs captured
+        # with single-token decode dummies; the multi-token queries need the
+        # right-aligned causal mask, which capture must therefore keep
+        # (cf. PR #17948).
+        query = torch.randn(4, 8, 64)
+        key = torch.randn(4, 8, 64)
+        value = torch.randn(4, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(8, 8, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [4]
+        metadata.num_actual_tokens = 4
+        metadata.seq_lens_list = [10]
+        metadata.max_query_len = 4
+        mock_get_forward_context.return_value = MagicMock(capturing=True)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.full_graph_fia(query, key, value, metadata, output)
+
+        task_kwargs = mock_register_task.call_args[0][1]
+        self.assertIs(task_kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(task_kwargs["sparse_mode"], 3)
+
+    @patch("vllm_ascend.attention.attention_v1.register_task")
+    @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_full_graph_fia_prefill_capture_keeps_attn_mask_and_sparse_mode_three(
+        self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
+    ):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [2]
+        metadata.num_actual_tokens = 2
+        metadata.seq_lens_list = [10]
+        mock_get_forward_context.return_value = MagicMock(capturing=True)
+
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        self.impl.full_graph_fia(query, key, value, metadata, output)
+
+        task_kwargs = mock_register_task.call_args[0][1]
+        self.assertIs(task_kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(task_kwargs["sparse_mode"], 3)
+
+    @patch("vllm_ascend.attention.attention_v1.register_task")
+    @patch("vllm_ascend.attention.attention_v1.get_capture_resource", return_value=MagicMock())
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_full_graph_fia_swa_decode_capture_keeps_attn_mask_and_sparse_mode_four(
+        self, mock_get_forward_context, mock_get_capture_resource, mock_register_task
+    ):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.causal = True
+        metadata.attn_mask = torch.zeros(4, 4, dtype=torch.int8)
+        metadata.actual_seq_lengths_q = [1, 2]
+        metadata.num_actual_tokens = 2
+        metadata.seq_lens_list = [10, 20]
+        mock_get_forward_context.return_value = MagicMock(capturing=True)
+
+        self.impl_swa.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl_swa.value_cache = torch.empty_like(self.impl_swa.key_cache)
+        self.impl_swa.full_graph_fia(query, key, value, metadata, output)
+
+        task_kwargs = mock_register_task.call_args[0][1]
+        self.assertIs(task_kwargs["atten_mask"], metadata.attn_mask)
+        self.assertEqual(task_kwargs["sparse_mode"], 4)
+
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     def test_decode_uses_paged_attention(self, mock_using_pa):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
@@ -850,6 +1021,22 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, None, output)
 
         assert output.shape == (10, 8 * 64)
+
+    def test_forward_pooling_encoder_only_is_bidirectional_despite_causal_metadata(self):
+        self.impl.attn_type = attn_module.AttentionType.ENCODER_ONLY
+        query = torch.zeros(2, self.impl.num_heads, self.impl.head_size)
+        output = torch.zeros_like(query)
+        encoder_output = torch.ones_like(query)
+        metadata = AscendMetadata(model_runner_type="pooling", causal=True, actual_seq_lengths_q=[query.shape[0]])
+
+        with (
+            patch("torch_npu.npu_fusion_attention", return_value=(encoder_output,)) as encoder_attention,
+            patch.object(self.impl, "forward_impl", return_value=output),
+        ):
+            result = self.impl.forward(self.layer_no_quant, query, query, query, (), metadata, output)
+
+        encoder_attention.assert_called_once()
+        torch.testing.assert_close(result, encoder_output)
 
     @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")

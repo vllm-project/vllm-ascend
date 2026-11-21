@@ -1,4 +1,3 @@
-import inspect
 from typing import Optional
 
 import torch
@@ -15,10 +14,6 @@ from vllm_ascend.utils import FP8_METHOD
 
 from ..methods import get_scheme_class
 from ..utils import is_fused_moe_layer
-
-# vLLM 0.27.1's is_layer_skipped has no match_mode; newer trees default to exact.
-_IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE = "match_mode" in inspect.signature(is_layer_skipped).parameters
-
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
@@ -63,13 +58,11 @@ class AscendFp8Config(Fp8Config):
         if not getattr(self, "ignored_layers", None):
             return False
 
-        skip_kwargs = {}
-        if _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE:
-            skip_kwargs["match_mode"] = getattr(self, "ignored_layers_match_mode", "exact")
-        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, **skip_kwargs):
+        match_mode = getattr(self, "ignored_layers_match_mode", "exact")
+        if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, match_mode=match_mode):
             return True
 
-        if not _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE or skip_kwargs.get("match_mode") == "suffix":
+        if match_mode == "suffix":
             return False
 
         if is_layer_skipped(prefix, self.ignored_layers, self.packed_modules_mapping, match_mode="suffix"):
@@ -94,7 +87,6 @@ class AscendFp8Config(Fp8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         # Delayed imports: both modules reach back into the quantization package.
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
@@ -113,7 +105,7 @@ class AscendFp8Config(Fp8Config):
         if self._is_layer_skipped(prefix):
             if is_linear:
                 return AscendUnquantizedLinearMethod()
-            return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
+            return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
         self._verify_block_quantization()
         logger.info_once("Using the vLLM Ascend block-wise fp8 Quantization now!")
@@ -129,7 +121,6 @@ class AscendFp8Config(Fp8Config):
             return AscendFusedMoEMethod(
                 scheme_class(self.weight_block_size, layer.moe_config),
                 layer.moe_config,
-                tid2eid=tid2eid,
             )
 
         return None
@@ -145,7 +136,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
         self,
         layer: torch.nn.Module,
         prefix: str,
-        tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendFusedMoEMethod,
@@ -163,6 +153,6 @@ class AscendDeepseekV4FP8Config(DeepseekV4FP8Config):
                 assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/ds_w4a8_moe"
             else:
                 raise NotImplementedError
-            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config, tid2eid=tid2eid)
+            quant_method = AscendFusedMoEMethod(scheme_class(), layer.moe_config)
             return quant_method
         return None

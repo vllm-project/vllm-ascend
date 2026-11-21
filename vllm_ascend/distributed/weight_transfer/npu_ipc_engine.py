@@ -4,8 +4,10 @@
 
 import os
 import socket
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -22,12 +24,15 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
 from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         VLLMWeightSyncClient,
         WeightSource,
@@ -118,6 +123,16 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
+    def __init__(
+        self,
+        config: "WeightTransferConfig",
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
+    ) -> None:
+        super().__init__(config, vllm_config, device, model)
+        self._packed_importer = NPUPackedBufferImporter()
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -155,6 +170,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -185,11 +201,14 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
+        mtp_check = nullcontext()
+        if vllm_version_is("0.33.0"):
+            # The pinned main tree used by mypy no longer contains this
+            # release-only module. Resolve it only in the release runtime.
+            mtp_validation = import_module("vllm.model_executor.model_loader.mtp_validation")
+            mtp_check = mtp_validation.disable_mtp_completeness_check()
 
-        with disable_mtp_completeness_check():
+        with mtp_check:
             self.model.load_weights(weights)
 
 
@@ -268,9 +287,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
 
     def _send_packed(self, source: "WeightSource") -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        # vLLM main replaced `WeightSource.__iter__` with `iter_full()`;
-        # v0.32.0 still iterates the source directly.
-        iterator = iter(source) if vllm_version_is("0.32.0") else source.iter_full()
+        # Both supported versions drive the WeightSource iter_full protocol.
+        iterator = source.iter_full()
         for chunk in packed_npu_ipc_producer(
             iterator=iterator,
             npu_uuid=self.npu_uuid,

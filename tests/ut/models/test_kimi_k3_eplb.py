@@ -13,8 +13,8 @@ from vllm.model_executor.models import utils as model_utils
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.models.utils import PPMissingLayer
 
-from vllm_ascend.models import kimi_k3 as k3_module
-from vllm_ascend.models import kimi_k3_mtp as mtp_module
+from vllm_ascend.models.kimi_k3 import kimi_k3 as k3_module
+from vllm_ascend.models.kimi_k3 import kimi_k3_mtp as mtp_module
 from vllm_ascend.patch.platform import patch_eplb
 
 
@@ -313,6 +313,7 @@ def test_expert_loading_initializes_every_replica(
         num_experts=num_experts,
         num_hidden_layers=2,
         num_nextn_predict_layers=1,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         is_linear_attn=False,

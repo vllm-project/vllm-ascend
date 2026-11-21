@@ -220,6 +220,18 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    # ModelSlim Step5 checkpoints store the routed-expert projections fused
+    # across all experts as "moe.{gate,up,down}_proj" (no "experts.E."
+    # infix), so the FusedMoE "experts" container resolves its shards
+    # directly against those keys.  The rest of the fused layout
+    # (qkv_proj/qkvg_proj/qkv_indexer_proj/gate_up_proj) is seeded from the
+    # model's own STEP5_PACKED_MODULES_MAPPING.
+    "step5": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
+    "step5_vl": {
+        "experts": ["gate_proj", "up_proj", "down_proj"],
+    },
 }
 
 
@@ -284,6 +296,12 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # Same for the step5 MTP draft: the module tree nests the decoder block
+    # under ".mtp_block." while the checkpoint keys it without that infix
+    # (e.g. "model.layers.93.self_attn.q_proj.weight").
+    "step5_mtp": {
         ".mtp_block.": ".",
     },
     # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim
@@ -659,6 +677,16 @@ class AscendModelSlimConfig(QuantizationConfig):
         gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
         return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
+    def uses_kimi_k3_mixed_mla_projection(self, prefix: str) -> bool:
+        """Keep differently quantized MLA output gates out of the Q/KV pack."""
+        quant_types = []
+        for name in ("q_a_proj", "kv_a_proj_with_mqa", "g_proj"):
+            shard_prefix = self.quant_prefix_mapper("kimi_k3", f"{prefix}.{name}")
+            key = _find_quant_description_key(self.quant_description, shard_prefix)
+            quant_types.append(self.quant_description.get(key) if key is not None else None)
+        # Missing descriptions retain the ordinary packed-layer validation.
+        return None not in quant_types and quant_types[0] == quant_types[1] and quant_types[0] != quant_types[2]
+
     def _has_quant_weight(self, prefix: str) -> bool:
         if _find_quant_description_key(self.quant_description, prefix) is not None:
             return True
@@ -774,6 +802,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
             self.packed_modules_mapping.update(mapping)
+        elif model_type == "kimi_k3_mtp":
+            # MTP uses the same MLA pair without the target's KDA mappings.
+            self.packed_modules_mapping["fused_qkv_a_proj"] = ["q_a_proj", "kv_a_proj_with_mqa"]
         if "experts" not in self.packed_modules_mapping:
             shard_names: set[str] = set()
             for key in self.quant_description:
@@ -783,7 +814,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
             AscendFusedMoEMethod,
@@ -818,10 +849,23 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
+            packed_modules_mapping = self.packed_modules_mapping
+            if (
+                model_type in ("kimi_k3", "kimi_linear", "kimi_k3_mtp")
+                and runtime_prefix.endswith(".fused_qkv_a_proj")
+                and len(getattr(layer, "output_sizes", ())) == 3
+            ):
+                # AMD Kimi includes a third gate shard under the same name as
+                # the two-shard draft projection. Validate the actual layout
+                # without changing the shared mapping used by ungated layers.
+                packed_modules_mapping = {
+                    **packed_modules_mapping,
+                    "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa", "g_proj"],
+                }
             quant_type = get_quant_type_for_layer(
                 self.quant_description,
                 runtime_prefix,
-                self.packed_modules_mapping,
+                packed_modules_mapping,
                 prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
             )
 
@@ -885,7 +929,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
             scheme = create_scheme_for_layer(quant_type, prefix, "moe")
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if quant_type is None:
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")

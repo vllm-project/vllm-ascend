@@ -12,10 +12,16 @@ from vllm.model_executor.layers import linear
 
 import vllm_ascend.models.glm5next.kda as model_kda
 from vllm_ascend.models.glm5next.model import Glm5NextForCausalLM
+from vllm_ascend.models.glm5next.recoverssm_config import validate_glm_recoverssm
 
 
 @pytest.fixture
 def parallel_groups(monkeypatch):
+    monkeypatch.setattr(
+        model_kda,
+        "get_ascend_config",
+        lambda: SimpleNamespace(finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=1)),
+    )
     # Exercise inherited vLLM loaders without Ascend's OOT class replacement.
     for name in ("ColumnParallelLinear", "RowParallelLinear"):
         monkeypatch.delitem(custom_op.op_registry_oot, name, raising=False)
@@ -33,6 +39,14 @@ def parallel_groups(monkeypatch):
     )
     group = SimpleNamespace(world_size=4, rank_in_group=2, all_gather=Mock(), all_reduce=Mock())
     monkeypatch.setattr(model_kda, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(
+        model_kda,
+        "get_tp_group",
+        lambda: SimpleNamespace(
+            world_size=linear.get_tensor_model_parallel_world_size(),
+            rank_in_group=linear.get_tensor_model_parallel_rank(),
+        ),
+    )
     return group
 
 
@@ -79,12 +93,9 @@ def test_pcp_column_projection_gathers_with_pcp_group(parallel_groups, loader_na
 
 @pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
 @pytest.mark.parametrize("input_is_parallel", [False, True])
-@pytest.mark.parametrize("reduce_results", [False, True])
-def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
-    parallel_groups, loader_name, input_is_parallel, reduce_results
-):
+def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(parallel_groups, loader_name, input_is_parallel):
     layer = model_kda.PCPRowParallelLinear(
-        8, 3, bias=False, input_is_parallel=input_is_parallel, reduce_results=reduce_results, params_dtype=torch.float32
+        8, 3, bias=False, input_is_parallel=input_is_parallel, params_dtype=torch.float32
     )
     weight = torch.arange(24, dtype=torch.float32).reshape(3, 8)
     getattr(layer, loader_name)(layer.weight, weight)
@@ -96,14 +107,15 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
     full = x @ weight.T
     parallel_groups.all_reduce.return_value = full
     output = layer(x[:, 4:6] if input_is_parallel else x)[0]
-    torch.testing.assert_close(output, full if reduce_results else local)
-    if reduce_results:
-        torch.testing.assert_close(parallel_groups.all_reduce.call_args.args[0], local)
-    else:
-        parallel_groups.all_reduce.assert_not_called()
+    torch.testing.assert_close(output, full)
+    torch.testing.assert_close(parallel_groups.all_reduce.call_args.args[0], local)
 
 
-@pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 1), (1, 2), (1, 4), (2, 1), (2, 4), (4, 2)])
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize(
+    ("tp_size", "pcp_size", "input_proj_tp_size"),
+    [(1, 1, 1), (1, 2, 1), (1, 4, 1), (2, 1, 1), (2, 4, 1), (4, 2, 1), (1, 1, 2), (1, 1, 4), (1, 1, 8)],
+)
 @pytest.mark.parametrize(
     ("cudagraph_mode", "needs_output_buffer"),
     [
@@ -114,15 +126,33 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
         (CUDAGraphMode.FULL_AND_PIECEWISE, True),
     ],
 )
-def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
-    monkeypatch, parallel_groups, tp_size, pcp_size, cudagraph_mode, needs_output_buffer
+@pytest.mark.parametrize("static_output_bias", [False, True])
+def test_kda_projection_and_state_sharding_follow_tp_times_pcp(
+    monkeypatch,
+    parallel_groups,
+    tp_size,
+    pcp_size,
+    input_proj_tp_size,
+    cudagraph_mode,
+    needs_output_buffer,
+    static_output_bias,
+    recover,
 ):
     # Construct the complete KDA layer to catch mismatched projection, gate,
-    # convolution, and cache dimensions, including the TP>1 fallback.
+    # convolution, and cache dimensions, including joint TP and PCP.
     monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: tp_size)
     monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: tp_size - 1)
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
+    input_proj_tp_group = SimpleNamespace(world_size=input_proj_tp_size, rank_in_group=input_proj_tp_size - 1)
+    monkeypatch.setattr(model_kda, "get_qkv_iproj_tp_group", lambda: input_proj_tp_group)
+    monkeypatch.setattr(
+        model_kda,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            finegrained_tp_config=SimpleNamespace(qkv_iproj_tensor_parallel_size=input_proj_tp_size)
+        ),
+    )
     config = SimpleNamespace(
         model_type="glm5_next",
         hidden_size=16,
@@ -132,20 +162,32 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
         linear_lower_bound=-4,
     )
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=pcp_size),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=config, hf_text_config=config),
-        cache_config=SimpleNamespace(mamba_cache_dtype="auto", use_replayssm=False),
-        speculative_config=None,
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto", use_replayssm=recover, enable_prefix_caching=False, mamba_cache_mode="none"
+        ),
+        mamba_config=SimpleNamespace(enable_stochastic_rounding=False),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_producer") if pcp_size > 1 else None,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3) if recover else None,
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
         quant_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}, cudagraph_mode=cudagraph_mode),
     )
+    if recover:
+        validate_glm_recoverssm(vllm_config)
 
     def init_base(self, config, vllm_config, prefix):
         torch.nn.Module.__init__(self)
         self.tp_size, self.tp_rank = tp_size, tp_size - 1
         self.hidden_size = config.hidden_size
         self.quant_config = vllm_config.quant_config
-        self.num_spec = 0
+        self.num_spec = 3 if recover else 0
 
     monkeypatch.setattr(model_kda.GatedDeltaNetAttention, "__init__", init_base)
     monkeypatch.setattr(model_kda, "get_current_vllm_config", lambda: vllm_config)
@@ -153,28 +195,49 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     monkeypatch.setattr(
         "vllm.third_party.flash_linear_attention.ops.kda.FusedRMSNormGated", lambda *args, **kwargs: torch.nn.Identity()
     )
+    if static_output_bias:
+        row_init = model_kda.RowParallelLinear.__init__
+
+        def init_static_row(self, *args, **kwargs):
+            row_init(self, *args, **kwargs)
+            self.register_parameter(
+                "quant_bias", torch.nn.Parameter(torch.zeros(self.output_size), requires_grad=False)
+            )
+
+        monkeypatch.setattr(model_kda.RowParallelLinear, "__init__", init_static_row)
     layer = model_kda.Glm5NextLinearAttention(config, vllm_config, prefix="model.layers.0.linear_attn")
+    assert layer.use_recoverssm is recover
     assert layer._needs_output_buffer is needs_output_buffer
     assert layer.pcp_group is parallel_groups
     assert layer.pcp_size == pcp_size
     assert layer.pcp_rank == pcp_size - 1
-    size = pcp_size if tp_size == 1 else tp_size
-    rank = pcp_size - 1 if tp_size == 1 else tp_size - 1
+    size = tp_size * pcp_size
+    rank = size - 1
     assert layer.tp_size == size and layer.tp_rank == rank
     assert layer.local_num_heads == 8 // size
+    if recover:
+        assert layer.recoverssm_records is not None
+        assert layer.recoverssm_records.correction.shape == (4, 8 // size, 4, 128)
+        assert layer.recoverssm_records.key_gate.shape == (4, 8 // size, 4, 256)
+        assert layer.recoverssm_records.correction.dtype == torch.float32
+        assert layer.recoverssm_records.key_gate.dtype is torch.bfloat16
+    else:
+        assert layer.recoverssm_records is None
     assert layer.local_projection_size == 1024 // size
-    assert layer.use_pcp_head_sharding == (tp_size == 1 and pcp_size > 1)
-    assert (
-        isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear)
-        == layer.use_pcp_head_sharding
+    assert layer.use_pcp_head_sharding == (pcp_size > 1)
+    assert isinstance(layer.in_proj_qkvbfg_a, model_kda.PCPGlm5NextMergedColumnParallelLinear) == (
+        layer.use_pcp_head_sharding or input_proj_tp_size > 1
     )
     assert isinstance(layer.o_proj, model_kda.PCPRowParallelLinear) == layer.use_pcp_head_sharding
-    for name in ("f_b_proj", "g_b_proj", "q_conv1d", "k_conv1d", "v_conv1d"):
+    for name in ("f_b_proj", "g_b_proj", "conv1d"):
         projection = getattr(layer, name)
         assert isinstance(projection, model_kda.PCPColumnParallelLinear) == layer.use_pcp_head_sharding
-        assert projection.weight.shape[0] == 1024 // size
-    assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // size + 8 // size + 2 * 128
+        assert projection.weight.shape[0] == (3 if name == "conv1d" else 1) * 1024 // size
+    projection_size = input_proj_tp_size if input_proj_tp_size > 1 else size
+    assert layer.in_proj_qkvbfg_a.weight.shape[0] == 3 * 1024 // projection_size + 8 // projection_size + 2 * 128
     assert layer.o_proj.weight.shape == (16, 1024 // size)
+    if static_output_bias:
+        assert layer.o_proj.quant_bias.shape == (16,)
     assert layer.get_state_shape() == Glm5NextForCausalLM.get_mamba_state_shape_from_config(vllm_config)
     assert layer.get_state_shape()[1] == (8 // size, 128, 128)
 
@@ -189,3 +252,76 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
 def test_pcp_head_count_must_be_divisible(monkeypatch, parallel_groups):
     with pytest.raises(AssertionError):
         model_kda.PCPColumnParallelLinear(3, 6, bias=False)
+
+
+@pytest.mark.parametrize("loader_name", ["weight_loader", "weight_loader_v2"])
+@pytest.mark.parametrize("direction", ["column", "row"])
+@pytest.mark.parametrize("communicate", [False, True])
+def test_explicit_projection_group_loads_and_communicates_independently(
+    monkeypatch, parallel_groups, loader_name, direction, communicate
+):
+    # An explicit projection group replaces both default groups, even when
+    # TP and PCP are nontrivial. Its weights and collectives use only its ranks.
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=1, all_gather=Mock(), all_reduce=Mock())
+    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
+    group = SimpleNamespace(world_size=2, rank_in_group=1, all_gather=Mock(), all_reduce=Mock())
+    if direction == "column":
+        layer = model_kda.PCPColumnParallelLinear(
+            8, 8, tp_group=group, bias=False, gather_output=communicate, params_dtype=torch.float32
+        )
+    else:
+        layer = model_kda.PCPRowParallelLinear(
+            8, 8, tp_group=group, bias=False, reduce_results=communicate, params_dtype=torch.float32
+        )
+    weight = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+    getattr(layer, loader_name)(layer.weight, weight)
+    assert layer.tp_rank == layer.weight.tp_rank == 1
+    assert layer.tp_size == layer.weight.tp_size == 2
+    x = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+    full = x @ weight.T
+    if direction == "column":
+        torch.testing.assert_close(layer.weight, weight[4:])
+        local = x @ weight[4:].T
+        group.all_gather.return_value = full
+        output = layer(x)[0]
+        collective = group.all_gather
+        if communicate:
+            assert collective.call_args.kwargs == {"dim": -1}
+    else:
+        torch.testing.assert_close(layer.weight, weight[:, 4:])
+        local = x[:, 4:] @ weight[:, 4:].T
+        group.all_reduce.return_value = full
+        output = layer(x[:, 4:])[0]
+        collective = group.all_reduce
+    torch.testing.assert_close(output, full if communicate else local)
+    assert collective.call_count == int(communicate)
+    if communicate:
+        torch.testing.assert_close(collective.call_args.args[0], local)
+    for unused in (parallel_groups, tp_group):
+        unused.all_gather.assert_not_called()
+        unused.all_reduce.assert_not_called()
+
+
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_joint_output_projection_reduces_pcp_before_optional_tp(monkeypatch, parallel_groups, reduce_results):
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=1, all_reduce=Mock())
+    monkeypatch.setattr(model_kda, "get_tp_group", lambda: tp_group)
+    layer = model_kda.PCPRowParallelLinear(16, 3, bias=False, reduce_results=reduce_results, params_dtype=torch.float32)
+    weight = torch.arange(48, dtype=torch.float32).reshape(3, 16)
+    layer.weight.weight_loader(layer.weight, weight)
+    assert layer.tp_rank == 6
+    torch.testing.assert_close(layer.weight, weight[:, 12:14])
+
+    x = torch.arange(16, dtype=torch.float32).reshape(1, 16)
+    local = x[:, 12:14] @ weight[:, 12:14].T
+    pcp_sum = x[:, 8:] @ weight[:, 8:].T
+    full = x @ weight.T
+    parallel_groups.all_reduce.return_value = pcp_sum
+    tp_group.all_reduce.return_value = full
+
+    torch.testing.assert_close(layer(x[:, 12:14])[0], full if reduce_results else pcp_sum)
+    torch.testing.assert_close(parallel_groups.all_reduce.call_args.args[0], local)
+    if reduce_results:
+        tp_group.all_reduce.assert_called_once_with(pcp_sum)
+    else:
+        tp_group.all_reduce.assert_not_called()

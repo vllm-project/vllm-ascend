@@ -28,7 +28,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
-    LayerPoolKey,
     LayerTransferTask,
     SharedBlockData,
 )
@@ -46,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
-    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
@@ -237,10 +235,7 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestLayerStoreRequestTracking(unittest.TestCase):
     def test_multiple_pending_saves_finish_only_after_all_complete(self):
-        for thread_type, transfer_size in (
-            (KVCacheStoreKeyLayerSendingThread, 1),
-            (KVCacheStoreLayerSendingThread, 16),
-        ):
+        for thread_type, transfer_size in ((KVCacheStoreLayerSendingThread, 16),):
             with self.subTest(thread_type=thread_type.__name__):
                 thread = thread_type(
                     FakeStore(),
@@ -376,9 +371,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(
-        self, external_slot_release_waiter=None, save_failure_checker=None, raise_on_transfer_failure=True
-    ):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -404,7 +397,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             dcp_size=1,
             page_size_bytes=16,
             ready_event=threading.Event(),
-            get_event=threading.Event(),
             layer_load_finished_events=load_finished,
             layer_save_finished_events=save_finished,
             sync_save_events=sync_events,
@@ -412,14 +404,13 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
-            raise_on_transfer_failure=raise_on_transfer_failure,
         )
         return thread, load_finished, save_finished, sync_events
 
     def test_gva_load_failure_policy(self):
-        for strict, hybrid in ((False, False), (True, False), (False, True), (True, True)):
-            with self.subTest(strict=strict, hybrid=hybrid):
-                thread, load_finished, _, _ = self._make_thread(raise_on_transfer_failure=strict)
+        for hybrid in (False, True):
+            with self.subTest(hybrid=hybrid):
+                thread, load_finished, _, _ = self._make_thread()
                 thread.m_store.store.batch_copy.return_value = -1
                 request = ReqMeta("r1", block_ids_by_group=[[7], [7]] if hybrid else [[7, 8]], block_hashes=[])
                 task = LayerTransferTask(
@@ -432,7 +423,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                         is_last_chunks=[False],
                     ),
                 )
-                load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
+                load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[task], layer_id=1)
                 thread.request_queue.put(load_task)
 
                 thread._handle_request(load_task)
@@ -457,7 +448,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         )
         transfer_tasks = [task]
         load_task = LayerLoadTask(
-            wait_for_save_layer=None,
+            wait_for_save_layers=(),
             transfer_tasks=transfer_tasks,
             layer_id=1,
         )
@@ -471,7 +462,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread, load_finished, save_finished, sync_events = self._make_thread()
         save_finished[0].set()
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -480,7 +471,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         thread._handle_request(load_task)
 
         sync_events[0].synchronize.assert_called_once_with()
-        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(save_finished[0].is_set())
         self.assertTrue(load_finished[1].is_set())
 
     def test_source_save_failure_stops_receiver_wait(self):
@@ -489,7 +480,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         save_finished[0] = MagicMock()
         save_finished[0].wait.return_value = False
         load_task = LayerLoadTask(
-            wait_for_save_layer=0,
+            wait_for_save_layers=(0,),
             transfer_tasks=[],
             layer_id=1,
         )
@@ -523,12 +514,12 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
                 is_last_chunks=[False],
             ),
         )
-        load_task = LayerLoadTask(wait_for_save_layer=0, transfer_tasks=[task], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(0,), transfer_tasks=[task], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)
 
-        self.assertEqual(call_order, [("save", 0), ("reuse", 1), ("h2d", 1)])
+        self.assertEqual(call_order, [("save", 0), ("reuse", 0), ("reuse", 1), ("h2d", 1)])
 
     def test_empty_load_waits_for_target_layer_reuse_before_finish(self):
         load_finished_observed: list[bool] = []
@@ -539,7 +530,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
 
         thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
-        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
+        load_task = LayerLoadTask(wait_for_save_layers=(), transfer_tasks=[], layer_id=1)
         thread.request_queue.put(load_task)
 
         thread._handle_request(load_task)
@@ -555,6 +546,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         kv_role="kv_producer",
         enable_kv_event=False,
         block_size=16,
+        sharded_mamba_group_ids=None,
     ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase(block_size=block_size)
@@ -569,6 +561,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             ready_event=threading.Event(),
             group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
+            sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
 
@@ -597,6 +590,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
             [["h1"], ["h0", "h2"]],
         )
+
+    def test_pcp_head_shards_save_every_checkpoint(self):
+        hashes = [f"h{i}" for i in range(4)]
+        for pcp_rank in range(2):
+            thread, store = self._make_thread(sharded_mamba_group_ids={0})
+            thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+            thread.group_uses_align_state = [True]
+            req = ReqMeta(req_id="r1", token_len_chunk=64, block_ids=[1, 2, 3, 4], block_hashes=hashes)
+            thread.add_stored_request(req)
+            thread.request_queue.put(req)
+            thread._handle_request(req)
+            keys = [key for call in store.put_calls for key in call[0]]
+            self.assertEqual([key.rsplit("@", 1)[1] for key in keys], hashes)
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
@@ -647,7 +653,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     req_id="r1",
                     token_len_chunk=16 * len(exists),
-                    block_ids=list(range(len(exists))),
+                    block_ids=list(range(1, len(exists) + 1)),
                     block_hashes=[f"h{i}" for i in range(len(exists))],
                     current_event=None,
                 )
@@ -666,7 +672,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -707,7 +713,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -740,7 +746,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             save_start_token=0,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             token_ids=list(range(16)),
             original_block_size=16,
@@ -758,7 +764,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             req_id="r1",
             token_len_chunk=32,
             save_start_token=16,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             token_ids=list(range(16, 32)),
             original_block_size=16,
@@ -908,7 +914,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     "r1",
                     token_len_chunk=32,
-                    block_ids=[0, 1],
+                    block_ids=[1, 2],
                     block_hashes=[b"h0", b"h1"],
                     token_ids=list(range(32)),
                     original_block_size=16,
@@ -957,7 +963,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -982,7 +988,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -1062,53 +1068,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertNotIn("r1", t.stored_requests)
-
-
-class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
-    def test_handle_request_puts_all_keys_without_exists_check(self):
-        store = FakeStore([1, 1])
-        store.requires_exists_before_put = False
-        sync_event = MagicMock()
-        thread = KVCacheStoreKeyLayerSendingThread(
-            m_store=store,
-            token_database=FakeTokenDatabase(),
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            put_step=1,
-            ready_event=threading.Event(),
-            num_layers=1,
-            layer_save_finished_events=[threading.Event()],
-            sync_save_events=[sync_event],
-        )
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
-            is_last_chunk=False,
-        )
-        metadata = KeyMetadata("m", 0, 0, 0)
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],
-            cached_process_tokens={
-                0: [
-                    (0, 16, [LayerPoolKey(metadata, "h0", 0)]),
-                    (16, 32, [LayerPoolKey(metadata, "h1", 0)]),
-                ]
-            },
-        )
-        thread.request_queue.put([task])
-
-        with patch.object(store, "exists", side_effect=AssertionError("exists should not be called")) as mock_exists:
-            thread._handle_request([task])
-
-        keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
-        mock_exists.assert_not_called()
-        sync_event.synchronize.assert_called_once()
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
@@ -1304,7 +1263,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
                             ReqMeta(
                                 req_id="r1",
                                 token_len_chunk=16,
-                                block_ids=[0],
+                                block_ids=[1],
                                 block_hashes=[b"h0"],
                                 event_id=chunk,
                             )
