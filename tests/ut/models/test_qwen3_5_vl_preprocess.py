@@ -499,3 +499,106 @@ def test_normalization_through_upstream_vision(monkeypatch, path, enabled):
     assert model.visual.seen.dtype == model.visual.dtype
     if enabled:
         assert model.input_norm.calls == 1
+
+
+def _synthetic_rgb(h: int, w: int, pattern: str) -> torch.Tensor:
+    if pattern == "random":
+        gen = torch.Generator(device="cpu").manual_seed(21797)
+        return torch.randint(0, 256, (C, h, w), dtype=torch.uint8, generator=gen)
+    y = torch.arange(h, dtype=torch.int32)[:, None]
+    x = torch.arange(w, dtype=torch.int32)[None, :]
+    if pattern == "gradient":
+        gx = (255 * x + (w - 1) // 2) // max(w - 1, 1)
+        gy = (255 * y + (h - 1) // 2) // max(h - 1, 1)
+        return torch.stack((gx.expand(h, w), gy.expand(h, w), (gx + 2 * gy + 1) // 3)).to(torch.uint8)
+    return torch.stack(((7 * x + 13 * y) % 256, (x ^ y) % 256, ((x // 7 + y // 5) % 2) * 255)).to(torch.uint8)
+
+
+def _unpatchify(patches: torch.Tensor, rh: int, rw: int) -> torch.Tensor:
+    gh, gw = rh // PS, rw // PS
+    x = patches.reshape(gh // MS, gw // MS, MS, MS, C, TPS, PS, PS)
+    first, second = x.unbind(dim=5)
+    assert torch.equal(first, second)
+    return first.permute(4, 0, 2, 5, 1, 3, 6).reshape(C, rh, rw)
+
+
+def _pillow_bicubic_rgb(rgb: torch.Tensor, rh: int, rw: int) -> torch.Tensor:
+    pil = Image.fromarray(rgb.permute(1, 2, 0).contiguous().numpy()).resize((rw, rh), Image.Resampling.BICUBIC)
+    return torch.frombuffer(bytearray(pil.tobytes()), dtype=torch.uint8).reshape(rh, rw, C).permute(2, 0, 1)
+
+
+@pytest.mark.parametrize("pattern", ["stripe", "random", "gradient"])
+def test_resize_and_patchify_exact_half_downscale_matches_pillow_bitwise(pattern):
+    """Exact 2x downscale hits half-integer boundaries where single-pass or
+    ties-to-even round() diverges heavily; separable half-up matches Pillow."""
+    stub = _StubVLModel()
+    sh, sw = 224, 168
+    rh, rw = 112, 84
+    rgb = _synthetic_rgb(sh, sw, pattern)
+    out = stub._resize_and_patchify(
+        {"pixel_values": rgb.reshape(-1), "image_hw": torch.tensor([[sh, sw]])},
+        torch.tensor([[1, rh // PS, rw // PS]]),
+    )
+    actual = _unpatchify(out, rh, rw).to(torch.uint8)
+    expected = _pillow_bicubic_rgb(rgb, rh, rw)
+    assert torch.equal(actual, expected)
+
+
+def test_resize_and_patchify_batched_geometries_match_pillow_within_rounding_tolerance():
+    """Separable two-pass bicubic + half-up keeps non-2x resizes within <0.5%
+    and <=2 uint8 levels of Pillow RGB BICUBIC across batched geometries."""
+    stub = _StubVLModel()
+    cases = [
+        ((321, 557), (224, 392), "stripe"),
+        ((200, 155), (140, 112), "random"),
+        ((112, 168), (224, 336), "random"),
+        ((159, 309), (224, 196), "stripe"),
+        ((168, 112), (84, 112), "random"),  # w == rw single-axis vertical
+        ((112, 168), (112, 84), "random"),  # h == rh single-axis horizontal
+        ((112, 84), (112, 84), "stripe"),  # identity (both axes unchanged)
+    ]
+    flats = []
+    hws = []
+    grids = []
+    refs = []
+    for (sh, sw), (rh, rw), pattern in cases:
+        rgb = _synthetic_rgb(sh, sw, pattern)
+        flats.append(rgb.reshape(-1))
+        hws.append([sh, sw])
+        grids.append([1, rh // PS, rw // PS])
+        refs.append((rh, rw, _pillow_bicubic_rgb(rgb, rh, rw)))
+
+    flat_input = torch.cat(flats)
+    flat_snapshot = flat_input.clone()
+    patches = stub._resize_and_patchify(
+        {"pixel_values": flat_input, "image_hw": torch.tensor(hws)},
+        torch.tensor(grids),
+    )
+    assert torch.equal(flat_input, flat_snapshot)
+    offset = 0
+    for rh, rw, expected in refs:
+        num_patches = (rh // PS) * (rw // PS)
+        actual = _unpatchify(patches[offset : offset + num_patches], rh, rw)
+        offset += num_patches
+        delta = (actual - expected.float()).abs()
+        mismatch_ratio = delta.count_nonzero().item() / delta.numel()
+        assert mismatch_ratio < 0.005
+        assert delta.max().item() <= 2.0
+    assert offset == patches.shape[0]
+
+
+def test_resize_and_patchify_patch_size_16_identity_matches_stock():
+    """Shared mixin subclasses using patch_size=16 preserve exact stock layout when unresized."""
+    stub = _StubVLModel()
+    stub._ps = 16
+    rgb = _synthetic_rgb(64, 96, "random")
+    out = stub._resize_and_patchify(
+        {"pixel_values": rgb.reshape(-1), "image_hw": torch.tensor([[64, 96]])},
+        torch.tensor([[1, 4, 6]]),
+    )
+    assert out.shape == (24, C * TPS * 16 * 16)
+    x = out.reshape(2, 3, MS, MS, C, TPS, 16, 16)
+    first, second = x.unbind(dim=5)
+    assert torch.equal(first, second)
+    reconstructed = first.permute(4, 0, 2, 5, 1, 3, 6).reshape(C, 64, 96).to(torch.uint8)
+    assert torch.equal(reconstructed, rgb)

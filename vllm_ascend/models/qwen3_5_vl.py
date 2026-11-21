@@ -233,11 +233,18 @@ class _AscendVLPreprocessMixin:
         patches = []
         for chunk, (h, w), (_, gh, gw) in zip(chunks, hw_list, grid_thw.tolist()):
             img = chunk.reshape(1, c, h, w)
-            # bicubic + antialias reproduces HF/PIL resize (cosine sim
-            # 0.999996); clamp+round replicate the original uint8
-            # quantization.
-            img = F.interpolate(img, size=[gh * ps, gw * ps], mode="bicubic", align_corners=False, antialias=True)
-            img = img.clamp(0, 255).round().squeeze(0)
+            rh, rw = gh * ps, gw * ps
+            # Closely match Pillow/torchvision uint8 separable bicubic resampling (#21797):
+            # resize horizontally then vertically, quantizing each pass in-place to [0, 255]
+            # with non-negative half-up rounding floor(clamp(x, 0, 255) + 0.5)
+            # instead of single-pass 2D bicubic + ties-to-even round().
+            if w != rw:
+                img = F.interpolate(img, size=[h, rw], mode="bicubic", align_corners=False, antialias=True)
+                img.clamp_(0, 255).add_(0.5).floor_()
+            if h != rh:
+                img = F.interpolate(img, size=[rh, rw], mode="bicubic", align_corners=False, antialias=True)
+                img.clamp_(0, 255).add_(0.5).floor_()
+            img = img.squeeze(0)
             # patchify: (C, rh, rw) -> (gh*gw, C*tps*ps*ps), HF layout.
             # Drop the batch dim before unsqueeze/expand: keeping it (as HF's
             # batched patchify does) creates a 9-D tensor, which CANN rejects
