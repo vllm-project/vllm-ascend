@@ -1,0 +1,4 @@
+pr: 21687
+entries:
+  - category: feature
+    text: Kimi K3 targets now provision the input embedding on the last PP stage for DSpark drafts without a checkpoint-owned embedding (e.g. Qwen3 GQA DSpark), so PP>1 speculative decoding shares the target-loaded shard instead of reopening the checkpoint to reload a private copy during draft initialization; GLM MoE DSA DSpark loads likewise keep the shared shard (one fewer resident copy). QuaRot targets and drafts with their own embedding keep the previous behavior; when a draft checkpoint ships its own embedding, the provisioned last-stage shard additionally stays resident but unused (one extra vocabulary shard per last-stage TP rank).
