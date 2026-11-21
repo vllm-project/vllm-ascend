@@ -46,6 +46,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
+from vllm_ascend.attention.qli_metadata import QLIMetadata, QLIMetadataBuffers
 from vllm_ascend.attention.utils import split_decodes_and_prefills, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -133,6 +134,7 @@ class AscendSFAIndexerMetadata:
     # V2's deferred producer fills this before the first indexer consumes it.
     qli_metadata: torch.Tensor | None = None
     qli_metadata_group_id: int | None = None
+    qli_inputs: QLIMetadata | None = None
     # Temporary full-history read addresses; persistent cache writes stay sharded.
     kv_gather_block_ids: torch.Tensor | None = None
 
@@ -1129,6 +1131,14 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
         self.use_sharded_dcp = enable_sfa_dcp_sharded_indexer(vllm_config)
         self.use_native_dcp_qli = self.use_sharded_dcp and DeviceOperator.native_dcp_indexer
+        qli_config = (
+            None
+            if self.use_sharded_dcp
+            else DeviceOperator.get_indexer_metadata_config(kv_cache_spec, vllm_config.model_config.hf_text_config)
+        )
+        self._qli_metadata_buffers = (
+            QLIMetadataBuffers(qli_config, self._max_num_reqs) if qli_config is not None else None
+        )
         self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config) and not self.use_sharded_dcp
         if not (self.use_dcp or (self.use_sharded_dcp and self.use_pcp)):
             return
@@ -1708,6 +1718,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             query_start_loc=query_start_loc,
             kv_gather_block_ids=kv_gather_block_ids,
         )
+        if self._qli_metadata_buffers is not None and num_reqs:
+            # All layers in this group consume the same lengths and CANN
+            # contract. Refresh before each forward, including graph replay.
+            metadata.qli_inputs = self._qli_metadata_buffers.build(
+                buffer_key,
+                query_start_loc,
+                actual_seq_lengths_key,
+                DeviceOperator.get_indexer_metadata_op(),
+            )
         if self._device_metadata_enabled and kv_gather_block_ids is None:
             self._defer_local_qli_metadata(metadata)
         return metadata
