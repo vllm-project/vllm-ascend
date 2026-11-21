@@ -90,6 +90,7 @@ def _minimax_qknorm_rope_cache_kernel(
     INDEX_BLOCK_SIZE: tl.constexpr,
     CACHE_FP8: tl.constexpr,
     INDEX_FP8: tl.constexpr,
+    MATERIALIZE_INDEX_KEY: tl.constexpr,
     FP8_E4M3_MAX: tl.constexpr,
 ):
     program = tl.program_id(0).to(tl.int64)
@@ -111,6 +112,11 @@ def _minimax_qknorm_rope_cache_kernel(
     )
     qk_scale = 1.0 + qk_weight
     iqk_scale = 1.0 + iqk_weight
+    if MATERIALIZE_INDEX_KEY:
+        # The A5 separate prepare adds one in BF16 before native RMSNorm.
+        # Preserve that rounding while fusing its launch and memory traffic.
+        qk_scale = qk_scale.to(packed.dtype.element_ty).to(tl.float32)
+        iqk_scale = iqk_scale.to(packed.dtype.element_ty).to(tl.float32)
     for token in range(program, NUM_TOKENS, programs):
         position = tl.load(positions + token * POSITION_STRIDE).to(tl.int64)
         cs = cos_sin + position * COS_SIN_STRIDE
@@ -141,11 +147,14 @@ def _minimax_qknorm_rope_cache_kernel(
         iq = extract_slice(iqk, (0, 0), (IQ_HEADS, HEAD_DIM), (1, 1))
         offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
         tl.store(index_query + offsets, iq)
-        slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
-        if slot >= 0:
-            ik = extract_slice(iqk, (IQ_HEADS, 0), (1, HEAD_DIM), (1, 1))
-            offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
-            tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
+        ik = extract_slice(iqk, (IQ_HEADS, 0), (1, HEAD_DIM), (1, 1))
+        if MATERIALIZE_INDEX_KEY:
+            tl.store(index_cache + token * HEAD_DIM + dim, ik.reshape(HEAD_DIM))
+        else:
+            slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
+            if slot >= 0:
+                offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
+                tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
 
 
 def minimax_qknorm_rope_cache(
@@ -158,7 +167,7 @@ def minimax_qknorm_rope_cache(
     index_k_weight: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    index_cache: torch.Tensor,
+    index_cache: torch.Tensor | None,
     slot_mapping: torch.Tensor,
     index_slot_mapping: torch.Tensor,
     num_actual_tokens: int,
@@ -167,12 +176,16 @@ def minimax_qknorm_rope_cache(
     num_index_heads: int,
     eps: float,
     index_packed: torch.Tensor | None = None,
+    index_key_out: torch.Tensor | None = None,
+    index_query_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return Q/index Q and insert K/V/index K, with no intermediate KV tensors.
 
     Caches use [block, token, head, dim] and [block, token, dim] layouts.
     Head dimensions must match (the MiniMax-M3 128-wide main/index heads).
     The caller owns cache lifetime and orders cache readers after this call.
+    For quantized index caches, index_key_out receives normalized/rotated
+    BF16 keys for the caller's existing quantization and insertion path.
     """
     head_dim = q_weight.numel()
     rotary_dim = cos_sin_cache.shape[-1]
@@ -190,8 +203,22 @@ def minimax_qknorm_rope_cache(
         assert index_packed.shape == (packed.shape[0], index_width)
         assert index_packed.stride(1) == 1 and index_packed.dtype == packed.dtype
         index_offset = 0
+    materialize_index_key = index_key_out is not None
+    if materialize_index_key:
+        assert index_cache is None
+        assert all(w.dtype == packed.dtype for w in (q_weight, k_weight, index_q_weight, index_k_weight))
+        assert index_key_out.shape == (packed.shape[0], head_dim)
+        assert index_key_out.dtype == packed.dtype and index_key_out.device == packed.device
+        assert index_key_out.is_contiguous()
+        # [token, 1, dim] keeps unused cache-layout constexprs independent
+        # of the request length, so token-count changes reuse one variant.
+        index_cache = index_key_out.unsqueeze(1)
+    assert index_cache is not None
     assert key_cache.ndim == value_cache.ndim == 4 and index_cache.ndim == 3
-    assert key_cache.shape == value_cache.shape and key_cache.shape[2:] == (num_kv_heads, head_dim)
+    assert key_cache.shape == value_cache.shape and key_cache.shape[2:] == (
+        num_kv_heads,
+        head_dim,
+    )
     assert index_cache.shape[-1] == head_dim
     assert key_cache.stride(-1) == value_cache.stride(-1) == index_cache.stride(-1) == 1
     assert 0 <= num_actual_tokens <= packed.shape[0]
@@ -199,14 +226,30 @@ def minimax_qknorm_rope_cache(
     assert positions.ndim == 1 and positions.numel() == packed.shape[0]
     assert cos_sin_cache.ndim == 2 and cos_sin_cache.stride(1) == 1
     assert packed.dtype == torch.bfloat16
-    assert key_cache.dtype == value_cache.dtype and key_cache.dtype in (packed.dtype, torch.float8_e4m3fn)
+    assert key_cache.dtype == value_cache.dtype and key_cache.dtype in (
+        packed.dtype,
+        torch.float8_e4m3fn,
+    )
     assert index_cache.dtype in (packed.dtype, torch.float8_e4m3fn)
     assert all(w.ndim == 1 and w.is_contiguous() for w in (q_weight, k_weight, index_q_weight, index_k_weight))
     assert slot_mapping.ndim == index_slot_mapping.ndim == 1
     assert slot_mapping.is_contiguous() and index_slot_mapping.is_contiguous()
     num_tokens = packed.shape[0]
     query = torch.empty((num_tokens, num_q_heads * head_dim), device=packed.device, dtype=packed.dtype)
-    index_query = torch.empty((num_tokens, num_index_heads * head_dim), device=packed.device, dtype=index_cache.dtype)
+    if index_query_out is None:
+        index_query = torch.empty(
+            (num_tokens, num_index_heads * head_dim),
+            device=packed.device,
+            dtype=index_cache.dtype,
+        )
+    else:
+        # Allow Q and K to occupy separate contiguous regions of one buffer,
+        # so native MX quantization can process both without a concatenation.
+        assert materialize_index_key
+        assert index_query_out.shape == (num_tokens, num_index_heads * head_dim)
+        assert index_query_out.dtype == index_cache.dtype and index_query_out.device == packed.device
+        assert index_query_out.is_contiguous()
+        index_query = index_query_out
     if num_tokens == 0:
         return query, index_query
     init_device_properties_triton()
@@ -248,6 +291,7 @@ def minimax_qknorm_rope_cache(
         index_cache.shape[1],
         key_cache.dtype == torch.float8_e4m3fn,
         index_cache.dtype == torch.float8_e4m3fn,
+        materialize_index_key,
         FP8_E4M3_MAX=FP8_E4M3_MAX,
         enable_fp_fusion=False,
     )

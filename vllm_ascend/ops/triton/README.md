@@ -138,6 +138,7 @@ configuration rather than the runner input or sampling interface.
 | [mamba/state_index.py](mamba/state_index.py) | Model state/attention |
 | [mamba/state_ops.py](mamba/state_ops.py) | Model state/attention |
 | [msa/minimax_qknorm_rope_cache.py](msa/minimax_qknorm_rope_cache.py) | Model sparse attention |
+| [msa/msa_m3_mxfp4_cache.py](msa/msa_m3_mxfp4_cache.py) | MiniMax-M3 packed index-key and E8M0 cache insertion; [contract](docs/msa_m3_mxfp4_cache.md) |
 | [msa/msa_m3_index_postprocess.py](msa/msa_m3_index_postprocess.py) | Model sparse attention |
 | [msa/msa_m3_index_topk.py](msa/msa_m3_index_topk.py) | MiniMax-M3 A5 sparse-attention Triton fallback |
 | [mul_add.py](mul_add.py) | Model/attention primitive or shared utility |

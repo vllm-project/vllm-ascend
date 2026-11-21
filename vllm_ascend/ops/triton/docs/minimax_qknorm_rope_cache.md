@@ -3,6 +3,17 @@
 ## Description
 
 - **Function**: `minimax_qknorm_rope_cache` applies four Gemma RMSNorms, partial NeoX RoPE, and three cache writes in one Triton kernel. Only Q and index Q are returned. K, V, and index K are written directly into their paged caches.
+
+  The optional `index_key_out` mode writes normalized/rotated BF16 index keys
+  to `[T,128]` instead of the index cache. Its caller quantizes those keys and
+  inserts packed FP4 bytes and E8M0 scales. Main K/V still go directly to their
+  caches. This mode requires BF16 normalization weights and rounds `1+weight`
+  to BF16, matching the separate A5 prepare path. The ordinary cache-write
+  mode retains its existing normalization-scale rounding. This numerical
+  difference is part of model-quality validation for the MXFP4 path.
+  `index_query_out` optionally supplies the contiguous query region next to
+  `index_key_out`, allowing both to be quantized in one native call without
+  concatenating or quantizing the query a second time.
 - **Location**: `vllm_ascend/ops/triton/msa/minimax_qknorm_rope_cache.py` — `_minimax_qknorm_rope_cache_kernel`, wrapper `minimax_qknorm_rope_cache`.
 - **Algorithm flow**:
   1. The grid uses `min(num_tokens, vector_core_count)` programs. Each program handles tokens cyclically and vectorizes Q/K and index Q/K along contiguous head rows. The four normalization weights and Gemma scales are prepared before the token loop and reused across its iterations.
