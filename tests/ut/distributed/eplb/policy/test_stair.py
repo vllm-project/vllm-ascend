@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -80,18 +79,43 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_allclose(compressed[1], samples[2:].mean(axis=0))
         np.testing.assert_allclose(np.average(compressed, axis=0, weights=weights), samples.mean(axis=0))
 
-    def test_policy_prepares_weighted_load_sums(self):
-        policy = SimpleNamespace(
-            config=StairConfig(load_window_bins=2),
-            _load_bin_boundaries=StairEplbPolicy._load_bin_boundaries,
+    def test_planner_rejects_step_regression_but_keeps_constant_load_improvement(self):
+        policy = StairEplbPolicy(StairConfig(load_window_bins=64))
+        alternating = np.tile([[10, 1, 8, 1], [1, 10, 2, 7]], (64, 1))
+        constant = np.tile([11, 11, 10, 8], (128, 1))
+        tail_regression = constant.copy()
+        # Four burst pairs improve the candidate's mean but regress its P95.
+        tail_regression[:8] = alternating[:8] * 2
+        samples = torch.from_numpy(np.stack((alternating, tail_regression, constant), axis=1)).to(torch.int32)
+        current = np.array([[[0, 1], [2, 3]]] * 3)
+        prepared = policy.prepare_local_load_stats(samples)
+        plan = policy.plan_rebalance(
+            prepared.values.numpy(),
+            current,
+            np.full(3, np.nan),
+            np.zeros(2, dtype=np.int64),
+            policy.config,
+            sample_counts=prepared.sample_counts,
         )
+        np.testing.assert_array_equal(plan.rank_expert_ids[:2], current[:2])
+        np.testing.assert_array_equal(plan.source_rank_ids[:2], [[[0, 0], [1, 1]]] * 2)
+        np.testing.assert_array_equal(plan.source_slot_ids[:2], [[[0, 1], [0, 1]]] * 2)
+        self.assertTrue(np.isnan(plan.predicted_mean_ratios[:2]).all())
+        np.testing.assert_array_equal(plan.rank_expert_ids[2], [[0, 2], [1, 3]])
+        np.testing.assert_allclose(plan.predicted_mean_ratios[2], 1.05)
+        np.testing.assert_allclose(
+            plan.imbalance_ratios,
+            [[1.10, 1.10, 1.10, 1.10], [1.10, 1.10, 1.10, 1.10], [1.10, 1.10, 1.05, 1.05]],
+        )
+
+    def test_policy_keeps_each_step_for_cross_rank_reduction(self):
+        policy = StairEplbPolicy(StairConfig(load_window_bins=2))
         samples = torch.arange(20, dtype=torch.int32).reshape(5, 2, 2)
 
         prepared = StairEplbPolicy.prepare_local_load_stats(policy, samples)
 
-        np.testing.assert_array_equal(prepared.sample_counts, [2, 3])
-        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0, dtype=samples.dtype))
-        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0, dtype=samples.dtype))
+        self.assertIs(prepared.values, samples)
+        self.assertIsNone(prepared.sample_counts)
 
     @patch.object(StairEplbPolicy, "gated_layer_imbalance", return_value=None)
     def test_prepared_bin_sums_are_converted_to_weighted_means(self, gated_layer_imbalance):
