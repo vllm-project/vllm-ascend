@@ -296,6 +296,23 @@ def test_resolve_sampling_input_batch_prefers_pcp_sampling_global():
     assert _resolve_sampling_input_batch(SimpleNamespace(pcp_manager=MagicMock()), local) is local
 
 
+def test_resolve_sampling_input_batch_refuses_pcp_local_fallback():
+    """PCP without sampling/global view must not silently use peeked local ids."""
+    from vllm_ascend.observability.runtime_guard.hooks import _resolve_sampling_input_batch
+
+    local = SimpleNamespace(req_ids=["local_only"])
+    runner = SimpleNamespace(
+        pcp_manager=SimpleNamespace(_sampling_global_batch=None, global_batch=None),
+        input_batch=SimpleNamespace(req_ids=["runner_local"]),
+    )
+    assert _resolve_sampling_input_batch(runner, local) is None
+    # No PCP: peeked is the real sampling batch.
+    assert _resolve_sampling_input_batch(SimpleNamespace(pcp_manager=None), local) is local
+    # No PCP and no peek: fall back to runner.input_batch.
+    runner_only = SimpleNamespace(pcp_manager=None, input_batch=SimpleNamespace(req_ids=["from_runner"]))
+    assert _resolve_sampling_input_batch(runner_only, None) is runner_only.input_batch
+
+
 def test_sample_tokens_guardless_keeps_bare_path():
     class _Bare:
         def __init__(self):
