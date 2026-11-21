@@ -19,6 +19,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.configs.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
+    UPDATED_PACKED_MODULES_MAPPING,
     AscendModelSlimConfig,
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
@@ -1250,6 +1251,75 @@ class TestGetQuantTypeForLayer(TestBase):
         )
 
         self.assertIsNone(result)
+
+    def test_packed_experts_accept_the_stacked_w13_w2_naming(self):
+        """Muse Spark names the stacked expert tensors after the fused linears
+        they feed, so a ModelSlim description of such a checkpoint carries
+        ``w13_weight`` and ``w2_weight`` rather than the logical module names.
+
+        Resolving them is what keeps the layer off the unquantized method,
+        which allocates bf16 for every expert it is handed.
+        """
+        quant_desc = {
+            "model.layers.0.mlp.experts.w13_weight": "W4A8_MXFP",
+            "model.layers.0.mlp.experts.w13_weight_scale": "W4A8_MXFP",
+            "model.layers.0.mlp.experts.w2_weight": "W4A8_MXFP",
+            "model.layers.0.mlp.experts.w2_weight_scale": "W4A8_MXFP",
+        }
+        mapping = {
+            "experts": [
+                "experts.0.gate_proj",
+                "experts.0.up_proj",
+                "experts.0.down_proj",
+            ]
+        }
+
+        result = get_quant_type_for_layer(
+            quant_desc,
+            "model.layers.0.mlp.experts",
+            mapping,
+        )
+
+        self.assertEqual(result, "W4A8_MXFP")
+
+    def test_packed_experts_prefer_the_logical_names_over_w13_w2(self):
+        """Both namings present: the logical one wins, because it is the one a
+        description written against the runtime module names means.
+        """
+        quant_desc = {
+            "model.layers.0.mlp.experts.gate_up_proj": "W8A8_MXFP8",
+            "model.layers.0.mlp.experts.down_proj": "W8A8_MXFP8",
+            "model.layers.0.mlp.experts.w13_weight": "W4A8_MXFP",
+            "model.layers.0.mlp.experts.w2_weight": "W4A8_MXFP",
+        }
+        mapping = {
+            "experts": [
+                "experts.0.gate_proj",
+                "experts.0.up_proj",
+                "experts.0.down_proj",
+            ]
+        }
+
+        result = get_quant_type_for_layer(
+            quant_desc,
+            "model.layers.0.mlp.experts",
+            mapping,
+        )
+
+        self.assertEqual(result, "W8A8_MXFP8")
+
+    def test_muse_spark_mapping_declares_both_fused_modules(self):
+        """Without an ``experts`` key the lookup never treats the routed
+        experts as fused, so the entry is as load-bearing as ``qkv_proj``.
+        """
+        for model_type in ("muse_spark", "muse_spark_text", "musespark1x_text"):
+            mapping = UPDATED_PACKED_MODULES_MAPPING[model_type]
+            self.assertIn("qkv_proj", mapping)
+            self.assertIn("experts", mapping)
+            self.assertEqual(
+                mapping["qkv_proj"],
+                ["q_proj", "k_proj", "v_proj", "gate_proj"],
+            )
 
     def test_packed_experts_reject_partial_split_and_fused_description(self):
         quant_desc = {
