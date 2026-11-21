@@ -12,6 +12,7 @@ from vllm_ascend.ops.triton.compressor.compressor_triton import (
     compressor,
     compressor_from_projected,
     compressor_ref,
+    pack_pcp_c2_rows,
     write_pcp_ring_rows,
 )
 
@@ -19,6 +20,42 @@ pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
+
+
+@pytest.mark.parametrize("tokens,send_rows,width", [(17, 23, 512), (1, 7, 129), (0, 5, 512), (8, 0, 64)])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_pack_pcp_c2_rows(tokens, send_rows, width, strided, use_graph):
+    kv = torch.randn(tokens, width * (2 if strided else 1), device="npu", dtype=torch.float32)
+    scores = torch.randn_like(kv)
+    if strided:
+        kv, scores = kv[:, ::2], scores[:, ::2]
+    # Include masked valid indices, negative indices, upper-bound indices and duplicates.
+    indices = torch.tensor(([0, tokens - 1, -1, tokens, 0, 10**9] * (send_rows // 6 + 1))[:send_rows], device="npu")
+    valid = torch.ones(send_rows, device="npu", dtype=torch.bool)
+    valid[::3] = False
+    output = torch.full((send_rows, 2 * width), float("nan"), device="npu", dtype=torch.float32)
+    expected = torch.zeros_like(output)
+    selected = valid & (indices >= 0) & (indices < tokens)
+    expected[selected] = torch.cat((kv[indices[selected]], scores[indices[selected]]), dim=-1)
+    output_ptr = output.data_ptr()
+    assert pack_pcp_c2_rows(kv, scores, indices, valid, output) is output
+    graph = None
+    if use_graph and send_rows:
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            pack_pcp_c2_rows(kv, scores, indices, valid, output)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    # Reuse stale output: every invalid row must be overwritten on each invocation.
+    valid.zero_()
+    if graph is None:
+        pack_pcp_c2_rows(kv, scores, indices, valid, output)
+    else:
+        graph.replay()
+    assert output.data_ptr() == output_ptr
+    torch.testing.assert_close(output, torch.zeros_like(output), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("ratio", [2, 3, 8, 9, 16, 128])
