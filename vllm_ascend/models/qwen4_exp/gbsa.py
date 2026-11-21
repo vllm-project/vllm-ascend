@@ -7,7 +7,8 @@ from vllm_ascend.ops.gbsa import (
     generic_block_sparse_attention,
     generic_block_sparse_attention_metadata,
 )
-from vllm_ascend.ops.triton.qwen4_exp.gbsa import (
+
+from .qsa_prepare import (
     pack_qsa_gbsa_indices,
     prepare_qsa_gbsa_inputs,
 )
