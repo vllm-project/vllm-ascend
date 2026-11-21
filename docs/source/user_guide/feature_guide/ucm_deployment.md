@@ -567,7 +567,7 @@ vllm serve /models/GLM-5.1-w4a8 \
     --gpu-memory-utilization 0.92 \
     --quantization ascend \
     --enforce-eager \
-    --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}' \
+    --additional-config '{"weight_nz_mode":1}' \
     --kv-transfer-config \
     '{
         "kv_connector": "MultiConnector",
