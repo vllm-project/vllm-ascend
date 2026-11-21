@@ -1,0 +1,5 @@
+pr: 15715
+entries:
+  - category: bugfix
+    text: Restored eager ATB extension registration on Ascend 310P without enabling its unsupported ATB warmup.
+    hardware: [310P]
