@@ -656,12 +656,12 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch):
     """Main path supports registered custom speculators with or without req_states."""
     monkeypatch.setattr(v2_spec_decode, "vllm_version_is", lambda _: False)
 
-    base_mod = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
+    base_mod: Any = ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
 
     class DummyBaseSpeculator:
         pass
 
-    setattr(base_mod, "BaseSpeculator", DummyBaseSpeculator)
+    base_mod.BaseSpeculator = DummyBaseSpeculator
     monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu.spec_decode.speculator", base_mod)
 
     class CustomNoReqStates(DummyBaseSpeculator):
@@ -676,10 +676,10 @@ def test_init_speculator_main_supports_custom_speculator(monkeypatch):
         def __init__(self, vllm_config, device):
             pass
 
-    custom_mod = ModuleType("tests.fake_custom_speculator")
-    setattr(custom_mod, "CustomNoReqStates", CustomNoReqStates)
-    setattr(custom_mod, "CustomWithReqStates", CustomWithReqStates)
-    setattr(custom_mod, "InvalidSpeculator", InvalidSpeculator)
+    custom_mod: Any = ModuleType("tests.fake_custom_speculator")
+    custom_mod.CustomNoReqStates = CustomNoReqStates
+    custom_mod.CustomWithReqStates = CustomWithReqStates
+    custom_mod.InvalidSpeculator = InvalidSpeculator
     monkeypatch.setitem(sys.modules, "tests.fake_custom_speculator", custom_mod)
 
     device = torch.device("cpu")
