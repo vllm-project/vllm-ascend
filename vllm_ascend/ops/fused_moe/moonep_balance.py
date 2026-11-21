@@ -64,8 +64,7 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
-from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
-from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp
+from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp, home_gemm_apply_mlp
 from vllm_ascend.quantization.quant_type import QuantType
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：

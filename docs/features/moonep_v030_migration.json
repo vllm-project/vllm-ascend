@@ -230,5 +230,8 @@
     "stage_events": "record only for shared-expert multistream consumers; preserve prefetch waits and communication synchronization",
     "quantized_home_activation": "SiLU only; explicitly reject other activations as confirmed",
     "native_baseline": "public MLP, quant dataclasses/methods, shared experts and native routers unchanged by this repair"
+  },
+  "main_path_mapping": {
+    "vllm_ascend/ops/fused_moe/moonep_home_gemm.py": "vllm_ascend/ops/fused_moe/moonep_mlp.py"
   }
 }
