@@ -917,9 +917,13 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        if not isinstance(retention_interval, int):
-            retention_interval = None
+        from vllm_ascend.patch.platform.patch_kv_cache_coordinator import _is_deepseek_v4_kv_cache_config
+
+        retention_interval = (
+            vllm_config.cache_config.prefix_cache_retention_interval
+            if _is_deepseek_v4_kv_cache_config(self.kv_cache_config)
+            else None
+        )
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
