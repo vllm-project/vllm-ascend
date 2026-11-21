@@ -478,6 +478,7 @@ def test_random_request_unions(capture):
     counts = torch.empty(rows, dtype=torch.int32, device="npu")
     sc = torch.empty_like(counts)
     stats = torch.empty(2, dtype=torch.int64, device="npu")
+    miss = torch.empty_like(indices, dtype=torch.uint8)
 
     def forward():
         ops.hisparse_resolve_residency(
