@@ -154,6 +154,12 @@ a3:
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 2
 
+  multi_card:
+    test_config:
+      - name: mlapo-direct-dtypes-a3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_mlapo_direct_modes.py
+
 a3-560t:
   single_node:
     test_config:
