@@ -21,7 +21,7 @@ vllm serve model_path \
     --port $2 \
     --data-parallel-size $3 \
     --data-parallel-rank $4 \
-    --data-parallel-address "$5" \
+    --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
     --prefill-context-parallel-size $8 \
