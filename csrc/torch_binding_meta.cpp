@@ -560,6 +560,73 @@ void npu_fused_scatter_copy_sparse_flash_attention_meta(
 {
 }
 
+at::Tensor kvtc_prepare_meta(at::TensorList caches, const at::Tensor& block_ids)
+{
+    TORCH_CHECK(!caches.empty(), "kvtc_prepare: caches must not be empty");
+    const at::Tensor& first_cache = caches.front();
+    TORCH_CHECK(first_cache.dim() == 4, "kvtc_prepare: every cache must be [G,B,H,D]");
+    TORCH_CHECK(block_ids.dim() == 1, "kvtc_prepare: block_ids must be one-dimensional");
+
+    const auto num_tokens = block_ids.sym_size(0) * first_cache.sym_size(1);
+    const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
+    const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
+    return at::empty_symint(c10::SymDimVector{num_tokens, feature_dim}, first_cache.options());
+}
+
+at::Tensor kvtc_prepare_rope_meta(at::TensorList caches, const at::Tensor& block_ids, const at::Tensor& token_starts,
+                                  const at::Tensor& inv_cos_sin_cache)
+{
+    TORCH_CHECK(!caches.empty(), "kvtc_prepare_rope: caches must not be empty");
+    const at::Tensor& first_cache = caches.front();
+    TORCH_CHECK(first_cache.dim() == 4, "kvtc_prepare_rope: every cache must be [G,B,H,D]");
+    TORCH_CHECK(block_ids.dim() == 1, "kvtc_prepare_rope: block_ids must be one-dimensional");
+    TORCH_CHECK(token_starts.dim() == 1 && token_starts.sym_size(0) == block_ids.sym_size(0),
+                "kvtc_prepare_rope: token_starts must be [S]");
+    TORCH_CHECK(inv_cos_sin_cache.dim() == 2 && inv_cos_sin_cache.sym_size(1) == first_cache.sym_size(3),
+                "kvtc_prepare_rope: inv_cos_sin_cache must be [P,D]");
+
+    const auto num_tokens = block_ids.sym_size(0) * first_cache.sym_size(1);
+    const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
+    const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
+    return at::empty_symint(c10::SymDimVector{num_tokens, feature_dim}, first_cache.options());
+}
+
+at::Tensor kvtc_restore_meta(const at::Tensor& reconstructed, const at::Tensor& dst_block_ids, at::TensorList caches)
+{
+    TORCH_CHECK(!caches.empty(), "kvtc_restore: caches must not be empty");
+    const at::Tensor& first_cache = caches.front();
+    TORCH_CHECK(first_cache.dim() == 4, "kvtc_restore: cache must be [G,B,H,D]");
+    TORCH_CHECK(reconstructed.dim() == 2, "kvtc_restore: reconstructed must be [M,K]");
+    TORCH_CHECK(dst_block_ids.dim() == 1, "kvtc_restore: dst_block_ids must be [S]");
+    const auto num_tokens = dst_block_ids.sym_size(0) * first_cache.sym_size(1);
+    const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
+    const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
+    TORCH_CHECK(reconstructed.sym_size(0) == num_tokens && reconstructed.sym_size(1) == feature_dim,
+                "kvtc_restore: reconstructed shape must be [S*B,L*H*D]");
+    return at::empty_symint(c10::SymDimVector{c10::SymInt(1)}, first_cache.options().dtype(at::kInt));
+}
+
+at::Tensor kvtc_restore_rope_meta(const at::Tensor& reconstructed, const at::Tensor& dst_block_ids,
+                                  const at::Tensor& token_starts, const at::Tensor& cos_sin_cache,
+                                  at::TensorList caches)
+{
+    TORCH_CHECK(!caches.empty(), "kvtc_restore_rope: caches must not be empty");
+    const at::Tensor& first_cache = caches.front();
+    TORCH_CHECK(first_cache.dim() == 4, "kvtc_restore_rope: cache must be [G,B,H,D]");
+    TORCH_CHECK(reconstructed.dim() == 2, "kvtc_restore_rope: reconstructed must be [M,K]");
+    TORCH_CHECK(dst_block_ids.dim() == 1, "kvtc_restore_rope: dst_block_ids must be [S]");
+    TORCH_CHECK(token_starts.dim() == 1 && token_starts.sym_size(0) == dst_block_ids.sym_size(0),
+                "kvtc_restore_rope: token_starts must be [S]");
+    TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.sym_size(1) == first_cache.sym_size(3),
+                "kvtc_restore_rope: cos_sin_cache must be [P,D]");
+    const auto num_tokens = dst_block_ids.sym_size(0) * first_cache.sym_size(1);
+    const int64_t num_layers = static_cast<int64_t>(caches.size()); // symbolic-meta-ok: TensorList length is static.
+    const auto feature_dim = num_layers * first_cache.sym_size(2) * first_cache.sym_size(3);
+    TORCH_CHECK(reconstructed.sym_size(0) == num_tokens && reconstructed.sym_size(1) == feature_dim,
+                "kvtc_restore_rope: reconstructed must be [S*B,L*H*D]");
+    return at::empty_symint(c10::SymDimVector{c10::SymInt(1)}, first_cache.options().dtype(at::kInt));
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -1886,6 +1953,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Add_Rms_Norm_Bias
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+    ops.impl("kvtc_prepare", &vllm_ascend::meta::kvtc_prepare_meta);
+    ops.impl("kvtc_prepare_rope", &vllm_ascend::meta::kvtc_prepare_rope_meta);
+    ops.impl("kvtc_restore", &vllm_ascend::meta::kvtc_restore_meta);
+    ops.impl("kvtc_restore_rope", &vllm_ascend::meta::kvtc_restore_rope_meta);
+#endif
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
     // transpose_kv_cache_by_block
