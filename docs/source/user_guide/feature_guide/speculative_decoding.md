@@ -899,11 +899,15 @@ and devices:
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers and supports joint TP × PCP head sharding. The KDA head count
-must be divisible by TP × PCP. PCP Decode consumers and colocated PCP execution
-are not supported.
-Stochastic rounding must be disabled.
+RecoverSSM requires speculative decoding, PP=1 and DCP=1. With PCP enabled,
+use TP=1 on a colocated engine without a KV connector. PD Prefill producers
+support joint TP × PCP head sharding. The KDA head count must be divisible by
+TP × PCP. PD Decode consumers use PCP=1. Disable stochastic rounding.
+
+For colocated serving, add `--tensor-parallel-size 1` and
+`--prefill-context-parallel-size 8` to the example above for an eight-device
+engine. Each rank verifies the same decode requests and commits its own KDA
+head shard.
 
 For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, speculative window,

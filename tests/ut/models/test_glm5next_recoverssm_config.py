@@ -70,7 +70,6 @@ def test_initialization_requires_speculative_decoding():
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "requires a KV producer"),
         ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
     ],
 )
@@ -103,15 +102,34 @@ def test_pcp_prefill_producer_and_dp_decode_consumer(connector, prefix_caching, 
 
 
 @pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 8), (2, 4), (4, 2)])
-@pytest.mark.parametrize("kv_role", [None, "kv_consumer", "kv_both"])
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
 def test_pcp_rejects_unsupported_execution(tp_size, pcp_size, kv_role):
     config = make_config()
     config.parallel_config.tensor_parallel_size = tp_size
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.model_config.enforce_eager = True
-    if kv_role is not None:
-        config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role=kv_role)
+    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2", kv_role=kv_role)
     with pytest.raises(ValueError, match="PCP requires a KV producer"):
+        patch_replayssm_config.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_colocated_pcp_enables_recoverssm(prefix_caching):
+    config = make_config()
+    config.parallel_config.prefill_context_parallel_size = 8
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize(("tp_size", "pcp_size"), [(2, 4), (4, 2)])
+def test_colocated_pcp_with_tp_is_rejected(tp_size, pcp_size):
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    with pytest.raises(ValueError, match="PCP requires TP=1"):
         patch_replayssm_config.validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
 

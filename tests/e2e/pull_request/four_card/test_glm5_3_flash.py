@@ -6,7 +6,7 @@ Keep the first nine Flash layers and production widths/experts. No checkpoint,
 tokenizer download, C8, multimodal input or runtime patch is installed here.
 Use the production multimodal model wrapper even for text-only requests: its
 vision tower initializes before the language model, as in full-model serving.
-Parallel coverage is TP4+EP with PCP=1 and DCP=1.
+Parallel coverage is TP4+EP and TP1/PCP4+EP, both with DCP=1.
 """
 
 import hashlib
@@ -26,7 +26,7 @@ NUM_LAYERS = 9
 NUM_MTP_LAYERS = 1
 NUM_SPECULATIVE_TOKENS = 3
 OUTPUT_TOKENS = 16
-TP_SIZE = 4
+WORLD_SIZE = 4
 LOADER = "glm53flash_functional_dummy"
 
 
@@ -111,7 +111,7 @@ class FlashWorker:
 
     model_runner: Any  # Supplied by the worker extension host at runtime.
 
-    def check_flash_paths(self):
+    def check_flash_paths(self, pcp_size, use_replayssm):
         modules = list(self.model_runner.model.modules())
         names = [type(module).__name__ for module in modules]
         assert names.count("Glm5NextDecoderLayer") == NUM_LAYERS
@@ -127,14 +127,29 @@ class FlashWorker:
             if type(module).__name__ == "Glm5NextDecoderLayer"
         ]
         assert len(draft_layers) == NUM_MTP_LAYERS
-        assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
+        kda_layers = [module for module in modules if type(module).__name__ == "Glm5NextLinearAttention"]
+        assert all(layer.use_recoverssm == use_replayssm for layer in kda_layers)
+        if pcp_size > 1:
+            assert not self.model_runner.pcp_manager.is_decode_sharded
+            for layer in kda_layers:
+                assert layer.use_pcp_head_sharding and layer.pcp_size == pcp_size
+                assert layer.local_num_heads * pcp_size == layer.num_heads
+                assert layer.recoverssm_records.correction.shape[1] == layer.local_num_heads
+        else:
+            assert all(
+                layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers
+            )
         return True
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
-@pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
+@pytest.mark.parametrize(
+    "use_replayssm,pcp_size",
+    [(False, 1), (True, 1), (True, WORLD_SIZE)],
+    ids=["no_recover", "recover", "pcp_recover"],
+)
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
-def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
+def test_glm53flash_four_card(tmp_path, monkeypatch, enforce_eager, use_replayssm, pcp_size, prefix_caching):
     for name, value in {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -149,10 +164,8 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         load_format=LOADER,
         worker_extension_cls=f"{__name__}.FlashWorker",
         dtype="bfloat16",
-        tensor_parallel_size=TP_SIZE,
-        # TODO: Add PCP coverage once GLM-Flash supports PCP, including MTP
-        # and RecoverSSM in eager and graph modes within the four-card budget.
-        prefill_context_parallel_size=1,
+        tensor_parallel_size=WORLD_SIZE // pcp_size,
+        prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=1,
         enable_expert_parallel=True,
         quantization="ascend",
@@ -178,7 +191,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             "enforce_eager": enforce_eager,
         },
         use_replayssm=use_replayssm,
-        additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0, "enable_flashcomm1": True},
+        additional_config={"enable_cpu_binding": False, "enable_fused_mc2": 0, "enable_flashcomm1": pcp_size == 1},
     )
     if not enforce_eager:
         settings["compilation_config"] = {
@@ -186,11 +199,11 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             "cudagraph_capture_sizes": [6, 12, 24],
         }
     with VllmRunner(str(model), **settings) as runner:
-        assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
+        assert runner.model.collective_rpc("check_flash_paths", args=(pcp_size, use_replayssm)) == [True] * WORLD_SIZE
         params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKENS, ignore_eos=True, detokenize=False)
         # A second mixed batch reuses slots after the first request finishes.
         # 127/128/129 and 511/512/513 straddle input/chunk boundaries.
-        for lengths in ((128,), (127, 128, 129), (511, 512, 513)):
+        for lengths in ((128,), (127, 128, 129), (127, 513, 1025), (511, 512, 513)):
             outputs = runner.model.generate(
                 [{"prompt_token_ids": [10 + i % 1000 for i in range(length)]} for length in lengths],
                 params,
