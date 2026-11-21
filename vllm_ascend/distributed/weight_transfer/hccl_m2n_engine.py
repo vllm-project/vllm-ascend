@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -39,6 +39,7 @@ from vllm.distributed.weight_transfer.nccl_common import (
 
 from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import HCCLLibrary
+from vllm_ascend.distributed.weight_transfer.hccl_m2n_packed import plan_batches, transfer_packed_parameters
 from vllm_ascend.distributed.weight_transfer.hccl_m2n_transport import (
     TransferPiece,
     plan_rank_transfers,
@@ -58,12 +59,18 @@ def _validate_hccl_options(info: HCCLM2NTrainerInitInfo | HCCLM2NWeightTransferI
         raise ValueError("hccl_m2n uses TCP rendezvous and does not accept NCCL runtime options")
     if not isinstance(info.direct_write, bool):
         raise ValueError("hccl_m2n direct_write must be a boolean")
+    if type(info.packed_buffer_size_bytes) is not int or info.packed_buffer_size_bytes < 0:
+        raise ValueError("hccl_m2n packed_buffer_size_bytes must be a nonnegative integer")
 
 
 @dataclass(kw_only=True)
 class HCCLM2NTrainerInitInfo(M2NTrainerInitInfo):
     backend: ClassVar[str] = "hccl_m2n"
-    direct_write: bool = False
+    direct_write: bool = True
+    # Budget in logical checkpoint bytes per batch, with 0 disabling batching.
+    # In packed mode the source must preserve each yielded shard until the
+    # update finishes, since packing consumes several yielded shards together.
+    packed_buffer_size_bytes: int = 0
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -72,17 +79,22 @@ class HCCLM2NTrainerInitInfo(M2NTrainerInitInfo):
 
 @dataclass(kw_only=True)
 class HCCLM2NWeightTransferInitInfo(M2NWeightTransferInitInfo):
-    direct_write: bool = False
+    direct_write: bool = True
+    packed_buffer_size_bytes: int = 0
 
     def __post_init__(self) -> None:
         super().__post_init__()
         _validate_hccl_options(self)
 
 
-def _require_nd(tensor: torch.Tensor) -> None:
+def _is_nd(tensor: torch.Tensor) -> bool:
     import torch_npu
 
-    if tensor.device.type != "npu" or torch_npu.get_npu_format(tensor) != ACL_FORMAT_ND:
+    return tensor.device.type == "npu" and torch_npu.get_npu_format(tensor) == ACL_FORMAT_ND
+
+
+def _require_nd(tensor: torch.Tensor) -> None:
+    if not _is_nd(tensor):
         raise ValueError("hccl_m2n requires ND tensors on NPU")
 
 
@@ -90,6 +102,17 @@ def _require_nd(tensor: torch.Tensor) -> None:
 class _TransferSession:
     group: PyHcclCommunicator
     pieces: list[tuple[TransferPiece, ...]]
+    batches: tuple[range, ...] = ()
+
+    def transfer(
+        self, stream: torch.npu.Stream, tensors: Iterator[torch.Tensor], *, send: bool
+    ) -> Iterator[torch.Tensor]:
+        if self.batches:
+            yield from transfer_packed_parameters(self.group, stream, tensors, self.pieces, self.batches, send=send)
+        else:
+            for tensor, pieces in zip(tensors, self.pieces, strict=True):
+                transfer_parameter(self.group, stream, tensor, pieces, send=send)
+                yield tensor
 
 
 def _open_session(
@@ -100,12 +123,19 @@ def _open_session(
     dst_mesh: M2NMesh,
     local_placements: list[Placements | None] | None = None,
     local_error: str | None = None,
+    *,
+    packed_buffer_size_bytes: int = 0,
 ) -> _TransferSession:
     # The first inference rank publishes placements on the metadata group.
     # This keeps placement and runtime checks ahead of native HCCL init.
     root = dst_mesh.start_rank
     placements = group.broadcast_obj(local_placements if group.rank == root else None, src=root)
     pieces = []
+    batches: tuple[range, ...] = ()
+    if packed_buffer_size_bytes:
+        # Agree on the wire protocol as well as the upstream layouts before
+        # either side opens HCCL. Preserve the digest for the original path.
+        source_digest = f"{source_digest}:packed:{packed_buffer_size_bytes}"
     if local_error is None:
         try:
             if placements is None:
@@ -122,6 +152,10 @@ def _open_session(
                 plan_rank_transfers(meta.shape, meta.source_layout, M2NLayout(dst_mesh, placement), group.rank)
                 for meta, placement in zip(metas, placements)
             ]
+            if packed_buffer_size_bytes:
+                candidate_batches = plan_batches(metas, packed_buffer_size_bytes)
+                if any(len(batch) > 1 for batch in candidate_batches):
+                    batches = candidate_batches
             HCCLLibrary().require_batch_send_recv()
         except Exception as exc:
             local_error = f"{type(exc).__name__}: {exc}"
@@ -131,7 +165,7 @@ def _open_session(
     communicator = PyHcclCommunicator(group, device)
     if not communicator.available or communicator.disabled:
         raise RuntimeError("HCCL M2N communicator is unavailable")
-    return _TransferSession(communicator, pieces)
+    return _TransferSession(communicator, pieces, batches)
 
 
 class HCCLM2NTrainerWeightTransferEngine(M2NTrainerWeightTransferEngine):
@@ -141,7 +175,10 @@ class HCCLM2NTrainerWeightTransferEngine(M2NTrainerWeightTransferEngine):
     _failed = False
 
     def _worker_init_info(self, init_info: HCCLM2NTrainerInitInfo) -> dict[str, Any]:
-        return {**super()._worker_init_info(init_info), "direct_write": init_info.direct_write}
+        payload = {**super()._worker_init_info(init_info), "direct_write": init_info.direct_write}
+        if init_info.packed_buffer_size_bytes:
+            payload["packed_buffer_size_bytes"] = init_info.packed_buffer_size_bytes
+        return payload
 
     def _initialize(self, init_info: HCCLM2NTrainerInitInfo, source: WeightSource) -> None:
         self._num_trainer_ranks = init_info.num_trainer_ranks
@@ -183,7 +220,15 @@ class HCCLM2NTrainerWeightTransferEngine(M2NTrainerWeightTransferEngine):
                 device = torch.device("npu", torch.npu.current_device())
             except Exception as exc:
                 device_error = f"{type(exc).__name__}: {exc}"
-            session = _open_session(metadata_group, device, self._metas, digest, dst_mesh, local_error=device_error)
+            session = _open_session(
+                metadata_group,
+                device,
+                self._metas,
+                digest,
+                dst_mesh,
+                local_error=device_error,
+                packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
+            )
             if worker_init is not None:
                 worker_init.result()
         except BaseException:
@@ -207,17 +252,23 @@ class HCCLM2NTrainerWeightTransferEngine(M2NTrainerWeightTransferEngine):
     def _send(self) -> None:
         session: _TransferSession = self._handle
         assert self.source is not None
+        source = self.source
         device = session.group.device
-        with torch.npu.device(device):
-            torch.npu.synchronize(device)
-            stream = torch.npu.current_stream(device)
-            for (name, shard), meta, pieces in zip(self.source.iter_local(), self._metas, session.pieces, strict=True):
+
+        def local_shards() -> Iterator[torch.Tensor]:
+            for (name, shard), meta in zip(source.iter_local(), self._metas, strict=True):
                 if name != meta.name or shard.dtype != meta.dtype or shard.shape != expected_local_shape(meta):
                     raise ValueError(f"hccl_m2n source yielded a shard that differs from the plan for {meta.name!r}")
                 if shard.device != device:
                     raise ValueError(f"hccl_m2n source shard {name!r} must be on {device}")
                 _require_nd(shard)
-                transfer_parameter(session.group, stream, shard, pieces, send=True)
+                yield shard
+
+        with torch.npu.device(device):
+            torch.npu.synchronize(device)
+            stream = torch.npu.current_stream(device)
+            for _ in session.transfer(stream, local_shards(), send=True):
+                pass
 
     def send_weights(self) -> None:
         if self._failed or self._handle is None:
@@ -275,7 +326,14 @@ class HCCLM2NWeightTransferEngine(M2NWeightTransferEngine):
         except Exception as exc:
             destination_error = f"{type(exc).__name__}: {exc}"
         self._handle = _open_session(
-            metadata_group, self.device, self._metas, digest, dst_mesh, placements, destination_error
+            metadata_group,
+            self.device,
+            self._metas,
+            digest,
+            dst_mesh,
+            placements,
+            destination_error,
+            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
         )
 
     def _prepare_hccl_destinations(self, init_info: HCCLM2NWeightTransferInitInfo) -> None:
@@ -294,16 +352,15 @@ class HCCLM2NWeightTransferEngine(M2NWeightTransferEngine):
         if tuple(init_info.dst_mesh_dims) != expected_mesh:
             raise ValueError(f"hccl_m2n dst_mesh_dims must match (DP, TP) = {expected_mesh}")
 
-        if init_info.direct_write:
-            if any(getattr(layer, "precast_fp32_weight", False) for layer in self.model.modules()):
-                raise ValueError("hccl_m2n direct_write requires weights without precomputed FP32 copies")
+        if init_info.direct_write and not any(
+            getattr(layer, "precast_fp32_weight", False) for layer in self.model.modules()
+        ):
             self._prepare_destination_plan(init_info)
-            for destination in self._parameter_destinations:
-                if destination.tensor is not None:
-                    _require_nd(destination.tensor)
-        else:
-            self._parameter_destinations = [M2NDestination(meta.name, None, None) for meta in self._metas]
-            self._uses_load_weights = bool(self._metas)
+            if all(d.tensor is None or _is_nd(d.tensor) for d in self._parameter_destinations):
+                return
+            # Preserve module-level reload semantics when a direct target fails the NPU format check.
+        self._parameter_destinations = [M2NDestination(meta.name, None, None) for meta in self._metas]
+        self._uses_load_weights = bool(self._metas)
 
     def start_weight_update(self) -> None:
         self._require_session()
@@ -334,20 +391,23 @@ class HCCLM2NWeightTransferEngine(M2NWeightTransferEngine):
         stream = torch.npu.current_stream(self.device)
         transferred = 0
 
-        def receive() -> Iterator[tuple[str, torch.Tensor]]:
-            nonlocal transferred
-            for meta, destination, pieces in zip(
-                self._metas, self._parameter_destinations, session.pieces, strict=True
-            ):
+        def buffers() -> Iterator[torch.Tensor]:
+            for meta, destination in zip(self._metas, self._parameter_destinations, strict=True):
                 buffer = destination.tensor
                 if buffer is None:
                     buffer = torch.empty(meta.shape, dtype=meta.dtype, device=self.device)
-                transfer_parameter(session.group, stream, buffer, pieces, send=False)
+                yield buffer
+
+        received = session.transfer(stream, buffers(), send=False)
+
+        def receive() -> Iterator[tuple[str, torch.Tensor]]:
+            nonlocal transferred
+            for meta, destination, buffer in zip(self._metas, self._parameter_destinations, received, strict=True):
                 transferred += 1
                 if not destination.direct:
                     yield meta.name, buffer
 
-        with disable_mtp_completeness_check():
+        with closing(received), disable_mtp_completeness_check():
             if self._uses_load_weights:
                 self.model.load_weights(receive())
             else:
