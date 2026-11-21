@@ -8,18 +8,25 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.config import AttentionConfig
-from vllm.v1.core.single_type_kv_cache_manager import (
-    register_all_kvcache_specs,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import DecodeBenchConnector
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    register_ascend_kv_cache_specs,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -63,6 +70,14 @@ def test_platform_builder_preserves_default_non_glm_accounting():
     groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=make_specs()["model.layers.3.attn"])]
     groups[0].kv_cache_spec = replace(groups[0].kv_cache_spec, model_version=None)
     assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(make_config(), groups) is None
+
+
+@pytest.mark.parametrize("uniform", [False, True])
+def test_generic_circular_buffer_is_not_a_glm_layout(uniform):
+    spec = CircularBufferSpec(block_size=16, num_kv_heads=1, head_size=128, head_size_v=0, dtype=torch.float32)
+    group_spec = UniformTypeKVCacheSpecs.from_specs({"tail": spec}) if uniform else spec
+    groups = [KVCacheGroupSpec(layer_names=["tail"], kv_cache_spec=group_spec)]
+    assert _get_glm5_next_cache_layout(groups) is None
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -116,16 +131,8 @@ def make_specs(pool: int = 16):
             model_version="glm5_next",
             **_ratio_kwargs(pool),
         ),
-        "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
-            block_size=pool,
-            ring_capacity=pool,
-            sliding_window=pool,
-            compress_ratio=pool,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.float32,
-            model_version="glm5_next",
-            indexes_kv_by_block_stride=True,
+        "model.layers.3.indexer.tail_cache": CircularBufferSpec(
+            dcp_sharded=False, block_size=pool, num_kv_heads=1, head_size=256, dtype=torch.float32, head_size_v=0
         ),
     }
     for layer_idx in range(3):
@@ -234,8 +241,8 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     plan = get_glm5_next_kv_cache_config(make_config(), groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
     descriptor = next(tensor for tensor in plan.kv_cache_tensors if indexer_name in get_kv_cache_tensor_layers(tensor))
     raw = torch.zeros(descriptor.size, dtype=torch.uint8)
-    (tail,) = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
-    page_rows = specs[tail_name].page_size_bytes // (2 * specs[tail_name].head_size * tail.element_size())
+    tail = view_kpool_tail_cache(tail_name, specs[tail_name], raw, plan.num_blocks)
+    page_rows = specs[tail_name].page_size_bytes // (specs[tail_name].head_size * tail.element_size())
     assert page_rows * tail.shape[-1] == tail.stride(0)
 
     backend = SimpleNamespace(get_kv_cache_shape=lambda n, b, h, d: (n, b, h, d))
@@ -246,6 +253,56 @@ def test_fp8_shared_pages_preserve_tail_rows_and_kernel_scale_alignment():
     assert keys.stride(0) == scales.stride(0) * scales.element_size() == page_bytes // 5
     assert scales.data_ptr() - keys.data_ptr() == 32 * 128
     assert page_bytes == 25600
+
+
+def test_tail_tensor_registration_uses_upstream_request_local_zero_fill():
+    """A 5999-token fake prefill initializes one ring, preserving other requests."""
+    spec = CircularBufferSpec(
+        dcp_sharded=False,
+        block_size=7,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        page_size_padded=256,
+        head_size_v=0,
+    )
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    assert isinstance(spec, CircularBufferSpec)
+    assert not spec.uses_slot_mapping
+    assert KVCacheSpecRegistry.get_manager_class(spec) is CircularBufferManager
+    group_spec = UniformTypeKVCacheSpecs(block_size=spec.block_size, kv_cache_specs={"tail": spec})
+    cache = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["tail"], kv_cache_spec=group_spec)],
+    )
+    extra = {"fill_mean": 0.015, "fill_std": 0.0}
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=SimpleNamespace(get_from_extra_config=lambda name, default: extra.get(name, default)),
+    )
+    scheduler = DecodeBenchConnector(config, KVConnectorRole.SCHEDULER, cache)
+    worker = DecodeBenchConnector(config, KVConnectorRole.WORKER, cache)
+    raw = torch.full((cache.num_blocks * spec.page_size_bytes,), 42, dtype=torch.uint8)
+    tail = view_kpool_tail_cache("tail", spec, raw, cache.num_blocks)
+    assert isinstance(tail, torch.Tensor)
+    worker.register_kv_caches({"tail": tail})
+    assert torch.equal(raw, torch.full_like(raw, 42))
+    for request_id, block_id in (("first", 1), ("second", 2)):
+        blocks = SimpleNamespace(blocks=([SimpleNamespace(block_id=block_id, is_null=False)],))
+        scheduler.update_state_after_alloc(SimpleNamespace(request_id=request_id, num_tokens=6000), blocks, 5999)
+        metadata = scheduler.build_connector_meta(None)
+        assert metadata.reqs_to_fill[request_id] == (([block_id],), 5999)
+        before = raw.clone()
+        worker.bind_connector_metadata(metadata)
+        worker.start_load_kv(None)
+        expected = before.clone()
+        start = block_id * spec.page_size_bytes
+        expected[start : start + spec.unpadded_page_size_bytes] = 0
+        assert torch.equal(raw, expected)
+        tail[block_id].fill_(1.0)
 
 
 @pytest.mark.parametrize(
@@ -270,7 +327,7 @@ def test_fp8_cache_budget_accounts_for_scales_tail_and_padding(block_size, looka
             tokens_per_state=4,
         )
         specs["model.layers.3.indexer.tail_cache"] = replace(
-            specs["model.layers.3.indexer.tail_cache"], ring_capacity=4 + lookahead
+            specs["model.layers.3.indexer.tail_cache"], block_size=4 + lookahead
         )
         groups = get_glm5_next_kv_cache_groups(config, specs)
         layout = _get_glm5_next_cache_layout(groups)

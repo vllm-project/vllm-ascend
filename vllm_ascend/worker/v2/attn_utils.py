@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -76,7 +77,6 @@ from vllm_ascend.attention.utils import (
     supports_strided_mla_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     get_kv_cache_compression_ratio,
@@ -1125,7 +1125,9 @@ def _allocate_kv_cache(
         if dsv4_backing is not None:
             continue
 
-        if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
+        if any(type(layer_kv_cache_spec[name]) is CircularBufferSpec for name in shared_names) and any(
+            getattr(spec, "model_version", None) == "glm5_next" for spec in layer_kv_cache_spec.values()
+        ):
             # The compressed indexer and request-private tail share a physical
             # small-page slot. Both need the same single backing allocation.
             raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
@@ -1874,7 +1876,10 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+            if (
+                isinstance(kv_cache_spec, CircularBufferSpec)
+                and getattr(group.backend, "get_name", lambda: None)() == "ASCEND_INDEXER_KPOOL_TAIL"
+            ):
                 kv_caches[layer_name] = view_kpool_tail_cache(
                     layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks
                 )

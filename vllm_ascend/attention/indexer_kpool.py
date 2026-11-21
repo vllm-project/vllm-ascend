@@ -3,6 +3,7 @@
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
 from collections.abc import Callable
+from copy import copy
 from dataclasses import dataclass
 from functools import partial
 from importlib import import_module
@@ -29,12 +30,11 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
@@ -635,25 +635,31 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(
         self,
-        kv_cache_spec: AscendIndexerKPoolTailSpec,
+        kv_cache_spec: CircularBufferSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        if not isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+        if type(kv_cache_spec) is not CircularBufferSpec:
             raise TypeError(
-                "Ascend Indexer KPool tail backend requires "
-                f"AscendIndexerKPoolTailSpec, got {type(kv_cache_spec).__name__}."
+                f"Ascend Indexer KPool tail backend requires CircularBufferSpec, got {type(kv_cache_spec).__name__}."
             )
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.block_size = kv_cache_spec.ring_capacity
+        self.block_size = kv_cache_spec.block_size
         # Persistent rings are separate from temporary CANN state pages.
         self._max_num_metadata_reqs = max(
             vllm_config.scheduler_config.max_num_seqs, vllm_config.scheduler_config.max_num_batched_tokens
         )
         self._tail_inputs: dict[int, dict[str, torch.Tensor]] = {}
-        self._pool_size = kv_cache_spec.compress_ratio
-        self._page_rows = kv_cache_spec.page_size_bytes // (2 * kv_cache_spec.head_size * 4)
+        layers = vllm_config.compilation_config.static_forward_context
+        ratios = {layers[name].compress_ratio for name in layer_names}
+        if len(ratios) != 1:
+            raise ValueError("GLM tail metadata groups require one compression ratio.")
+        self._pool_size = ratios.pop()
+        if self._pool_size <= 1 or self.block_size < self._pool_size:
+            raise ValueError("GLM tail capacity must cover its positive compression pool.")
+        self._page_rows = kv_cache_spec.page_size_bytes // (kv_cache_spec.head_size * 4)
+        self._slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._lookahead = self.block_size > self._pool_size
 
     def build(
@@ -676,7 +682,25 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
             if cache_group_idx is None:
                 raise RuntimeError("KPool tail PCP metadata requires the PCP cache-group index.")
             write_common = _get_kpool_pcp_global_metadata(common_attn_metadata, pcp_context, cache_group_idx)
-        from vllm_ascend.ops.triton.glm5_next_cann_keypool import build_tail_inputs  # type: ignore[import-untyped]
+        from vllm_ascend.ops.triton.glm5_next_cann_keypool import (  # type: ignore[import-untyped]
+            build_tail_inputs,
+            build_tail_slot_mapping,
+        )
+
+        def circular_slots(common):
+            step = common.slot_mapping.data_ptr()
+            if step not in self._slot_mapping_buffers:
+                self._slot_mapping_buffers[step] = torch.empty(
+                    self._max_num_metadata_reqs, dtype=torch.int64, device=self.device
+                )
+            return build_tail_slot_mapping(common, self.block_size, self._slot_mapping_buffers[step])
+
+        slot_mapping = circular_slots(common_attn_metadata)
+        mapped_common = copy(write_common)
+        mapped_common.slot_mapping = (
+            slot_mapping if write_common is common_attn_metadata else circular_slots(write_common)
+        )
+        write_common = mapped_common
 
         if key not in self._tail_inputs:
             n, width = self._max_num_metadata_reqs, self.block_size
@@ -749,8 +773,7 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        # Kernel selection uses the logical pool size. The builder addresses
-        # the entire physical ring through spec.ring_capacity.
+        # The upstream spec block size is the physical circular ring capacity.
         return [MultipleOf(1)]
 
     @staticmethod
@@ -769,7 +792,7 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
-        return (num_blocks, block_size, 2 * head_size)
+        return (num_blocks, block_size, head_size)
 
 
 class Glm5NextKPoolIndexerBackend(nn.Module):

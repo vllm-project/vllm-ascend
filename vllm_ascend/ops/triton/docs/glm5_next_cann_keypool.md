@@ -2,20 +2,41 @@
 
 ## Description
 
-- **Function**: Three Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
-- **Formula**: With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
+- **Function**: Four Triton kernel types adapt GLM-5.3-Flash metadata, cache writes and token indices to CANN `KeyPool`/`PoolKeyIndexer`. The entry points are in `vllm_ascend/ops/triton/glm5_next_cann_keypool.py`.
+- **Formula**: A request's circular tail slot is `block_id * C + p % C` when `block_id != 0` and `p >= 0`, otherwise -1. Here `C` is the ring capacity and `block_id` is column zero of that request's block table. With pool size `P`, logical block size `L`, position `p` and raw slot `s`, a completed pool has `(p + 1) % P == 0` and compressed slot `(s // L) * (L // P) + (s % L) // P`. A negative slot remains invalid. The visible tail starts at `a = ((p + 1) // P) * P` and contains `[a, ..., p]`, appended after `min(a, topk)` history columns.
 - **FP8 extension**: With an FP8 cache, each pool stores E4M3FN (`float8_e4m3fn`) keys with `scale=max(abs(pooled))/448` (or 1 for a zero vector), and stores one FP32 descale per pool.
 - **INT8 extension**: The backend quantizes each completed pooled key with an FP16 per-vector scale. The cache-write kernel stores INT8 keys and scales in the same transferable page. INT8 selection calls CANN `PoolKeyIndexer` with `quant_mode=2`.
 - **Algorithm flow**:
-    1. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. Completed pools retain their compact output row even when their cache slot is evicted.
-    2. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed pooled keys in one launch. FP8 keys are quantized in the kernel; INT8 keys and FP16 scales are prepared by the backend. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
-    3. BF16 and FP8 use the shared `pool_key_indexer_nonempty` adapter to append one sentinel request and clamp empty pooled histories before CANN selection. The GLM backend quantizes FP8 queries after padding. INT8 calls the CANN operator directly and requires a build that supports empty completed-pool history.
-    4. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
+    1. `build_tail_slot_mapping` reconstructs circular slots because the generic `CircularBufferSpec` does not provide framework slot mapping. `_tail_slot_mapping_kernel` uses one program per request, looping over fixed 256-token tiles, plus one program that serially fills padding with -1. `AscendIndexerKPoolTailMetadataBuilder` calls the wrapper for ordinary metadata and, when needed, PCP write metadata; target, graph-capture and drafting paths reuse it.
+    2. `_build_keypool_metadata_kernel` has two modes, exposed by `build_keypool_metadata` and `build_tail_inputs`. They build compressed request boundaries/slots and raw-tail read/write addresses once per metadata build. The resulting buffers are reused across layers. Completed pools retain their compact output row even when their cache slot is evicted.
+    3. After CANN `KeyPool` has consumed the old tail, `_write_keypool_caches_kernel` writes the raw FP32 tail and completed pooled keys in one launch. FP8 keys are quantized in the kernel; INT8 keys and FP16 scales are prepared by the backend. Non-MTP reads updated CANN state; MTP writes retained projected key/gate rows so rejected candidates can be overwritten after logical rollback.
+    4. BF16 and FP8 use the shared `pool_key_indexer_nonempty` adapter to append one sentinel request and clamp empty pooled histories before CANN selection. The GLM backend quantizes FP8 queries after padding. INT8 calls the CANN operator directly and requires a build that supports empty completed-pool history.
+    5. `_pack_indices_kernel` preserves the selected history, appends the causal tail and clears padded rows/alignment columns in one launch. It can write directly into the SFA output buffer.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay.
 
 ## Parameters
 
 `R` is the padded request count, `T` the padded token count, `A` the actual token count, `D` the head dimension, `C` the tail ring capacity, `B` the compressed kernel block size and `W = retained_width or P`. Model values are `D=128`, `P=4` and `topk=2048`. All tensors are on the same NPU; scalar attributes are Python integers.
+
+### build_tail_slot_mapping
+
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `common.positions` | Input | Absolute token positions; storage covers the logical input prefix | int64 | Contiguous vector |
+| `common.query_start_loc` | Input | Packed request boundaries, `[R+1]` | int32 | Contiguous vector |
+| `common.block_table_tensor` | Input | `[R,M]`, `M>=1`; column zero owns each request's ring; zero is the null block | int32 | ND; row stride may include other columns or padding; column stride 1 |
+| `common.num_reqs` | Attribute | `R`, including graph dummy requests | int | Nonnegative scalar |
+| `common.num_actual_tokens` | Attribute | Actual token prefix before graph padding | int | Nonnegative scalar |
+| `common.num_input_tokens` | Optional attribute | Logical input length; defaults to `positions.numel()` | int | Nonnegative scalar |
+| `capacity` | Attribute | `C`, the logical ring capacity, not its physical page stride | int | Positive scalar |
+| `output` | Output storage | Preallocated circular slot buffer; only the returned prefix is written | int64 | Contiguous vector |
+| Return value | Output | View of `output[:T]`, with invalid positions/null requests and padding mapped to -1 | int64 | Contiguous vector |
+
+For this wrapper, `T` is the minimum of available positions, the logical input length and output capacity; `A=min(common.num_actual_tokens,T)`. Counts and query boundaries must fit int32; positions and output addresses use int64. Input tensors and output storage must not overlap. The function does not read `common.slot_mapping`; it reconstructs actual-token circular slots and fills `[A:T]` with -1 independently of generic mapping. Inputs are read-only and output storage beyond `T` remains unchanged. All tensors share a device; production uses the NPU path. The existing CPU fallback supports host callers and does not establish NPU correctness.
+
+The grid is always `R+1`, including an empty padding program when `A==T`. With zero requests, that one program still fills the padding range with -1. Each request's boundaries are normalized (negative means `A`) and clamped to `A`, keeping dummy requests from writing the padding range. Normalized boundaries must be nondecreasing, begin at zero and cover the actual prefix. Block IDs must be nonnegative; the extra `position >= 0` predicate maps a negative position to -1 and preserves the vector selection used in the measured Ascend implementation.
+
+The 256-token tile is a fixed power of two for `tl.arange` and bounds the per-program vector size; long requests iterate over multiple tiles. It is not a tunable per-request split count. Request-core capping and padding tile grids have workload-dependent regressions in the operator comparison, so this implementation retains one program per request and a separate serial padding program. This is a measured default, not a claim of optimality for every workload.
 
 ### build_keypool_metadata
 
@@ -77,11 +98,11 @@
 
 ## Constraints
 
-- Inference only. `P>1`, `D>0`, `L%P==0`, `0<=A<=source<=T`, and input storage must cover every actual token. FP8 cache writes require matching FP32 scale storage and supported Ascend 950 hardware. The FP8 LI path does not support `OffloadingConnector` or `PreemptOffloadConnector`, including through `MultiConnector`.
+- Inference only. `P>1`, `D>0`, `L%P==0`; pooled metadata requires `0<=A<=source<=T`, and input storage must cover every actual token. The circular slot wrapper uses the separately bounded prefix described above. FP8 cache writes require matching FP32 scale storage and supported Ascend 950 hardware. The FP8 LI path does not support `OffloadingConnector` or `PreemptOffloadConnector`, including through `MultiConnector`.
 - The indexer and FP32 tail share padded pages. FP8 reduces allocated cache memory only when the final shared page becomes smaller; a tail-dominated page can have the same physical size for BF16 and FP8 keys.
 - BF16 remains the default. INT8 requires Ascend A3, matching managed FP16 scale storage, and a CANN `PoolKeyIndexer` build that accepts an empty completed-pool history without a dummy request.
 - Queries are contiguous within each request and packed in request order. Normalize a negative query boundary to `A`, clamp boundaries to `A`, then require nondecreasing boundaries beginning at 0 and ending at `A`. Raw sequence lengths must cover the request's query length; actual positions are nonnegative and consistent with those lengths.
-- Tail blocks are request-local. Use `C=P` for non-MTP and `C=P+num_speculative_tokens` for speculative decoding; `0<retained_width<=C` when MTP is enabled. `page_rows>=C` and `page_rows*2D==tail.stride(0)` preserve shared page padding.
+- Tail blocks are request-local. With `S=num_speculative_tokens`, `get_kpool_tail_ring_capacity` selects `C=P*next_power_of_2(ceil((P+S)/P))`: one power-of-two number of pools covering the open pool plus lookahead. Non-MTP uses `C=P`; for `P=4,S=3`, the ring capacity is 8, not 7. `0<retained_width<=C` when MTP is enabled. `page_rows>=C` and `page_rows*2D==tail.stride(0)` preserve shared page padding.
 - `tail` rows, `cache` tokens and vector columns must be contiguous. Only tail page, compressed block and pooled-vector row strides may include padding. `cache` has exactly one KV head. Metadata output buffers must not overlap unrelated tensors.
 - INT8 `scale_cache` must have shape `cache.shape[:-1]`, and `pooled_scales` must have one value per pooled row. Both must be supplied together; the FP16 scales use the managed cache page stride, so a P/D cache transfer carries keys and scales together. The kernel copies already quantized values and does not compute scales.
 - Invalid tail/pooled destinations are skipped. Valid destinations must be unique within their respective write set; duplicate destinations can race. CANN state and projections must be ready before cache writes. Reads of historical tail rows must finish before any overwrite.
@@ -93,17 +114,44 @@
 
 ## Origin and Differences
 
-- **Origin**: Developed for the CANN GLM-5.3-Flash pooled-indexer integration, with the same logical slot and tail contract as the existing GLM KPool path.
+- **Origin**: Developed for the CANN GLM-5.3-Flash pooled-indexer integration, with the same logical slot and tail contract as the existing GLM KPool path. The circular slot formula matches upstream vLLM's `_kpool_tail_slot_mapping_kernel` in `vllm/v1/attention/backends/mla/indexer.py`.
 - **Differences**: Replaces separate boundary conversions, compact-slot construction, tail/cache scatter and output padding operations with fused adapters. The metadata kernel runs in two modes per metadata build. BF16 and FP8 use a trailing sentinel request; INT8 calls CANN directly. Key pooling and TopK scoring remain CANN operations. Tail state remains FP32; completed keys can be BF16, FP8 with FP32 descales, or INT8 with FP16 descales.
+- **Circular mapping differences**: Ascend keeps a position nonnegativity predicate and normalizes/clamps each query boundary for graph dummy requests. It fills padding with -1 using a single program. The compared upstream kernel instead forces the last request end to the actual count and copies input padding in independent 256-token programs. The padding results agree when upstream input padding is -1; Ascend does not preserve arbitrary input padding values. The Ascend wrapper uses a caller-owned output buffer and reconstructs actual-token circular slots without relying on generic actual-token slot values.
 
-## Example
+## JIT specialization and warmup
 
-For `P=4`, `L=128`, `D=128`, a token at position 65539 completes a pool. Raw slot 135 maps to compressed slot 33. With `topk=2048`, position 65540 has a tail beginning at 65540, placed in column 2048; columns 2049 and 2050 are -1. This is logical token addressing, while compressed writes use physical cache slots.
+For `_tail_slot_mapping_kernel`, `BLOCK_SIZE` is fixed at 256. `CAPACITY` remains compile-time because it defines ring modulo arithmetic and is fixed by cache configuration; `BLOCK_TABLE_STRIDE` remains compile-time for block-table addressing. Changing either creates a required variant. Pointer dtype/alignment, scalar inferred types, target and compiler options can also affect specialization.
+
+The batch-varying `num_actual_tokens`, `num_tokens` and `num_reqs` remain runtime values and use `do_not_specialize` to avoid value/divisibility variants. Positions, block IDs and query-boundary contents are runtime data, not specialization keys. Changing the launch grid alone is not a new key.
+
+No dedicated warmup registration is added for this wrapper. The builder's graph-capture entry point reuses the same public wrapper and launch configuration; this is not a claim that all serving variants are warmed or that the mapping is included in the model graph. Model-workload compilation counts must distinguish startup from serving and are separate evidence from synthetic operator checks.
 
 ## Test Cases
+
+Integer/index results require exact equality (`rtol=0`, `atol=0`) against a CPU integer reference. The NPU tests cover ring wraparound, capacities 4/8/32, long int64 positions, null blocks, padding, and stable-buffer graph replay. Boundary cases also cover empty input, padding-only output, zero-length requests, a 256-token crossing, Ascend dummy requests, negative query boundaries, negative versus zero positions, strided block-table rows and output guards. The output is reset to non-padding sentinel values before calls and graph replays, verifying that padding is overwritten with -1 while output guards and inputs remain unchanged. Generic slot-mapping values are not used.
+
+Run on an applicable Ascend device with the matching vLLM/Ascend environment:
+
+```bash
+python3 -m pytest -sv \
+    tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_cann_keypool.py
+```
+
+The same module includes BF16/FP8 cache-write and graph regressions. FP8 is restricted to hardware advertising `POOL_KEY_INDEXER_FP8`; circular integer mapping itself has no 950-only branch. CPU wrapper/reference tests are separate:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -sv \
+    tests/ut/ops/test_cann_keypool_adapters.py
+```
 
 The INT8 NPU tests compare complete managed pages byte-for-byte after valid, invalid and page-boundary writes, including untouched padding. They also compare CANN `PoolKeyIndexer` outputs from managed strided pages against contiguous key/scale tensors in eager and graph modes.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_int8_kpool_cache.py
 ```
+
+Operator microbenchmarks must separate eager calls from captured-kernel graph replay, retain identical inputs/launch options for paired candidates, and report request counts, query lengths, padding, capacities, dtypes, versions, warmup, repetitions and aggregation. Synthetic shape averages are not production workload weights. Model accuracy/performance and startup-versus-serving compilation counts must be reported with their actual model configurations; operator tests alone do not satisfy those checks.
+
+## Example
+
+For `P=4`, `L=128`, `D=128`, a token at position 65539 completes a pool. Raw slot 135 maps to compressed slot 33. With `topk=2048`, position 65540 has a tail beginning at 65540, placed in column 2048; columns 2049 and 2050 are -1. This is logical token addressing, while compressed writes use physical cache slots.

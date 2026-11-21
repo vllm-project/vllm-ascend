@@ -1,0 +1,4 @@
+pr: 21429
+entries:
+  - category: bugfix
+    text: Aligned GLM indexer tail caches with the upstream circular cache specification and registered block-indexed tensor views, allowing DecodeBench to initialize only the requesting ring while preserving neighbouring requests and page padding.
