@@ -1,0 +1,9 @@
+pr: 22722
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in setting for operator call stacks in the Ascend PyTorch
+      Profiler. Set torch_npu_profiler_with_stack to true in --additional-config
+      and enable torch_profiler_with_stack in --profiler-config to record these
+      stacks. Operator call stacks are disabled by default to limit collection
+      overhead.
