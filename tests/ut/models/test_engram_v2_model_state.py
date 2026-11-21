@@ -56,6 +56,9 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: calls.append(("retain", stream.name)))
     monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: context_available[0])
     monkeypatch.setattr(model_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        model_mod, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True, world_size=1)
+    )
     return calls, context, aux, context_available
 
 
@@ -264,6 +267,7 @@ def test_forward_only_waits_external_events_on_full_runs(runtime, monkeypatch, m
             return hidden[:, 0]
 
     model.layers = [Layer(1), Layer(2)]
+    model.start_layer, model.end_layer = 0, len(model.layers)
     model.forward(
         torch.arange(4),
         torch.arange(4),
@@ -290,6 +294,7 @@ def make_state(model, monkeypatch):
     state.rope_state = None
     state.supports_mm_inputs = False
     state.prompt_embeds_state = None
+    state.decoder_replay_state = None
     state.model = model
     state.lookback_token_ids = torch.full((4, 2), -1, dtype=torch.int32)
     state._cg_mode = CUDAGraphMode.FULL
@@ -613,6 +618,7 @@ def test_mask_wait_is_delayed_past_early_layer_compute(runtime):
             return hidden[:, 0]
 
     model.layers = [Layer(0), Layer(1), Layer(2)]
+    model.start_layer, model.end_layer = 0, len(model.layers)
     model.forward(
         torch.arange(4),
         torch.arange(4),

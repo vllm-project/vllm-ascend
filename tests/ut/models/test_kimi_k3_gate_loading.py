@@ -21,6 +21,8 @@ def make_linear(cls, output_sizes, tp_size=1, tp_rank=0):
     layer.tp_rank = tp_rank
     layer.tp_size = tp_size
     layer.output_sizes = output_sizes
+    # The real merged initializer establishes #66784's unpadded loader state.
+    layer.padding_size = 0
     layer.shard_ids = tuple(range(len(output_sizes)))
     layer.loaded_shard_ids = {}
     return layer
@@ -40,6 +42,7 @@ def make_model(tp_size=1, tp_rank=0, fused_gate=False):
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
         is_moe=False,
+        dsa_config=None,
         is_linear_attn=True,
         linear_attn_config={"use_full_rank_gate": True},
         q_lora_rank=1536,

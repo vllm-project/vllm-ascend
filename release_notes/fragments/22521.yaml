@@ -1,0 +1,4 @@
+pr: 22521
+entries:
+  - category: bugfix
+    text: Fixed a DeepSeek V4.1 startup crash on Ascend during Engram weight loading.

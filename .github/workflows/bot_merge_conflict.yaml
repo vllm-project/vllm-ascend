@@ -4,6 +4,15 @@ on:
   pull_request_target:
     types: [synchronize]
 
+concurrency:
+  # PR-side debounce: a burst of synchronize events on the same PR (e.g. a
+  # mass rebase) collapses into one run, only the newest checks the label.
+  # The push event keeps its own group per branch on purpose - every main
+  # push must re-check all PRs against the new base and must not cancel
+  # unrelated in-flight checks on other branches.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   main:
     runs-on: linux-amd64-cpu-2-hk

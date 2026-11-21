@@ -73,11 +73,11 @@ Handlers record a metric when its declared level is less than or equal to this v
 
 ## detector (shared)
 
-Stop-detect is controlled by ``report.max_per_req`` (write-full), not a shared detector flag.
-Default ``actions.defaults.on_trigger`` includes ``report``.
+Stop-detect is controlled by `report.max_per_req` (write-full), not a shared detector flag.
+Default `actions.defaults.on_trigger` includes ``report``.
 
-Detector JSON sections are declared on each detector class (``schema``) and
-registered in ``runtime_config.detector_catalog`` — add/remove a detector there
+Detector JSON sections are declared on each detector class (`schema`) and
+registered in `runtime_config.detector_catalog` — add/remove a detector there
 to refresh defaults, validation, and control-panel field lists.
 
 Each nested detector section supports:
@@ -86,7 +86,7 @@ Each nested detector section supports:
 |-----|------|-------------|
 | `enabled` | bool | Master switch (default `false`) |
 | `on_trigger` | list[str] | Override actions for this incident type |
-| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). |
+| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_cp*` (`cp` from PCP×DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [Runtime Guard — Feature compatibility](../feature_guide/runtime_guard.md#feature-compatibility). |
 
 ### spec_acceptance
 
@@ -119,12 +119,12 @@ Per-req INFO short-log throttle is a fixed internal interval (2s), not a JSON fi
 
 Deferred alert-batch queue cap is a fixed internal constant, not a JSON field.
 
-Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
+Each step runs a device `isfinite` reduction and one all-finite gate. Default
 path launches a non-blocking host copy of that gate and waits in
-``check_deferred``. On a hit only, bad rows / ``logits_indices`` / ``finite_kind``
+`check_deferred`. On a hit only, bad rows / `logits_indices` / `finite_kind`
 are resolved (indices are snapshotted at pre-sample when needed). Set
-``item_sync: true`` when you need kind/attribution against pristine pre-sample
-logits. Retired: ``check_every_tokens`` (multi-step window) — ignored if present.
+`item_sync: true` when you need kind/attribution against pristine pre-sample
+logits. Retired: `check_every_tokens` (multi-step window) — ignored if present.
 
 ### manual_trigger
 
