@@ -640,6 +640,7 @@ def test_allgather_mxfp8_ceil_quantization(prequantized):
     )
     with (
         patch("vllm_ascend.ops.fused_moe.token_dispatcher.get_dynamic_mx_quant_scale_alg", return_value=1, create=True),
+        patch.object(TokenDispatcherWithAllGather, "ep_size", new_callable=PropertyMock, return_value=1),
         patch("torch_npu.npu_dynamic_mx_quant", return_value=(quantized, scales)) as quantize,
         patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
@@ -695,10 +696,13 @@ def test_allgather_token_dispatch_quant_mode_without_dynamic_scale(_scale_alg):
             act_quant_type=case["act_quant_type"],
         )
 
-        with patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
-            return_value=init_routing_output,
-        ) as mock_init_routing:
+        with (
+            patch.object(TokenDispatcherWithAllGather, "ep_size", new_callable=PropertyMock, return_value=1),
+            patch(
+                "vllm_ascend.ops.fused_moe.token_dispatcher.DeviceOperator.npu_moe_init_routing",
+                return_value=init_routing_output,
+            ) as mock_init_routing,
+        ):
             output = dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         init_kwargs = mock_init_routing.call_args.kwargs
