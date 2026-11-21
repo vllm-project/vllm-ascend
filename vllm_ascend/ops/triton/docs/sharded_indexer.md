@@ -42,9 +42,9 @@
 
 The radix key orders scores descending and local IDs ascending. The local-to-global ID map is strictly increasing within a rank, so mapping IDs after sorting preserves the tie order. Signed zeros share one sorting key while the original score payload is retained. Invalid candidates receive a negative-infinity score and are written with ID -1.
 
-Each least-significant-digit pass extracts ID bits first, followed by the encoded score bits. A native FP32 value sort orders `digit * BLOCK + position`; the position tag makes the pass stable. With K2048, 11 position bits leave 13 digit bits within FP32's 24-bit significand. The resulting permutation gathers both scores and IDs before the next pass.
+Each least-significant-digit pass tags its digit with the current position to preserve the order of ties. The kernel adds `0x20000000` to the 30-bit tagged integer and bitcasts the result to FP32. Every key is a positive normal float, so ascending native FP32 sort preserves unsigned integer order. With K2048, 19 bits hold the digit and the low 11 bits recover the permutation used to gather scores and IDs.
 
-Local IDs use a fixed 20-bit field under the input contract above. The logical key is `[descending score key | ascending local ID]`: 36 bits for BF16 and 52 bits for FP32. With K2048, the shared compile-time radix loop therefore takes three passes for BF16 or four for FP32. No per-row maximum-ID reduction, ID-width selection or large-ID comparison fallback is needed. `SCORE_BITS` is supplied by the wrapper, so dtype selection adds no per-row branch.
+Local IDs use a fixed 20-bit field under the input contract above. The logical key combines the descending score key and ascending local ID, totaling 36 bits for BF16 and 52 bits for FP32. With K2048, the compile-time radix loop takes two passes for BF16 and three for FP32. The wrapper supplies `SCORE_BITS` based on dtype.
 
 The wrapper keeps grid selection and routing outside the kernel. Fusion requires K2048, at least 75% as many rows as vector cores, and enough downstream merge levels to amortize local sorting. Other workloads keep separate sorting and packing. Runtime `num_rows` does not specialize the fused kernel; score width, strides, topology and block size do. This change adds no new warmup entry or routing policy.
 

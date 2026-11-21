@@ -159,12 +159,13 @@ def _pack_sorted_candidates(
     SCORE_BITS: tl.constexpr,
 ):
     """Sort by descending score/ascending ID and pack global ID/score bits."""
-    FP32_SIGNIFICAND_BITS: tl.constexpr = 24
+    SORT_KEY_BITS: tl.constexpr = 30
+    SORT_KEY_BIAS: tl.constexpr = 0x20000000
     FP32_STORAGE_BITS: tl.constexpr = 32
     FP32_MAGNITUDE_MASK: tl.constexpr = 0x7FFFFFFF
     FP32_SIGN_MASK: tl.constexpr = -0x80000000
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
-    DIGIT_BITS: tl.constexpr = FP32_SIGNIFICAND_BITS - LOG_BLOCK
+    DIGIT_BITS: tl.constexpr = SORT_KEY_BITS - LOG_BLOCK
     # Caller guarantees valid local token IDs fit in 20 bits.
     ID_BITS: tl.constexpr = 20
     candidate_offsets = tl.arange(0, BLOCK)
@@ -181,8 +182,9 @@ def _pack_sorted_candidates(
         local_id_keys = tl.where(valid, local_ids.to(tl.float32), 0.0)
         candidate_scores = tl.where(valid, candidate_scores, -float("inf"))
         # LSD radix order: [descending score key | ascending local ID].
-        # Each pass adds the current position to make equal digits stable
-        # and recover the permutation; digit + position fits in 24 bits.
+        # Tag each digit with its current position for a stable value-only sort.
+        # The biased bit patterns 0x20000000..0x5fffffff are positive normal
+        # FP32 values whose numeric order is their unsigned integer order.
         for bit_offset in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
             score_bits = candidate_scores.to(tl.int32, bitcast=True)
             # +/-0 compare equal; preserve the original payload.
@@ -199,9 +201,9 @@ def _pack_sorted_candidates(
             else:
                 digit = (local_id_keys.to(tl.int32) >> bit_offset) | (descending_score_key << (ID_BITS - bit_offset))
             digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - bit_offset)) - 1
-            stable_digit_key = digit.to(tl.float32) * BLOCK + candidate_offsets.to(tl.float32)
-            sorted_digit_keys = _sort(stable_digit_key, descending=False)
-            permutation = (sorted_digit_keys - tl.floor(sorted_digit_keys * (1.0 / BLOCK)) * BLOCK).to(tl.int32)
+            tagged = SORT_KEY_BIAS + ((digit << LOG_BLOCK) | candidate_offsets)
+            sorted_keys = _sort(tagged.to(tl.float32, bitcast=True), descending=False)
+            permutation = sorted_keys.to(tl.int32, bitcast=True) & (BLOCK - 1)
             candidate_scores = tl.gather(candidate_scores, permutation, 0)
             local_id_keys = tl.gather(local_id_keys, permutation, 0)
         sorted_local_ids = tl.where(tl.abs(candidate_scores) < float("inf"), local_id_keys, 0).to(tl.int32)
