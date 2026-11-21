@@ -425,9 +425,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
+        # The core writes every real token and explicitly zeros profiling and
+        # padding outputs, so no initialization is needed before the custom op.
+        core_attn_out = torch.empty(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -474,7 +474,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             ensure_gdn_checkpoint_workspace(self, mixed_qkv)
 
         if attn_metadata is None:
-            # V1 profile run
+            # Profiling skips computation but downstream Norm still reads output.
+            core_attn_out.zero_()
             return
 
         # Layerwise KV pool hooks must stay inside the custom op body: the
@@ -496,6 +497,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         self_kv_cache = self.kv_cache
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+        # Graph padding is consumed by the output projection too. Initialize only
+        # the suffix that the attention kernels will not overwrite.
+        if num_actual_tokens < core_attn_out.shape[0]:
+            core_attn_out[num_actual_tokens:].zero_()
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
