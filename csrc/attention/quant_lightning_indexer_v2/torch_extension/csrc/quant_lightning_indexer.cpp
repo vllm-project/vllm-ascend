@@ -161,10 +161,9 @@ std::tuple<at::Tensor, at::Tensor> ConstructQuantLightningIndexerOutputTensor(
     at::Tensor sparseIndicesOut = at::empty(outputSize, query.options().dtype(at::kInt));
     at::Tensor sparseValuesOut;
     if (returnValue) {
-        // arch22 (910B/910_93) 直接输出 FP32 score; 950/arch35 保持 BF16。
         const char *socName = aclrtGetSocName();
         const bool fp32Score =
-            (socName == nullptr) || (std::string(socName).find("Ascend950") == std::string::npos);
+            returnValue == 2 && (socName == nullptr || std::string(socName).find("Ascend950") == std::string::npos);
         sparseValuesOut = at::empty(outputSize, query.options().dtype(fp32Score ? at::kFloat : at::kBFloat16));
     } else {
         sparseValuesOut = at::empty({0}, query.options().dtype(at::kBFloat16));

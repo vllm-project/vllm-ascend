@@ -116,7 +116,7 @@ class BaseDeviceAdaptor:
             or kv_cache.dtype != torch.int8
         ):
             raise NotImplementedError("DCP QLI requires A3 INT8 query and key caches")
-        indices, scores = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        return torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             q_li.contiguous(),
             kv_cache,
             weights.to(torch.float16).contiguous(),
@@ -140,9 +140,6 @@ class BaseDeviceAdaptor:
             causal_seqlens_kv_global=global_seq_lens,
             return_value=1,
         )
-        from vllm_ascend.ops.triton.sharded_indexer import normalize_dcp_candidates
-
-        return normalize_dcp_candidates(indices, scores, query_start_loc)
 
     @staticmethod
     def indexer_select_local_candidates(
