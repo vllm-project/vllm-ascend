@@ -1,0 +1,4 @@
+pr: 14054
+entries:
+  - category: feature
+    text: Added opt-in prefill admission throttling for low-bandwidth pipeline-parallel deployments.
