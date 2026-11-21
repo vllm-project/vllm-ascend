@@ -77,7 +77,7 @@ runtime/
   config/runtime_config.json
   report/
     <incident_type>/report_<ms>[_<req_id>]_pid*.json   # last-PP TP0 only
-    kv_cache/<incident_type>/<req_id>/wave_*/dp*_tp*_pp*_cp*/*.pt
+    kv_cache/<incident_type>/<req_id>/wave_*/dp*_tp*_pp*_pcp*_dcp*/*.pt
     kv_cache/<incident_type>/<req_id>/wave_*/request_info.json
 ```
 
@@ -102,7 +102,7 @@ Online KV / position meta detectors are **not** in this release; use `dump_kv` f
 | Action | Effect |
 |--------|--------|
 | `report` | Write JSON incident report (+ metric counter) |
-| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head delivers the list on the merged due-bus dump lane (`config_due` may be false when hot-reload is off; `tp_size<=1` stashes locally with no TP collective), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_cp*/*.pt` |
+| `dump_kv` | D2H paged KV for the request. **Last PP × all TP** (not other PP stages): TP0 records dump jobs this step and writes `request_info.json` (report-like metadata); the next wave-head delivers the list on the merged due-bus dump lane (`config_due` may be false when hot-reload is off; `tp_size<=1` stashes locally with no TP collective), then each last-PP TP rank (including TP0) does local D2H in `end_of_wave`. Same arm wave: each `req_id` at most once (`queue_kv_dump` dedupes by `(wave, req_id)`; duplicate enqueue logs INFO). Files: `{dump_root}/{type}/{req_id}/wave_<N>/request_info.json` and `{dump_root}/{type}/{req_id}/wave_<N>/dp*_tp*_pp*_pcp*_dcp*/*.pt` |
 
 Default `on_trigger` is `["report"]`. Per-detector overrides:
 

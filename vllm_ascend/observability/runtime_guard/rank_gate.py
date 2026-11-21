@@ -113,7 +113,7 @@ def runner_pcp_rank(runner: Any) -> int:
 
     Ascend / upstream runners usually keep ``pcp_rank`` on ``pcp_manager``, not
     on the runner itself. Reading only ``runner.pcp_rank`` collapses every PCP
-    row to ``0`` and collides dump dirs (``…_cp0``).
+    row to ``0`` and collides dump dirs (``…_pcp0_…``).
     """
     try:
         pcp_manager = getattr(runner, "pcp_manager", None)
@@ -129,26 +129,24 @@ def runner_pcp_rank(runner: Any) -> int:
         return 0
 
 
-def runner_cp_rank(runner: Any) -> int:
-    """Combined CP rank (``pcp_rank * dcp_size + dcp_rank``) when CP is on."""
+def runner_dcp_rank(runner: Any) -> int:
+    """DCP rank for dump path tags (0 when DCP is off)."""
     try:
-        dcp = int(getattr(runner, "dcp_rank", 0) or 0)
+        return int(getattr(runner, "dcp_rank", 0) or 0)
     except Exception:
-        dcp = 0
-    pcp = runner_pcp_rank(runner)
-    try:
-        dcp_size = int(getattr(runner, "dcp_size", 1) or 1)
-    except Exception:
-        dcp_size = 1
-    if dcp_size < 1:
-        dcp_size = 1
-    return int(pcp) * int(dcp_size) + int(dcp)
+        return 0
 
 
 def dump_rank_tag(runner: Any) -> str:
-    """Directory / report tag for this worker's KV shard (dp/tp/pp/cp)."""
+    """Directory / report tag for this worker's KV shard (dp/tp/pp/pcp/dcp).
+
+    PCP and DCP are separate fields so dump paths stay unique without folding
+    them into a single ``cp`` index (``pcp_rank * dcp_size + dcp_rank``).
+    """
     return (
-        f"dp{runner_dp_rank(runner)}_tp{runner_tp_rank(runner)}_pp{runner_pp_rank(runner)}_cp{runner_cp_rank(runner)}"
+        f"dp{runner_dp_rank(runner)}_tp{runner_tp_rank(runner)}_"
+        f"pp{runner_pp_rank(runner)}_pcp{runner_pcp_rank(runner)}_"
+        f"dcp{runner_dcp_rank(runner)}"
     )
 
 

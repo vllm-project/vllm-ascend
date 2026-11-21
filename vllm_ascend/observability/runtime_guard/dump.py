@@ -31,7 +31,8 @@ import torch
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.rank_gate import (
     dump_rank_tag,
-    runner_cp_rank,
+    runner_dcp_rank,
+    runner_pcp_rank,
     runner_pp_rank,
     runner_tp_rank,
 )
@@ -849,7 +850,8 @@ class KvCacheReader:
             tp_rank = 0
         rank_tag = dump_rank_tag(self._runner)
         pp_rank = runner_pp_rank(self._runner)
-        cp_rank = runner_cp_rank(self._runner)
+        pcp_rank = runner_pcp_rank(self._runner)
+        dcp_rank = runner_dcp_rank(self._runner)
         for src_name, layer_name, tensor, gid, ids, expansion_unknown in self._request_tensors(
             manager_block_ids_by_group
         ):
@@ -876,7 +878,8 @@ class KvCacheReader:
                 "rank_tag": rank_tag,
                 "tp_rank": tp_rank,
                 "pp_rank": pp_rank,
-                "cp_rank": cp_rank,
+                "pcp_rank": pcp_rank,
+                "dcp_rank": dcp_rank,
                 "num_kv_heads": num_kv_heads,
                 "tensor": payload_tensor,
             }

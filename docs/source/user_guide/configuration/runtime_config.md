@@ -36,7 +36,7 @@ Valid action names: `report`, `dump_kv`. ActionQueue capacity is a fixed interna
 | `auto_max_times` | int | `0` | Max auto `dump_kv` captures per process lifetime. `0` disables auto dump quota |
 | `auto_cooldown_seconds` | float | `300` | Minimum seconds between auto dumps after a **successful** quota consume (refund clears this cooldown) |
 | `manual_dump` | bool \| int | `false` | Manual dump watermark: `false`, positive int N (catch-up: dump once per armed wave while process `done < N`; **prefer bump 1→2→3**), or `true` (continuous; **not recommended**). Never rewritten by the process. If disk value ≤ `done`, skip. Setting N=5 with `done=0` fires about five dumps across subsequent waves. Reports / `.pt` carry `manual_dump_count` (1-based seq). Multi-DP: each replica tracks its own `done`. **Ops:** start the server first, then raise N in the live JSON (hot-reload required). |
-| `dump_dir` | str \| null | derived | KV dump root (default `<report_dir>/kv_cache`). Layout: `<dump_root>/<incident_type>/<req_id>/dp*_tp*_pp*_cp*/*.pt`. Coverage is last PP × all TP (not other PP). |
+| `dump_dir` | str \| null | derived | KV dump root (default `<report_dir>/kv_cache`). Layout: `<dump_root>/<incident_type>/<req_id>/dp*_tp*_pp*_pcp*_dcp*/*.pt`. Coverage is last PP × all TP (not other PP). |
 
 Free-space headroom for `dump_kv` (`estimated payload + headroom`) is a fixed internal constant (5GB), not a JSON field.
 
@@ -86,7 +86,7 @@ Each nested detector section supports:
 |-----|------|-------------|
 | `enabled` | bool | Master switch (default `false`) |
 | `on_trigger` | list[str] | Override actions for this incident type |
-| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_cp*` (`cp` from PCP×DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [Runtime Guard — Feature compatibility](../feature_guide/runtime_guard.md#feature-compatibility). |
+| `dump_kv` | object | Per-type dump options: `scope` (`request` \| `all_requests`). Finish-wave arms still dump; artifacts may set `request_finished_at_dump: true` (KV may already be freed/reused — treat as suspect). Dump dirs use `dp*_tp*_pp*_pcp*_dcp*` (PCP and DCP ranks). Per-layer block tables follow `kv_cache_groups` (hybrid / draft). See [Runtime Guard — Feature compatibility](../feature_guide/runtime_guard.md#feature-compatibility). |
 
 ### spec_acceptance
 
