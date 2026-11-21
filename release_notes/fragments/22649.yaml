@@ -1,0 +1,4 @@
+pr: 22649
+entries:
+  - category: bugfix
+    text: Fixed runs with VLLM_KV_CACHE_LAYOUT=HND (LBHNC) crashing at the first paged-attention read (EZ0037) - the head-major cache is now fed to the attention kernel as gathered token-major blocks; default-layout users see no change.
