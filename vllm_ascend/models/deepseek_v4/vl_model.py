@@ -11,10 +11,12 @@ from collections.abc import Iterable, Iterator
 
 import torch
 from torch import nn
+from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsKVCacheGrouping,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -28,6 +30,7 @@ from vllm.models.deepseek_v4.common.mm_preprocess import (
     image_sentinel_mask,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4ForCausalLM
 from vllm_ascend.models.deepseek_v4.vision import (
@@ -56,10 +59,17 @@ class AscendDeepseekV4ForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsEagle3,
+    SupportsKVCacheGrouping,
 ):
     """DeepSeek-V4 vision entry point using the Ascend text backbone."""
 
     requires_raw_input_tokens = True
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+    ) -> list[KVCacheGroupSpec]:
+        return AscendDeepseekV4ForCausalLM.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

@@ -71,6 +71,7 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle3,
+    SupportsKVCacheGrouping,
     SupportsLoRA,
     SupportsPP,
 )
@@ -84,7 +85,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
@@ -96,6 +97,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.models.deepseek_v4.cache_config import get_deepseek_v4_kv_cache_groups
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
@@ -1084,11 +1086,19 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle3):
+class AscendDeepseekV4ForCausalLM(
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle3, SupportsKVCacheGrouping
+):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
     model_cls = DeepseekV4Model
+
+    @classmethod
+    def get_kv_cache_groups(
+        cls, vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+    ) -> list[KVCacheGroupSpec]:
+        return get_deepseek_v4_kv_cache_groups(vllm_config, kv_cache_spec)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
