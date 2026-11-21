@@ -243,7 +243,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.use_cann_megamoe", return_value=True)
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
-    def test_process_weights_after_loading_megamoe_frees_fp32_scale(
+    def test_process_weights_after_loading_megamoe_keeps_fp32_scale_for_fallback(
         self, mock_get_config, mock_vllm_config, mock_megamoe
     ):
         mock_config = MagicMock()
@@ -262,8 +262,14 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertEqual(len(layer.cann_mega_moe_fused_w1_scale_list), self.num_experts)
         self.assertEqual(len(layer.cann_mega_moe_fused_w2_scale_list), self.num_experts)
         self.assertTrue(all(scale.dtype == torch.int64 for scale in layer.cann_mega_moe_fused_w1_scale_list))
-        # The float32 scale copy is dead under MegaMoe and must be released.
-        self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))
+        # The float32 scale copy must stay alive for ALLTOALL / MC2 fallback paths.
+        self.assertTrue(hasattr(layer, "w13_weight_scale_fp32"))
+        w1, w1_scale, w2, w2_scale = self.quant_method._get_mlp_weights(layer)
+        self.assertIs(w1[0], layer.w13_weight)
+        self.assertIs(w1_scale[0], layer.w13_weight_scale_fp32)
+        self.assertIs(w2[0], layer.w2_weight)
+        self.assertIs(w2_scale[0], layer.w2_weight_scale)
+        self.assertEqual(len(self.quant_method.get_eplb_weight_views(layer)), 6)
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.use_cann_megamoe", return_value=True)
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config")

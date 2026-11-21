@@ -333,21 +333,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
         elif use_mega_moe:
-            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            # Share the single 3D FRACTAL_NZ int8 physical buffer zero-copy across
+            # both MegaMoe (2D int8 per-expert views via unbind) and ALLTOALL/MC2
+            # fallback (3D packed int32 view via _pack_to_int32), and retain the
+            # original scale/bias attributes so fallback paths (_get_mlp_weights,
+            # _get_mlp_scale_bias, get_eplb_weight_views) never raise AttributeError.
+            layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+            layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
 
             layer.cann_mega_moe_w13_weight_scale_list = [
                 t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)
             ]
             layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
             layer.cann_mega_moe_w13_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)
+                (t if t.dtype == torch.float32 else t.to(torch.float32)).reshape(-1)
+                for t in layer.w13_scale_bias.data.unbind(dim=0)
             ]
             layer.cann_mega_moe_w2_scale_bias_list = [
-                t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
+                (t if t.dtype == torch.float32 else t.to(torch.float32)).reshape(-1)
+                for t in layer.w2_scale_bias.data.unbind(dim=0)
             ]
-            for tensor_name in tensor_names:
-                delattr(layer, tensor_name)
+            layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
         else:
             layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
