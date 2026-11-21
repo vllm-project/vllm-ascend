@@ -7,7 +7,7 @@ from functools import cached_property
 from queue import Queue
 from threading import Condition
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -15,6 +15,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.distributed.weight_transfer.base import ParamMeta, Shard, WeightSource
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory, WeightTransferTrainerFactory
 from vllm.distributed.weight_transfer.m2n_common import M2NLayout, M2NMesh, M2NParamMeta
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_ascend.distributed.device_communicators.pyhccl import HcclSendRecvType, PyHcclCommunicator
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import HCCLLibrary, hcclDataTypeEnum
@@ -23,6 +24,7 @@ from vllm_ascend.distributed.weight_transfer.hccl_m2n_engine import (
     HCCLM2NTrainerInitInfo,
     HCCLM2NTrainerWeightTransferEngine,
     HCCLM2NWeightTransferEngine,
+    HCCLM2NWeightTransferInitInfo,
     _TransferSession,
 )
 from vllm_ascend.distributed.weight_transfer.hccl_m2n_transport import plan_rank_transfers, transfer_parameter
@@ -160,6 +162,48 @@ class _LocalSource(WeightSource):
         raise AssertionError("HCCL M2N must send local shards")
 
 
+@pytest.mark.parametrize(
+    "options,precast_fp32,nd_format,uses_direct",
+    [
+        ({}, False, True, True),
+        ({"direct_write": False}, False, True, False),
+        ({}, True, True, False),
+        ({}, False, False, False),
+    ],
+)
+def test_automatic_direct_destinations(monkeypatch, options, precast_fp32, nd_format, uses_direct):
+    trainer_info = HCCLM2NTrainerInitInfo(master_address="127.0.0.1", master_port=5000, rank=0, world_size=2, **options)
+    trainer = HCCLM2NTrainerWeightTransferEngine(client=Mock(), source=Mock(), is_sender=True)
+    trainer._wire_params = []
+    trainer._source_digest = hccl_m2n_engine.source_plan_digest([])
+    worker_info = HCCLM2NWeightTransferInitInfo(**trainer._worker_init_info(trainer_info))
+
+    model = torch.nn.Linear(2, 2, bias=False)
+    model.precast_fp32_weight = precast_fp32
+    config = SimpleNamespace(
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        world_size=1,
+        tensor_parallel_size=1,
+        enable_expert_parallel=False,
+        enable_eplb=False,
+    )
+    model_config = SimpleNamespace(is_moe=False, quantization=None, enable_sleep_mode=False)
+    worker = HCCLM2NWeightTransferEngine(
+        Mock(), SimpleNamespace(parallel_config=config, model_config=model_config), torch.device("cpu"), model
+    )
+    worker._metas = [SimpleNamespace(name="weight", dtype=torch.float32, shape=(2, 2))]
+    model.weight.weight_loader = default_weight_loader
+    monkeypatch.setattr(hccl_m2n_engine, "_is_nd", lambda _: nd_format)
+
+    worker._prepare_hccl_destinations(worker_info)
+
+    assert worker._parameter_destinations[0].direct is uses_direct
+    assert worker._uses_load_weights is not uses_direct
+    if uses_direct:
+        assert worker._parameter_destinations[0].tensor.data_ptr() == model.weight.data_ptr()
+
+
 def test_two_update_rounds_reconstruct_latest_weight(monkeypatch):
     from vllm.model_executor.model_loader import reload
 
@@ -171,8 +215,11 @@ def test_two_update_rounds_reconstruct_latest_weight(monkeypatch):
     )
     monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
     monkeypatch.setattr(hccl_m2n_engine, "_require_nd", Mock())
-    monkeypatch.setattr(reload, "initialize_layerwise_reload", Mock())
-    monkeypatch.setattr(reload, "finalize_layerwise_reload", Mock())
+    has_reload_lifecycle = hasattr(reload, "start_reload")
+    start = Mock()
+    finish = Mock()
+    monkeypatch.setattr(reload, "start_reload" if has_reload_lifecycle else "initialize_layerwise_reload", start)
+    monkeypatch.setattr(reload, "finish_reload" if has_reload_lifecycle else "finalize_layerwise_reload", finish)
     monkeypatch.setattr(hccl_m2n_engine, "HCCLLibrary", Mock())
 
     source_layout = M2NLayout(M2NMesh((2, 1), 0), (0, -1))
@@ -236,8 +283,11 @@ def test_two_update_rounds_reconstruct_latest_weight(monkeypatch):
                 future.result(timeout=10)
             torch.testing.assert_close(loaded["weight"], tensor)
             tensor.add_(100)
-    assert reload.initialize_layerwise_reload.call_count == 2
-    assert reload.finalize_layerwise_reload.call_count == 2
+    assert start.call_args_list == [call(worker.model)] * 2
+    finish_args = (worker.model, worker.model_config)
+    if has_reload_lifecycle:
+        finish_args += (worker.device,)
+    assert finish.call_args_list == [call(*finish_args)] * 2
 
 
 def test_failed_trainer_session_cannot_send_again():

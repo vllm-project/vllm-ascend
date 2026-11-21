@@ -214,12 +214,24 @@ dimensions. Use disjoint trainer and rollout NPUs and a CANN build with
 `HcclBatchSendRecv` support. The trainer and rollout must use the same
 parameter names and checkpoint semantics.
 
-By default, workers reconstruct each checkpoint tensor and pass it through
-the model loader. Use `direct_write=True` only after verifying that the target
-model's live parameter storage has the layout of its checkpoint shard and
-its loader requires no additional transformation. Upstream destination
-resolution selects eligible direct targets and sends the remaining weights
-through the loader.
+Workers use upstream destination resolution to select eligible direct targets
+automatically. Remaining weights are reconstructed and passed through the
+model loader. Workers use the full loader path if the model has precomputed
+FP32 weight copies or a selected direct destination fails the NPU ND format
+check. Set `direct_write=False` in `HCCLM2NTrainerInitInfo` to use the loader
+for all parameters.
+
+Set `packed_buffer_size_bytes=128 * 1024 * 1024` in
+`HCCLM2NTrainerInitInfo` to enable experimental cross-parameter batching.
+The limit is based on logical checkpoint bytes per batch. A parameter larger
+than the limit uses the single-parameter path. All trainer ranks must use the
+same settings. Keep the contents of each tensor yielded by `iter_local()`
+unchanged until `send_weights()` returns when using batching.
+
+Packed transfer uses PyTorch `copy_()` to pack and unpack weight slices in
+per-peer staging buffers. It works with both direct and loader destinations.
+The default `packed_buffer_size_bytes=0` uses single-parameter transfers.
+
 After an update failure, restart the affected trainer and rollout session
 before resuming generation. A partial update may already have changed weights.
 
