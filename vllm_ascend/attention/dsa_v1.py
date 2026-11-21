@@ -634,22 +634,8 @@ def build_dspark_swa_indices(
         slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
-    repeats = query_lens
-    active_rows = None
-    if (indices_output is not None or buffer is not None) and num_decode_tokens is not None and query_lens.numel() > 0:
-        # Match the fixed graph row count without reading device lengths on CPU.
-        active_rows = query_start_loc[-1]
-        repeats = query_lens.clone()
-        repeats[-1] += num_decode_tokens - active_rows
-
-    per_token_slots = torch.repeat_interleave(slot_ids, repeats, dim=0, output_size=num_decode_tokens).unsqueeze(1)
-    per_token_lens = torch.repeat_interleave(visible_lens, repeats, dim=0, output_size=num_decode_tokens)
-    if active_rows is not None:
-        valid_rows = (
-            torch.arange(num_decode_tokens, device=query_start_loc.device, dtype=query_start_loc.dtype) < active_rows
-        )
-        per_token_slots = per_token_slots.masked_fill(~valid_rows[:, None, None], -1)
-        per_token_lens = per_token_lens.masked_fill(~valid_rows, 0)
+    per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
+    per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
 
     if indices_output is not None:
         if indices_output.shape != per_token_slots.shape:
