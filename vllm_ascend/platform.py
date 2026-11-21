@@ -254,6 +254,11 @@ class NPUPlatform(Platform):
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
+        # PCP keeps its distributed backend; eligible local draft layers use CANN FlashAttn.
+        if not attn_selector_config.use_pcp and _validate_flash_attn_backend(backend_key, attn_selector_config):
+            # vLLM resolves this import path to the backend class.
+            return "vllm_ascend.attention.fa_v1.AscendFlashAttentionBackend"
+
         backend_map = {
             (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
             (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
@@ -1479,6 +1484,47 @@ def _disable_expandable_segments() -> None:
     if updated_configs != npu_alloc_configs:
         os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
         logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
+
+
+def _validate_flash_attn_backend(backend_key, selector) -> bool:
+    """Select CANN FlashAttn for A5 V1 DFlash2 eager drafts with GLM MoE DSA targets."""
+    # backend_key is (use_mla, use_sparse, use_compress).
+    if backend_key != (False, False, False) or not get_current_hardware_profile().supports(
+        HardwareCapability.DEVICE_LENGTH_FLASH_ATTN
+    ):
+        return False
+
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    # Require an active V1 config; V2 uses its existing attention path.
+    if config is None or config.use_v2_model_runner:
+        return False
+    spec = config.speculative_config
+    # Apply only to eager drafts, preserving the target model's attention backend.
+    if spec is None or config.model_config.runner_type != "draft" or not spec.enforce_eager:
+        return False
+    target = spec.target_model_config
+    # Restrict target models to the GLM MoE DSA family, including GLM-5.3.
+    if target.hf_text_config.model_type != "glm_moe_dsa":
+        return False
+
+    from vllm_ascend.spec_decode.dflash2_proposer import is_dflash2_draft
+
+    return (
+        is_dflash2_draft(spec)
+        # CANN FlashAttn requires FP16/BF16 Q and unquantized KV.
+        and selector.dtype in (torch.float16, torch.bfloat16)
+        and selector.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+        # These features require additional metadata or batch-invariance guarantees.
+        and not (
+            selector.use_dcp
+            or selector.use_mm_prefix
+            or selector.use_rswa
+            or selector.use_batch_invariant
+            or selector.use_per_head_quant_scales
+        )
+    )
 
 
 def _validate_fa3_backend(key, _attn_selector_config):
