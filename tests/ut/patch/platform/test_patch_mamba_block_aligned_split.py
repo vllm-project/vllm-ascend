@@ -19,6 +19,7 @@ import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -105,6 +106,32 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     )
 
     assert result == 5
+
+
+@pytest.mark.parametrize(
+    "prompt,hit,first_seen,expected",
+    [
+        (3503, 1152, False, 2304),
+        (7003, 5760, False, 1243),
+        (2003, 1152, True, 851),
+        (2003, 1152, False, 832),
+        (9003, 6912, False, 1152),
+    ],
+)
+def test_native_gdn_policy_applies_to_each_prefill(prompt, hit, first_seen, expected):
+    scheduler = _scheduler(is_kv_consumer=None)
+    scheduler.cache_config.block_size = scheduler.block_size = 1152
+    scheduler.hash_block_size = 64
+    scheduler.mamba_partial_cache_hit = True
+    scheduler.mamba_has_prefill_checkpoint_blocks = True
+    scheduler.mamba_prefill_checkpoint_alignment = 64
+    scheduler._ascend_gdn_checkpoint_policy = GDNCheckpointPolicy(8192, True, True)
+    request = _request(num_computed_tokens=0, num_prompt_tokens=prompt, num_tokens=prompt)
+    request._ascend_first_observed_mamba_tail = first_seen
+
+    assert _mamba_block_aligned_split(scheduler, request, prompt - hit, hit) == expected
+    assert scheduler.mamba_has_prefill_checkpoint_blocks
+    assert scheduler.mamba_partial_cache_hit
 
 
 def test_pd_consumer_preserves_window_after_external_cache_hit():
