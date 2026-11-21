@@ -242,6 +242,9 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_cos: torch.Tensor | None = None
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
+    # Per-forward staging cache, shared through the builder's batch dictionary
+    # so every cache group in the same forward resolves the same instance.
+    swa_stage_cache: Any = None
     global_metadata: "AscendDSAV41Metadata | None" = None
 
 
@@ -268,6 +271,10 @@ class DeepseekV41LayerMetadata:
     swa: AscendDSAV41Metadata
     compressor: DeepseekV41CompressorMetadata | None
     indexer: DeepseekV41IndexerMetadata | None
+    # Per-forward shared cache for the bounded SWA staging view. Every layer
+    # resolves it from the same attention-metadata mapping, so planning and
+    # operator metadata are shared across the cache group instead of per layer.
+    swa_stage_cache: "_SwaChunkStageCache | None" = None
 
     @property
     def positions(self) -> torch.Tensor:
@@ -351,14 +358,13 @@ def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
 
 
 class _SwaChunkPlan:
-    """Immutable per-step view shared by the four layers of one SWA group.
+    """Immutable per-step view of one cache group's bounded SWA blocks.
 
     ``window_block_table`` lists, per local chunk row, exactly the slab blocks
     that the sliding window can reach. Staging turns them into a dense local
     range; ``replay_seq_lens`` rebases the operator's causal coordinates onto
-    that range. ``smla_cache`` holds the rebuilt operator tiling metadata per
-    attention-metadata object, because compressed layers read the long-KV
-    group's metadata rather than the SWA group's.
+    that range. ``segments`` is the shared, batch-level segment plan that both
+    the rebased table and the operator metadata signature derive from.
     """
 
     __slots__ = (
@@ -368,10 +374,12 @@ class _SwaChunkPlan:
         "total_blocks",
         "max_replay_seq_len",
         "prepared",
-        "smla_cache",
+        "segments",
     )
 
-    def __init__(self, window_block_table, counts, replay_seq_lens, total_blocks, max_replay_seq_len, prepared):
+    def __init__(
+        self, window_block_table, counts, replay_seq_lens, total_blocks, max_replay_seq_len, prepared, segments
+    ):
         self.window_block_table = window_block_table
         self.counts = counts
         self.replay_seq_lens = replay_seq_lens
@@ -380,34 +388,82 @@ class _SwaChunkPlan:
         # Dense stage table and flat source-block list, shared by every layer
         # in this group; only the copied data differs per layer.
         self.prepared = prepared
-        self.smla_cache: dict[int, torch.Tensor | bool] = {}
+        self.segments = segments
 
 
-def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, num_blocks):
-    """Build (and memoize) the bounded SWA view for this step.
+class _SwaChunkStageCache:
+    """Per-forward staging caches shared by every layer of one batch.
 
-    Runs on the CPU-side sequence lengths only: no device synchronization and
-    no full-prefix gather. Returns ``None`` for any batch the bounded view
-    cannot represent exactly, in which case the caller keeps the direct
-    peer-read path.
+    ``segments`` depends only on the rank-local CPU sequence lengths, so the
+    segment plan is computed once per batch regardless of how many layers read
+    it. ``smla_cache`` is keyed by a value signature of the operator inputs:
+    layers with identical batch geometry share one ``npu_sparse_flash_mla_metadata``
+    call, while every differing geometry still pays its own call.
+    """
+
+    __slots__ = ("segments", "segments_key", "smla_cache")
+
+    def __init__(self):
+        self.segments_key: tuple | None = None
+        self.segments: list | None = None
+        self.smla_cache: dict[tuple, torch.Tensor | bool] = {}
+
+
+_SWA_CHUNK_STAGE_CACHE_KEY = "_swa_chunk_stage_cache"
+
+
+def _cpu_prefix(value, size: int) -> tuple[int, ...] | None:
+    """Read a CPU-side length prefix without a device synchronization."""
+    if value is None:
+        return None
+    try:
+        values = value.tolist() if hasattr(value, "tolist") else value
+        return tuple(int(item) for item in list(values)[:size])
+    except (TypeError, ValueError):
+        return None
+
+
+def _swa_chunk_stage_cache(metadata) -> _SwaChunkStageCache:
+    """Return the batch-scoped staging cache attached to ``metadata``."""
+    cache = getattr(metadata, _SWA_CHUNK_STAGE_CACHE_KEY, None)
+    if not isinstance(cache, _SwaChunkStageCache):
+        cache = _SwaChunkStageCache()
+        try:
+            setattr(metadata, _SWA_CHUNK_STAGE_CACHE_KEY, cache)
+        except (AttributeError, TypeError):
+            # A slotted metadata object cannot carry the shared cache; this
+            # step then plans per call rather than failing.
+            return cache
+    return cache
+
+
+def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, num_blocks, *, stage_cache=None):
+    """Build the bounded SWA view for one cache group.
+
+    The segment plan runs on the CPU-side sequence lengths only: no device
+    synchronization and no full-prefix gather. It is cached on the shared
+    per-forward ``stage_cache`` under its actual CPU inputs, so every layer
+    reuses one plan while each cache group still gathers its own block table.
+    Returns ``None`` for any batch the bounded view cannot represent exactly,
+    in which case the caller keeps the direct peer-read path.
     """
     from vllm_ascend.attention.context_parallel.pcp_owner_stage import (
         build_stage_tables_fixed,
         plan_swa_chunk_segments,
     )
 
-    key = (int(block_table.data_ptr()), int(num_reqs), int(block_size), int(window), int(num_blocks))
-    cached = getattr(metadata, "_swa_chunk_plan", None)
-    if cached is not None and cached[0] == key:
-        return cached[1]
+    if stage_cache is None:
+        stage_cache = _swa_chunk_stage_cache(metadata)
+    starts = _cpu_prefix(getattr(metadata, "query_start_loc_cpu", None), num_reqs + 1)
+    seqs = _cpu_prefix(getattr(metadata, "seq_lens_cpu", None), num_reqs)
+    key = (starts, seqs, int(num_reqs), int(block_size), int(window))
+    if stage_cache.segments_key == key:
+        segments = stage_cache.segments
+    else:
+        segments = plan_swa_chunk_segments(starts, seqs, num_reqs, block_size, window)
+        stage_cache.segments_key = key
+        stage_cache.segments = segments
     plan = None
-    segments = plan_swa_chunk_segments(
-        getattr(metadata, "query_start_loc_cpu", None),
-        getattr(metadata, "seq_lens_cpu", None),
-        num_reqs,
-        block_size,
-        window,
-    )
     if segments is not None and block_table.shape[1] > 0:
         max_blocks = max((segment.num_blocks for segment in segments), default=0)
         if max_blocks > 0 and max_blocks <= int(block_table.shape[1]):
@@ -437,9 +493,52 @@ def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, n
                 total_blocks=sum(counts),
                 max_replay_seq_len=max(segment.replay_seq_len for segment in segments),
                 prepared=prepared,
+                segments=segments,
             )
-    metadata._swa_chunk_plan = key, plan
     return plan
+
+
+def _smla_signature_value(value):
+    """Normalize one operator input into a hashable signature component."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, torch.Tensor):
+        # Length tensors affect the tiling, so they cannot be keyed by value
+        # without a device sync. The same tensor object across layers shares
+        # the identical contents; a different allocation rebuilds.
+        return ("tensor", int(value.data_ptr()), tuple(value.shape))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _swa_chunk_smla_signature(
+    attn, swa_metadata, operator_metadata, plan, *, has_compressed, ratio, cmp_topk, num_reqs
+) -> tuple:
+    """Value signature of every input that changes the operator tiling."""
+    cmp_mask_mode = 3 if has_compressed else 0
+    return (
+        int(attn.n_local_heads),
+        int(attn.head_dim),
+        int(num_reqs),
+        int(swa_metadata.max_query_len),
+        int(plan.max_replay_seq_len),
+        int(operator_metadata.max_cache_seq_len) if has_compressed else 0,
+        _smla_signature_value(swa_metadata.ori_topk_length),
+        int(cmp_topk) if has_compressed else 0,
+        int(ratio) if has_compressed else 0,
+        int(swa_metadata.ori_mask_mode),
+        cmp_mask_mode,
+        int(swa_metadata.ori_win_left),
+        int(swa_metadata.ori_win_right),
+        "TND",
+        "PA_BBND",
+        True,
+        bool(has_compressed),
+        tuple((int(segment.replay_start), int(segment.replay_seq_len)) for segment in plan.segments),
+    )
 
 
 def _build_swa_chunk_smla_metadata(
@@ -448,6 +547,7 @@ def _build_swa_chunk_smla_metadata(
     operator_metadata,
     plan,
     *,
+    stage_cache=None,
     has_compressed,
     ratio,
     cmp_seq_lens,
@@ -459,13 +559,29 @@ def _build_swa_chunk_smla_metadata(
 
     The builder produced it from the unbounded sequence lengths; the kernel
     must see the same batch with ``seqused_ori_kv`` shortened to each segment's
-    replay length. Memoized per attention-metadata object so a step pays one
-    metadata op per cache group, not one per layer.
+    replay length. Memoized on the shared per-forward cache by a value
+    signature of the operator inputs, so identical batch geometry across layers
+    pays one metadata op per forward while differing geometry still rebuilds.
     """
-    key = id(operator_metadata)
-    cached = plan.smla_cache.get(key)
-    if cached is not None:
-        return cached if cached is not False else None
+    if stage_cache is None:
+        stage_cache = _swa_chunk_stage_cache(swa_metadata)
+    key = _swa_chunk_smla_signature(
+        attn,
+        swa_metadata,
+        operator_metadata,
+        plan,
+        has_compressed=has_compressed,
+        ratio=ratio,
+        cmp_topk=cmp_topk,
+        num_reqs=num_reqs,
+    )
+    if key in stage_cache.smla_cache:
+        cached = stage_cache.smla_cache[key]
+        if cached is False:
+            return None
+        # Every layer gets its own tensor even though the op ran once; a
+        # kernel or caller that mutates the tiling cannot affect its peers.
+        return cached.clone() if isinstance(cached, torch.Tensor) else cached
     try:
         value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
             attn.n_local_heads,
@@ -500,10 +616,13 @@ def _build_swa_chunk_smla_metadata(
             "keeping the direct peer-read path for this step.",
             exc_info=True,
         )
-        plan.smla_cache[key] = False
+        stage_cache.smla_cache[key] = False
         return None
-    plan.smla_cache[key] = value
-    return value
+    # The operator may return a tensor backed by an internal reusable buffer;
+    # cache an owned copy and hand out a separate copy per caller.
+    stored = value.clone() if isinstance(value, torch.Tensor) else value
+    stage_cache.smla_cache[key] = stored
+    return stored.clone() if isinstance(stored, torch.Tensor) else stored
 
 
 def _maybe_stage_owner_cmp_cache(
@@ -616,6 +735,7 @@ class AscendDSAV41Impl:
         staged = None
         rebuilt = None
         plan = None
+        stage_cache = getattr(metadata, "swa_stage_cache", None)
         with npu_stream_switch(stream, enabled=True):
             stream.wait_event(start)
             plan_token = _timing_enter("stage_swa_plan", config.enable_timing)
@@ -626,6 +746,7 @@ class AscendDSAV41Impl:
                 int(swa_metadata.storage_block_size),
                 int(swa_metadata.ori_win_left) + 1,
                 int(swa_cache.shape[0]),
+                stage_cache=stage_cache,
             )
             _timing_exit(plan_token)
             if plan is not None and plan.total_blocks > 0:
@@ -635,6 +756,7 @@ class AscendDSAV41Impl:
                     swa_metadata,
                     metadata.attention if has_compressed else swa_metadata,
                     plan,
+                    stage_cache=stage_cache,
                     has_compressed=has_compressed,
                     ratio=self.role.compress_ratio if has_compressed else 0,
                     cmp_seq_lens=(metadata.attention.cache_seq_lens[:num_reqs] if has_compressed else None),
@@ -686,6 +808,12 @@ class AscendDSAV41Impl:
         long_kv = metadata[self.long_kv_source_prefix] if self.long_kv_source_prefix is not None else None
         index_k = metadata[self.index_k_source_prefix] if self.index_k_source_prefix is not None else None
         compressor_state = metadata[self.compressor_state_prefix] if self.compressor_state_prefix is not None else None
+        # The builder publishes one staging cache per forward through the
+        # shared batch dictionary; every cache group receives the same
+        # instance, so planning and operator metadata are shared per batch.
+        stage_cache = getattr(swa, "swa_stage_cache", None)
+        if not isinstance(stage_cache, _SwaChunkStageCache):
+            stage_cache = _swa_chunk_stage_cache(swa)
         return DeepseekV41LayerMetadata(
             attention=long_kv,
             swa=swa,
@@ -695,6 +823,7 @@ class AscendDSAV41Impl:
                 else None
             ),
             indexer=(DeepseekV41IndexerMetadata(index_k) if index_k is not None else None),
+            swa_stage_cache=stage_cache,
         )
 
     @staticmethod
@@ -1128,6 +1257,7 @@ class AscendDSAV41Impl:
 
                     if owner_slab_for_tensor(swa_cache) is not None:
                         timing = _timing_enter("stage_swa_chunk", self.pcp_config.enable_timing)
+                        stage_cache = getattr(metadata, "swa_stage_cache", None)
                         plan = _build_swa_chunk_plan(
                             metadata.swa,
                             ori_block_table,
@@ -1135,6 +1265,7 @@ class AscendDSAV41Impl:
                             int(metadata.swa.storage_block_size),
                             int(metadata.swa.ori_win_left) + 1,
                             int(swa_cache.shape[0]),
+                            stage_cache=stage_cache,
                         )
                         if plan is not None and plan.total_blocks > 0:
                             rebuilt = _build_swa_chunk_smla_metadata(
@@ -1142,6 +1273,7 @@ class AscendDSAV41Impl:
                                 metadata.swa,
                                 operator_metadata,
                                 plan,
+                                stage_cache=stage_cache,
                                 has_compressed=has_compressed,
                                 ratio=ratio,
                                 cmp_seq_lens=cmp_seq_lens,
@@ -1486,6 +1618,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         values = dict(self.common_v41_batch_metadata["batch"])
         values.update(self._request_counts_metadata)
         values["cache_seq_lens"] = values["seq_lens"]
+        stage_cache = self.common_v41_batch_metadata.get("swa_chunk_stage")
+        if not isinstance(stage_cache, _SwaChunkStageCache):
+            stage_cache = _SwaChunkStageCache()
+            self.common_v41_batch_metadata["swa_chunk_stage"] = stage_cache
 
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
@@ -1505,6 +1641,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             attn_state=getattr(common, "attn_state", None),
             is_prefilling=getattr(common, "is_prefilling", None),
             causal=getattr(common, "causal", True),
+            swa_stage_cache=stage_cache,
             **values,
         )
 
