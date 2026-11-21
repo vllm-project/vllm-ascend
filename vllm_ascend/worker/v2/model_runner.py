@@ -979,7 +979,7 @@ class NPUModelRunner(GPUModelRunner):
             adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
-        admitted_draft_kwargs = {}
+        num_admitted_draft_tokens = None
         if adaptive_verification_active:
             num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
                 num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
@@ -1014,10 +1014,12 @@ class NPUModelRunner(GPUModelRunner):
         if adaptive_verification_active:
             num_scheduled_draft_tokens = total_num_draft_tokens
             self._log_adaptive_verification_costs(adaptive_verification_manager)
-            allocation = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
-            cu_num_logits, query_start_loc, total_num_draft_tokens = allocation[:3]
-            if len(allocation) == 4:
-                admitted_draft_kwargs["num_admitted_draft_tokens"] = allocation[3]
+            (
+                cu_num_logits,
+                query_start_loc,
+                total_num_draft_tokens,
+                num_admitted_draft_tokens,
+            ) = adaptive_verification_manager.reallocate_drafts(req_ids, idx_mapping)
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             logger.debug(
                 "Adaptive verification budget: requests=%d, scheduled_drafts=%d, admitted_drafts=%d, "
@@ -1125,8 +1127,6 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        pp_kwargs = {"max_seq_len_np": batch_req_state.max_seq_len_np}
-        pp_kwargs.update(admitted_draft_kwargs)
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1140,6 +1140,7 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
             num_draft_tokens_per_req=num_draft_tokens_per_req,
+            num_admitted_draft_tokens=num_admitted_draft_tokens,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -1152,7 +1153,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
-            **pp_kwargs,
+            max_seq_len_np=batch_req_state.max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
