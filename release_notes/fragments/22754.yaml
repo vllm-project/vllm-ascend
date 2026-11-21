@@ -1,0 +1,12 @@
+pr: 22754
+entries:
+  - category: bugfix
+    text: >-
+      Reuse the cached static kernel run packages across restarts when
+      `enable_static_kernel` is enabled, so a restart no longer recompiles
+      every static kernel and no longer leaves a new
+      `static_kernel_compile_outputs/ts*_outputs` directory behind each time.
+      The run packages are stored under
+      `$VLLM_CACHE_ROOT/ascend_static_kernel`, so point `VLLM_CACHE_ROOT` at
+      persistent storage to benefit from the cache across restarts.
+    hardware: [A2, A3, A5]
