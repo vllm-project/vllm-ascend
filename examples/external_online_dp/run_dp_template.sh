@@ -20,6 +20,7 @@ vllm serve model_path \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+    --prefill-context-parallel-size $8 \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \

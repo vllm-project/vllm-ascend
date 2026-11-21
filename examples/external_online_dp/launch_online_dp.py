@@ -9,10 +9,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+    parser.add_argument("--pcp-size", type=int, default=1, help="Prefill context parallel size.")
     parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
     parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
     parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
-    parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
+    parser.add_argument("--dp-rpc-port", type=str, default="12345", help="Port for data parallel master node.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
     return parser.parse_args()
 
@@ -20,6 +21,7 @@ def parse_args():
 args = parse_args()
 dp_size = args.dp_size
 tp_size = args.tp_size
+pcp_size = args.pcp_size
 dp_size_local = args.dp_size_local
 if dp_size_local == -1:
     dp_size_local = dp_size
@@ -38,8 +40,9 @@ def run_command(visible_devices, dp_rank, vllm_engine_port):
         str(dp_size),
         str(dp_rank),
         dp_address,
-        dp_rpc_port,
+        str(dp_rpc_port),
         str(tp_size),
+        str(pcp_size),
     ]
     subprocess.run(command, check=True)
 
@@ -51,11 +54,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     processes = []
-    num_cards = dp_size_local * tp_size
+    # Each DP rank consumes tp_size * pcp_size logical devices, so the local
+    # visible devices are split by that product instead of tp_size alone.
+    devices_per_rank = tp_size * pcp_size
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        visible_devices = ",".join(str(x) for x in range(i * devices_per_rank, (i + 1) * devices_per_rank))
         process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()

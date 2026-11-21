@@ -1,0 +1,16 @@
+pr: 22696
+entries:
+  - category: feature
+    text: Added `--pcp-size` to the `examples/external_online_dp/launch_online_dp.py`
+      launcher. Each data parallel rank now receives `tp-size * pcp-size` visible
+      devices and the value is forwarded to `run_dp_template.sh` as
+      `--prefill-context-parallel-size`, so the example can launch prefill
+      context parallel deployments such as the DeepSeek-V4.1-Flash A2 PD layout.
+      The default stays `1`, which keeps the existing single-device-per-rank
+      behavior.
+  - category: bugfix
+    text: Fixed the `examples/external_online_dp/launch_online_dp.py` launcher
+      failing with `TypeError: expected str, bytes or os.PathLike object, not
+      int` when `--dp-rpc-port` was not given explicitly. The default port is
+      now passed as a string, so the example starts without having to override
+      the port.
