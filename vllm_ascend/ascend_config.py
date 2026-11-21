@@ -776,6 +776,7 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
     enable_sparse_sfa_c8: bool = False
+    enable_sparse_sfa_hif8: bool = False
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
     pd_tp_ratio: int = 1
@@ -1017,7 +1018,12 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
+        from vllm_ascend.utils import (
+            ASCEND_QUANTIZATION_METHOD,
+            is_hif8_c8_kv_quant,
+            model_uses_kpool_indexer,
+            model_uses_sfa_sparse,
+        )
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
@@ -1029,6 +1035,15 @@ class AscendConfig:
         cache_dtype = getattr(cache_config, "cache_dtype", None)
         self.enable_sparse_sfa_turboquant = cache_dtype == "turboquant_4bit_nc" and use_sparse_sfa
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
+        self.enable_sparse_sfa_hif8 = is_hif8_c8_kv_quant(vllm_config)
+        if self.enable_sparse_sfa_hif8:
+            if (
+                not use_sparse_sfa
+                or vc.model_config.hf_text_config.model_type not in ("glm5_next", "glm5_next_text")
+                or vc.model_config.quantization != ASCEND_QUANTIZATION_METHOD
+            ):
+                raise ValueError("--kv-cache-dtype hif8 requires a ModelSlim-quantized GLM-5.3-Flash model.")
+            self._validate_sparse_sfa_hif8(vllm_config)
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.enable_sparse_li_c4 = vllm_config.attention_config.indexer_kv_dtype == "mxfp4" and use_sparse
         if self.enable_sparse_li_c8 and self.enable_sparse_li_c4:
@@ -1099,6 +1114,23 @@ class AscendConfig:
             getattr(self, "enable_sparse_sfa_c8", False) or getattr(self, "enable_sparse_sfa_turboquant", False)
         )
 
+    def _validate_sparse_sfa_hif8(self, vllm_config: VllmConfig) -> None:
+        """Hardware and parallel-mode checks for ``--kv-cache-dtype hif8``.
+
+        aclnnQuantSparseFlashMla (and the HIF8 quantize/dequantize chain) only
+        ships for Ascend 950PR/950DT. PCP/DCP gather and KV-transfer flows
+        would also have to move the packed HIF8 payload; reject them until
+        they are explicitly qualified.
+        """
+        if not is_950():
+            raise ValueError("--kv-cache-dtype hif8 (HIF8 C8 KV cache) requires Ascend 950PR/950DT products.")
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size > 1:
+            raise ValueError("--kv-cache-dtype hif8 does not support context parallel (PCP/DCP) yet.")
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and (kv_transfer_config.is_kv_producer or kv_transfer_config.is_kv_consumer):
+            raise ValueError("--kv-cache-dtype hif8 does not support KV transfer (PD disagg) yet.")
+
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -1162,9 +1194,9 @@ class AscendConfig:
             )
 
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
+        if self.sparse_kv_offload_config.enabled and (self.uses_packed_sfa_main_cache or self.enable_sparse_sfa_hif8):
             raise NotImplementedError(
-                "Sparse KV offload does not support packed SFA main caches (C8 or TQ4). "
+                "Sparse KV offload does not support SFA main-cache quantization (C8, TQ4 or HIF8). "
                 "Sparse LI C8 is supported because the indexer cache remains device-resident."
             )
 

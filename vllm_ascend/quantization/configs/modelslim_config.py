@@ -46,7 +46,9 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     C8_MXFP_KV_CACHE_DTYPE,
+    HIF8_C8_KV_CACHE_DTYPE,
     calc_split_factor,
+    is_hif8_c8_kv_quant,
 )
 
 from ..methods import get_scheme_class
@@ -74,6 +76,11 @@ _MXFP_C8_UNUSED_FA_SUFFIXES = (
     ".fa_k.scale",
     ".fa_q.offset",
     ".fa_k.offset",
+)
+
+_HIF8_C8_LAYER_QUANT_TYPE = "QK_HIF8_PER_TENSOR"
+_GLM5NEXT_SELF_ATTN = re.compile(
+    r"^(?:model\.language_model|language_model\.model|model)\.layers\.(\d+)\.(?:mtp_block\.)?self_attn"
 )
 
 
@@ -521,6 +528,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
+        self.enable_hif8_c8_quant = False
+        self._hif8_configured = False
+        self.hif8_mtp_layers: set[str] = set()
+        self.hif8_skip_layers: set[str] = set()
         self._add_kvcache_quant_metadata()
 
     def __repr__(self) -> str:
@@ -633,7 +644,22 @@ class AscendModelSlimConfig(QuantizationConfig):
             # The remaining FAKQuant legacy tensors have no MXFP8 consumer.
             suffix_map[".fa_v.offset"] = None
             suffix_map.update(dict.fromkeys(_MXFP_C8_UNUSED_FA_SUFFIXES, None))
-        if self.enable_fa_quant:
+        hif8_layers = self.hif8_quant_layers | self.hif8_mtp_layers
+        enabled_layers = hif8_layers - self.hif8_skip_layers if self.enable_hif8_c8_quant else set()
+        # ModelSlim can export FAKQuant offsets alongside symmetric HIF8 scales.
+        for layers, tensors in (
+            (enabled_layers, r"[qkv]\.offset|v\.scale"),
+            (hif8_layers - enabled_layers, r"[qkv]\.(?:scale|offset)"),
+        ):
+            if layers:
+                layer_ids = "|".join(sorted(layers))
+                regex_map[
+                    re.compile(
+                        rf"\.layers\.(?:{layer_ids})\.(?:mtp_block\.)?self_attn"
+                        rf"(?:\.mla_attn\.mla_attn)?\.fa_(?:{tensors})$"
+                    )
+                ] = None
+        if self.enable_fa_quant or enabled_layers:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
             regex_map.update(
@@ -881,7 +907,17 @@ class AscendModelSlimConfig(QuantizationConfig):
             return AscendLinearMethod(scheme)
 
         elif isinstance(layer, AttentionLayerBase):
-            if self.is_fa_quant_layer(prefix):
+            if not self._hif8_configured and (self.hif8_quant_layers or is_hif8_c8_kv_quant(vllm_config)):
+                self._configure_hif8_layers(vllm_config)
+            if (
+                self.enable_hif8_c8_quant
+                and getattr(layer, "kv_cache_dtype", None) == HIF8_C8_KV_CACHE_DTYPE
+                and self.is_hif8_quant_layer(runtime_prefix)
+            ):
+                from ..methods.kv_cache.hif8_c8 import AscendHIF8KVCacheAttentionMethod
+
+                scheme = AscendHIF8KVCacheAttentionMethod(prefix)
+            elif self.is_fa_quant_layer(prefix):
                 fa_quant_type = self.quant_description["fa_quant_type"]
                 scheme = create_scheme_for_layer(fa_quant_type, prefix, "attention")
                 logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa]")
@@ -941,11 +977,21 @@ class AscendModelSlimConfig(QuantizationConfig):
         return None
 
     def is_fa_quant_layer(self, prefix):
-        if self.enable_fa_quant:
+        if self.enable_fa_quant and not self.is_hif8_quant_layer(prefix):
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:
                 return True
         return False
+
+    def is_hif8_quant_layer(self, prefix: str | None) -> bool:
+        if prefix is None:
+            return False
+        match = _GLM5NEXT_SELF_ATTN.match(prefix)
+        return (
+            match is not None
+            and prefix[match.end() :] in ("", ".attn", ".mla_attn.mla_attn")
+            and (match[1] in self.hif8_quant_layers or match[1] in self.hif8_mtp_layers)
+        )
 
     def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
         is_decode_instance = (
@@ -996,6 +1042,31 @@ class AscendModelSlimConfig(QuantizationConfig):
         if vllm_config is None:
             return False
         return vllm_config.cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+    def _configure_hif8_layers(self, vllm_config) -> None:
+        # Weight mapping also runs outside the construction-time config context.
+        self.enable_hif8_c8_quant = is_hif8_c8_kv_quant(vllm_config)
+        if self.enable_hif8_c8_quant and not self.hif8_quant_layers:
+            raise ValueError("--kv-cache-dtype hif8 requires ModelSlim QK_HIF8_PER_TENSOR layer recipes.")
+        if not self.hif8_quant_layers:
+            return
+        self.hif8_skip_layers = set(vllm_config.cache_config.kv_cache_dtype_skip_layers or ())
+        self._hif8_configured = True
+        config = vllm_config.model_config.hf_text_config
+        first_mtp_layer = config.num_hidden_layers
+        mtp_layers = range(first_mtp_layer, first_mtp_layer + (getattr(config, "num_nextn_predict_layers", 0) or 0))
+        # GLM-5.3-Flash ModelSlim exports can omit quant_type on MTP layers
+        # while declaring both FA scale tensors in the draft layer's namespace.
+        for idx in mtp_layers:
+            for prefix in ("model.language_model", "language_model.model", "model"):
+                attn = f"{prefix}.layers.{idx}.self_attn"
+                if (
+                    f"{attn}.quant_type" not in self.quant_description
+                    and self.quant_description.get(f"{attn}.fa_q.scale") == "FAQuant"
+                    and self.quant_description.get(f"{attn}.fa_k.scale") == "FAQuant"
+                ):
+                    self.hif8_mtp_layers.add(str(idx))
+                    break
 
     @property
     def _has_mxfp_c8_recipe(self) -> bool:
@@ -1228,6 +1299,25 @@ class AscendModelSlimConfig(QuantizationConfig):
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
+        self._hif8_configured = False
+        self.hif8_mtp_layers.clear()
+        self.hif8_quant_layers = {
+            match[1]
+            for key, value in self.quant_description.items()
+            if value == _HIF8_C8_LAYER_QUANT_TYPE
+            and key.endswith(".quant_type")
+            and (match := _GLM5NEXT_SELF_ATTN.fullmatch(key.removesuffix(".quant_type")))
+        }
+        if self.hif8_quant_layers and self.enable_fa_quant:
+            # A HIF8 recipe owns the full-attention KV quantization, and its
+            # per-tensor fa scales cannot be consumed by the legacy FAKQuant
+            # loader (whose params are TP-sharded). Stand FAKQuant down for
+            # the whole model so the recipe routes exclusively to HIF8.
+            logger.warning_once(
+                "[quantization] fa_quant_type=%s is declared alongside HIF8 layer recipes; ignoring FAKQuant.",
+                fa_quant_type,
+            )
+            self.enable_fa_quant = False
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
