@@ -28,7 +28,7 @@ from zmq.constants import SocketOption, SocketType
 from zmq.error import Again, ZMQError
 from zmq.sugar.context import Context
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -582,12 +582,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             if final_only:
                 # Window tables retain logical positions, including null slots.
                 window_start = max(0, end - getattr(spec, "num_retained_tokens", spec.sliding_window - 1) - 1)
-                if self._is_dsv4 and not is_prefix_cacheable(spec):
-                    # The D prefix hit covers cacheable history only. Rebuild
-                    # the entire live window, including pages before that hit.
-                    start = window_start
-                else:
-                    start = max(start, window_start)
+                start = max(start, window_start)
             first, last = start // block_size, (end + block_size - 1) // block_size
             local_ids, remote_ids = [], []
             for index in range(first, last):
