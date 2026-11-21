@@ -96,6 +96,7 @@
 | `max_num_tokens` | Input/Attribute | Fixed graph-visible token capacity used for query/output padding | int | scalar |
 | `max_model_len` | Input/Attribute | Maximum model sequence length; query positions are clamped to `max_model_len - 1` | int | scalar |
 | `sample_from_anchor` | Input/Attribute | Whether query offset 0 is sampled; the legacy DFlash integration uses `False` | bool | scalar |
+| `num_reqs_override` | Input/Attribute | Number of requests to process. Defaults to `input_batch.num_reqs` when `None`. Otherwise, `0 < num_reqs_override <= input_batch.num_reqs`. | int or None | scalar |
 
 ## Constraints
 
