@@ -401,12 +401,16 @@ class _SwaChunkStageCache:
     call, while every differing geometry still pays its own call.
     """
 
-    __slots__ = ("segments", "segments_key", "smla_cache")
+    __slots__ = ("segments", "segments_key", "smla_cache", "plan_cache")
 
     def __init__(self):
         self.segments_key: tuple | None = None
         self.segments: list | None = None
         self.smla_cache: dict[tuple, torch.Tensor | bool] = {}
+        # One bounded plan (including its dense stage tables) per distinct
+        # block-table buffer and geometry within a step.  Layers that share a
+        # cache group reuse the gather/cat work instead of rebuilding it.
+        self.plan_cache: dict[tuple, _SwaChunkPlan | None] = {}
 
 
 _SWA_CHUNK_STAGE_CACHE_KEY = "_swa_chunk_stage_cache"
@@ -773,6 +777,9 @@ def _pcp_stage_note_step(step_token, stage_cache) -> None:
         smla_cache = getattr(cache, "smla_cache", None)
         if isinstance(smla_cache, dict):
             smla_cache.clear()
+        plan_cache = getattr(cache, "plan_cache", None)
+        if isinstance(plan_cache, dict):
+            plan_cache.clear()
         state["step_smla_ops"] = 0
         state["negative"] = None
     state["token"] = step_token
@@ -813,8 +820,10 @@ class AscendDSAV41Impl:
             _pcp_stage_count("swa", "skipped_packed")
             return
         if swa_metadata.num_decodes > 0:
-            _pcp_stage_count("swa", "skipped_mixed")
-            return
+            # Mixed rows are eligible for the bounded window too: a decode row
+            # has chunk_len == 1, so its replay range is the last window+1
+            # tokens.  The whole compressed history stays on the long-KV gate.
+            _pcp_stage_count("swa", "mixed_included")
         if swa_metadata.num_prefills <= 0:
             _pcp_stage_count("swa", "skipped_nonprefill")
             return
@@ -863,15 +872,27 @@ class AscendDSAV41Impl:
         with npu_stream_switch(stream, enabled=True):
             stream.wait_event(start)
             plan_token = _timing_enter("stage_swa_plan", config.enable_timing)
-            plan = _build_swa_chunk_plan(
-                swa_metadata,
-                ori_block_table,
-                num_reqs,
-                int(swa_metadata.storage_block_size),
-                int(swa_metadata.ori_win_left) + 1,
-                int(swa_cache.shape[0]),
-                stage_cache=stage_cache,
-            )
+            block_size = int(swa_metadata.storage_block_size)
+            window = int(swa_metadata.ori_win_left) + 1
+            num_blocks = int(swa_cache.shape[0])
+            plan_key = (int(ori_block_table.data_ptr()), int(num_reqs), num_blocks, block_size, window)
+            plan_cache = getattr(stage_cache, "plan_cache", None)
+            if isinstance(plan_cache, dict) and plan_key in plan_cache:
+                plan = plan_cache[plan_key]
+                _pcp_stage_count("swa", "plan_hit")
+            else:
+                plan = _build_swa_chunk_plan(
+                    swa_metadata,
+                    ori_block_table,
+                    num_reqs,
+                    block_size,
+                    window,
+                    num_blocks,
+                    stage_cache=stage_cache,
+                )
+                if isinstance(plan_cache, dict):
+                    plan_cache[plan_key] = plan
+                _pcp_stage_count("swa", "plan_miss")
             _timing_exit(plan_token)
             if plan is not None and plan.total_blocks > 0:
                 smla_token = _timing_enter("stage_swa_smla", config.enable_timing)
@@ -1467,7 +1488,7 @@ class AscendDSAV41Impl:
                     # plan/metadata/overflow already failed; retrying the same
                     # device work per layer would only add latency.
                     _pcp_stage_negative(fallback_stage_cache) is None
-                    and metadata.swa.num_decodes == 0
+                    # Mixed rows are eligible (decode rows replay one window).
                     and metadata.swa.num_prefills > 0
                     and metadata.swa.ori_sparse_indices is None
                     # A per-token visible-length floor (bounded replay) is tied
