@@ -412,8 +412,9 @@ The experimental native recurrence can be enabled with
 `gdn_native_prefill_checkpoints` together with `gdn_internal_prefill_checkpoints`.
 On a supported fused GDN backend, it runs both sides of an internal checkpoint
 within one model forward and exports the recurrent state and convolution window
-between them. The scheduler policies below also require the corresponding
-vLLM Core changes.
+between them. The policies below are implemented in vLLM Ascend and apply
+to the native recurrence with a local KV cache. They use the internal
+checkpoint interfaces in the supported vLLM Core revision.
 
 | Key | Type | Default | Behavior |
 | --- | --- | --- | --- |

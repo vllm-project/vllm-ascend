@@ -15,8 +15,31 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
 )
 
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
+
 
 class AscendMambaManager(MambaManager):
+    gdn_checkpoint_policy: GDNCheckpointPolicy | None = None
+
+    def _gdn_internal_position(self, position: int, start: int, end: int) -> int:
+        policy = self.gdn_checkpoint_policy
+        if policy is None:
+            return position
+        return policy.internal_position(
+            position, start, end, self.block_size, self.kv_cache_spec.prefill_checkpoint_alignment
+        )
+
+    def _needs_internal_checkpoint(
+        self, request_id: str, query_start: int, query_end: int, checkpoint_position: int, prefill_end: int
+    ) -> bool:
+        return super()._needs_internal_checkpoint(
+            request_id,
+            query_start,
+            query_end,
+            self._gdn_internal_position(checkpoint_position, query_start, query_end),
+            prefill_end,
+        )
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -77,6 +100,14 @@ class AscendMambaManager(MambaManager):
             apply_admission_cap=apply_admission_cap,
             prefill_end=prefill_end,
         )
+        if self.gdn_checkpoint_policy is not None and not apply_admission_cap:
+            checkpoint = self._checkpoints.get(request_id)
+            if checkpoint is not None:
+                position, column = checkpoint
+                # The upstream capacity check recorded its original position.
+                # Keep the reserved column and publish the position the worker writes.
+                position = self._gdn_internal_position(position, total_computed_tokens, num_tokens_main_model)
+                self._checkpoints[request_id] = (position, column)
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one
         # extra block to hold the external cache content. Account

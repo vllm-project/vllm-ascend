@@ -4,8 +4,12 @@
 
 import torch
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position, is_mamba_prefill_checkpoint_valid
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule_checkpoint
 
 GDN_CHECKPOINT_ALIGNMENT = 64
@@ -48,17 +52,55 @@ def initialize_gdn_checkpoints(layer) -> None:
 
     if "num_prefill_checkpoint_blocks" not in MambaSpec.__dataclass_fields__:
         raise ValueError("GDN internal checkpoints require vLLM with PR #60050")
-    if (ascend_config.gdn_native_checkpoint_max_tokens or ascend_config.gdn_native_preserve_physical_prefix) and not {
-        "prefill_checkpoint_max_tokens",
-        "prefer_short_physical_checkpoint",
-    }.issubset(MambaSpec.__dataclass_fields__):
-        raise ValueError("The native GDN checkpoint scheduling policy requires the companion vLLM Core changes")
     layer._ascend_internal_checkpoint_enabled = True
     layer._ascend_native_checkpoint_enabled = ascend_config.gdn_native_prefill_checkpoints
     layer.register_buffer("_ascend_checkpoint_workspace", None, persistent=False)
     layer._checkpoint_alignment = GDN_CHECKPOINT_ALIGNMENT
     layer._max_num_batched_tokens = config.scheduler_config.max_num_batched_tokens
     layer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=layer.conv_kernel_size - 1)
+
+
+def build_gdn_checkpoint_metadata(builder, metadata, rows, policy: GDNCheckpointPolicy):
+    from vllm.model_executor.layers.mamba.checkpoint import (
+        MambaPrefillCheckpointMetadata,
+    )
+
+    config = builder.vllm_config
+    cache_config = config.cache_config
+    hash_size = cache_config.hash_block_size
+    hit_alignment = cache_config.cache_hit_alignment_tokens
+    if hash_size is None or hit_alignment is None:
+        return None
+    spec = builder.kv_cache_spec
+    assert metadata.seq_lens_cpu_upper_bound is not None
+    seq_lens = metadata.seq_lens_cpu_upper_bound.tolist()
+    all_query_lens = metadata.query_start_loc_cpu.diff().tolist()
+    query_lens = [all_query_lens[row] for row in rows]
+    offsets, columns = [], []
+    for row, query_len in zip(rows, query_lens):
+        end = seq_lens[row]
+        start = end - query_len
+        position = get_mamba_prefill_checkpoint_position(
+            end, hit_alignment, builder.drop_eagle_block, config.num_hash_lookahead_tokens
+        )
+        position = policy.internal_position(position, start, end, spec.block_size, spec.prefill_checkpoint_alignment)
+        valid = is_mamba_prefill_checkpoint_valid(
+            start, end, position, hash_size, spec.block_size, spec.prefill_checkpoint_alignment
+        )
+        offsets.append(position - start if valid else 0)
+        columns.append(cdiv(end, spec.block_size) - 2 if valid else -1)
+    if not any(offsets):
+        return None
+    device = metadata.query_start_loc.device
+    checkpoint = MambaPrefillCheckpointMetadata(
+        checkpoint_offsets=async_tensor_h2d(offsets, dtype=torch.int32, device=device),
+        state_indices=None,
+        offsets=offsets,
+        query_lens=query_lens,
+        request_rows=async_tensor_h2d(rows, dtype=torch.int64, device=device),
+        block_cols=async_tensor_h2d(columns, dtype=torch.int64, device=device),
+    )
+    return checkpoint.regather_state_indices(metadata.block_table_tensor)
 
 
 def ensure_gdn_checkpoint_workspace(layer, tensor):

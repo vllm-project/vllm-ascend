@@ -32,7 +32,9 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
+from vllm_ascend.core.gdn_checkpoint_policy import GDNCheckpointPolicy
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
+from vllm_ascend.ops.gdn_checkpoint import build_gdn_checkpoint_metadata
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -1011,7 +1013,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     cache_config = self.vllm_config.cache_config
                     if cache_config.hash_block_size is None or cache_config.cache_hit_alignment_tokens is None:
                         raise RuntimeError("Native GDN prefill requires the engine's resolved cache alignment")
-                checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                policy = (
+                    GDNCheckpointPolicy.from_config(self.vllm_config) if self._ascend_native_gdn_checkpoints else None
+                )
+                if policy is None:
+                    checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                else:
+                    checkpoint = build_gdn_checkpoint_metadata(self.checkpoint_builder, m, prefill_rows, policy)
                 if checkpoint is not None:
                     # Do not round at a boundary without a reserved cache page.
                     checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
