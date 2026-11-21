@@ -56,6 +56,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     using_paged_attention,
 )
+from vllm_ascend.compilation.fia_graph_replay import CAPTURE_FIA_REPLAY
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
@@ -680,6 +681,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         input_layout = "TND"
         attn_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
+
+        if CAPTURE_FIA_REPLAY.get() and self.sliding_window is None:
+            # Match FIAParamProvider's maskless parameters for this uniform
+            # single-token decode graph.
+            attn_mask, sparse_mode = None, 0
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
