@@ -1,0 +1,8 @@
+pr: 22585
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the external online DP launcher example so it accepts --pcp-size and
+      assigns TP x PCP devices per rank, matching the DeepSeek-V4.1-Flash PD
+      deployment guide. The example run_dp_template.sh now forwards the PCP size to
+      --prefill-context-parallel-size and defaults to 1.

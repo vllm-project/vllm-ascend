@@ -1,3 +1,7 @@
+# Positional arguments set by launch_online_dp.py:
+# $1 visible devices, $2 API port, $3 global DP size, $4 global DP rank,
+# $5 DP address, $6 DP RPC port, $7 TP size, $8 PCP size (default 1).
+
 export HCCL_IF_IP=your_ip_here
 export GLOO_SOCKET_IFNAME=your_socket_ifname_here
 export TP_SOCKET_IFNAME=your_socket_ifname_here
@@ -20,6 +24,7 @@ vllm serve model_path \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+    --prefill-context-parallel-size ${8:-1} \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \
