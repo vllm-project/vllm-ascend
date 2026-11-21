@@ -1335,7 +1335,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             quant_type=QuantType.W8A8,
         )
 
-        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"),
+        ):
             result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.mock_npu_dynamic_quant.assert_not_called()
@@ -1369,7 +1372,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                 expert_map=expert_map,
                 quant_type=quant_type,
             )
-            with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+            with (
+                self._mock_split_copy_state(self.dispatcher),
+                patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"),
+            ):
                 result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
             self.mock_npu_dynamic_quant.assert_called_once()
@@ -1409,6 +1415,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                 quant_type=quant_type,
             )
             with (
+                self._mock_split_copy_state(self.dispatcher),
                 patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_pre,
                 patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
                 patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_post,
@@ -1447,7 +1454,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             quant_type=QuantType.W4A8MXFP,
         )
 
-        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"),
+        ):
             result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.mock_npu_dynamic_quant.assert_called_once()
@@ -1502,7 +1512,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             quant_type=QuantType.W4A8,
             is_per_channel_weight=True,
         )
-        dispatch_out = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        with self._mock_split_copy_state(self.dispatcher):
+            dispatch_out = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
         self.assertEqual(dispatch_out.hidden_states.shape, (0, 16))
         self.assertEqual(dispatch_out.hidden_states.dtype, torch.bfloat16)
 
@@ -1579,6 +1590,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         )
 
         with (
+            self._mock_split_copy_state(self.dispatcher),
             patch("vllm_ascend.ops.fused_moe.token_dispatcher.preprocess_lora_indices") as mock_pre,
             patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices") as mock_all2all,
             patch("vllm_ascend.ops.fused_moe.token_dispatcher.postprocess_lora_indices") as mock_post,
