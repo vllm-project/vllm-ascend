@@ -309,7 +309,7 @@ def test_write_snapshots_torch_save_failure_writes_dump_skipped(tmp_path: Path, 
             "incident_type": "token_repeat",
             "dump_root": str(dump_root),
             "dump_arm_wave": 3,
-            "rank_tag": "dp0_tp0_pp0_cp0",
+            "rank_tag": "dp0_tp0_pp0_pcp0_dcp0",
             "layer": "L0",
             "tensor": torch.zeros(1),
         },
@@ -323,7 +323,7 @@ def test_write_snapshots_torch_save_failure_writes_dump_skipped(tmp_path: Path, 
         _boom,
     )
     assert KvCacheReader.write_snapshots([snap]) == []
-    marker = dump_root / "token_repeat" / "r1" / "wave_3" / "dp0_tp0_pp0_cp0" / "dump_skipped.json"
+    marker = dump_root / "token_repeat" / "r1" / "wave_3" / "dp0_tp0_pp0_pcp0_dcp0" / "dump_skipped.json"
     assert marker.is_file()
     data = json.loads(marker.read_text(encoding="utf-8"))
     assert data["reason"] == "torch_save_failed"
@@ -425,7 +425,7 @@ def test_dump_kv_arms_when_request_finished_stamps_flag(tmp_path):
                 wave=3,
             ),
             runner=runner,
-            rank_tag="dp0_tp0_pp0_cp0",
+            rank_tag="dp0_tp0_pp0_pcp0_dcp0",
             rc=_dump_rc(tmp_path),
         )
         DumpKvAction().run(ctx)
@@ -458,7 +458,7 @@ def test_dump_kv_skips_when_request_reaped(tmp_path):
             tmp_path=tmp_path,
             incident=Incident(incident_type="token_repeat", req_id="r1", block_ids=[0]),
             quota=quota,
-            rank_tag="dp0_tp0_pp0_cp0",
+            rank_tag="dp0_tp0_pp0_pcp0_dcp0",
             rc=_dump_rc(tmp_path),
         )
         DumpKvAction().run(ctx)
@@ -494,7 +494,7 @@ def test_dump_kv_writes_request_info_json(tmp_path):
                 "output_token_count": 5,
                 "block_ids": [0, 1],
             },
-            rank_tag="dp0_tp0_pp0_cp0",
+            rank_tag="dp0_tp0_pp0_pcp0_dcp0",
         )
         DumpKvAction().run(ctx)
         guard = ctx.runner.runtime_guard
@@ -523,13 +523,13 @@ def test_write_kv_dump_skipped_marker(tmp_path):
         incident_type="logits_finite",
         reason="reaped",
         stage="drain",
-        rank_tag="dp0_tp0_pp1_cp0",
+        rank_tag="dp0_tp0_pp1_pcp0_dcp0",
         wave=3,
     )
     assert path is not None and path.is_file()
     assert path.name == "dump_skipped.json"
     assert "wave_3" in str(path)
-    assert "dp0_tp0_pp1_cp0" in str(path)
+    assert "dp0_tp0_pp1_pcp0_dcp0" in str(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["stage"] == "drain"
     assert data["reason"] == "reaped"
@@ -545,14 +545,14 @@ def test_write_kv_dump_skipped_arm_reasons(tmp_path):
         incident_type="manual_trigger",
         reason="no_dump_targets",
         stage="arm",
-        rank_tag="dp0_tp0_pp0_cp0",
+        rank_tag="dp0_tp0_pp0_pcp0_dcp0",
         wave=4,
         detail={"scope": "all_requests"},
     )
     assert path is not None and path.is_file()
     assert path.name == "dump_skipped.json"
     assert "wave_4" in str(path)
-    assert "dp0_tp0_pp0_cp0" in str(path)
+    assert "dp0_tp0_pp0_pcp0_dcp0" in str(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["reason"] == "no_dump_targets"
     assert data["dump_arm_wave"] == 4

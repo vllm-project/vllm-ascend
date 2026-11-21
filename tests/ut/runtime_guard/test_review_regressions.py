@@ -1964,9 +1964,8 @@ def test_v25c_dump_rank_tag_reads_pcp_manager_rank(monkeypatch):
         pcp_manager=SimpleNamespace(pcp_rank=3),
     )
     assert rank_gate.runner_pcp_rank(runner) == 3
-    # cp = pcp_rank * dcp_size + dcp_rank = 3*2+1 = 7
-    assert rank_gate.runner_cp_rank(runner) == 7
-    assert "_cp7" in rank_gate.dump_rank_tag(runner)
+    assert rank_gate.runner_dcp_rank(runner) == 1
+    assert rank_gate.dump_rank_tag(runner) == "dp0_tp0_pp0_pcp3_dcp1"
 
     monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2))
     runner0 = SimpleNamespace(use_async_scheduling=True, tp_rank=0, tp_size=2)
