@@ -7,7 +7,24 @@ from __future__ import annotations
 import functools
 from typing import Any, cast
 
-from vllm_ascend.kv_trace.kv_trace_runtime import KVTraceRuntime, get_trace
+from vllm_ascend.observability.kv_trace.kv_trace_runtime import KVTraceRuntime, get_trace
+
+
+def batch_values(batch: Any) -> dict[str, Any]:
+    """Keep native coordinates; request state indices are not request row order."""
+    if any(getattr(batch, name, None) is None for name in ("positions", "query_start_loc", "seq_lens")):
+        return {}
+    rows, tokens = batch.num_reqs, batch.num_tokens
+    prefilling = getattr(batch, "is_prefilling_np", None)
+    return dict(
+        request_ids=list(batch.req_ids[:rows]),
+        num_tokens=tokens,
+        num_tokens_after_padding=batch.num_tokens_after_padding,
+        query_start_loc=batch.query_start_loc[: rows + 1],
+        positions=batch.positions[:tokens],
+        seq_lens=batch.seq_lens[:rows],
+        is_prefilling=None if prefilling is None else prefilling[:rows].copy(),
+    )
 
 
 class _V2RunnerAdapter:
@@ -19,10 +36,6 @@ class _V2RunnerAdapter:
         self.request_ids: list[str] = []
 
     def configure(self) -> None:
-        tables = self.runner.block_tables
-        sizes = [group.kv_cache_spec.block_size for group in self.runner.kv_cache_config.kv_cache_groups]
-        if list(tables.block_sizes) != sizes or list(tables.kernel_block_sizes) != sizes:
-            raise ValueError("KV Trace: unadapted MRV2 allocator/kernel block coordinates")
         prepare = self.runner.model_state.prepare_attn
         if getattr(prepare, "_ascend_kv_trace", False):
             return
@@ -33,12 +46,39 @@ class _V2RunnerAdapter:
             if self.runtime._phase is not None:
                 self.runtime._finish_pending()
                 self.request_ids = list(input_batch.req_ids[: input_batch.num_reqs])
+                self.runtime._batch = batch_values(input_batch)
+                context = getattr(self.runner.model_state, "pcp_context", None)
+                self.runtime._parallel = (
+                    {}
+                    if context is None
+                    else dict(
+                        batch=batch_values(context.global_batch),
+                        block_tables=context.global_block_tables,
+                        slot_mappings=context.global_slot_mappings,
+                        **{
+                            name: getattr(context, name, None)
+                            for name in (
+                                "local_token_indices",
+                                "local_to_global_req_indices",
+                                "padded_gather_idx",
+                                "gathered_kv_write_mask",
+                            )
+                        },
+                    )
+                )
                 self.runtime._full_graph = "FULL" in str(cudagraph_mode)
                 self.runtime.observe_metadata(metadata)
                 scheduled = self.runtime._scheduled
                 if self.runtime._phase == "forward" and scheduled is not None:
-                    ids = self.request_ids
-                    if len(ids) != len(set(ids)) or set(ids) != set(scheduled):
+                    pcp = getattr(self.runtime.config.parallel_config, "prefill_context_parallel_size", 1) > 1
+                    ids = self.runtime._parallel["batch"]["request_ids"] if self.runtime._parallel else self.request_ids
+                    dynamic = self.runtime.config.speculative_config is not None
+                    mismatch = (
+                        not set(ids).issubset(scheduled)
+                        if dynamic
+                        else (len(ids) != len(set(ids)) or set(ids) != set(scheduled))
+                    )
+                    if (not pcp or self.runtime._parallel) and mismatch:
                         self.runtime.report(
                             "kv_trace.violation", operation="bind", reason="v2_batch_request_mismatch", request_ids=ids
                         )

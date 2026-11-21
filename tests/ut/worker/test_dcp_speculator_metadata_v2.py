@@ -109,7 +109,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.draft_attn_layer_names = {"draft.layer"}
     target = torch.tensor([31, 127, 99, 99], dtype=torch.int32)
     spec.target_input_buffers = SimpleNamespace(seq_lens_cpu=target)
-    spec._get_seq_lens_cpu = lambda n: target[:n]
+    spec._get_seq_lens_cpu = lambda n, **kwargs: target[:n]
     spec.input_batch = SimpleNamespace(
         num_reqs=2,
         is_prefilling_np=np.array([True, False]),

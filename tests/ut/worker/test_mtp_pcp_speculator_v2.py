@@ -438,7 +438,10 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     speculator.enable_adaptive_verification = False
     speculator.dp_size = 2
     speculator.pcp_manager = object() if pcp_enabled else None
-    input_batch = object()
+    speculator.num_speculative_steps = 3
+    input_batch = SimpleNamespace(num_reqs=16, seq_lens=torch.full((16,), 8))
+    speculator.use_dcp = False
+    speculator.attn_architecture = "MLA"
     attn_metadata = {"mtp": _mla_pcp_decode_metadata(4, [4, 8])}
     sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     dp_sync = DPSyncState(
@@ -466,7 +469,9 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose", side_effect=parent_propose) as parent,
     ):
-        speculator.propose(input_batch, attn_metadata, *[MagicMock() for _ in range(9)], dp_sync, dummy_run=dummy_run)
+        arguments = [MagicMock() for _ in range(9)]
+        arguments[4] = torch.zeros(16, dtype=torch.int32)
+        speculator.propose(input_batch, attn_metadata, *arguments, dp_sync, dummy_run=dummy_run)
     assert parent.call_args.args[0] is input_batch
     assert parent.call_args.args[11] is (None if pcp_enabled else dp_sync)
     assert speculator.input_batch is input_batch

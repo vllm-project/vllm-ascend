@@ -567,6 +567,8 @@ def test_build_fia_params_decode():
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
+    speculator._verified_seq_lens_cpu = torch.tensor([10, 29])
+    speculator._eplb_dummy_run = False
     speculator.num_speculative_steps = 3
     speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=30))
     result = speculator.build_fia_params(3, {"draft": metadata}, False)
@@ -684,9 +686,12 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
     speculator.dp_size = 2
     speculator.pcp_manager = None
     speculator.enable_adaptive_verification = adaptive
-    input_batch = object()
+    speculator.use_dcp = False
+    speculator.attn_architecture = "GQA"
+    input_batch = SimpleNamespace(num_reqs=1, seq_lens=torch.tensor([8]))
     attn_metadata = {"draft": object()}
     args = [object() for _ in range(9)]
+    args[4] = torch.tensor([2], dtype=torch.int32)
     sync_kwargs = dict(
         num_tokens_across_dp=torch.tensor([8, 8]),
         uniform_token_count=sync_uniform,

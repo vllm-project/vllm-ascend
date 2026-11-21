@@ -1,0 +1,21 @@
+pr: 22071
+entries:
+  - category: feature
+    text: >-
+      Extended MRV2 KV Trace address-plan checks to distinct per-group metadata
+      views and DCP/PCP coordinates for the target model in eager and graph
+      execution. These checks cover target verification batches during speculative
+      decoding. Draft addresses report unavailable at trace configuration.
+      Supported asynchronous generation retains step-local snapshots, and
+      unsupported cache layouts keep explicit observation-only status.
+  - category: feature
+    text: >-
+      Moved KV Trace into observability.kv_trace and added the default-on
+      additional_config.kv_trace.slot switch for write slot checks. Disabling
+      slot checks retains trace logs and request, block-table and sequence-length
+      checks; KV Trace itself remains disabled by default.
+  - category: bugfix
+    text: >-
+      Corrected native multi-step autoregressive draft attention lengths after
+      speculative rejection in eager execution and graph replay. Host metadata
+      now uses the accepted target end, including when KV Trace is disabled.
