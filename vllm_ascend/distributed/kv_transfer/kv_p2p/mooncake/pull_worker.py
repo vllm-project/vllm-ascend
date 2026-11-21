@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, TypeVar
 
 import msgspec
 import torch
@@ -1321,8 +1321,13 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         return transfer_metadata
 
 
+_ReceivingThreadT = TypeVar("_ReceivingThreadT", bound=MooncakePullRecvingThread)
+
+
 class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     """Worker-side framework for Mooncake pull transfers."""
+
+    receiving_thread_cls: type[MooncakePullRecvingThread] | None = None
 
     def __init__(
         self,
@@ -1333,6 +1338,39 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
 
+    def _build_recving_thread(
+        self, thread_cls: type[_ReceivingThreadT], ready_event: threading.Event, **kwargs: Any
+    ) -> _ReceivingThreadT:
+        metadata = self.xfer_handshake_metadata
+        if not isinstance(metadata, MooncakeTransferMetadata):
+            raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
+        return thread_cls(
+            engine=self.engine,
+            vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
+            kv_cache_specs=self.kv_cache_specs,
+            layer_name_to_group_index=self.layer_name_to_group_index,
+            layer_name_to_spec_index=self.layer_name_to_spec_index,
+            local_metadata=metadata,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
+            dp_rank=self.dp_rank,
+            dp_size=self.dp_size,
+            pcp_rank=self.pcp_rank,
+            pcp_size=self.pcp_size,
+            dcp_rank=self.dcp_rank,
+            dcp_size=self.dcp_size,
+            device=torch.npu.current_device(),
+            ready_event=ready_event,
+            **kwargs,
+        )
+
+    def _create_recving_thread(self, ready_event: threading.Event) -> MooncakePullRecvingThread:
+        thread_cls = self.receiving_thread_cls or MooncakePullRecvingThread
+        return self._build_recving_thread(thread_cls, ready_event)
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -1340,30 +1378,8 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         """Register caches and start the D-side pull execution thread."""
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_consumer:
-            if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
-                raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
             ready_event = threading.Event()
-            self._recving_thread = MooncakePullRecvingThread(
-                engine=self.engine,
-                vllm_config=self.vllm_config,
-                kv_cache_config=self.kv_cache_config,
-                kv_cache_specs=self.kv_cache_specs,
-                layer_name_to_group_index=self.layer_name_to_group_index,
-                layer_name_to_spec_index=self.layer_name_to_spec_index,
-                local_metadata=self.xfer_handshake_metadata,
-                tp_rank=self.tp_rank,
-                tp_size=self.tp_size,
-                pp_rank=self.pp_rank,
-                pp_size=self.pp_size,
-                dp_rank=self.dp_rank,
-                dp_size=self.dp_size,
-                pcp_rank=self.pcp_rank,
-                pcp_size=self.pcp_size,
-                dcp_rank=self.dcp_rank,
-                dcp_size=self.dcp_size,
-                device=torch.npu.current_device(),
-                ready_event=ready_event,
-            )
+            self._recving_thread = self._create_recving_thread(ready_event)
             self._recving_thread.start()
             if not ready_event.wait(timeout=10):
                 raise RuntimeError("Timed out starting Mooncake pull receiving thread")
