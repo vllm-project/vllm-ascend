@@ -431,6 +431,12 @@ completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
 
+When a `MooncakeHybridConnector` request reaches the D scheduler but finishes
+before its KV receive is dispatched, D sends a completion notification through
+an empty receive so P can release the retained blocks. Requests cancelled
+before reaching the engine, or completion notifications that cannot reach P,
+still rely on `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` for cleanup.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
