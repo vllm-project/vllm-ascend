@@ -29,7 +29,7 @@ from vllm.config import CompilationConfig
 from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
-QWEN36_DFLASH_DRAFT_MODEL = "rainney/AEON-DFlash-Qwen3.6-35B-A3B"
+QWEN36_DFLASH_DRAFT_MODEL = "z-lab/Qwen3.6-35B-A3B-DFlash"
 MODELS = [QWEN36_MOE_MODEL]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -43,7 +43,7 @@ GPU_MEMORY_UTILIZATION = 0.95
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
         pytest.param(
-            4.0,
+            3.4,
             7,
             {"ascend_compilation_config": {"enable_npugraph_ex": False}},
             id="dflash-qwen36-35b",
