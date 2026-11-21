@@ -276,6 +276,52 @@ class TestCaMem(PytestBase):
         mock_unmap.assert_any_call(handle2)
         assert mock_unmap.call_count == 2
         assert mock_memcpy.called
+        # The fixture wakes asleep allocations; these handles are fake.
+        allocator.pointer_to_data.clear()
+
+    @patch("vllm_ascend.device_allocator.camem.unmap_and_release")
+    @patch("vllm_ascend.device_allocator.camem.memcpy")
+    def test_sleep_discards_only_parameter_allocations(
+        self, mock_memcpy, mock_unmap, _npu_camem_allocator, monkeypatch
+    ):
+        allocator = _npu_camem_allocator
+        allocator.pointer_to_data = {
+            1000: AllocationData((1, 10, 1000, 0), "weights"),
+            2000: AllocationData((2, 20, 2000, 0), "weights"),
+            3000: AllocationData((3, 30, 3000, 0), "weights"),
+        }
+        snapshot = [
+            {"address": 1000, "blocks": [{"address": 1000, "state": "active"}]},
+            {
+                "address": 2000,
+                "blocks": [
+                    {"address": 2000, "state": "active"},
+                    {"address": 2001, "state": "active"},
+                ],
+            },
+            {"address": 3000, "blocks": [{"address": 3000, "state": "active"}]},
+        ]
+        monkeypatch.setattr(camem_module.torch.npu, "memory_snapshot", lambda: snapshot)
+
+        original_torch_empty = torch.empty
+
+        def mock_torch_empty(*args, **kwargs):
+            if kwargs.get("pin_memory") is True:
+                kwargs["pin_memory"] = False
+            return original_torch_empty(*args, **kwargs)
+
+        with patch("vllm_ascend.device_allocator.camem.torch.empty", side_effect=mock_torch_empty):
+            allocator.sleep(offload_tags=("weights",), discardable={1000})
+
+        # 1000 is a pure parameter allocation: discard without CPU backup.
+        assert allocator.pointer_to_data[1000].cpu_backup_tensor is None
+        # 2000 has a non-parameter block and 3000 is not a parameter: back up.
+        assert allocator.pointer_to_data[2000].cpu_backup_tensor is not None
+        assert allocator.pointer_to_data[3000].cpu_backup_tensor is not None
+        assert mock_unmap.call_count == 3
+        assert mock_memcpy.call_count == 2
+        # The fixture wakes asleep allocations; these handles are fake.
+        allocator.pointer_to_data.clear()
 
     @patch("vllm_ascend.device_allocator.camem.create_and_map")
     @patch("vllm_ascend.device_allocator.camem.memcpy")

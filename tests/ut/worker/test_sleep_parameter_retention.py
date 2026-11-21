@@ -13,15 +13,18 @@ def worker(monkeypatch):
     from vllm_ascend.worker import worker as worker_module
 
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=["weight"])
+    worker.model_config = SimpleNamespace(
+        sleep_preserve_parameter_names=["weight"],
+        sleep_mode_backend="camem",
+    )
+    worker.vllm_config = SimpleNamespace(model_config=worker.model_config)
     worker.model_runner = SimpleNamespace(model=torch.nn.Linear(2, 2))
-    worker.model_runner.model.register_buffer("scale", torch.tensor([2.0]))
-    worker._sleep_saved_parameters = {}
-    worker._sleep_saved_buffers = {}
+    from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
+
+    worker._sleep_mode_backend = MagicMock(spec=CaMemBackend)
     worker.sleep_wakeup_manager = MagicMock()
-    worker.allocator = MagicMock()
     monkeypatch.setattr(worker, "synchronize_device", MagicMock())
-    monkeypatch.setattr(worker_module.CaMemAllocator, "get_instance", lambda: worker.allocator)
+    monkeypatch.setattr(worker_module.global_te, "unregister_buffer", MagicMock())
     monkeypatch.setattr(
         worker_module.torch.npu,
         "mem_get_info",
@@ -38,152 +41,66 @@ def worker(monkeypatch):
     return worker
 
 
-def device_parameters(model, monkeypatch):
-    # CPU UTs simulate only the device-to-CPU boundary; comparisons/copies use real tensors.
-    parameters = list(model.named_parameters())
-    mocks = []
-    for name, parameter in parameters:
-        mock = MagicMock()
-        mock.is_cpu = False
-        mock.detach.return_value.to.side_effect = lambda _, parameter=parameter: parameter.detach().clone()
-        mocks.append((name, mock))
-    monkeypatch.setattr(model, "named_parameters", lambda: iter(mocks))
-    return dict(mocks)
+def _storage_ptr(parameter: torch.nn.Parameter) -> int:
+    return parameter.untyped_storage().data_ptr()
 
 
-def test_save_matches_globs_and_deduplicates_parameters(worker, monkeypatch):
+def test_discardable_excludes_preserved_storage(worker):
     model = worker.model_runner.model
-    parameters = device_parameters(model, monkeypatch)
-    worker.model_config.sleep_preserve_parameter_names = ["w*", "weight"]
 
-    worker._save_sleep_parameters(model)
+    discardable = worker._discardable_parameters(model)
 
-    assert set(worker._sleep_saved_parameters) == {"weight"}
-    assert torch.equal(worker._sleep_saved_parameters["weight"], model.weight)
-    assert worker._sleep_saved_parameters["weight"].data_ptr() != model.weight.data_ptr()
-    parameters["weight"].detach.return_value.to.assert_called_once_with("cpu")
-    parameters["bias"].detach.assert_not_called()
+    assert _storage_ptr(model.weight) not in discardable
+    assert _storage_ptr(model.bias) in discardable
 
 
-def test_cpu_parameters_need_no_backup(worker):
-    worker._save_sleep_parameters(worker.model_runner.model)
+def test_discardable_contains_all_parameters_without_preserve(worker):
+    worker.model_config.sleep_preserve_parameter_names = []
+    model = worker.model_runner.model
 
-    assert worker._sleep_saved_parameters == {}
+    discardable = worker._discardable_parameters(model)
 
-
-def test_sleep_retention_rejects_meta_parameters_before_sleep(worker):
-    worker.model_runner.model.register_parameter("placeholder", torch.nn.Parameter(torch.empty(2, device="meta")))
-    worker.model_config.sleep_preserve_parameter_names = ["placeholder"]
-
-    with pytest.raises(ValueError, match="Sleep retention cannot snapshot meta parameters: placeholder"):
-        worker.sleep(level=2)
-
-    worker.allocator.sleep.assert_not_called()
+    assert discardable == {_storage_ptr(model.weight), _storage_ptr(model.bias)}
 
 
-@pytest.mark.parametrize("config", [SimpleNamespace(), SimpleNamespace(sleep_preserve_parameter_names=[])])
-def test_empty_or_older_configuration_clears_saved_parameters(worker, config):
-    worker.model_config = config
-    worker._sleep_saved_parameters = {"stale": torch.ones(1)}
-
-    worker._save_sleep_parameters(worker.model_runner.model)
-
-    assert worker._sleep_saved_parameters == {}
-
-
-def test_unmatched_pattern_fails_before_discarding_memory(worker):
+def test_unmatched_pattern_fails_before_sleep(worker):
     worker.model_config.sleep_preserve_parameter_names = ["missing.*"]
 
     with pytest.raises(ValueError, match="No parameter matches sleep retention: missing"):
         worker.sleep(level=2)
 
-    worker.allocator.sleep.assert_not_called()
+    worker.sleep_mode_backend.suspend.assert_not_called()
 
 
-def test_level_two_retains_parameters_before_allocator_discards_them(worker, monkeypatch):
-    model = worker.model_runner.model
-    expected = model.weight.detach().clone()
-    device_parameters(model, monkeypatch)
+def test_draft_pattern_is_allowed_without_draft(worker):
+    worker.model_config.sleep_preserve_parameter_names = ["draft.*"]
 
-    def discard(offload_tags):
-        assert offload_tags == ()
-        assert torch.equal(worker._sleep_saved_parameters["weight"], expected)
-        with torch.no_grad():
-            model.weight.zero_()
-            model.scale.zero_()
+    discardable = worker._discardable_parameters(worker.model_runner.model)
 
-    worker.allocator.sleep.side_effect = discard
-    worker.sleep(level=2)
-    worker.wake_up(tags=["weights"])
-
-    assert torch.equal(model.weight, expected)
-    assert torch.equal(model.scale, torch.tensor([2.0]))
-    assert worker._sleep_saved_parameters == {}
-    assert worker._sleep_saved_buffers == {}
-    assert worker.synchronize_device.call_count == 3
+    assert _storage_ptr(worker.model_runner.model.weight) in discardable
 
 
-def test_level_one_keeps_allocator_offload_and_clears_old_backups(worker, monkeypatch):
-    worker._sleep_saved_parameters = {"weight": torch.ones(2, 2)}
-    worker._sleep_saved_buffers = {"scale": torch.ones(1)}
-    save = MagicMock()
-    monkeypatch.setattr(worker, "_save_sleep_parameters", save)
-
+def test_level_one_passes_empty_discardable(worker):
     worker.sleep(level=1)
 
-    save.assert_not_called()
-    worker.allocator.sleep.assert_called_once_with(offload_tags=("weights",))
-    assert worker._sleep_saved_parameters == {}
-    assert worker._sleep_saved_buffers == {}
+    worker.sleep_mode_backend.suspend.assert_called_once_with(set())
 
 
-@pytest.mark.parametrize("tags", [None, ["weights"], ["weights", "kv_cache"]])
-def test_weight_wake_restores_in_place_after_mapping(worker, tags):
+def test_level_two_passes_discardable_storages(worker):
     model = worker.model_runner.model
-    pointer = model.weight.data_ptr()
-    expected = torch.full_like(model.weight, 3.0)
-    worker._sleep_saved_parameters = {"weight": expected.clone()}
-    worker._sleep_saved_buffers = {"scale": torch.tensor([4.0])}
-    worker.allocator.wake_up.side_effect = lambda tags: model.weight.data.zero_()
+    expected = worker._discardable_parameters(model)
 
-    worker.wake_up(tags=tags)
+    worker.sleep(level=2)
 
-    assert model.weight.data_ptr() == pointer
-    assert model.weight.requires_grad
-    assert torch.equal(model.weight, expected)
-    assert torch.equal(model.scale, torch.tensor([4.0]))
-    assert worker._sleep_saved_parameters == {}
-    assert worker._sleep_saved_buffers == {}
-    worker.allocator.wake_up.assert_called_once_with(tags=tags)
-    worker.synchronize_device.assert_called_once_with()
+    worker.sleep_mode_backend.suspend.assert_called_once_with(expected)
 
 
-@pytest.mark.parametrize("tags", [[], ["kv_cache"], ["other"]])
-def test_non_weight_wake_preserves_backups_without_touching_parameters(worker, tags):
-    model = worker.model_runner.model
-    original = model.weight.detach().clone()
-    backup = torch.full_like(model.weight, 3.0)
-    worker._sleep_saved_parameters = {"weight": backup}
-    worker._sleep_saved_buffers = {"scale": torch.tensor([4.0])}
-
-    worker.wake_up(tags=tags)
-
-    assert torch.equal(model.weight, original)
-    assert worker._sleep_saved_parameters["weight"] is backup
-    assert set(worker._sleep_saved_buffers) == {"scale"}
+def test_worker_no_longer_keeps_python_sleep_snapshots(worker):
+    assert not hasattr(worker, "_sleep_saved_parameters")
+    assert not hasattr(worker, "_sleep_saved_buffers")
 
 
-def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
-    model = worker.model_runner.model
-    device_parameters(model, monkeypatch)
+def test_get_sleep_parameters_returns_target_parameters(worker):
+    parameters = worker._get_sleep_parameters(worker.model_runner.model)
 
-    for value in (3.0, 7.0):
-        with torch.no_grad():
-            model.weight.fill_(value)
-        worker._save_sleep_parameters(model)
-        with torch.no_grad():
-            model.weight.zero_()
-        worker._restore_sleep_parameters(model)
-
-        assert torch.equal(model.weight, torch.full_like(model.weight, value))
-        assert worker._sleep_saved_parameters == {}
+    assert set(parameters) == {"weight", "bias"}
