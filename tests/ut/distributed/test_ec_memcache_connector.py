@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
+from vllm.multimodal.inputs import PlaceholderRange
 
 from vllm_ascend.distributed.ec_transfer import ec_memcache_connector as connector_module
 from vllm_ascend.distributed.ec_transfer.ec_memcache_connector import (
@@ -444,13 +445,44 @@ def test_ec_get_batch_skips_key_evicted_before_load() -> None:
     )
 
 
-def test_scheduler_records_encoder_embed_rows_for_loads() -> None:
+def _make_scheduler_connector() -> ECMemcacheConnector:
     connector = ECMemcacheConnector.__new__(ECMemcacheConnector)
-    connector._mm_hash_hits = {"hit"}
-    connector._mm_hash_hit_count = 1
+    connector._backend = MagicMock()
+    connector._mm_hash_hits = set()
+    connector._mm_hash_hit_count = 0
     connector._miss_count = 0
     connector._mm_hashes_need_loads = {}
     connector._mm_hashes_need_saves = set()
+    return connector
+
+
+def _mm_request(*inputs: tuple[str, int, int]) -> MagicMock:
+    """Build a request from (identifier, offset, length) multimodal inputs."""
+    request = MagicMock()
+    request.mm_features = [
+        MagicMock(identifier=identifier, mm_position=PlaceholderRange(offset=offset, length=length))
+        for identifier, offset, length in inputs
+    ]
+    return request
+
+
+def test_scheduler_skips_inputs_already_in_kv_cache() -> None:
+    connector = _make_scheduler_connector()
+    connector._backend.exists.return_value = [1]
+    request = _mm_request(("consumed", 0, 4), ("pending", 4, 4))
+
+    assert connector.ensure_cache_available(request, 4)
+    connector._backend.exists.assert_called_once_with(["pending"])
+
+    connector._backend.exists.reset_mock()
+    assert connector.ensure_cache_available(request, 8)
+    connector._backend.exists.assert_not_called()
+
+
+def test_scheduler_records_encoder_embed_rows_for_loads() -> None:
+    connector = _make_scheduler_connector()
+    connector._mm_hash_hits = {"hit"}
+    connector._mm_hash_hit_count = 1
     request = MagicMock()
     request.mm_features = [MagicMock(identifier="hit"), MagicMock(identifier="miss")]
     request.get_num_encoder_embeds.side_effect = lambda index: [7, 9][index]

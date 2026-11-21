@@ -133,13 +133,9 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     return profile_tokens
 
 
-def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
-    """Whether a GQA/MQA model enables both PCP and DCP."""
-    return (
-        parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size > 1
-        and not model_config.use_mla
-    )
+def model_supports_dcp(model_config: Any) -> bool:
+    """Whether the model enables MLA or uses Ascend SFA attention."""
+    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -2010,9 +2006,22 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
 def use_updatable_graph(
     attn_backend,
 ) -> bool:
+    if attn_backend is None:
+        return False
+
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    if issubclass(attn_backend, AscendAttentionBackend):
+        return True
+
+    from vllm.distributed import get_dcp_group
+
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
+    # on its specialized graph-parameter path until its grouped update logic is
+    # migrated separately.
+    return issubclass(attn_backend, AscendMLABackend) and get_dcp_group().world_size == 1
 
 
 def _is_glm_model(model_config) -> bool:

@@ -8,9 +8,9 @@
   compacts the convolution history prepared by the caller. This supports GLM
   speculative decoding without keeping a full recurrent checkpoint per draft.
   Kimi K3/K3.1 and GLM use request-indexed temporary records.
-- **Formula**: For one head, let `S` have shape `[V, K]`, and normalize nonzero
-  query/key vectors to unit L2 norm; zero vectors remain zero. Scale the normalized
-  query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
+- **Formula**: For one head, let `S` have shape `[V, K]`. Normalize each query/key
+  vector `z` as `z / sqrt(sum(z * z) + 1e-6)` over its `K` components. Scale the
+  normalized query by `K**-0.5`. With `a = exp(A_log)` and `x = raw_g + dt_bias`:
 
   ```text
   g = lower_bound * sigmoid(a * x)       if lower_bound is not None
@@ -212,8 +212,8 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   in `vllm_ascend/ops/triton/kda/recoverssm.py`. It implements the paged verify and
   accepted-state commit contracts for Ascend GLM KDA.
 - **Differences**:
-    - Q/K normalization follows AscendC KDA: no squared-norm epsilon is added to
-    nonzero vectors, and zero vectors normalize to zero.
+    - Verify and both commit paths use the `1e-6` squared-norm epsilon from
+      AscendC RecurrentKDA.
     - FP32 recurrent arithmetic, explicit strided request records and batched
     multi-layer commit are used for Ascend. Persistent state is not advanced
     during verification.

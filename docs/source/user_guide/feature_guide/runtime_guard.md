@@ -88,7 +88,7 @@ Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_tr
 | Type | Stage | Typical use |
 |------|-------|-------------|
 | `token_repeat` | after sample | Stutter / repetition |
-| `logits_finite` | before sample | NaN/Inf logits (``isfinite`` + gate; default **async** ``.item()`` wait at after-sample — logits may be mutated by grammar before wait; set ``item_sync: true`` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
+| `logits_finite` | before sample | NaN/Inf logits (`isfinite` + gate; default **async** `.item()` wait at after-sample — logits may be mutated by grammar before wait; set `item_sync: true` for sync pre-sample gate/kind). Hit resolves indices/kind then enqueues; after-sample drains. Unattributable rows: warning only (no guessed / null-req report). |
 | `spec_acceptance` | after spec | Spec-decode acceptance drift (via `run_sample_phase` → `check_after_spec`; v2 stashes accept stats in `postprocess_sampled`) |
 
 All detectors default to **disabled**. Enable individually under `detector.<name>.enabled`.
@@ -155,6 +155,6 @@ Residual risks (PD cross-machine, DCP full-sequence stitch, offload-backed dump)
 
 ## Related docs
 
-- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
-- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)  
+- [runtime_config.md](../configuration/runtime_config.md) — JSON field reference
+- Compatibility epic: [vllm-ascend#21976](https://github.com/vllm-project/vllm-ascend/issues/21976)
 - Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/runtime_guard_{design,ops}.md`

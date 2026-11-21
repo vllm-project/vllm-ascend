@@ -40,6 +40,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAReqMetadata,
     OProjBufferPool,
     build_compressor_metadata_out,
+    build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
 from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
@@ -123,6 +124,43 @@ def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
             mm_prefix_ranges={0: [(0, 3)]},
             num_tokens=4,
         )
+
+
+@pytest.mark.parametrize("output_arg", ["buffer", "indices_output"])
+@pytest.mark.parametrize(
+    ("query_start_loc", "num_decode_tokens"),
+    [([0, 2, 3], 3), ([0, 2, 3], 8), ([0, 0, 0], 8)],
+    ids=["full", "padded", "all-padding"],
+)
+def test_build_dspark_swa_indices_preserves_graph_padding(output_arg, query_start_loc, num_decode_tokens):
+    output_rows = num_decode_tokens + 2 if output_arg == "buffer" else num_decode_tokens
+    output = torch.full((output_rows, 1, 5), 99, dtype=torch.int32)
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[3, 5], [7, 8]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=2,
+        block_size=4,
+        query_start_loc=torch.tensor(query_start_loc, dtype=torch.int32),
+        seq_lens=torch.tensor([6, 3], dtype=torch.int32),
+        num_decode_tokens=num_decode_tokens,
+        index_width=5,
+        **{output_arg: output},
+    )
+
+    active_rows = query_start_loc[-1]
+    expected_indices = torch.full((num_decode_tokens, 1, 5), -1, dtype=torch.int32)
+    expected_lengths = torch.zeros(num_decode_tokens, dtype=torch.int32)
+    if active_rows:
+        expected_indices[:3, 0] = torch.tensor(
+            [[14, 15, 20, 21, -1], [14, 15, 20, 21, -1], [28, 29, 30, -1, -1]], dtype=torch.int32
+        )
+        expected_lengths[:3] = torch.tensor([4, 4, 3], dtype=torch.int32)
+
+    torch.testing.assert_close(indices, expected_indices)
+    torch.testing.assert_close(lengths, expected_lengths)
+    assert indices.data_ptr() == output.data_ptr()
+    if output_arg == "buffer":
+        assert torch.all(output[num_decode_tokens:] == 99)
 
 
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
@@ -1790,7 +1828,9 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
     pcp_manager._local_batch = SimpleNamespace(
-        num_tokens=local_common.num_actual_tokens, num_tokens_after_padding=local_common.num_input_tokens
+        num_tokens=local_common.num_actual_tokens,
+        num_tokens_after_padding=local_common.num_input_tokens,
+        idx_mapping=global_batch.idx_mapping,
     )
     pcp_manager._local_gather_idx = torch.tensor([0, 4, -1], dtype=torch.int64)
     pcp_manager._block_tables = SimpleNamespace(

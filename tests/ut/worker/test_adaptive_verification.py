@@ -224,7 +224,7 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
     config = SimpleNamespace(
         use_v2_model_runner=True,
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
+            method="mtp", num_speculative_tokens=3, parallel_drafting=False, max_num_new_slots_for_drafting=0
         ),
     )
     return dict(

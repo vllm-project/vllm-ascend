@@ -94,8 +94,8 @@ PR references marked with **†** were merged into the v0.30.0 release branch be
 
 - We still use MRV1 by default in this version, and some models need to be switched to MRV2 for support. For specific information, please refer to the [model tutorial](https://docs.vllm.ai/projects/ascend/en/v0.30.0/tutorials/models/index.html). The main branch has been switched to use MRV2 by default.
 - Gemma-4-E4B-it model fail because of attention op issue. [#19559](https://github.com/vllm-project/vllm-ascend/issues/19559)
-- KV pooling with mooncake backend doesn't support SSD offload case on RoCE networking, because [kvcache-al/Mooncake#4756](https://github.com/kvcache-ai/Mooncake/pull/4756) was not merged into current Mooncake version. [#19707](https://github.com/vllm-project/vllm-ascend/issues/19707)
-- When layerwise KV pooling with mooncake backend and SSD offload + pipeline parallel, we can't hit kvcache on SSD because of [kvcache-al/Mooncake#3658](https://github.com/kvcache-ai/Mooncake/pull/3658), and the bugfix pr [kvcache-al/Mooncake#3916](https://github.com/kvcache-ai/Mooncake/pull/3916) was not merged into current Mooncake version. [#20151](https://github.com/vllm-project/vllm-ascend/issues/20151)
+- KV pooling with mooncake backend doesn't support SSD offload case on RoCE networking, because [kvcache-ai/Mooncake#4756](https://github.com/kvcache-ai/Mooncake/pull/4756) was not merged into current Mooncake version. [#19707](https://github.com/vllm-project/vllm-ascend/issues/19707)
+- When layerwise KV pooling with mooncake backend and SSD offload + pipeline parallel, we can't hit kvcache on SSD because of [kvcache-ai/Mooncake#3658](https://github.com/kvcache-ai/Mooncake/pull/3658), and the bugfix pr [kvcache-ai/Mooncake#3916](https://github.com/kvcache-ai/Mooncake/pull/3916) was not merged into current Mooncake version. [#20151](https://github.com/vllm-project/vllm-ascend/issues/20151)
 - When enabling structured output, GLM5.3 model's output can't be aligned with vLLM v0.30.0, because [vllm-project/vllm#56994](https://github.com/vllm-project/vllm/pull/56994) was not merged into vLLM v0.30.0, and it will be aligned with vLLM in the next version. [#20173](https://github.com/vllm-project/vllm-ascend/issues/20173)
 - Some w4 quantifications weights(published by Eco-Tech, like [GLM-5.3-w4a4c8-mxfp4](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w4a4c8-mxfp4), [Qwen3.6-35B-A3B-w4a8-mxfp](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp)) are slightly lower than the accuracy reported in the paper on certain datasets. If these weights are to be used, please conduct accuracy verification and ensure that the accuracy is acceptable.
 
@@ -338,7 +338,7 @@ This is the first post release of vLLM Ascend v0.23.0. It includes the fixes, de
 
 ## v0.26.0rc1 - 2026.09.03
 
-This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.
+This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM-5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.
 
 ### Highlights
 
@@ -987,7 +987,7 @@ We're excited to announce the release of v0.18.0 for vLLM Ascend. This is the of
     - Added addrmsnorm support for 300I DUO. [#6704](https://github.com/vllm-project/vllm-ascend/pull/6704)
     - Fix ngram graph replay accuracy error on 310P. [#7134](https://github.com/vllm-project/vllm-ascend/pull/7134)
 - **Custom Operators**: Added multiple custom operators including:
-    - Added AscendC casual_conv1d_fn operator for Qwen3-Next. [#6661](https://github.com/vllm-project/vllm-ascend/pull/6661)
+    - Added AscendC causal_conv1d_fn operator for Qwen3-Next. [#6661](https://github.com/vllm-project/vllm-ascend/pull/6661)
     - Added Ascend Ops recurrent_gated_delta_rule operator. [#6725](https://github.com/vllm-project/vllm-ascend/pull/6725)
     - Added GMM custom operator for MoE models. [#7010](https://github.com/vllm-project/vllm-ascend/pull/7010)
     - Optimize split_qkv_rmsnorm_rope operator. [#6827](https://github.com/vllm-project/vllm-ascend/pull/6827)
@@ -1241,7 +1241,7 @@ Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest)
 - w8a8 dispatch ffn combine bias param adapt ([#8342](https://github.com/vllm-project/vllm-ascend/pull/8342))
 - Fix quant_bias missing in w8a8_static for GLM-5 with flashcomm1 ([#8220](https://github.com/vllm-project/vllm-ascend/pull/8220))
 - Fix DSA-CP PD role gating for deepseek v3.2 ([#8290](https://github.com/vllm-project/vllm-ascend/pull/8290))
-- Require piecewise cudagraph for layerwise AscendStorConnector ([#8283](https://github.com/vllm-project/vllm-ascend/pull/8283))
+- Require piecewise cudagraph for layerwise AscendStoreConnector ([#8283](https://github.com/vllm-project/vllm-ascend/pull/8283))
 - Fix remote KV waiting promotion in patch balance scheduler ([#8279](https://github.com/vllm-project/vllm-ascend/pull/8279))
 - Enforce C locale for CPU binding subprocess parsing ([#8251](https://github.com/vllm-project/vllm-ascend/pull/8251))
 - Add wait_for_kv_layer_from_connector in mlapo branch SFA ([#8195](https://github.com/vllm-project/vllm-ascend/pull/8195))
@@ -1383,7 +1383,7 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 ### Hardware and Operator Support
 
 - 310P now supports w8a8sc quantization method. [#7075](https://github.com/vllm-project/vllm-ascend/pull/7075)
-- Added AscendC casual_conv1d_fn operator for Qwen3-Next. [#6661](https://github.com/vllm-project/vllm-ascend/pull/6661)
+- Added AscendC causal_conv1d_fn operator for Qwen3-Next. [#6661](https://github.com/vllm-project/vllm-ascend/pull/6661)
 - Added Ascend Ops recurrent_gated_delta_rule operator. [#6725](https://github.com/vllm-project/vllm-ascend/pull/6725)
 - Added GMM custom operator for MoE models. [#7010](https://github.com/vllm-project/vllm-ascend/pull/7010)
 
@@ -1842,7 +1842,7 @@ We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the of
 ### Upgrade notice
 
 - TorchNPU is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/artifactory/ascend-local/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
-- CANN is upgraded to 8.3.rc2.
+- CANN is upgraded to 8.3.RC2.
 
 ### Known Issues
 
@@ -2072,7 +2072,7 @@ This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the 
 - openEuler is upgraded to 24.03. [#2631](https://github.com/vllm-project/vllm-ascend/pull/2631)
 - Added custom lmhead tensor parallel to achieve reduced memory consumption and improved TPOT performance. [#2309](https://github.com/vllm-project/vllm-ascend/pull/2309)
 - Qwen3 MoE/Qwen2.5 support torchair graph now. [#2403](https://github.com/vllm-project/vllm-ascend/pull/2403)
-- Support Sliding Window Attention with AscendSceduler, thus fixing Gemma3 accuracy issue. [#2528](https://github.com/vllm-project/vllm-ascend/pull/2528)
+- Support Sliding Window Attention with AscendScheduler, thus fixing Gemma3 accuracy issue. [#2528](https://github.com/vllm-project/vllm-ascend/pull/2528)
 
 ### Others
 
@@ -2080,7 +2080,7 @@ This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the 
     - Updated the graph capture size calculation, somehow alleviated the problem that NPU stream not enough in some scenarios. [#2511](https://github.com/vllm-project/vllm-ascend/pull/2511)
     - Fixed bugs and refactor cached mask generation logic. [#2442](https://github.com/vllm-project/vllm-ascend/pull/2442)
     - Fixed the nz format does not work in quantization scenarios. [#2549](https://github.com/vllm-project/vllm-ascend/pull/2549)
-    - Fixed the accuracy issue on Qwen series caused by enabling `enable_shared_pert_dp` by default. [#2457](https://github.com/vllm-project/vllm-ascend/pull/2457)
+    - Fixed the accuracy issue on Qwen series caused by enabling `enable_shared_expert_dp` by default. [#2457](https://github.com/vllm-project/vllm-ascend/pull/2457)
     - Fixed the accuracy issue on models whose rope dim is not equal to head dim, e.g., GLM4.5. [#2601](https://github.com/vllm-project/vllm-ascend/pull/2601)
 - Performance improved through a lot of prs:
     - Removed torch.cat and replaced it with List[0]. [#2153](https://github.com/vllm-project/vllm-ascend/pull/2153)
@@ -2301,7 +2301,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 
 ### Core
 
-- Upgraded CANN to 8.2.rc1 in [#2036](https://github.com/vllm-project/vllm-ascend/pull/2036)
+- Upgraded CANN to 8.2.RC1 in [#2036](https://github.com/vllm-project/vllm-ascend/pull/2036)
 - Upgraded TorchNPU to 2.5.1.post1 in [#2135](https://github.com/vllm-project/vllm-ascend/pull/2135)
 - Upgraded python to 3.11 in [#2136](https://github.com/vllm-project/vllm-ascend/pull/2136)
 - Disabled quantization in mindie_turbo  in [#1749](https://github.com/vllm-project/vllm-ascend/pull/1749)
@@ -2325,7 +2325,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Adapted dispatchV2 interface in [#1822](https://github.com/vllm-project/vllm-ascend/pull/1822)
 - Fixed disaggregate prefill hang issue in long output in [#1807](https://github.com/vllm-project/vllm-ascend/pull/1807)
 - Fixed flashcomm_v1 when engine v0 in [#1859](https://github.com/vllm-project/vllm-ascend/pull/1859)
-- ep_group is not equal to word_size in some cases in [#1862](https://github.com/vllm-project/vllm-ascend/pull/1862).
+- ep_group is not equal to world_size in some cases in [#1862](https://github.com/vllm-project/vllm-ascend/pull/1862).
 - Fixed wheel glibc version incompatibility in [#1808](https://github.com/vllm-project/vllm-ascend/pull/1808).
 - Fixed mc2 process group to resolve self.cpu_group is None in [#1831](https://github.com/vllm-project/vllm-ascend/pull/1831).
 - Pin vllm version to v0.9.1 to make mypy check passed  in [#1904](https://github.com/vllm-project/vllm-ascend/pull/1904).
@@ -2509,7 +2509,7 @@ This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [
 
 ## v0.7.3.post1 - 2025.05.29
 
-This is the first post release of 0.7.3. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.7.3) to start the journey. It includes the following changes:
+This is the first post release of v0.7.3. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/v0.7.3) to start the journey. It includes the following changes:
 
 ### Highlights
 

@@ -1,0 +1,65 @@
+name: Dispatch Daily Issue update
+description: Trigger the Issue update workflow for one failed Daily case.
+
+inputs:
+  github-token:
+    description: Token with permission to dispatch workflows.
+    required: true
+  request-id:
+    description: Daily round identity passed by the main workflow.
+    required: true
+  case-name:
+    description: Failed Daily case name.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch update workflow
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REQUEST_ID: ${{ inputs.request-id }}
+        CASE_NAME: ${{ inputs.case-name }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        from urllib.error import HTTPError, URLError
+        from urllib.request import Request, urlopen
+
+        HTTP_TIMEOUT_SECONDS = 30
+        token = os.environ["GH_TOKEN"]
+        if not token:
+            raise SystemExit("A workflow dispatch token is required")
+        api_url = os.environ["GITHUB_API_URL"].rstrip("/")
+        repository = os.environ["GITHUB_REPOSITORY"]
+        payload = {
+            "ref": os.environ["GITHUB_REF_NAME"],
+            "inputs": {
+                "request_id": os.environ["REQUEST_ID"],
+                "case_name": os.environ["CASE_NAME"],
+                "run_url": os.environ["RUN_URL"],
+            },
+        }
+        request = Request(
+            f"{api_url}/repos/{repository}/actions/workflows/publish_daily_issue.yaml/dispatches",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS):
+                print("Daily Issue update dispatched")
+        except HTTPError as error:
+            raise SystemExit(f"Workflow dispatch failed: HTTP {error.code}") from None
+        except (URLError, TimeoutError, OSError):
+            raise SystemExit("Workflow dispatch request failed") from None
+        PY
