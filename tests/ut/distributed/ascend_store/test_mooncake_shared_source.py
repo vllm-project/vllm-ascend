@@ -199,17 +199,12 @@ class TestMooncakeSharedSource(unittest.TestCase):
 
     def test_failed_put_revokes_uncommitted_objects(self):
         worker, store, _, conn = make_mooncake_worker(self, bounded=True)
-        worker.sync_save_events = [Mock() for _ in range(worker.num_layers)]
-        worker.kv_send_thread.sync_save_events = worker.sync_save_events
         conn.bind_connector_metadata(metadata(worker))
         store.fail_put = True
         forward(conn, worker)
         worker.kv_send_thread.request_queue.join()
         self.assertFalse(store.complete)
         self.assertFalse(worker._put_started_keys)
-        worker.sync_save_events[2].synchronize.assert_called_once()
-        for layer in (8, 14, 20):
-            worker.sync_save_events[layer].synchronize.assert_not_called()
 
     def test_failed_get_stops_before_attention_and_releases_sessions(self):
         worker, store, _, conn = make_mooncake_worker(self, bounded=True)

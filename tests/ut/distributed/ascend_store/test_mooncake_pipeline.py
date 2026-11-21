@@ -353,8 +353,9 @@ class TestMooncakePipeline(unittest.TestCase):
         real_put = store.batch_copy_put
 
         def fail_one_group(keys, *args):
-            results = real_put(keys, *args)
-            return [-1 if "@pp_rank:1@group:1@" in key else result for key, result in zip(keys, results, strict=True)]
+            if all("@pp_rank:1@group:1@" in key for key in keys):
+                return [-1] * len(keys)
+            return real_put(keys, *args)
 
         with patch.object(store, "batch_copy_put", side_effect=fail_one_group):
             for worker in (stage0, stage1):

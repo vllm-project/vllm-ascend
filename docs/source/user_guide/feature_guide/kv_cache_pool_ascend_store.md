@@ -50,11 +50,10 @@ in each connector's own extra config; the V2 option selects the P/D Push protoco
 
     With `backend: "mooncake"` and `use_layerwise: true`, loads from multiple cache
     groups at the same execution layer are combined before applying the configured
-    transfer limits. Saves transfer each group separately and synchronize the
-    layer's write event only before its first active PUT. Each group is committed
-    immediately after its final required layer is copied. Layer prefetch ordering,
-    per-group failure tracking, and transfer limits are preserved; no additional
-    configuration is required.
+    transfer limits. Saves retain the upstream per-group PUT and commit flow,
+    including each active group's save-event synchronization. Layer prefetch
+    ordering, per-group failure tracking, and transfer limits are preserved;
+    no additional configuration is required.
 
 === "Memcache backend"
 
