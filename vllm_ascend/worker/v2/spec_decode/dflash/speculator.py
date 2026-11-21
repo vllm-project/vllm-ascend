@@ -211,6 +211,44 @@ def prepare_dflash_inputs_factory(
     return prepare_with_block_stride
 
 
+def validate_grouped_draft_causal(model: Any, kv_cache_config: Any) -> None:
+    """Reject mixed-causal draft layers that share one KV cache group.
+
+    The pinned upstream DFlash speculator stores draft causality per KV cache
+    group (``_group_causal``), so the last layer's flag wins for the whole
+    group. DFlash2 MLA draft layers publish identical KV cache specs and land
+    in a single group even when the checkpoint mixes causal modes (e.g.
+    sliding/full/sliding ``layer_types``); a full-attention layer that loses
+    its non-causal mask then attends to later positions in its draft block.
+    Mixed causality needs the modes split into separate KV cache groups,
+    which Ascend MLA drafts do not publish yet; fail fast instead of silently
+    corrupting draft attention. Models without the per-layer hooks keep the
+    upstream per-group fallback unchanged.
+    """
+    get_layer_names = getattr(model, "get_draft_kv_cache_layer_names", None)
+    get_causal = getattr(model, "get_draft_attn_causal", None)
+    if get_layer_names is None or get_causal is None:
+        return
+    name_to_gid = {
+        layer_name: gid for gid, group in enumerate(kv_cache_config.kv_cache_groups) for layer_name in group.layer_names
+    }
+    causal_by_gid: dict[int, bool] = {}
+    for layer_name, causal in zip(get_layer_names(), get_causal()):
+        gid = name_to_gid.get(layer_name)
+        if gid is None:
+            continue
+        causal = bool(causal)
+        if gid in causal_by_gid and causal_by_gid[gid] != causal:
+            raise ValueError(
+                "DFlash draft layers with mixed attention causality share one "
+                f"KV cache group (group {gid}); the per-group causal flag "
+                "would keep only the last layer's mode and corrupt draft "
+                "attention. Split the causal modes into separate KV cache "
+                "groups or use a checkpoint with homogeneous draft causality."
+            )
+        causal_by_gid[gid] = causal
+
+
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     if not vllm_version_is("0.33.0"):
 
@@ -273,7 +311,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for layer_name, metadata in attn_metadata.items():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None:
+                decode_metadata.actual_seq_lengths_q = query_lens_list
+            else:
+                metadata.actual_seq_lengths_q = query_lens_list
             # Backend subclasses can use different metadata contracts (e.g.
             # device-length CANN FlashAttn). Restrict KV trimming to FIA itself.
             if self.attn_backends[layer_name] is not AscendAttentionBackend:
@@ -336,6 +378,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
+        validate_grouped_draft_causal(self.model, kv_cache_config)
         dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs_factory(  # type: ignore[call-arg]
             self.vllm_config.cache_config.block_size,
             block_tables,
