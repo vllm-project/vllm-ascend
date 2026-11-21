@@ -82,6 +82,7 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.v2.pp_transport import (
     PPDependencyTransport,
@@ -500,6 +501,38 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
         prefix=f"{prefix}.wo_b",
         return_bias=False,
     )
+    self.fused_attn_epilogue = None
+    if not get_current_hardware_profile().supports(HardwareCapability.DSV41_FUSED_ATTN_EPILOGUE):
+        return
+
+    vllm_config = get_current_vllm_config()
+    parallel = vllm_config.parallel_config
+    transfer = vllm_config.kv_transfer_config
+    if (
+        (tp_size, self.n_heads, self.n_groups, self.head_dim, self.rope_head_dim, self.o_lora_rank, self.dim)
+        != (1, 64, 8, 512, 64, 1024, 5120)
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.decode_context_parallel_size != 1
+        or oproj_tp_enable()
+        or (transfer is not None and transfer.is_kv_producer and not transfer.is_kv_consumer)
+        or vllm_config.lora_config is not None
+        or envs.VLLM_BATCH_INVARIANT
+    ):
+        return
+
+    from vllm_ascend.ops.dsv41_attn_epilogue import get_attn_epilogue_out
+    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+
+    projections = (self.wo_a, self.wo_b)
+    if not all(
+        isinstance(getattr(projection.quant_method, "quant_method", None), AscendW8A8MXFP8DSDynamicLinearMethod)
+        for projection in projections
+    ):
+        return
+    self.fused_attn_epilogue = get_attn_epilogue_out()
+    if self.fused_attn_epilogue is not None:
+        for projection in projections:
+            projection._dsv41_epilogue_nd = True
 
 
 @dataclass(frozen=True)

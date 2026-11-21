@@ -2276,7 +2276,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 x1_scale=act_scale.view(torch.float8_e8m0fnu),
                 x2_scale=self.wo_a.weight_scale.view(torch.float8_e8m0fnu),
                 perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
+                perm_x2=(0, 2, 1) if getattr(self.wo_a, "_dsv41_epilogue_nd", False) else (0, 1, 2),
                 perm_y=(1, 0, 2),
             )
         return torch_npu.npu_transpose_batchmatmul(
