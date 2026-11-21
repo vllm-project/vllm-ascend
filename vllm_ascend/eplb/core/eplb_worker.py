@@ -62,15 +62,19 @@ class EplbWorker:
 
         # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
-        if load_info is None:
-            logger.debug("[eplb/worker] No moe_load data available yet, skipping this cycle")
-            return
 
         # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
-        _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+        if load_info is None:
+            logger.debug("[eplb/worker] No moe_load data available yet, keeping the current placement")
+            new_placement = old_placement.clone()
+        else:
+            changed, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+            if isinstance(changed, (bool, int, np.bool_, np.integer)) and not changed:
+                logger.info("[eplb/worker] Plan does not improve balance enough, keeping the current placement")
+                new_placement = old_placement.clone()
 
-        if self.rank_id == 0:
+        if load_info is not None and self.rank_id == 0:
             if self.multi_stage:
                 hotness = self._calculate_hotness(old_placement, load_info.sum(0))
             else:
