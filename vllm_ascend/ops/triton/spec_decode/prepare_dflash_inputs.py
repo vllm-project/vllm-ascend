@@ -362,11 +362,17 @@ def prepare_dflash_inputs_triton(
         workers_for_sample,
     )
 
-    max_ctx_per_worker = triton.cdiv(max_target_query_len, workers_per_req)
-    block_size_kernel = min(
-        _MAX_CONTEXT_BLOCK_SIZE,
-        triton.next_power_of_2(max(2, max_ctx_per_worker)),
-    )
+    # Fix the context tile width to _MAX_CONTEXT_BLOCK_SIZE. BLOCK_SIZE is a
+    # tl.constexpr, so a per-step dynamic width turns every distinct value
+    # (2/4/8/.../256) into a separate Triton specialization: the first time each
+    # width is hit during serving, the host pays a full JIT compile of this
+    # kernel (measured 2.3-3.4 s per width, see #20334), while the kernel
+    # itself runs in ~10-20 us. A constant width is safe because
+    # workers_for_context = cdiv(max_target_query_len, _MAX_CONTEXT_BLOCK_SIZE)
+    # and workers_per_req >= workers_for_context, so every worker's context
+    # partition fits in a single masked tile of _MAX_CONTEXT_BLOCK_SIZE lanes;
+    # lanes beyond the partition are masked off by the kernel.
+    block_size_kernel = _MAX_CONTEXT_BLOCK_SIZE
 
     if kv_cache_block_size % block_size != 0:
         raise ValueError("The physical KV block size must be divisible by the kernel block size.")
