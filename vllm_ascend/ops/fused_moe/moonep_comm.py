@@ -61,6 +61,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
@@ -281,15 +282,12 @@ def _warmup_aicpu_custom_scheduler() -> bool:
         capturing = False
     if capturing:
         # 图捕获期间不能插新算子、更不能 host 同步。
-        print(f"[moonep-init r{rank}] stage=aicpu-warmup skipped (capturing)", flush=True)
+        logger.info("[moonep-init r%s] stage=aicpu-warmup skipped (capturing)", rank)
         return False
     try:
         op = getattr(torch.ops._C_ascend, _AICPU_WARMUP_OP)
     except Exception:  # noqa: BLE001 - 别的模型/版本可能没有这个算子
-        print(
-            f"[moonep-init r{rank}] stage=aicpu-warmup skipped (op {_AICPU_WARMUP_OP} not registered)",
-            flush=True,
-        )
+        logger.info("[moonep-init r%s] stage=aicpu-warmup skipped (op %s not registered)", rank, _AICPU_WARMUP_OP)
         return False
     dev = f"npu:{torch.npu.current_device()}"
     lens = torch.ones(1, dtype=torch.int32, device=dev)
@@ -317,14 +315,15 @@ def _warmup_aicpu_custom_scheduler() -> bool:
         )
         torch.npu.synchronize()
     except Exception as exc:  # noqa: BLE001 - 预热失败不许改变原有行为
-        print(
-            f"[moonep-init r{rank}] stage=aicpu-warmup FAILED "
-            f"({type(exc).__name__}: {exc}) —— AICPU custom 调度器可能没起来，"
-            f"后续 aicpu 算子（A5 attention metadata）有挂住的风险",
-            flush=True,
+        logger.warning(
+            "[moonep-init r%s] stage=aicpu-warmup FAILED (%s: %s) —— "
+            "AICPU custom 调度器可能没起来，后续 aicpu 算子（A5 attention metadata）有挂住的风险",
+            rank,
+            type(exc).__name__,
+            exc,
         )
         return False
-    print(f"[moonep-init r{rank}] stage=aicpu-warmup done op={_AICPU_WARMUP_OP}", flush=True)
+    logger.info("[moonep-init r%s] stage=aicpu-warmup done op=%s", rank, _AICPU_WARMUP_OP)
     return True
 
 
@@ -386,7 +385,7 @@ class _MoonEPRuntime:
                 "MoonEP: no MoE layers registered (register_moonep_layer). "
                 "MoE layers must be created before the first forward."
             )
-        print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=creating-buffers nkeys={len(keys)}", flush=True)
+        logger.info("[moonep-init r%s] stage=creating-buffers nkeys=%s", get_ep_group().rank_in_group, len(keys))
         # Validate + create every Buffer *before* the single collective init.
         for E, K, H, nle in keys:
             if E % R != 0:
@@ -422,10 +421,13 @@ class _MoonEPRuntime:
                 )
                 for cap in capacities
             }
-            print(
-                f"[moonep-init r{get_ep_group().rank_in_group}] stage=pool-ready "
-                f"E={E} K={K} H={H} capacities={capacities}",
-                flush=True,
+            logger.info(
+                "[moonep-init r%s] stage=pool-ready E=%s K=%s H=%s capacities=%s",
+                get_ep_group().rank_in_group,
+                E,
+                K,
+                H,
+                capacities,
             )
             # Static [S_max, *] workspace shared across layers of one shape.
             # Each call overwrites the real prefix; kernels ignore the tail.
@@ -466,9 +468,10 @@ class _MoonEPRuntime:
             # （2026-09-09：uid 卡 init_with_buffer:182，ipport 可到首层 MoE
             # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP_TYPE=uid 覆盖。
             bootstrap = envs.MOONEP_SHMEM_BOOTSTRAP_TYPE
-            print(
-                f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter bootstrap_type={bootstrap}",
-                flush=True,
+            logger.info(
+                "[moonep-init r%s] stage=shmem-init-enter bootstrap_type=%s",
+                get_ep_group().rank_in_group,
+                bootstrap,
             )
             if bootstrap == "ipport":
                 # Config-store bootstrap (the path ascend-moonep's own multi-rank
@@ -508,12 +511,14 @@ class _MoonEPRuntime:
                 )
             else:
                 ShmemRuntime.init_with_buffer(group=group, enable_udma=use_udma, prefetch_overlap=prefetch_overlap)
-            print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
+            logger.info("[moonep-init r%s] stage=shmem-init-done", get_ep_group().rank_in_group)
         qp_layout = ShmemRuntime.require_udma_prefetch_overlap() if prefetch_overlap else None
         if qp_layout is not None:
-            print(
-                f"[moonep-udma-qp] allocated={qp_layout[0]} dispatch_count={qp_layout[1]} prefetch_qp={qp_layout[2]}",
-                flush=True,
+            logger.info(
+                "[moonep-udma-qp] allocated=%s dispatch_count=%s prefetch_qp=%s",
+                qp_layout[0],
+                qp_layout[1],
+                qp_layout[2],
             )
         # Check effective context flags once at initialization. Planning is
         # native in this SDK; the other three stages support UDMA.
@@ -531,10 +536,14 @@ class _MoonEPRuntime:
                 if actual != expected_backends:
                     raise RuntimeError(f"MoonEP backend mismatch: requested={expected_backends}, effective={actual}")
                 backends = " ".join(f"{name}={'udma' if enabled else 'mte'}" for name, enabled in actual.items())
-                print(
-                    f"[moonep-backend r{get_ep_group().rank_in_group}] "
-                    f"E={experts} K={topk} H={hidden} S={cap} {backends}",
-                    flush=True,
+                logger.info(
+                    "[moonep-backend r%s] E=%s K=%s H=%s S=%s %s",
+                    get_ep_group().rank_in_group,
+                    experts,
+                    topk,
+                    hidden,
+                    cap,
+                    backends,
                 )
         dev = torch.npu.current_device()
         torch.npu.synchronize(dev)
@@ -547,11 +556,15 @@ class _MoonEPRuntime:
         torch.npu.empty_cache()
         free_after, _ = torch.npu.mem_get_info(dev)
         released_layers = sum(bool(getattr(st, "_released", False)) for st in self._states)
-        print(
-            f"[moonep-release r{ep_group.rank_in_group}] home_backed_layers={released_layers}/{len(self._states)} "
-            f"torch_allocated_released_bytes={allocated_before - torch.npu.memory_allocated(dev)} "
-            f"device_free_delta_bytes={free_after - free_before} device_free_bytes={free_after}",
-            flush=True,
+        logger.info(
+            "[moonep-release r%s] home_backed_layers=%s/%s torch_allocated_released_bytes=%s "
+            "device_free_delta_bytes=%s device_free_bytes=%s",
+            ep_group.rank_in_group,
+            released_layers,
+            len(self._states),
+            allocated_before - torch.npu.memory_allocated(dev),
+            free_after - free_before,
+            free_after,
         )
 
 
@@ -586,9 +599,9 @@ def ensure_runtime_initialized() -> None:
     # （/proc/environ 只反映 exec 时刻，运行时可能有重注入，故在初始化点直接打印）。
     import os as _os_audit
 
-    print(
-        "[moonep-env-audit] "
-        + " ".join(
+    logger.info(
+        "[moonep-env-audit] %s",
+        " ".join(
             f"{k}={_os_audit.environ.get(k, '<unset>')}"
             for k in (
                 "MOONEP_PLANNING_SOURCE_DEDUPLICATION_ENABLED",
@@ -596,7 +609,6 @@ def ensure_runtime_initialized() -> None:
                 "MOONEP_MIN_DISPATCH_TOKENS",
             )
         ),
-        flush=True,
     )
     _MOONEP_RUNTIME._ensure_initialized()
 
@@ -817,9 +829,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         log_key = (quant_type, H)
         if log_key not in self._logged_transports:
             reason = "W4A8MXFP_E4M3_group32" if use_mxfp8 else "existing_BF16_dispatch_path"
-            print(
-                f"[moonep-dispatch-auto] quant_type={quant_type} transport={transport} H={H} reason={reason}",
-                flush=True,
+            logger.info(
+                "[moonep-dispatch-auto] quant_type=%s transport=%s H=%s reason=%s",
+                quant_type,
+                transport,
+                H,
+                reason,
             )
             self._logged_transports.add(log_key)
 
