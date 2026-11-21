@@ -1,0 +1,5 @@
+pr: 22147
+entries:
+  - category: performance
+    text: Use the FLA Chunk32 prefill kernel for supported BF16 gated delta-rule inputs with 128-dimensional heads on A5.
+    hardware: [A5]
