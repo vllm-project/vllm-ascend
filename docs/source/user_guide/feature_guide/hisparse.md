@@ -139,7 +139,8 @@ With `kv_load_failure_policy=recompute`, a failed external import resumes
 from local compute and skips further external lookups for that request.
 
 Pool keys use the `hisparse-v4` namespace and include the target and draft
-checkpoint identities, revisions and page layout. Upgrading from an earlier
+checkpoint identities, revisions, effective model configurations (including
+RoPE settings), and page layout. Upgrading from an earlier
 namespace starts with a cold pool. For local weights, use a versioned directory
 when replacing a checkpoint in a persistent pool. Files overwritten in place
 keep the same model path.

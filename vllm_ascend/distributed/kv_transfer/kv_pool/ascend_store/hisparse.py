@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
 _HISPARSE_CACHE_NAMESPACE = "hisparse-v4"
+_HF_CONFIG_METADATA = frozenset({"_name_or_path", "transformers_version"})
 
 
 def has_hisparse_cache_layout(config: KVCacheConfig | None) -> bool:
@@ -61,6 +62,24 @@ def _checkpoint_identity(model: ModelConfig) -> tuple[str, str | None, str | Non
     return source, model.revision, model.code_revision, str(model.dtype), model.quantization
 
 
+def _without_hf_config_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_hf_config_metadata(item) for key, item in value.items() if key not in _HF_CONFIG_METADATA}
+    if isinstance(value, (list, tuple)):
+        return [_without_hf_config_metadata(item) for item in value]
+    return value
+
+
+def _model_cache_identity(model: ModelConfig) -> tuple[Any, ...]:
+    # Read the loaded HF configs after overrides have been applied. Include the
+    # text config separately because some models resolve it outside the root config.
+    effective_configs = tuple(
+        _without_hf_config_metadata(config.to_dict()) if config is not None else None
+        for config in (getattr(model, "hf_config", None), getattr(model, "hf_text_config", None))
+    )
+    return _checkpoint_identity(model), effective_configs
+
+
 def build_pool_key_namespace(
     vllm_config: VllmConfig, config: KVCacheConfig | None, dcp_size: int, granularity: int
 ) -> str:
@@ -72,11 +91,11 @@ def build_pool_key_namespace(
     speculative = vllm_config.speculative_config
     draft = speculative.draft_model_config if speculative is not None else None
     identity = (
-        _checkpoint_identity(model),
-        _checkpoint_identity(draft) if draft is not None else None,
+        _model_cache_identity(model),
+        _model_cache_identity(draft) if draft is not None else None,
         _hisparse_page_geometry(config, dcp_size, granularity),
     )
-    digest = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
     return f"{_HISPARSE_CACHE_NAMESPACE}:{digest}"
 
 
