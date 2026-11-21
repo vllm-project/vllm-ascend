@@ -14,6 +14,7 @@ LOCAL_HITS = "vllm:prefix_cache_hits_total"
 EXTERNAL_HITS = "vllm:external_prefix_cache_hits_total"
 EXTERNAL_GETS = "vllm:ascend_store_load_get_keys_total"
 DRAFTS = "vllm:spec_decode_num_drafts_total"
+COMPUTED_TOKENS = "local_compute"
 HISPARSE_MISSES = "vllm:hisparse_cache_misses_total"
 
 
@@ -26,6 +27,8 @@ def _metrics(url):
         name = sample.partition("{")[0]
         if name in totals:
             totals[name] += float(value)
+        elif name == "vllm:prompt_tokens_by_source_total" and 'source="local_compute"' in sample:
+            totals[COMPUTED_TOKENS] = totals.get(COMPUTED_TOKENS, 0.0) + float(value)
     return totals
 
 
@@ -53,6 +56,8 @@ def _request(url, model, workload, output_tokens):
     assert len(choice["token_ids"]) == output_tokens
     for field in ("token_logprobs", "top_logprobs"):
         assert len(choice["logprobs"][field]) == output_tokens
+    token_details = result["usage"].get("prompt_tokens_details") or {}
+    choice["cached_tokens"] = token_details.get("cached_tokens")
     return choice
 
 
@@ -78,6 +83,18 @@ def run_arm(url, model, workloads, *, output_tokens=32):
         choices = [future.result() for future in futures]
     after = _metrics(url)
     return choices, {key: after[key] - before[key] for key in before}
+
+
+def assert_external_replay(warm, external, counts, prompt_length):
+    assert counts[LOCAL_HITS] == 0 and counts[EXTERNAL_GETS] > 0, counts
+    cached = []
+    for reference, replay in zip(warm, external, strict=True):
+        hit = replay["cached_tokens"]
+        assert isinstance(hit, int) and hit > 0, "Enable --enable-prompt-tokens-details and verify each request hits"
+        assert hit == reference["cached_tokens"], (hit, reference["cached_tokens"])
+        cached.append(hit)
+    assert counts[EXTERNAL_HITS] == sum(cached), counts
+    assert counts[COMPUTED_TOKENS] == len(cached) * prompt_length - sum(cached), counts
 
 
 def server_config(url):

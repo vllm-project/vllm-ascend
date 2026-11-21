@@ -440,7 +440,9 @@ class MooncakeBackend(Backend):
             self._store_initialized = True
 
     def ensure_initialized(self):
-        if self._store_initialized:
+        # Host staging registers with an already initialized Store. After a
+        # transfer timeout its closed client must stay disabled for this worker.
+        if self._store_initialized or self._host_staging is not None:
             return
 
         with self._store_init_lock:

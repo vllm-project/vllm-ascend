@@ -36,10 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import (
-    has_hisparse_cache_layout,
-    validate_hisparse_decode_config,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hisparse import has_hisparse_cache_layout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
 )
@@ -192,10 +189,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not extra_config.get("load_async", False):
                 # HiSparse publishes imported Host Source pages on receive completion.
                 incompatibilities.append("requires load_async=true")
-            try:
-                validate_hisparse_decode_config(vllm_config, save_decode_cache=self.save_decode_cache)
-            except ValueError as error:
-                incompatibilities.append(str(error))
+            # A one-token prefill chunk may take the decode path. A later
+            # prefill PUT can publish that row before the deferred page copy.
+            hisparse_config = vllm_config.attention_config.hisparse_config
+            if hisparse_config is None or not hisparse_config.eager_host_mirror:
+                incompatibilities.append("requires eager_host_mirror=true for all whole-block saves")
             try:
                 pool_backend_class = get_backend_class(self.backend_name)
                 if pool_backend_class is None:

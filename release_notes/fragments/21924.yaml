@@ -7,15 +7,14 @@ entries:
       transfer engine and a DDR pool. Mooncake uses synchronous Ascend Direct
       transfers with timeout limits that fit the Store batch deadline.
       Both backends require asynchronous request loading (load_async=true).
-      Saving Decode blocks (save_decode_cache=true) also
-      requires eager_host_mirror=true. Mooncake uses independent 64 MiB send and receive DDR staging buffers
+      Whole-block saves require eager_host_mirror=true, including Prefill-only saves. Mooncake uses independent 64 MiB send and receive DDR staging buffers
       per worker for Host Source pages; Indexer pages transfer directly.
       The combination supports single-node colocated Prefill and Decode with
       kv_role=kv_both on MultiConnector and its children. Startup rejects PD
-      disaggregation, multi-node deployments, additional connector types,
+      disaggregation, multi-node deployments, prefill context parallelism, duplicate or additional connectors,
       layerwise transfers, other Store backends and other MemCache protocols. Mooncake FabricMem and
-      SSD modes are excluded from this combination. The hisparse-v4 pool namespace
-      separates target and draft checkpoints, revisions, effective model
+      SSD modes are excluded from this combination. The hisparse-v5 pool namespace
+      separates target and draft checkpoints, resolved revisions, dummy weights, effective model
       configurations such as RoPE settings, and page layouts. Older
-      objects, including hisparse-v3 entries, miss until the new pool is populated.
+      objects, including hisparse-v4 entries, miss until the new pool is populated.
     hardware: [A5]

@@ -17,6 +17,7 @@ from tests.e2e.nightly.single_node.hisparse_ascendstore.replay_helpers import (
     EXTERNAL_GETS,
     EXTERNAL_HITS,
     LOCAL_HITS,
+    assert_external_replay,
     make_workloads,
     require_mtp3,
     reset_local_cache,
@@ -49,6 +50,8 @@ def serving_instance(pytestconfig):
         "store": {"HiSparseConnector", "AscendStoreConnector"},
     }
     assert names == expected[mode], f"Replay mode {mode!r} does not match server connectors {names}"
+    if mode in {"store", "plain-store"}:
+        assert transfer["kv_load_failure_policy"] == "fail"
     if pytestconfig.getoption("--hisparse-replay-mtp"):
         require_mtp3(config)
     return url, served_model(url), mode
@@ -74,8 +77,7 @@ def test_hisparse_prefix_replay(serving_instance, prompt_length, concurrency, py
     if mode in {"store", "plain-store"}:
         reset_local_cache(url)
         external, external_counts = run_arm(url, model, workloads, output_tokens=output_tokens)
-        assert external_counts[LOCAL_HITS] == 0
-        assert external_counts[EXTERNAL_HITS] > 0 and external_counts[EXTERNAL_GETS] > 0
+        assert_external_replay(local, external, external_counts, prompt_length)
         arms.append(("external", external, external_counts))
 
     mtp = pytestconfig.getoption("--hisparse-replay-mtp")
