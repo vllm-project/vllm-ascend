@@ -5,10 +5,166 @@
 
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 PLE_BLOCK_C = 512
 PLE_NUM_WARPS = 8
+
+
+@triton.jit
+def _ple_gate_materialized_kernel(
+    key,
+    value,
+    hidden,
+    nk,
+    nq,
+    nc,
+    previous,
+    current,
+    gated,
+    normed,
+    key_stride,
+    value_stride,
+    eps,
+    H: tl.constexpr,
+    HC: tl.constexpr,
+    BLOCK: tl.constexpr,
+    STAGE: tl.constexpr,
+):
+    t, group = tl.program_id(0), tl.program_id(1)
+    lane = tl.arange(0, BLOCK)
+    mask = lane < H
+    offset = group * H + lane
+    dtype: tl.constexpr = hidden.dtype.element_ty
+    if STAGE == 0:
+        k = tl.load(key + t * key_stride + offset, mask, 0).to(tl.float32)
+        q = tl.load(hidden + t * HC * H + offset, mask, 0).to(tl.float32)
+        kw = tl.load(nk + offset, mask, 0).to(tl.float32)
+        qw = tl.load(nq + offset, mask, 0).to(tl.float32)
+        kn = (k * tl.rsqrt(tl.sum(k * k) / H + eps) * (1.0 + kw)).to(dtype)
+        qn = (q * tl.rsqrt(tl.sum(q * q) / H + eps) * (1.0 + qw)).to(dtype)
+        products = (kn.to(tl.float32) * qn.to(tl.float32)).to(dtype)
+        result = tl.sum(products.to(tl.float32))
+    else:
+        scalar = tl.load(previous + t * HC + group).to(tl.float32)
+        if STAGE == 1:
+            result = scalar / tl.sqrt(float(H))
+        elif STAGE == 2:
+            sign = tl.where(scalar < 0, -1.0, tl.where(scalar > 0, 1.0, 0.0))
+            magnitude = tl.sqrt(tl.maximum(tl.abs(scalar), 1e-6)).to(dtype)
+            result = sign * magnitude
+        elif STAGE == 3:
+            result = tl.sigmoid(scalar)
+        else:
+            v = tl.load(value + t * value_stride + lane, mask, 0).to(tl.float32)
+            g = (scalar * v).to(dtype)
+            gf = g.to(tl.float32)
+            cw = tl.load(nc + offset, mask, 0).to(tl.float32)
+            n = gf * tl.rsqrt(tl.sum(gf * gf) / H + eps) * (1.0 + cw)
+            tl.store(gated + t * HC * H + offset, g, mask)
+            tl.store(normed + t * HC * H + offset, n, mask)
+    if STAGE < 4:
+        # A separate launch consumes this BF16 value. A cast inside the
+        # original fused kernel alone did not preserve these rounding points.
+        tl.store(current + t * HC + group, result)
+
+
+def _ple_gate_bf16(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tokens, width = value.shape
+    hc = hidden.shape[-1] // width
+    gated, normed = torch.empty_like(hidden), torch.empty_like(hidden)
+    if tokens == 0:
+        return gated, normed
+    scratch = [hidden.new_empty((tokens, hc)) for _ in range(4)]
+    for stage in range(5):
+        _ple_gate_materialized_kernel[(tokens, hc)](
+            key,
+            value,
+            hidden,
+            norm_key_w,
+            norm_query_w,
+            norm_conv_w,
+            scratch[max(stage - 1, 0)],
+            scratch[min(stage, 3)],
+            gated,
+            normed,
+            key.stride(0),
+            value.stride(0),
+            eps,
+            H=width,
+            HC=hc,
+            BLOCK=triton.next_power_of_2(width),
+            STAGE=stage,
+            num_warps=4,
+        )
+    return gated, normed
+
+
+def _ple_gate_bf16_fake(key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps):
+    return torch.empty_like(hidden), torch.empty_like(hidden)
+
+
+direct_register_custom_op(
+    op_name="ascend_ple_gate_bf16",
+    op_func=_ple_gate_bf16,
+    mutates_args=[],
+    fake_impl=_ple_gate_bf16_fake,
+)
+
+
+def ple_gate(key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps):
+    if hidden.dtype != torch.bfloat16:
+        from vllm.models.qwen4_exp.common.ops.ple import ple_gate as upstream_gate
+
+        return upstream_gate(key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps)
+    if key.dtype != hidden.dtype or value.dtype != hidden.dtype:
+        raise ValueError("key, value, and hidden must have the same dtype")
+    if key.stride(1) != 1 or value.stride(1) != 1 or not hidden.is_contiguous():
+        raise ValueError("PLE gate requires contiguous hidden and unit key/value inner strides")
+    return torch.ops.vllm.ascend_ple_gate_bf16(key, value, hidden, norm_key_w, norm_query_w, norm_conv_w, eps)
+
+
+@triton.jit
+def _ple_add_outer_kernel(residual, outer, token_map, C: tl.constexpr, BLOCK: tl.constexpr, MAPPED: tl.constexpr):
+    row = tl.program_id(0)
+    if MAPPED:
+        row = tl.load(token_map + row).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    offset = row * C + col
+    first_sum = tl.load(residual + offset, col < C, 0).to(tl.float32)
+    outer_value = tl.load(outer + offset, col < C, 0).to(tl.float32)
+    tl.store(residual + offset, first_sum + outer_value, col < C)
+
+
+def _preserve_aliased_outer(residual, outer):
+    if outer is not None and residual.dtype == torch.bfloat16:
+        if residual.untyped_storage().data_ptr() == outer.untyped_storage().data_ptr():
+            return outer.clone()
+    return outer
+
+
+def _add_outer_after_bf16(residual, outer, token_indices):
+    if outer is not None and residual.dtype == torch.bfloat16:
+        rows = residual.shape[0] if token_indices is None else token_indices.numel()
+        if rows:
+            _ple_add_outer_kernel[(rows, triton.cdiv(residual.shape[1], PLE_BLOCK_C))](
+                residual,
+                outer,
+                token_indices,
+                C=residual.shape[1],
+                BLOCK=PLE_BLOCK_C,
+                MAPPED=token_indices is not None,
+                num_warps=PLE_NUM_WARPS,
+            )
 
 
 @triton.jit
@@ -35,12 +191,14 @@ def _store_ple_conv_output(
             other=0.0,
         )
         ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
-        outer_residual = tl.load(
-            outer_residual_ptr + output_t * C + c_offs,
-            mask=c_mask,
-            other=0.0,
-        )
-        ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
+        if residual_ptr.dtype.element_ty != tl.bfloat16:
+            outer_residual = tl.load(
+                outer_residual_ptr + output_t * C + c_offs,
+                mask=c_mask,
+                other=0.0,
+            )
+            ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
+        # BF16: store the first sum before a second launch adds outer.
     tl.store(
         residual_ptr + output_t * C + c_offs,
         ple_output,
@@ -476,6 +634,7 @@ def ple_conv_spec(
     separate (race-free) state writeback."""
     if query_start_loc is None or num_accepted_tokens is None:
         raise ValueError("query_start_loc and num_accepted_tokens are required for spec decode")
+    outer_residual = _preserve_aliased_outer(residual, outer_residual)
     BLOCK_C = PLE_BLOCK_C
     T, C = inputs.shape
     K = conv_weights.shape[1]
@@ -541,6 +700,7 @@ def ple_conv_spec(
         NULL_STATE_ID=NULL_BLOCK_ID,
         num_warps=PLE_NUM_WARPS,
     )
+    _add_outer_after_bf16(residual, outer_residual, token_indices)
 
 
 def ple_conv_prefill(
@@ -559,6 +719,7 @@ def ple_conv_prefill(
     """Update state and write activated convolution into residual.
     A non-None outer_residual enables both fused residual additions.
     """
+    outer_residual = _preserve_aliased_outer(residual, outer_residual)
     BLOCK_C = PLE_BLOCK_C
     T, C = inputs.shape
     K = conv_weights.shape[1]
@@ -626,6 +787,7 @@ def ple_conv_prefill(
         NULL_STATE_ID=NULL_BLOCK_ID,
         num_warps=PLE_NUM_WARPS,
     )
+    _add_outer_after_bf16(residual, outer_residual, token_indices)
 
 
 def ple_conv_decode(
@@ -644,6 +806,7 @@ def ple_conv_decode(
     token_indices: torch.Tensor | None = None,
 ) -> None:
     """Run decode with channel-contiguous weights and fused state writeback."""
+    outer_residual = _preserve_aliased_outer(residual, outer_residual)
     T, C = inputs.shape
     if token_indices is not None:
         T = token_indices.numel()
@@ -679,3 +842,4 @@ def ple_conv_decode(
         FUSE_RESIDUAL=outer_residual is not None,
         num_warps=PLE_NUM_WARPS,
     )
+    _add_outer_after_bf16(residual, outer_residual, token_indices)

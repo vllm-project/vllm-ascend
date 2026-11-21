@@ -58,6 +58,18 @@ from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
 
 
+class AscendQwen4ExpSparseMoeBlock(upstream_model.Qwen4ExpSparseMoeBlock):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if self.shared_expert is not None:
+            # Scope SiLU materialization to Qwen4Exp's unfused shared expert.
+            # Routed/fused experts and other models retain their native path.
+            self.shared_expert.act_fn.materialize_bf16_silu = True
+
+
+upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock
+
+
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 

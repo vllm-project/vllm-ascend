@@ -24,8 +24,30 @@ from vllm.model_executor.layers.activation import (
     SwigluOAIAndMul,
     SwigluStepAndMul,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.device_op import DeviceOperator
+
+
+def _silu_bf16_and_mul(x: torch.Tensor) -> torch.Tensor:
+    gate, up = x.chunk(2, dim=-1)
+    gate = gate.float()
+    # Keep a real BF16 boundary between SiLU and multiplication. The opaque
+    # custom op prevents graph compilation from fusing away this conversion.
+    activated = (gate * torch.sigmoid(gate)).to(torch.bfloat16)
+    return (activated.float() * up.float()).to(torch.bfloat16)
+
+
+def _silu_bf16_and_mul_fake(x: torch.Tensor) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], x.shape[-1] // 2))
+
+
+direct_register_custom_op(
+    op_name="ascend_silu_bf16_and_mul",
+    op_func=_silu_bf16_and_mul,
+    mutates_args=[],
+    fake_impl=_silu_bf16_and_mul_fake,
+)
 
 
 class AscendQuickGELU(QuickGELU):
@@ -35,7 +57,11 @@ class AscendQuickGELU(QuickGELU):
 
 
 class AscendSiluAndMul(SiluAndMul):
+    materialize_bf16_silu = False
+
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        if self.materialize_bf16_silu and x.dtype == torch.bfloat16:
+            return torch.ops.vllm.ascend_silu_bf16_and_mul(x)
         out = torch_npu.npu_swiglu(x)
         return out
 
