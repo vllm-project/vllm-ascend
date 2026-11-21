@@ -116,6 +116,32 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
+@pytest.mark.parametrize("topk", [8192, 16384, 151936])
+def test_topk_log_softmax_large_topk(topk):
+    """A caller may request log probabilities for most or all of the vocabulary.
+
+    Sizing one gather vector at ``next_power_of_2(topk)`` exceeds unified buffer
+    above a few thousand ids, which failed to compile the kernel and took the
+    engine down rather than failing the request. The cases above only reach
+    topk=64, so the gather has to be exercised at full vocabulary scale here.
+    """
+    torch.manual_seed(42)
+
+    vocab_size = 151936
+    logits = torch.randn((2, vocab_size), dtype=torch.float32, device="npu")
+    token_ids = torch.randint(0, vocab_size, (2, topk), dtype=torch.int64, device="npu")
+
+    actual = compute_token_logprobs(logits, token_ids)
+    expected = torch_compute_token_logprobs(logits, token_ids)
+
+    assert actual.shape == (2, topk)
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-5)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
 def test_topk_log_softmax_edge_cases(vocab_size):
     """

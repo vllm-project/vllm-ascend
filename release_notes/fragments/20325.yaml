@@ -1,0 +1,8 @@
+pr: 20325
+entries:
+  - category: bugfix
+    text: >-
+      Fixed the Ascend log-probability kernel aborting the engine when a request asks for more
+      than a few thousand log probabilities. The gather pass sized a single vector at
+      `next_power_of_2(topk)`, which overflowed unified buffer; it now walks the requested ids
+      in blocks like the vocabulary passes already did.
