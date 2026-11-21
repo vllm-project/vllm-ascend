@@ -1,0 +1,4 @@
+pr: 22734
+entries:
+  - category: performance
+    text: Quantized Qwen4Exp PLE lookup with host-offloaded embeddings is faster for frequently repeated IDs on Ascend 950DT. Each replica now stores its local group scales in NPU memory while the embedding codes stay in host memory.
