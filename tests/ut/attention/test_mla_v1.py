@@ -32,13 +32,11 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
 def test_mla_block_table_uses_actual_native_padding_default():
     speculative = object.__new__(SpeculativeConfig)
-    if vllm_version_is("0.33.0"):
-        speculative.disable_padded_drafter_batch = False
     builder = object.__new__(AscendMLAMetadataBuilder)
     builder.speculative_config = speculative
     builder.graph_pad_size = 8
@@ -1092,51 +1090,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
-
-    @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
-    def test_ascend_mla_metadata_builder_build_full_graph(self, mock_get_cos_and_sin_mla):
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
-        mock_vllm_config.model_config.hf_text_config.mla_use_nope = False
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
-        mock_vllm_config.parallel_config.decode_context_parallel_size = 1
-        mock_device = "cpu"
-        torch.Tensor.pin_memory = lambda x: x  # noqa
-
-        mock_spec_config = MagicMock()
-        mock_spec_config.num_speculative_tokens = 1
-        mock_spec_config.disable_padded_drafter_batch = True
-        mock_vllm_config.speculative_config = mock_spec_config
-
-        builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, mock_device)
-        common_metadata = MagicMock()
-        common_metadata.graph_pad_size = 8
-        common_metadata.num_reqs = 4
-        common_metadata.num_actual_tokens = 5
-        common_metadata.max_query_len = 5
-        common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
-        common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
-        common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4, 5]).int()
-        common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
-        common_metadata.causal = False
-        block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
-        common_metadata.block_table_tensor = block_table
-        mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
-        # Preserve this original MRv1 unpadded-layout contract on both lanes;
-        # main's actual native default is exercised separately above.
-        with patch("vllm_ascend.attention.mla_v1.vllm_version_is", return_value=True):
-            metadata = builder.build(0, common_metadata)
-        self.assertFalse(metadata.causal)
-
-        self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])
-        self.assertEqual(metadata.decode.block_table.shape[0], 8)
 
     def test_determine_chunked_prefill_workspace_size(self):
         mock_vllm_config = MagicMock()
@@ -2675,8 +2628,8 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_rebinds_incompatible_value(self, mock_format_cast):
         """An incompatible reload must rebind instead of raising from ``copy_``.
 
-        v0.33.0 rebinds an incompatible value; main can copy a smaller value
-        into the parameter's existing storage. Both must accept the new shape.
+        Main copies a smaller value into the parameter's existing storage, so
+        the new shape must be accepted.
         """
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
@@ -2706,13 +2659,9 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        if vllm_version_is("0.33.0"):
-            # A re-derived value that no longer fits rebinds the parameter.
-            self.assertNotEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
-        else:
-            # Main copies a smaller value into the parameter's own storage, so
-            # the address captured by graphs is preserved.
-            self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        # Main copies a smaller value into the parameter's own storage, so
+        # the address captured by graphs is preserved.
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
         self.assertEqual(
             self.impl.W_UV.shape,
             (self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim),

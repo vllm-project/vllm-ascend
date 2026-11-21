@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pcp_group, get_pp_group
+from vllm.distributed import get_pp_group
 
 # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
 # torch_utils.async_tensor_h2d (gaining out=/device=None support).
@@ -37,12 +37,10 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
     from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -91,28 +89,6 @@ class AscendPCPManager(PCPManager):
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
-
-    # vLLM 0.33.0 lacks the runner hook introduced by upstream #61994.
-    # Other supported versions inherit PCPManager.sync_drafts directly.
-    # Remove this block and the propose() calls when dropping 0.33.0.
-    # DFlash/DSpark return full-width row slices of contiguous draft buffers.
-    if vllm_version_is("0.33.0"):
-
-        def sync_drafts(
-            self,
-            draft_tokens: torch.Tensor,
-            idx_mapping: torch.Tensor,
-            draft_logits: "torch.Tensor | DraftLogitsCache | None",
-        ) -> None:
-            """Broadcast completed proposals in place, as the upstream hook does."""
-            pcp_group = get_pcp_group()
-            pcp_group.broadcast(draft_tokens, src=0)
-            if draft_logits is not None:
-                # Older paired versions store a Tensor instead of DraftLogitsCache.
-                logits_buffer = draft_logits if isinstance(draft_logits, torch.Tensor) else draft_logits.values
-                logits = logits_buffer[idx_mapping]
-                pcp_group.broadcast(logits, src=0)
-                logits_buffer[idx_mapping] = logits
 
     def __init__(
         self,

@@ -12,21 +12,17 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm_ascend.utils import vllm_version_is
-
 ROOT = Path(__file__).parents[3]
 
 
 @pytest.fixture(name="runtime")
 def runtime_fixture(monkeypatch):
-    release = vllm_version_is("0.33.0")
     for name in ("vllm_ascend", "vllm_ascend.kv_trace", "vllm"):
         package = ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
 
     utils = ModuleType("vllm_ascend.utils")
-    monkeypatch.setattr(utils, "vllm_version_is", lambda version: release and version == "0.33.0", raising=False)
     monkeypatch.setitem(sys.modules, "vllm_ascend.utils", utils)
 
     def load(name, path):
@@ -72,7 +68,7 @@ def runtime_fixture(monkeypatch):
     return runtime
 
 
-def message(bindings=None, computed=None, counts=None, cached=None, finished=(), preempted=(), resumed=()):
+def message(bindings=None, computed=None, counts=None, cached=None, finished=(), preempted=()):
     bindings = {"r": [[1]]} if bindings is None else bindings
     computed = computed or {}
     counts = {request: 1 for request in bindings} if counts is None else counts
@@ -86,7 +82,6 @@ def message(bindings=None, computed=None, counts=None, cached=None, finished=(),
             req_ids=list(cached),
             new_block_ids=[value[0] for value in cached.values()],
             num_computed_tokens=[value[1] for value in cached.values()],
-            resumed_req_ids=set(resumed),
         ),
         num_scheduled_tokens=counts,
         total_num_scheduled_tokens=sum(counts.values()),

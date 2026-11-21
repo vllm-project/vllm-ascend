@@ -157,7 +157,6 @@ def test_select_seq_lens_spec_decode(
     torch.testing.assert_close(seq_lens, expected)
 
 
-@pytest.mark.parametrize("is_release", [False, True])
 @pytest.mark.parametrize(
     ("method", "model_type", "parallel_drafting", "expected"),
     [
@@ -167,22 +166,17 @@ def test_select_seq_lens_spec_decode(
         ("mtp", "qwen3", False, CPU_SEQ_LENS[:NUM_REQS]),
     ],
 )
-def test_select_seq_lens_versioned_parallel_capability(
-    monkeypatch,
-    is_release: bool,
+def test_select_seq_lens_reads_the_speculator_capability(
     method: str,
     model_type: str,
     parallel_drafting: bool,
     expected: torch.Tensor,
 ) -> None:
-    monkeypatch.setattr(attention_utils, "vllm_version_is", lambda version: is_release, raising=False)
-    # Main leaves the deprecated flag unset. Release has no capability object.
+    # Every supported pin exposes the capability on the speculator config.
     spec_config = SimpleNamespace(
-        parallel_drafting=parallel_drafting if is_release else None,
+        speculator_config=SimpleNamespace(parallel_drafting=parallel_drafting),
         use_dspark=lambda: method == "dspark",
     )
-    if not is_release:
-        spec_config.speculator_config = SimpleNamespace(parallel_drafting=parallel_drafting)
 
     seq_lens = _select_seq_lens(_common_attn_metadata(), None, spec_config, _vllm_config(model_type))
 

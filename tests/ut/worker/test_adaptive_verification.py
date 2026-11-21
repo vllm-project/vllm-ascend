@@ -1,4 +1,3 @@
-import importlib
 from contextlib import nullcontext
 from functools import partial
 from types import SimpleNamespace
@@ -23,7 +22,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuil
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadataBuilder
 from vllm_ascend.patch.worker import patch_model_runner
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -99,18 +97,6 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     assert get_mrv2_in_profile_run() is False
 
 
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
-    import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
-
-    allocator = Mock()
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget", allocator, raising=False)
-    monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object(), raising=False)
-    module = importlib.import_module("vllm_ascend.patch.worker.patch_adaptive_verification")
-    importlib.reload(module)
-
-    assert adaptive._assign_draft_token_budget_compiled is allocator
-
-
 @pytest.mark.parametrize(
     "local_reqs,dp_reqs,target_capacity,expected_reqs",
     [(1, 3, 16, 1), (0, 3, 16, 3), (0, 1, 8, 1)],
@@ -162,13 +148,12 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     # agreement, before dispatch can enter graph/device/collective execution.
     dispatch = Mock(side_effect=InputsPrepared)
     monkeypatch.setattr(upstream, "dispatch_cg_and_sync_dp", dispatch)
-    sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.full((3,), target_capacity),
         uniform_token_count=None,
         eager=False,
         num_reqs=dp_reqs,
-        **sync_kwargs,
+        max_query_len=None,
     )
     with pytest.raises(InputsPrepared):
         spec.propose(

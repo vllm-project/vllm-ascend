@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
@@ -51,11 +50,9 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     UpdatableGraph attention-parameter updates on replay).
     """
 
-    if not vllm_version_is("0.33.0"):
-
-        def supports_batch_sharded_draft_logits(self) -> bool:
-            # NPU draft-logits kernels index the cache by request state.
-            return False
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # NPU draft-logits kernels index the cache by request state.
+        return False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -73,8 +70,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         # Transformers validates Step3.5 layer_types against num_hidden_layers
         # and may leave only the base-layer entries. The MTP draft model builds
         # layers at num_hidden_layers + k, so make the draft config cover those
-        # layer indices before the model is constructed. This can be removed when
-        # v0.33.0 is supported.
+        # layer indices before the model is constructed.
         hf_config = self.draft_model_config.hf_config
         layer_types = getattr(hf_config, "layer_types", None)
         num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
@@ -123,11 +119,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY if cudagraph_mode.has_full_cudagraphs() else CUDAGraphMode.NONE
             )
-        decode_query_lens = (
-            self.num_speculative_steps + 1
-            if vllm_version_is("0.33.0")
-            else self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
-        )
+        decode_query_lens = self.vllm_config.get_decode_cudagraph_query_lens(self.num_speculative_steps + 1)
         self.cudagraph_manager = AutoRegressiveAclGraphManager(
             self.vllm_config,
             self.device,

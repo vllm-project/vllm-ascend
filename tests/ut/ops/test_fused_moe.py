@@ -3111,12 +3111,13 @@ def _stub_moe_runner_init(
 def test_runner_preserves_native_shared_scaling(monkeypatch, divide_shared, dtype, with_shared):
     runner = _stub_moe_runner_init(monkeypatch, divide_shared_output_in_fp16=divide_shared)
     runner.routed_scaling_factor = 2.0
-    if not vllm_version_is("0.33.0"):
+    if not vllm_version_is("0.34.0"):
         assert runner.divide_shared_output_in_fp16 is divide_shared
     shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
     fused = torch.full((2, 4), 3.0, dtype=dtype)
     shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
-    divides = (vllm_version_is("0.33.0") or divide_shared) and with_shared and dtype == torch.float16
+    # v0.34.0's runner has no per-layer guard and always divides fp16 shared output.
+    divides = with_shared and dtype == torch.float16 and (divide_shared or vllm_version_is("0.34.0"))
     torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
     if shared is not None:
         torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)
@@ -3381,7 +3382,7 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("with_shared", [False, True])
 def test_runner_preserves_native_routed_scale_mode(monkeypatch, mode_name, dtype, with_shared):
-    main = not vllm_version_is("0.33.0")
+    main = not vllm_version_is("0.34.0")
     mode = None
     if main:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode

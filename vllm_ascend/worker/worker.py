@@ -569,7 +569,9 @@ class NPUWorker(GPUWorker):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        if vllm_version_is("0.33.0"):
+        # v0.34.0 still resets LoRA state here; the replacement hook landed on
+        # main after the release branch was cut.
+        if vllm_version_is("0.34.0"):
             self.model_runner.reset_lora_state()
         else:
             self.model_runner.on_target_weights_replaced()
@@ -1486,11 +1488,7 @@ class NPUWorker(GPUWorker):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = (
-            getattr(self.model_runner, "uniform_decode_query_len", 1)
-            if vllm_version_is("0.33.0")
-            else self.model_runner.decode_query_len
-        )
+        num_tokens = self.model_runner.decode_query_len
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)

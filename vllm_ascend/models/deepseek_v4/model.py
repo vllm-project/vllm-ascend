@@ -39,9 +39,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from torch import nn
 
-# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class on
-# main; the v0.33.0 lane still ships it under
-# `vllm.transformers_utils.configs.deepseek_v4`.
+# vLLM #61392 switched DeepseekV4Config to the upstream Transformers class.
 from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile

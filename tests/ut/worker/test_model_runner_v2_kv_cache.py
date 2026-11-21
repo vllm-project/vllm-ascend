@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,7 +11,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as upstream
 
 from vllm_ascend.patch.worker import patch_model_runner  # noqa: F401
-from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("is_profiling", [False, True])
@@ -41,11 +40,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     def register_connector(*_args):
         registration_order.append("connector")
 
-    tracker_context: AbstractContextManager[MagicMock | None]
-    if not vllm_version_is("0.33.0"):
-        tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
-    else:
-        tracker_context = nullcontext(None)
+    tracker_context = patch.object(upstream, "get_replayssm_block_copy_tensors", return_value=trackers)
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
         patch.object(upstream, "maybe_create_adaptive_verification_manager", return_value=None),
@@ -63,12 +58,9 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
     assert [id(tensor) for tensor in runner.kv_caches] == [id(tensor) for tensor in (k, v, conv, ssm, single)]
-    if collect_trackers is not None:
-        collect_trackers.assert_called_once_with(runner.compilation_config.static_forward_context)
-        assert runner.replayssm_block_copy_tensors is trackers
-        assert type(runner.replayssm_block_copy_tensors) is list
-    else:
-        assert runner.replayssm_block_copy_tensors is stale_trackers
+    collect_trackers.assert_called_once_with(runner.compilation_config.static_forward_context)
+    assert runner.replayssm_block_copy_tensors is trackers
+    assert type(runner.replayssm_block_copy_tensors) is list
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
     if is_profiling:
         assert registration_order == ["offload"]
@@ -119,13 +111,10 @@ def test_initialize_builds_aux_output_connector_when_enabled():
 
     # The initializer deep-copies the config, so assert against the resolved one
     # (identity shortcut) instead of comparing the original object by value.
-    if vllm_version_is("0.33.0"):
-        get_aux.assert_called_once_with(runner.model, runner.vllm_config, runner.kv_cache_config)
-    else:
-        # Main creates the connector without the KV-cache config and
-        # initializes its storage once the layout is resolved.
-        get_aux.assert_called_once_with(runner.model, runner.vllm_config)
-        connector.initialize_output_storage.assert_called_once_with(runner.kv_cache_config)
+    # Main creates the connector without the KV-cache config and
+    # initializes its storage once the layout is resolved.
+    get_aux.assert_called_once_with(runner.model, runner.vllm_config)
+    connector.initialize_output_storage.assert_called_once_with(runner.kv_cache_config)
     assert runner.aux_output_connector is connector
 
 

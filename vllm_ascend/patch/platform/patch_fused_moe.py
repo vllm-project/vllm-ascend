@@ -141,7 +141,7 @@ def _ascend_FusedMoE(
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.
     scaling_kwargs: dict[str, Any]
-    if vllm_version_is("0.33.0"):
+    if vllm_version_is("0.34.0"):
         scaling_kwargs = {"apply_routed_scale_to_output": apply_routed_scale_to_output}
     else:
         from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode

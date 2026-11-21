@@ -14,7 +14,6 @@ from vllm.v1.request import Request, RequestStatus
 
 from tests.ut.kv_offload.utils import create_model_runner_output, create_scheduler, create_vllm_config
 from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_scheduler(npu_slots: int = 8) -> Scheduler:
@@ -86,8 +85,6 @@ def _capacity(manager: ScoreEncoderCacheManager) -> tuple[int, int, int, int]:
 
 
 def _policy_metadata(scheduler: Scheduler, scheduler_output):
-    if vllm_version_is("0.33.0"):
-        return scheduler_output.ec_manager_metadata
     # These CPU tests check the Score policy, not worker-side transport.
     # MRv1 removal moved this local snapshot outside native SchedulerOutput.
     assert not hasattr(scheduler_output, "ec_manager_metadata")
@@ -99,7 +96,7 @@ def _assert_error_and_finish(scheduler: Scheduler, request: Request, scheduler_o
     assert not scheduler_output.scheduled_encoder_inputs
     outputs = scheduler.update_from_output(
         scheduler_output,
-        ModelRunnerOutput(req_ids=[], **({"req_id_to_index": {}} if vllm_version_is("0.33.0") else {})),
+        ModelRunnerOutput(req_ids=[]),
     )
     assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests

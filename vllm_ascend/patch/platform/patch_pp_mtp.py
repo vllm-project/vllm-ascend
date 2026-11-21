@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import copy
 from functools import wraps
-from itertools import chain
 
 from vllm.logger import logger
 
@@ -167,10 +166,10 @@ def _patch_scheduler_make_cached_request_data() -> None:
     def _patched_make_cached_request_data(
         self,
         running_reqs,
-        resumed_reqs,
         num_scheduled_tokens,
         spec_decode_tokens,
         req_to_new_blocks,
+        iteration_details=None,
     ):
         saved_async = self.scheduler_config.async_scheduling
         use_pp_ipc_runtime_patch = _use_pp_ipc_runtime_patch(
@@ -180,21 +179,31 @@ def _patch_scheduler_make_cached_request_data() -> None:
         try:
             if use_pp_ipc_runtime_patch:
                 self.scheduler_config.async_scheduling = False
-            cached_reqs_data = original_make_cached(
-                self,
-                running_reqs,
-                resumed_reqs,
-                num_scheduled_tokens,
-                spec_decode_tokens,
-                req_to_new_blocks,
-            )
+            if vllm_version_is("0.34.0"):
+                # v0.34.0's helper predates the iteration-details argument.
+                cached_reqs_data = original_make_cached(
+                    self,
+                    running_reqs,
+                    num_scheduled_tokens,
+                    spec_decode_tokens,
+                    req_to_new_blocks,
+                )
+            else:
+                cached_reqs_data = original_make_cached(
+                    self,
+                    running_reqs,
+                    num_scheduled_tokens,
+                    spec_decode_tokens,
+                    req_to_new_blocks,
+                    iteration_details=iteration_details,
+                )
         finally:
             self.scheduler_config.async_scheduling = saved_async
 
         if not saved_async or not use_pp_ipc_runtime_patch or not cached_reqs_data.new_token_ids:
             return cached_reqs_data
 
-        for req_index, req in enumerate(chain(running_reqs, resumed_reqs)):
+        for req_index, req in enumerate(running_reqs):
             if req_index >= len(cached_reqs_data.new_token_ids):
                 break
             if cached_reqs_data.new_token_ids[req_index]:
@@ -228,10 +237,7 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             request.spec_token_ids = []
             continue
 
-        if vllm_version_is("0.33.0"):
-            validated = scheduler.structured_output_manager.validate_tokens(request, spec_token_ids[req_index])
-        else:
-            validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
+        validated = scheduler.structured_output_manager.trim_spec_tokens(request, spec_token_ids[req_index])
         request.spec_token_ids = validated
 
 
@@ -344,8 +350,7 @@ def _apply_patch() -> None:
     _patch_model_runner_output()
     # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
-    if vllm_version_is("0.33.0"):
-        _patch_scheduler_make_cached_request_data()
+    _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
     _patch_model_config_validation()
 

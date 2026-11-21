@@ -33,7 +33,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_slab_view,
 )
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils as attn_utils_v2
 
 
@@ -749,7 +748,7 @@ def test_qsa_block_alignment_reuses_vllm_for_whole_gdn_page(monkeypatch, cache_m
     )
     NPUPlatform._align_hybrid_block_size(config, AscendQSABackend)
     assert cache.block_size == 896
-    expected_mamba_block_size = 896 if cache_mode == "align" or vllm_version_is("0.31.0") else None
+    expected_mamba_block_size = 896 if cache_mode == "align" else None
     assert cache.mamba_block_size == expected_mamba_block_size
     assert cache.mamba_page_size_padded == 896 * 1024
 
@@ -825,21 +824,14 @@ def test_platform_builder_uses_qwen_pool_accounting() -> None:
 
 @pytest.mark.parametrize("manager_block_size", [256, 384, 768])
 def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manager_block_size):
+    import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.worker.utils import AttentionGroup
 
     from vllm_ascend.models.qwen4_exp import qsa
 
-    if vllm_version_is("0.33.0"):
-        import vllm.models.qwen4_exp.common.qsa_cache as qsa_module  # type: ignore[import-not-found]
-
-        QSARawKeyCache = qsa_module.QSAKeyStateCache
-        QSAIndexerBackend = qsa_module.QSAStateBackend
-    else:
-        import vllm.models.qwen4_exp.common.qsa_indexer as qsa_module  # type: ignore[import-not-found]
-
-        QSARawKeyCache = qsa_module.QSARawKeyCache
-        QSAIndexerBackend = qsa_module.QSAIndexerBackend
+    QSARawKeyCache = qsa_module.QSARawKeyCache
+    QSAIndexerBackend = qsa_module.QSAIndexerBackend
 
     groups = [
         KVCacheGroupSpec(
