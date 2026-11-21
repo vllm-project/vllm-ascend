@@ -12,43 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Publish local expert weights to Home, prefetch remote weights into Slots, and build zero-copy MLP views.
+"""Publish local expert weights to Home and manage remote expert prefetch.
 
-Conventional owner-only dispatch sends every row to the rank
-that owns its expert. Under skewed routing that concentrates rows on the hot
-expert's rank. The MoonEP planning kernel can instead keep some rows *local*
-and mark their (remote) expert in ``plan.experts_to_copy``; the rank then
-prefetches that expert's weights into one of its B slots (SHMEM RMA) and
-computes the rows locally against the [epn+B] weight alias. Loads stay
-balanced across ranks without vLLM's dynamic EPLB layer — the same trade-off
-MindSpeed-MM_MoonEP's ``shmem_ep_dispatcher`` makes ("perfect load balance").
+For each weight or scale tensor, a Home chunk stores the local expert rows.
+Layers with the same geometry share a Slot pool for remote rows. The SDK
+prefetches through a projection indexed by global expert and Slot IDs.
+Grouped MLP instead reads a zero-copy alias with local Home rows followed
+by Slot rows.
 
-Per layer, per *payload* (bf16: w13 [epn,H,2F] and w2 [epn,F,H]; W4A8MXFP adds
-the two e8m0 scales, four payloads in total — a remote expert is only usable if
-its scales travel with it):
-  home [epn, R, C]  VMM chunk, bf16 *byte carrier* mirroring this rank's local
-                    weight rows (published once at init; inference weights are
-                    static). ``R*C*2`` == the payload's per-expert byte count.
-  slot [B,  R, C]   VMM chunk shared across layers of one shape (B = epn);
-                    filled per step by prefetch_weight with the remote rows of
-                    plan.experts_to_copy
-  full [E+B, R, C]  projection view (home at [rank*epn, ..)) used by the
-                    prefetch kernel (via attached source VAs)
-  alias [epn+B,..]  zero-copy packed view (home rows 0..epn, slot rows epn..)
-                    used as the grouped-matmul weights; shape/stride/dtype/
-                    npu_format are read off the weight tensor at runtime
-
-The prefetch chain only reads ``shape[1:]`` plus the attached source VAs and
-copies ``H*Hp*2`` bytes per expert as flat bytes
-(ascend-moonep/kernels/prefetch.cpp:97-141), so the bf16 carrier is transparent
-for quantized payloads — no library, csrc or kernel change is involved.
-
-Scope: bf16 (AscendUnquantizedFusedMoEMethod) plus quantized layouts whose
-per-expert block is dense (``stride(0)*element_size == numel/E``) — verified
-on-card for W4A8MXFP (uint8 NZ weights + e8m0 ND scales). Anything else raises.
-Used whenever vLLM selects MoonEP/SHMEM. ``enable_moonep`` still controls
-whether MoonEP is available. Quantized payloads follow the same layout
-validation unconditionally; this does not quantize BF16 model weights.
+BF16 carriers describe byte ranges for prefetch. The MLP aliases preserve
+the loaded tensor's dtype and layout, including packed NZ weights and E8M0
+scales for W4A8MXFP. Supported BF16 and W4A8MXFP parameters can use Home as
+their backing storage after publication.
 """
 
 from __future__ import annotations
@@ -237,8 +212,7 @@ def _infer_F(layer, H: int) -> int:
 
     Both layouts keep ``2F`` on the last axis, so only the hidden axis differs:
     bf16 leaves w13 as ``[epn, H, 2F]``, while W4A8MXFP packs 2 values per byte
-    along hidden and transposes to ``[epn, H/2, 2F]`` (measured on card, see
-    docs/moonep_slot_quant.md).
+    along the hidden axis and transposes to ``[epn, H/2, 2F]``.
     """
     w13 = layer.w13_weight
     if w13.dim() != 3 or int(w13.shape[2]) % 2:
@@ -624,11 +598,8 @@ class _LayerWeightState:
 def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int, spec: _PayloadSpec) -> torch.Tensor:
     """Zero-copy [epn+B] alias: home at rows 0..epn, slot after.
 
-    The alias mirrors ``spec.ref`` field by field — NZ payloads are built with
-    the *cast* shape plus their format and then transposed (exactly how
-    ``process_weights_after_loading`` produced the reference), ND payloads copy
-    shape[1:]/stride/storage_offset/format verbatim. On-card spike M4 shows both
-    variants are bit-identical to the real weights on a W4A8MXFP gmm1.
+    Rebuild packed NZ tensors from their pre-transpose shape and format.
+    For ND tensors, reuse the within-row strides and start at the alias base.
     """
     from ascend_moonep.buffer_c import (
         VmmProjection,
@@ -668,8 +639,7 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int, spec: _Paylo
         for alloc, off in ((home_alloc, 0), (slot_alloc, slot_off)):
             va = base + off
             acl_vmm_map(va, int(alloc.size), alloc.mem_handle, 0)
-            # set_access 的 location.id 要物理号，其余 VMM 接口要逻辑号
-            # （docs/cross_repo_fixes.md §3）；buffer_c 里的同类调用都做了这一步。
+            # Access permissions use the physical device ID. Other VMM calls use the logical ID.
             acl_vmm_set_access(va, int(alloc.size), acl_vmm_access_device_id(int(dev)))
             segments.append((va, int(alloc.size), alloc.mem_handle))
     except Exception:
@@ -744,12 +714,10 @@ def _pf_prefetch(buffer, state, plan):
 
 
 def maybe_install_pf_stream(decoder_layers: Iterable[torch.nn.Module]) -> None:
-    """Let the real-plan prefetch hook identify the current MoE layer.
+    """Register decoder pre-hooks that record the current layer's weight identity.
 
-    钩子在库的 `_run_dispatch_on_current_stream` 里触发（planning 之后、
-    dispatch 之前），需要拿到本层的 `_LayerWeightState` 才能发 prefetch。
-    层的识别方式：用 `experts.w13_weight` 的 id 当 key，
-    由 decoder 层的 forward pre-hook 在每层开始时记下。
+    The SDK's after-planning callback uses this identity to retrieve the
+    layer's weight state before issuing the prefetch.
     """
     if _PREFETCH_OVERLAP == "none" or _PF["done"]:
         return
@@ -836,7 +804,7 @@ def _pf_stream_hook(buffer, lookup_slot_state: Callable[[int], _LayerWeightState
         try:
             key = _PF.get("cur_key")
             state = lookup_slot_state(key) if key is not None else None
-            if state is None:  # 本层第一次跑，还没建权重状态
+            if state is None:  # The current layer has no registered weight state.
                 return
             import torch_npu
 
@@ -882,14 +850,11 @@ def run_slot_forward(
     quant_method=None,
     record_before_gmm2: bool = False,
 ):
-    """Prefetch remote slot weights, then run the grouped GEMMs on the aliases.
+    """Consume or issue Slot prefetch, then compute on the Home/Slot views.
 
-    Mirrors MindSpeed shmem_ep_forward's middle section (weights publish is done
-    once at init for inference). Goes through the standard
-    ``build_mlp_compute_input`` + ``apply_slot_mlp`` entry points so bf16 and
-    quantized layers share one operator call with the owner path, and only the
-    weight payloads are swapped for the aliases. Returns the MLP output rows
-    (same order as the dispatched rows) for the caller's combine.
+    The ordinary path waits before the quant-method MLP reads the weights.
+    Home overlap runs GEMM1 for Home rows before waiting for the Slot data.
+    Return the MLP output in dispatched row order and the optional GEMM2 event.
     """
     try:
         capturing = _EXTRA_CTX.capturing

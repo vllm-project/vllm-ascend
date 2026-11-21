@@ -12,42 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""MoonEP (SHMEM symmetric-memory) MoE communication method.
+"""MoonEP communication backend for expert-parallel MoE.
 
-Routes expert-parallel MoE steps through the ``ascend-moonep`` Buffer instead
-of HCCL all-to-all / MC2 token exchange:
+Planning assigns routed rows to local Home experts or redundant Slots.
+The SDK dispatches activations over SHMEM and the weight manager prefetches
+remote experts into the selected Slots. Grouped MLP consumes Home rows
+followed by Slot rows. Weighted combine uses the source rank's FP32 Top-K
+weights and group counts to gather valid expert results.
 
-  * Planning assigns rows to home experts or redundant local slots, then
-    ``buffer.dispatch`` scatters their activations through SHMEM.
-  * Slot prefetch loads the planned remote experts into redundant weight slots;
-    the grouped MLP computes against the packed home/slot weight aliases.
-  * ``buffer.combine_weighted`` applies source-rank FP32 route weights and
-    gathers the K per-token rows before the final BF16 cast.
+Model Runner V2 initializes the SHMEM buffer pools and publishes weights
+after model loading. Each step selects a capacity shared by all EP ranks,
+and kernels use the real token count to exclude unused capacity.
 
-MoonEP/SHMEM always uses this Slot path. The overall ``enable_moonep`` switch
-and the independent MC2 selection policy still control which steps use it.
-
-Integration contract
---------------------
-Rows are prefix-packed by this rank's home expert groups followed by its
-redundant Slot groups. Differences of ``cu_seqlens`` produce the count-mode
-group list for both sets. The standard prepare/finalize and MLP entry points
-are reused with the packed home/slot aliases.
-
-Limitations (POC scope, all fail fast):
-  * no dynamic EPLB / expert maps / mix-placement (plain contiguous expert
-    sharding), and no LoRA,
-  * the MoE layer cannot run inside captured CUDA graphs (collective device
-    kernels): run with ``--enforce-eager`` when ``enable_moonep`` is on,
-  * per-step token count must fit the maximum capacity S
-    (``max_num_batched_tokens``). Steps are dispatched against a pooled
-    capacity (pow2 ladder, min 128) chosen from the rank-symmetric step token
-    count, so short steps do not pay for the full S*K row space.
-  * Each rank's receive capacity is S*K rows. Real token counts bound the
-    planning and dispatch loops; unused capacity contributes no expert load.
-
-The ascend-moonep library is imported lazily so a stock vllm-ascend install
-(without the package or with ``enable_moonep`` off) is unaffected.
+MoonEP requires eager execution, contiguous expert sharding, and more than
+one EP rank. Dynamic EPLB, expert maps, mixed placement, and LoRA are
+unsupported. The SDK is loaded lazily when the backend is used.
 """
 
 from __future__ import annotations
@@ -77,34 +56,23 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatcher
 
 @dataclass
 class MoonEPCombineMetadata:
-    """Carry-over state from token_dispatch to token_combine.
-
-    ``w_trim`` is a *clone* of the per-row route weights: the symmetric
-    dispatch buffers are reused by every MoE layer of the same shape, so the
-    row-aligned weights must be snapshotted at dispatch time.
-    """
+    """Plan, weights, and row counts shared by one dispatch, MLP, and combine."""
 
     plan: object  # ascend_moonep MoonEPCommPlan
     buffer: object  # ascend_moonep Buffer used for this call
-    w_trim: torch.Tensor  # [rows_total] fp32, row-aligned with dispatched rows
     num_tokens: int  # actual (pre-pad) token count of this MoE call
     hidden_shape: torch.Size  # original hidden_states shape (for restore)
-    state: object | None = None  # _LayerWeightState for the selected Slot layer
-    group_list: torch.Tensor | None = None  # [epn+B] int64 counts (slot mode)
-    tail_masked: bool = False  # dispatch used the no-sync full-shard path
-    source_topk_weights_sk: torch.Tensor | None = None
+    group_list: torch.Tensor  # Home and Slot row counts for fused publication
+    source_topk_weights_sk: torch.Tensor  # FP32 Top-K weights on the source rank
+    state: object | None = None  # weight state for the current MoE layer
 
 
-# ---------------------------------------------------------------------------
-# Per-(H, K, E) layer registry. AscendFusedMoE.__init__ registers every MoE
-# layer when enable_moonep is on; the runtime pool is materialized from the
-# registry on the first MoonEP forward (i.e. after the whole model graph has
-# been constructed), because the collective ShmemRuntime init needs the
-# complete descriptor set of all Buffers up front.
-# ---------------------------------------------------------------------------
+# AscendRoutedExperts registers each layer when MoonEP is enabled.
+# V2 load_model then initializes the pools and publishes weights after loading.
+# Collective SHMEM initialization needs the full set of descriptors up front.
 _moonep_layer_registry: list[dict] = []
 _registry_lock = threading.Lock()
-_SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
+_SLOT_TLS = threading.local()  # current layer weight state during dispatch
 
 # Planning, dispatch and combine always use the real token count. Buffer
 # capacity remains independent of the rows included in routing and computation.
@@ -203,12 +171,9 @@ def _moonep_pool_capacities(s_max: int, cost_per_token: int = 32_768) -> list[in
 def _step_token_count(tokens: int):
     """Rank-symmetric token count for this step, or None when unknown.
 
-    ``set_ascend_forward_context`` derives ``max_tokens_across_dp`` from the DP
-    metadata all-reduce (or from the local count without DP), so every rank in
-    the MoE collective reads the same value. A wrong capacity pick would
-    desynchronize the collective rather than merely waste work, hence the
-    conservative fallbacks: unknown context, or DP without metadata -> None
-    (caller uses the full capacity, which every rank agrees on).
+    The forward context takes the maximum from DP token-count metadata,
+    or the local count without DP. Missing context or DP metadata returns
+    None so every EP rank falls back to the full capacity.
     """
     try:
         forward_context = get_forward_context()
@@ -222,7 +187,7 @@ def _step_token_count(tokens: int):
     return max(int(max_across_dp), tokens)
 
 
-def _moonep_slot_count(E: int, epn: int) -> int:
+def _moonep_slot_count(epn: int) -> int:
     """Per-rank redundant expert slots; unset defaults to epn = E/R."""
     configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
     b = int(epn if configured_slot_count is None else configured_slot_count)
@@ -344,9 +309,6 @@ class _MoonEPRuntime:
     def lookup_slot_state(self, weight_id: int):
         return self._state_by_w13.get(weight_id)
 
-    def _slot_states(self) -> list:
-        return getattr(self, "_states", [])
-
     def _ensure_initialized(self):
         with self._lock:
             if self._ready:
@@ -401,7 +363,7 @@ class _MoonEPRuntime:
                 raise ValueError(f"MoonEP: combine requires H % 16 == 0, got H={H}.")
             if K * H * capacity >= 2**31:
                 raise ValueError("MoonEP: S*K exceeds the planning int32 range.")
-            # B (prefetch slots) must equal epn for the planning kernel.
+            # The per-rank Slot count is bounded by the local expert count.
             capacities = _moonep_pool_capacities(int(capacity), cost_per_token=K * H * 2)
             self._buffers[(E, K, H)] = {
                 cap: Buffer(
@@ -411,7 +373,7 @@ class _MoonEPRuntime:
                     E,
                     R,
                     token_padding=1,
-                    B=_moonep_slot_count(E, E // R),
+                    B=_moonep_slot_count(E // R),
                     group=group,
                     explicitly_destroy=True,
                     # Keep the SDK's num_sms default. Planning selects its own
@@ -613,51 +575,31 @@ def ensure_runtime_initialized() -> None:
     _MOONEP_RUNTIME._ensure_initialized()
 
 
-# Host-path constants and caches. Everything here used to be re-evaluated per
-# MoE layer: os.environ lookups, a sorted() of the capacity pool, and vLLM group
-# lookups. At 48 layers/step each microsecond-class cost shows up in the step
-# time (the MoE kernels themselves are only ~0.12 ms/layer), so they are lifted
-# out of the hot path.
+# Cache the capacity ladder for each initialized buffer pool.
 _GEO_CACHE: dict = {}
 
 
 def _geometry(E: int, K: int, H: int) -> dict:
-    """Rank/epn/sorted-capacity for an (E, K, H) pool, computed once."""
+    """Cache the sorted capacities and upper bound of an (E, K, H) pool."""
     geo = _GEO_CACHE.get((E, K, H))
     if geo is None:
-        ep_group = get_ep_group()
-        pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
-        geo = {
-            "rank": ep_group.rank_in_group,
-            "world": ep_group.world_size,
-            "epn": E // ep_group.world_size,
-            "caps": sorted(pool),
-            "s_max": max(pool),
-            "B": int(pool[max(pool)]._require_ctx()["B"]),
-        }
+        caps = sorted(_MOONEP_RUNTIME._buffers[(E, K, H)])
+        geo = {"caps": caps, "s_max": caps[-1]}
         _GEO_CACHE[(E, K, H)] = geo
     return geo
 
 
-# Pre-allocated scratch for the per-layer hot path (space-for-time). The hot
-# path used to allocate ~8 fresh tensors per layer (cu cast, the cat/sub for the
-# counts, the contiguous copies, the weight snapshot's clone+cast+contiguous).
-# Those allocations are what `disp_post` was really spending 0.34 ms on: once
-# the device is saturated the caching allocator blocks while reclaiming blocks,
-# which serialises the host. Reusing out= buffers removes both the kernels and
-# the blocking. Sized for the largest capacity of the pool, so one scratch set
-# per (E, K, H) covers every step.
+# Reuse device-side row-count scratch across layers with the same geometry.
 _SCRATCH: dict = {}
 
 
-def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict:
+def _scratch_for(E: int, K: int, H: int, extra: int, device) -> dict:
     """``extra`` = B, the per-rank prefetch-slot count: the library's cu_seqlens
     has E + B entries, which can exceed E + K."""
     key = (int(E), int(K), int(H))
     sc = _SCRATCH.get(key)
     if sc is not None:
         return sc
-    nvs = int(s_max) * int(K)
     nrows = int(E) + int(extra)
     # cu_pad[0] is zero for the whole run (nothing ever writes index 0), so the
     # per-group row counts come out of a single subtract -- counts[i] =
@@ -671,7 +613,6 @@ def _scratch_for(E: int, K: int, H: int, s_max: int, extra: int, device) -> dict
         "tpe_compat": torch.zeros(int(E), dtype=torch.int32, device=device),
         "counts": torch.empty(nrows, dtype=torch.int64, device=device),
         "own": torch.empty(int(E), dtype=torch.int64, device=device),
-        "w": torch.empty(nvs, dtype=torch.float32, device=device),
     }
     _SCRATCH[key] = sc
     return sc
@@ -794,13 +735,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         source_topk_weights_sk[:T, :K].copy_(topk_weights)
         # SDK validates this compatibility tensor; Planning rebuilds real load
         # from topk_c, independently of these unused histogram values.
-        _pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
-        sc = _scratch_for(E, K, H, max(_pool), buffer._require_ctx()["B"], topk_c.device)
+        sc = _scratch_for(E, K, H, buffer._require_ctx()["B"], topk_c.device)
         tpe = sc["tpe_compat"]
 
         dispatch_scale = None
         if use_mxfp8:
-            h_nvs, dispatch_scale, w_nvs, cu, plan = buffer.dispatch_mxfp8(
+            h_nvs, dispatch_scale, _, cu, plan = buffer.dispatch_mxfp8(
                 hidden_states,
                 route_c,
                 topk_c,
@@ -815,7 +755,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # legacy combine later publishes the MLP output back into that same
             # shard; both are on the current stream, so the GMM has finished
             # reading before that copy is enqueued.
-            h_nvs, w_nvs, cu, plan = buffer.dispatch(
+            h_nvs, _, cu, plan = buffer.dispatch(
                 hidden_c,
                 route_c,
                 topk_c,
@@ -869,13 +809,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Return a disposable view: dispose_tensor() calls Tensor.set_, which
         # must not mutate the SDK's cached dispatch output tensor object.
         hidden_trim = h_nvs[:]
-        # Snapshot row weights into the pre-allocated fp32 workspace before
-        # another dispatch can overwrite the shared SDK weights buffer.
-        w_buf = sc["w"]
-        n = min(int(w_buf.numel()), int(w_nvs.numel()))
-        w_buf[:n].copy_(w_nvs[:n])
-        w_trim = w_buf[:n]
-
         state = getattr(_SLOT_TLS, "state", None)
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
@@ -885,12 +818,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             combine_metadata=MoonEPCombineMetadata(
                 plan=plan,
                 buffer=buffer,
-                w_trim=w_trim,
                 num_tokens=T,
                 hidden_shape=hidden_states.shape,
                 state=state,
                 group_list=local_counts,
-                tail_masked=True,
                 source_topk_weights_sk=source_topk_weights_sk,
             ),
         )
@@ -905,11 +836,9 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         if combine_metadata.source_topk_weights_sk is None:
             raise ValueError("MoonEP Slot combine requires source-rank route weights")
         buffer = combine_metadata.buffer
-        row_counts = None
-        if combine_metadata.tail_masked:
-            row_counts = combine_metadata.group_list
-            if row_counts is None:
-                raise ValueError("Fused publish requires counts for a masked tail")
+        row_counts = combine_metadata.group_list
+        if row_counts is None:
+            raise ValueError("Fused publish requires counts for a masked tail")
         # Native publication writes valid rows and zeros the SHMEM tail.
         # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
         combine_input = hidden_states

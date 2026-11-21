@@ -158,7 +158,7 @@ def _routed_output_is_reduced(layer_name: str) -> bool:
         MoECommType.MC2,
         MoECommType.ALLTOALL,
         MoECommType.FUSED_MC2,
-        MoECommType.SHMEM,
+        MoECommType.MOONEP_SHMEM,
     } or (comm == MoECommType.ALLGATHER and is_sequence_parallel)
 
 

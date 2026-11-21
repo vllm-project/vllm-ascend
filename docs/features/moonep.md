@@ -6,8 +6,13 @@ The integration branch `moonep_main` replays the six MoonEP commits through
 `moonep_v0.30.0` (`8d173bb61238`) on vllm-ascend main (`4e11513255d8`).
 Its verified vLLM revision is `ba15685ab7f4` (main2main 1106).
 The working directory is `/mnt/share/x00893896/vllm_ascend_moonep_integration_main`.
-Model Runner V2 initializes MoonEP after weight loading inside its resource
-cleanup scope. Device and performance validation on this pair is pending.
+Model Runner V2 initializes MoonEP after weight loading. The companion
+`ascend-moonep` checkout is `92f06ff4304d`.
+
+Historical smoke runs on A5-118 with `xzx_moonep_main` exercised Qwen3.6-35B-A3B
+with BF16 dispatch at EP2 and DeepSeek-V4-Flash with MXFP8 dispatch at EP8. Each
+run completed all 16 GSM8K requests and matched 15 reference answers. These
+results describe the tested integration revisions.
 
 ## Previous v0.30.0 migration and validation
 
@@ -41,21 +46,27 @@ numerical-equivalence, sparse-offload feature, or performance qualification.
 - `AscendRoutedExperts` registers the actual owner of expert Parameters.
   Runtime allocation and weight publication occur after model weight loading
   in Model Runner V2, before the first forward.
-- SHMEM communication methods use the v0.30 per-configuration registry.
-  Native hardware-policy selection remains the baseline when MoonEP is off.
-- Dispatch uses real token counts, rank-symmetric capacity selection, and the
-  existing SDK planning/dispatch/prefetch/weighted-combine protocol.
+- `MoECommType.MOONEP_SHMEM` registers `MoonEPCommImpl` when enabled. The
+  hardware policy selects the native backend when MoonEP is off. With
+  `MOONEP_KEEP_MC2=1`, eligible native MC2 and Fused MC2 steps are retained.
+- MoonEP selects a common capacity across EP ranks and dispatches the actual
+  token count through the SDK. Weighted combine uses the source rank's FP32
+  Top-K weights and Home/Slot group counts to process valid rows.
+- `moonep_weight_manager.py` publishes local expert tensors to SHMEM Home,
+  manages shared prefetch Slots, and builds zero-copy Home/Slot MLP views.
+  Supported BF16 and W4A8MXFP parameters can use Home as backing storage after
+  publication. V2 accounts for the net change in live Torch allocations after
+  MoonEP initialization when budgeting the KV cache.
 - `SlotMLPLayerView` supplies Home/Slot aliases to native quant-method hooks.
   Replacing only `MoEMlpComputeInput.weights` is insufficient in v0.30 because
   the hooks obtain tensors from `layer`. The view supplies weights and scales
   without swapping live model Parameters on each forward.
-- BF16 dispatch, automatic W4A8MXFP/MXFP8 dispatch, effective-row unpacking,
-  fused publication, FP32 weighted combine, buffer reuse, capacity pools,
-  optional expert caching, and dispatch/Home-GEMM1 overlap retain their SDK
-  implementation.
-- Prefetch identifies the weight owner at the actual MoE call. Shared experts
-  receive real dispatch, GMM2, and combine milestones; these execution events
-  are not the removed development diagnostics.
+- BF16 and W4A8MXFP/MXFP8 use SDK dispatch and fused publication. The
+  dispatcher's row counts determine the valid portion of the output shard.
+- Layer selection at the MoE call identifies which weights to prefetch.
+  When enabled, the side stream starts prefetch after planning. The main stream
+  waits before the unified MLP, or between Home GEMM1 and Slot GEMM1 in Home
+  overlap mode. Home overlap requires the optional expert cache to be disabled.
 
 MoonEP requires expert parallelism over multiple ranks, contiguous linear
 expert placement, eager execution, and supported unsplit expert tensors.
@@ -63,10 +74,6 @@ Dynamic EPLB, mix placement, expert bias, split expert lists, and MoE LoRA are
 rejected. Home GEMM supports BF16 gated activations from the existing path and
 W4A8MXFP with SiLU; other Home backends fail explicitly.
 Native Off retains its own EPLB and communication paths.
-
-The development timers, load-accounting diagnostics, simulated routing,
-predicted planning, and plan dumps removed from the source branch are not
-reintroduced. Historical experiments remain on the old branch.
 
 ## MoonEP semantic compatibility
 
@@ -117,7 +124,7 @@ defaults are retained:
 | MOONEP_POOL_TOKEN_CAPACITY_TIERS | unset; automatic capacity ladder |
 | MOONEP_POOL_MAX_TIER_COUNT | 32 |
 | MOONEP_POOL_MEMORY_BUDGET_MB | 2048 MiB per-shape estimate, not a global VRAM limit |
-| MOONEP_MIN_DISPATCH_TOKENS | 128; existing minimum selected capacity |
+| MOONEP_MIN_DISPATCH_TOKENS | 128; token-count floor for capacity selection |
 
 SDK-owned planning/deduplication and barrier settings remain documented in
 the companion SDK. Collective settings must agree across EP ranks.
@@ -130,8 +137,9 @@ rejects expandable NPU allocator segments; keep
 SHMEM's device-state getter must have local symbol binding when memfabric is
 loaded in the same worker. Both libraries otherwise export the legacy
 `HybmGetInitDeviceId()` name, allowing SHMEM to read memfabric's uninitialized
-device number and fail initialization. Build the SDK with the SHMEM internal
-visibility fix; keep memfabric installed and normally importable.
+device number and fail initialization. The SDK applies the SHMEM internal visibility patch at build time. It also applies
+a device-ID normalization patch for SHMEM user buffers. Build the SDK with both
+patches and keep memfabric normally importable.
 
 ## Previous v0.30.0 validation environment
 
@@ -148,8 +156,8 @@ inside the new workspace if necessary; preserve the old installed artifacts.
 
 ## Validation handoff
 
-Device validation on the current main2main pair should cover BF16 and MXFP8 operators,
-multiple ranks with empty/uneven batches and changing capacities, prefetch/cache
-event ordering, shared experts, Model Runner V2, model correctness, and
-matched Off/On performance. Preserve raw evidence and report unsupported
-combinations instead of silently changing the requested configuration.
+For changes to dispatch or combine, validate BF16 and MXFP8 on multiple ranks
+with empty and uneven batches, changing capacities, and optional shared experts.
+For changes to weight management, also check the prefetch and cache event order.
+Use matched Off/On configurations for performance comparisons and record the
+exact revisions and settings with the results.

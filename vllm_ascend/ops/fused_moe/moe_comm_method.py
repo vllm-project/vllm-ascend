@@ -74,7 +74,7 @@ def setup_moe_comm_method(moe_config):
         if get_ascend_config().enable_moonep:
             from vllm_ascend.ops.fused_moe.moonep_comm import MoonEPCommImpl
 
-            _MoECommMethods[_moe_config_key(MoECommType.SHMEM, moe_config)] = MoonEPCommImpl(moe_config)
+            _MoECommMethods[_moe_config_key(MoECommType.MOONEP_SHMEM, moe_config)] = MoonEPCommImpl(moe_config)
     else:
         _MoECommMethods[_moe_config_key(MoECommType.ALLGATHER, moe_config)] = AllGatherCommImpl(moe_config)
 

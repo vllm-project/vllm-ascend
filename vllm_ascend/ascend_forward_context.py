@@ -45,7 +45,7 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
-    SHMEM = 4
+    MOONEP_SHMEM = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -504,7 +504,7 @@ def select_moe_comm_method(
         if not keep_mc2:
             if capacity is None or num_tokens > capacity:
                 raise RuntimeError(f"MoonEP step has {num_tokens} tokens, SHMEM capacity is {capacity}")
-            moe_comm_type = MoECommType.SHMEM
+            moe_comm_type = MoECommType.MOONEP_SHMEM
 
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "

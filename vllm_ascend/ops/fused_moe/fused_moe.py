@@ -314,7 +314,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-            MoECommType.SHMEM,
+            MoECommType.MOONEP_SHMEM,
         } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
