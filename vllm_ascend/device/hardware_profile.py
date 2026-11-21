@@ -331,6 +331,9 @@ class HardwareProfile:
     # First row count where the integrated Qwen4Exp HC gate-mix wrapper is
     # faster than the one-row kernel on this hardware family.
     qwen4exp_hc_gate_mix_row_block_min_rows: int = 2048
+    # A3 reuses each block-output row across HC streams for long prefills.
+    # Other profiles retain the per-stream kernel until their crossover is measured.
+    qwen4exp_hc_combine_norm_row_wise_min_rows: int | None = None
 
     def supports(self, capability: HardwareCapability) -> bool:
         """Return whether the exact documented ``capability`` contract is available."""
@@ -435,6 +438,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
             flash_attn_npu_3_models=frozenset({FlashAttentionNpu3Model.MINIMAX}),
+            qwen4exp_hc_combine_norm_row_wise_min_rows=512,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

@@ -1,0 +1,6 @@
+pr: 22538
+entries:
+  - category: performance
+    text: Qwen4Exp HyperConnection combine-norm on A3 now loads each block-output row once and reuses it across HC streams for per-branch norm batches of at least 512 rows, instead of reloading the row in every per-stream program. This reduces memory traffic and program count while preserving the BF16 materialization and FP32 reduction order; shared weights, smaller batches, and other hardware retain the legacy path.
+    model: qwen4exp
+    hardware: [A3]
