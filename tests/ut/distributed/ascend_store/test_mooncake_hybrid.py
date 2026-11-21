@@ -527,10 +527,13 @@ class TestMooncakeHybrid(unittest.TestCase):
         meta.add_request(request)
         worker.prepare_layerwise_step(meta)
         worker.start_load_kv(meta)
-        for _ in range(4):
-            worker.wait_for_layer_load()
-            with attention_transfer_window():
-                pass
+        with patch.object(store, "batch_copy_get", wraps=store.batch_copy_get) as get:
+            for _ in range(4):
+                worker.wait_for_layer_load()
+                with attention_transfer_window():
+                    pass
+        self.assertFalse(worker.has_shared_kv)
+        self.assertEqual(get.call_count, 4)  # One GET per layer, including mixed cache groups.
         for name, array in arrays.items():
             slots = [4] if "state" in name else [1, 2] if "c4" in name else [1, 2, 3, 4]
             np.testing.assert_array_equal(array[slots], saved[name][slots])

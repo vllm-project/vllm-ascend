@@ -923,6 +923,31 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(req_meta.block_ids[index] for index in indices)
 
+    def _copy_range_loads(
+        self,
+        layer_id: int,
+        keys: list[str],
+        buffers: list[list[int]],
+        sizes: list[list[int]],
+        offsets: list[list[int]],
+    ) -> list[int]:
+        if not keys:
+            return []
+        self._stagger_h2d_submit(layer_id)
+        results: list[int] = []
+        for batch_keys, batch_buffers, batch_sizes, batch_offsets in self._range_transfer_batches(
+            keys, buffers, sizes, offsets, self.max_transfer_blocks, self.max_transfer_bytes
+        ):
+            results.extend(
+                require_aligned_batch_results(
+                    "batch_copy_get",
+                    batch_keys,
+                    self.m_store.batch_copy_get(batch_keys, batch_buffers, batch_sizes, batch_offsets),
+                )
+            )
+        _emit_range_debug_event("load", layer_id, sizes, offsets, results)
+        return results
+
     def _handle_range_request(self, req_meta: LayerRangeReqMeta, shared: SharedBlockData) -> None:
         layer_id = req_meta.layer_id
         if self._active_load_indices is None or layer_id == 0:
@@ -936,27 +961,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
-            self._stagger_h2d_submit(layer_id)
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
-            results: list[int] = []
-            for keys, buffers, sizes, offsets in self._range_transfer_batches(
-                active_keys,
-                active_buffers,
-                active_sizes,
-                active_offsets,
-                self.max_transfer_blocks,
-                self.max_transfer_bytes,
-            ):
-                results.extend(
-                    require_aligned_batch_results(
-                        "batch_copy_get",
-                        keys,
-                        self.m_store.batch_copy_get(keys, buffers, sizes, offsets),
-                    )
-                )
-            _emit_range_debug_event("load", layer_id, active_sizes, active_offsets, results)
+            results = self._copy_range_loads(layer_id, active_keys, active_buffers, active_sizes, active_offsets)
             failed_indices = [index for index, result in zip(active_indices, results, strict=True) if result < 0]
             if failed_indices:
                 self._mark_invalid_range_indices(req_meta, failed_indices)
@@ -980,6 +988,55 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.external_slot_release_waiter(source)
         return True
 
+    def _handle_merged_range_loads(self, data: LayerLoadTask) -> None:
+        """Batch ready groups at one layer, retaining each group's failure mask."""
+        keys: list[str] = []
+        buffers: list[list[int]] = []
+        sizes: list[list[int]] = []
+        offsets: list[list[int]] = []
+        groups: list[tuple[LayerTransferTask, LayerRangeReqMeta, SharedBlockData, list[int], set[int]]] = []
+        aborted = self._load_abort_event.is_set()
+        for task in data.transfer_tasks:
+            shared = task.shared_block_data
+            if shared is None:
+                raise RuntimeError("Layerwise range load requires shared block metadata")
+            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+            if not isinstance(req_meta, LayerRangeReqMeta):
+                raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
+            req_meta.layer_id = data.layer_id
+            active = self._group_load_indices.get(task.group_id)
+            if active is None or data.layer_id == 0:
+                active = set(range(len(req_meta.keys)))
+            self._active_load_indices = active
+            indices = [index for index in range(len(req_meta.keys)) if not aborted and index in active]
+            groups.append((task, req_meta, shared, indices, active))
+            keys.extend(req_meta.keys[index] for index in indices)
+            buffers.extend(req_meta.all_buffers[index] for index in indices)
+            sizes.extend(req_meta.all_sizes[index] for index in indices)
+            offsets.extend(req_meta.all_offsets[index] for index in indices)
+
+        # The existing splitter applies to the combined rows. Results remain in
+        # row order, so a failed key is mapped back to its original group/block.
+        results = self._copy_range_loads(data.layer_id, keys, buffers, sizes, offsets)
+        start = 0
+        for task, req_meta, shared, indices, active in groups:
+            end = start + len(indices)
+            failed = [index for index, result in zip(indices, results[start:end], strict=True) if result < 0]
+            if failed:
+                self._mark_invalid_range_indices(req_meta, failed)
+                active.difference_update(failed)
+            self._group_load_indices[task.group_id] = (
+                None if task.final_group_layer or data.layer_id == self.final_layer_id else active
+            )
+            if data.layer_id == self.final_layer_id:
+                for req_id, is_last_chunk in zip(req_meta.req_ids, shared.is_last_chunks, strict=True):
+                    if is_last_chunk:
+                        self.set_finished_request(req_id)
+            start = end
+        if data.layer_id == self.final_layer_id:
+            self._active_load_indices = None
+
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
         layer_id = data.layer_id
         try:
@@ -991,6 +1048,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     return
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
+            if len(data.transfer_tasks) > 1:
+                self._handle_merged_range_loads(data)
+                return
             for task in data.transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:

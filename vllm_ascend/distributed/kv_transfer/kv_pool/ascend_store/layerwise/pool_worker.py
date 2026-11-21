@@ -111,7 +111,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
-        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
+        self.has_shared_kv = has_shared_kv_sources(vllm_config)
         self._step_load_keys: set[str] = set()
         # Request ID -> cache group ID -> request block index -> private pool key.
         self._snapshot_keys: dict[str, dict[int, dict[int, str]]] = {}
@@ -718,7 +718,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
-                if getattr(self, "use_kvpp", False):
+                if getattr(self, "use_kvpp", False) or getattr(self, "has_shared_kv", False):
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
