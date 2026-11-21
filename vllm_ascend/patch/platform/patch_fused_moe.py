@@ -137,6 +137,17 @@ def _ascend_FusedMoE(
     image_sentinel_lo: int = 129257,
     **kwargs,
 ):
+    # vLLM 0.33.0's Ling model passes activation="silu" even for a routed layer
+    # with a configured swiglu_limit, which must clamp after SiLU (vllm#65088).
+    # Ling calls this factory directly from its module, which identifies it.
+    if (
+        kwargs.get("activation") == "silu"
+        and kwargs.get("swiglu_limit") is not None
+        and vllm_version_is("0.33.0")
+        and sys._getframe(1).f_globals.get("__name__") == "vllm.model_executor.models.bailing_moe_v3"
+    ):
+        kwargs["activation"] = "swiglustep"
+
     # Ascend-owned model callers retain the release booleans; native main
     # callers pass the enum introduced by vLLM #66859. Normalize before
     # constructing either the router or the native factory to scale once.
