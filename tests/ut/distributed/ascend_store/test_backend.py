@@ -562,6 +562,16 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         with self.assertRaises(backend_base.BatchResultShapeError):
             b.batch_is_readable(["k1", "k2"])
 
+    def test_put_reports_all_key_success_before_event_publication(self):
+        for result in ([0, 0], [0, -1], [0], RuntimeError("backend fail")):
+            with self.subTest(result=result):
+                backend = self._make_backend()
+                if isinstance(result, Exception):
+                    backend.store.batch_put_from_multi_buffers.side_effect = result
+                else:
+                    backend.store.batch_put_from_multi_buffers.return_value = result
+                self.assertIs(backend.put(["k0", "k1"], [[1], [2]], [[8], [8]]), result == [0, 0])
+
     def test_transfers(self):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.logger"
         for operation, store_method in [

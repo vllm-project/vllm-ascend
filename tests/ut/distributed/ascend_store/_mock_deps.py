@@ -121,6 +121,7 @@ _vllm_mock_modules = [
     "vllm.v1.request",
     "vllm.v1.serial_utils",
     "vllm.v1.worker",
+    "vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
@@ -405,10 +406,33 @@ _kv_interface_mod.CircularBufferSpec = type(  # type: ignore[attr-defined]
     "CircularBufferSpec", (_FakeKVCacheSpec,), {"prefix_cacheable": False}
 )
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.RSWASpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheConfig = _FakeKVCacheConfig  # type: ignore[attr-defined]
+
+
+def _fake_kv_cache_spec_kind(spec):
+    if isinstance(spec, _FakeUniformTypeKVCacheSpecs):
+        spec = next(iter(spec.kv_cache_specs.values()))
+    if isinstance(spec, _FakeMambaSpec):
+        kind = "mamba"
+    elif isinstance(spec, _FakeSlidingWindowSpec):
+        kind = "sliding_window"
+    else:
+        kind = "full_attention"
+    return types.SimpleNamespace(value=kind)
+
+
+def _fake_kv_cache_spec_sliding_window(spec):
+    if isinstance(spec, _FakeUniformTypeKVCacheSpecs):
+        spec = next(iter(spec.kv_cache_specs.values()))
+    return getattr(spec, "sliding_window", None)
+
+
+_kv_interface_mod.get_kv_cache_spec_kind = _fake_kv_cache_spec_kind  # type: ignore[attr-defined]
+_kv_interface_mod.get_kv_cache_spec_sliding_window = _fake_kv_cache_spec_sliding_window  # type: ignore[attr-defined]
 
 
 class _FakeKVCacheSpecRegistry:
@@ -485,6 +509,11 @@ if _MOCK_VLLM_DEPS:
     _ascend_parallel_state = _make_pkg("vllm_ascend.distributed.parallel_state")
     _ascend_parallel_state.get_global_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
     sys.modules["vllm_ascend.distributed.parallel_state"] = _ascend_parallel_state
+    # Load DSpark helpers without importing device-specific proposer modules.
+    sys.modules.setdefault(
+        "vllm_ascend.spec_decode",
+        _make_pkg("vllm_ascend.spec_decode", os.path.join(_vllm_ascend_real_path, "spec_decode")),
+    )
 
 _kv_transfer_real_path = os.path.join(_vllm_ascend_real_path, "distributed", "kv_transfer")
 if _MOCK_VLLM_DEPS:
