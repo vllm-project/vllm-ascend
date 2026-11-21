@@ -54,7 +54,11 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .lightning_indexer import (
+    QSACompressedIndexerMetadataProtocol,
+    QSAIndexerMetadataProtocol,
+    qsa_select_paged_tokens_lightning_v2,
+)
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -184,7 +188,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
     def _metadata(
         self,
-    ) -> tuple[QSAIndexerMetadataProtocol, QSAIndexerMetadataProtocol] | None:
+    ) -> tuple[QSAIndexerMetadataProtocol, QSACompressedIndexerMetadataProtocol] | None:
         """Read paired QSA metadata without a graph-breaking host sync."""
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
@@ -193,7 +197,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             return None
         raw = cast(QSAIndexerMetadataProtocol, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAIndexerMetadataProtocol,
+            QSACompressedIndexerMetadataProtocol,
             metadata[self.compressed_key_cache.prefix],
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
@@ -386,7 +390,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         token_k: torch.Tensor,
         positions: torch.Tensor,
         raw_metadata: QSAIndexerMetadataProtocol,
-        compressed_metadata: QSAIndexerMetadataProtocol,
+        compressed_metadata: QSACompressedIndexerMetadataProtocol,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
@@ -426,7 +430,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _select(
         self,
         query: torch.Tensor,
-        metadata: QSAIndexerMetadataProtocol,
+        metadata: QSACompressedIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
@@ -725,12 +729,12 @@ class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: i
         fast_build: bool = False,
     ):
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        if self.compress_ratio <= 1 or getattr(metadata, "num_prefills", 0):
+        if self.compress_ratio <= 1:
             return metadata
 
         layer = self._main_qsa_layer()
         if layer is None:
-            return metadata
+            raise RuntimeError("QSA compressed metadata builder cannot find its owning attention layer")
 
         requests = int(metadata.seq_lens.shape[0])
         rows = int(metadata.num_actual_tokens)
@@ -779,6 +783,12 @@ class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: i
             requests,
             int(self.compress_ratio),
         )
+        metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        metadata.qsa_score_weights = buffers["score_weights"]
+        if getattr(metadata, "num_prefills", 0):
+            return metadata
+
         prepare_qsa_gbsa_shared(
             metadata.logical_positions,
             metadata.seq_lens,
@@ -788,9 +798,6 @@ class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: i
             buffers["row_block_table"],
             rows,
         )
-        metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
-        metadata.qsa_residual_lengths = buffers["residual_lengths"]
-        metadata.qsa_score_weights = buffers["score_weights"]
         metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
         metadata.qsa_gbsa_cu_query = buffers["cu_query"]
         metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
