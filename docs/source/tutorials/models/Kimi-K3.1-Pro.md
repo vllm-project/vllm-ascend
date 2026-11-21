@@ -1406,7 +1406,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
     ock.mmc.local_service.max.dram.size = 1024GB
     ```
 
-    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total `8589934592` bytes (8 GiB).
+    `world_size=256` is the LocalService communication capacity, not the number of standalone providers to start. The reference starts one provider on each of the eight P/D nodes. Its eight 1 GiB DRAM segments total 8GiB.
 
 === "950DT Products"
 
@@ -2080,7 +2080,7 @@ This guide uses `ock.mmc.local_service.dram.size=1GB` by default. It specifies t
         | grep -E '^memcache_(segment_capacity_bytes|total_capacity_bytes)'
     ```
 
-    For the eight-provider 1 GiB reference, expect eight DRAM segments of `1073741824` bytes and a total of `8589934592` bytes. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
+    For the eight-provider 1 GiB reference, expect eight DRAM segments of 1GiB and a total of 8GiB. MemCache registration ranks are dynamic; do not map a segment rank directly to a model P/D rank. MetaService metrics establish provider registration and capacity, not model-side cache hits.
 
     After the engines and Proxy are ready, send the text and multimodal requests in [Section 6](#6-functional-verification) using `kimi-k3.1-pro`. Inspect the active engine configuration for `MultiConnector`, `backend=memcache`, `use_layerwise=false`, and the client `MMC_LOCAL_CONFIG_PATH`. Repeat a request with the same sufficiently long prefix and correlate the engine's external-cache lookup/load/save logs or metrics with the request and the returned output. Local prefix caching is also enabled; a faster repeated request alone does not prove a MemCache hit.
 
