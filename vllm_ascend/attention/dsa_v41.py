@@ -470,7 +470,12 @@ def _build_swa_chunk_plan(metadata, block_table, num_reqs, block_size, window, n
     plan = None
     if segments is not None and block_table.shape[1] > 0:
         max_blocks = max((segment.num_blocks for segment in segments), default=0)
-        if max_blocks > 0 and max_blocks <= int(block_table.shape[1]):
+        width = int(block_table.shape[1])
+        # The gather indexes the *absolute* block range, not just the longest
+        # row: a segment whose first_block + num_blocks exceeds the table width
+        # would read out of bounds even when every individual count fits.
+        in_bounds = all(segment.first_block + segment.num_blocks <= width for segment in segments)
+        if max_blocks > 0 and max_blocks <= width and in_bounds:
             device = block_table.device
             indices = torch.full((num_reqs, max_blocks), -1, dtype=torch.int64, device=device)
             for row, segment in enumerate(segments):
