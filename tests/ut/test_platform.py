@@ -1191,10 +1191,7 @@ class TestNPUPlatform(TestBase):
                                 for size in decode_sizes
                             }
                         )
-                        self.assertEqual(
-                            config.compilation_config.decode_cudagraph_capture_request_sizes,
-                            expected_decode_sizes,
-                        )
+                        self.assertEqual(config.compilation_config.decode_cudagraph_capture_request_sizes, expected_decode_sizes)
                         prefill_sizes = config.compilation_config.prefill_cudagraph_capture_token_sizes
                         self.assertTrue(all(size % 4 == 0 for size in prefill_sizes))
                         if max_num_seqs == 1:
@@ -1240,8 +1237,7 @@ class TestNPUPlatform(TestBase):
             self.run_compile_backend(config)
 
             assert config.additional_config[MRV2_DECODE_QUERY_LIMITS_KEY] == {6: 4}
-            assert config.scheduler_config.max_num_seqs == 4
-            assert config.scheduler_config.max_num_active_seqs == 1
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
             assert config.compilation_config.decode_cudagraph_capture_request_sizes == [4]
             assert config.compilation_config.cudagraph_capture_sizes == [24]
 
@@ -1283,8 +1279,7 @@ class TestNPUPlatform(TestBase):
                 assert config.compilation_config.cudagraph_capture_sizes == capture_sizes
                 assert config.compilation_config.cudagraph_mode == mode
                 # The graph cap must not shrink eager fallback buffers or admission.
-                assert config.scheduler_config.max_num_seqs == capacity
-                assert config.scheduler_config.max_num_active_seqs == 1
+                assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (capacity, 1)
 
     def test_setup_compile_backend_aligns_adaptive_varlen_grid(self):
         from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
@@ -1356,17 +1351,12 @@ class TestNPUPlatform(TestBase):
                 get_decode_cudagraph_query_lens=lambda _self, _q: {6: 1},
                 get_varlen_decode_cudagraph_token_sizes=upstream_varlen_resolver,
             ),
-            pytest.raises(
-                ValueError,
-                match="Adaptive-verification CUDA graph token sizes",
-            ),
+            pytest.raises(ValueError, match="Adaptive-verification CUDA graph token sizes"),
         ):
             self.run_compile_backend(config)
 
     def test_setup_compile_backend_aligns_single_module_mtp_draft_grid(self):
-        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-            SpeculatorCudaGraphManager,
-        )
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
 
         config = self.mock_main_graph_config(
             tp_size=4,
@@ -1386,8 +1376,7 @@ class TestNPUPlatform(TestBase):
 
             assert config.additional_config[MRV2_DRAFT_DECODE_REQUEST_SIZES_KEY] == [4]
             assert config.get_draft_decode_cudagraph_request_sizes() == [4]
-            assert config.scheduler_config.max_num_seqs == 4
-            assert config.scheduler_config.max_num_active_seqs == 1
+            assert (config.scheduler_config.max_num_seqs, config.scheduler_config.max_num_active_seqs) == (4, 1)
             assert config.compilation_config.cudagraph_capture_sizes == [4]
 
             config._set_cudagraph_sizes()

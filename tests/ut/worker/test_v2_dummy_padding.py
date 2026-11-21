@@ -28,8 +28,7 @@ def runner(buffers):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner._target_uses_flashmla = False
     runner.vllm_config = SimpleNamespace(
-        kv_transfer_config=None,
-        parallel_config=SimpleNamespace(pcp_shard_decode_requests=False),
+        kv_transfer_config=None, parallel_config=SimpleNamespace(pcp_shard_decode_requests=False)
     )
     runner.input_buffers = buffers
     runner.debugger = None
@@ -149,8 +148,7 @@ def test_piecewise_dummy_keeps_queries_and_pads_only_inputs(buffers, num_reqs, v
     assert torch.all(buffers.positions[padded_tokens:] == 99)
     assert not buffers.is_padding[padded_tokens:].any()
     update_rotary.assert_called_once_with(batch.positions)
-    assert buffers.dummy_num_tokens is None
-    assert buffers.dummy_num_reqs is None
+    assert buffers.dummy_num_tokens is buffers.dummy_num_reqs is None
 
 
 def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
@@ -216,8 +214,7 @@ def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode
     ):
         runner._dummy_run(uniform, uniform_decode=True)
     assert collective.call_count == 1
-    assert buffers.dummy_num_tokens is None
-    assert buffers.dummy_num_reqs is None
+    assert buffers.dummy_num_tokens is buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize(
@@ -251,8 +248,7 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
         pytest.raises(RuntimeError, match="test"),
     ):
         runner._dummy_run(1, **kwargs)
-    assert buffers.dummy_num_tokens == 7
-    assert buffers.dummy_num_reqs == 5
+    assert (buffers.dummy_num_tokens, buffers.dummy_num_reqs) == (7, 5)
 
 
 @pytest.mark.parametrize("inner_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
@@ -262,37 +258,32 @@ def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mod
 
     def execute_dummy(num_tokens, **kwargs):
         if num_tokens == 2:
-            assert buffers.dummy_num_tokens == 2
-            assert buffers.dummy_num_reqs == 2
+            assert buffers.dummy_num_tokens == buffers.dummy_num_reqs == 2
             with (
                 patch.object(runner.compilation_config, "cudagraph_mode", inner_mode),
                 pytest.raises(RuntimeError, match="inner dummy"),
             ):
                 runner._dummy_run(6)
-            assert buffers.dummy_num_tokens == 2
-            assert buffers.dummy_num_reqs == 2
+            assert buffers.dummy_num_tokens == buffers.dummy_num_reqs == 2
             return None, None
         assert buffers.dummy_num_tokens == buffers.dummy_num_reqs == 6
         raise RuntimeError("inner dummy")
 
     with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
         runner._dummy_run(2)
-    assert buffers.dummy_num_tokens == 7
-    assert buffers.dummy_num_reqs == 5
+    assert (buffers.dummy_num_tokens, buffers.dummy_num_reqs) == (7, 5)
 
 
 def test_idle_dummy_preserves_zero_logical_batch(buffers, runner):
     def execute_dummy(num_tokens, **kwargs):
         assert num_tokens == 0
-        assert buffers.dummy_num_tokens == 0
-        assert buffers.dummy_num_reqs == 0
+        assert buffers.dummy_num_tokens == buffers.dummy_num_reqs == 0
         return None, None
 
     with patch.object(GPUModelRunner, "_dummy_run", side_effect=execute_dummy):
         runner._dummy_run(0)
 
-    assert buffers.dummy_num_tokens is None
-    assert buffers.dummy_num_reqs is None
+    assert buffers.dummy_num_tokens is buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize("num_tokens,uniform_decode", [(1, False), (1, True), (6, True), (16, False)])
@@ -303,8 +294,7 @@ def test_profile_dummy_keeps_eager_layout(buffers, runner, num_tokens, uniform_d
         assert kwargs["is_profile"]
         query_tokens = max(num_tokens, runner.decode_query_len) if uniform_decode else num_tokens
         num_reqs = query_tokens // runner.decode_query_len if uniform_decode else min(query_tokens, runner.max_num_reqs)
-        assert buffers.dummy_num_tokens == query_tokens
-        assert buffers.dummy_num_reqs == num_reqs
+        assert (buffers.dummy_num_tokens, buffers.dummy_num_reqs) == (query_tokens, num_reqs)
         desc, sync = dispatch_cg_and_sync_dp(
             target,
             num_reqs,
@@ -328,8 +318,7 @@ def test_profile_dummy_keeps_eager_layout(buffers, runner, num_tokens, uniform_d
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
     ):
         runner._dummy_run(num_tokens, uniform_decode=uniform_decode, is_profile=True)
-    assert buffers.dummy_num_tokens is None
-    assert buffers.dummy_num_reqs is None
+    assert buffers.dummy_num_tokens is buffers.dummy_num_reqs is None
 
 
 @pytest.mark.parametrize("num_tokens,expected_mode", [(16, CUDAGraphMode.PIECEWISE), (32, CUDAGraphMode.NONE)])
@@ -338,9 +327,8 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
     context_len = 8
 
     def execute_dummy(num_tokens, **kwargs):
-        assert buffers.dummy_num_tokens == num_tokens
         num_reqs = min(num_tokens, runner.max_num_reqs)
-        assert buffers.dummy_num_reqs == num_reqs
+        assert (buffers.dummy_num_tokens, buffers.dummy_num_reqs) == (num_tokens, num_reqs)
         desc, _ = dispatch_cg_and_sync_dp(target, num_reqs, num_tokens, None, 1, 0)
         assert desc.cg_mode == expected_mode
         batch = AscendInputBatch.make_dummy(num_reqs, desc.num_tokens, buffers, desc.max_query_len)
@@ -363,8 +351,7 @@ def test_context_dummy_keeps_capture_and_tail_layouts(buffers, runner, num_token
         patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
     ):
         runner._dummy_run(num_tokens, context_len=context_len)
-    assert buffers.dummy_num_tokens is None
-    assert buffers.dummy_num_reqs is None
+    assert buffers.dummy_num_tokens is buffers.dummy_num_reqs is None
 
 
 def test_dummy_slot_mapping_uses_padded_persistent_buffer(buffers, runner):
