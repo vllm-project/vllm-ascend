@@ -590,3 +590,59 @@ def test_w4a8_method_apply_forwards_moe_lora_context() -> None:
 
     assert build.call_args.kwargs["lora_context"] is sentinel_ctx
     comm_method.fused_experts.assert_called_once_with(fused_experts_input="built", quant_method=method)
+
+
+def test_w4a8_allgather_dp2_uses_gathered_lora_indices_without_collapsing_minus_one() -> None:
+    lora_context = SimpleNamespace(
+        use_ep=True,
+        ep_rank=1,
+        local_num_experts=2,
+        top_k=1,
+        replicated_batch=False,
+        gathered_lora_indices=torch.tensor([-1, 0], dtype=torch.long),
+    )
+    mlp_input = _make_w4a8_input(
+        hidden_states=torch.randn(2, 4, dtype=torch.bfloat16),
+        expanded_row_idx=torch.tensor([-1, 0], dtype=torch.int32),
+        topk_ids=torch.tensor([[0], [3]], dtype=torch.int32),
+        lora_context=lora_context,
+    )
+    quant_method = _make_w4a8_method()
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.randn(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    stream = Mock(record_event=Mock(return_value=object()))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
+        ),
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            side_effect=[[gate_up_out], [down_out]],
+        ),
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        output, _ = quant_apply_mlp_with_moe_lora(
+            mlp_compute_input=mlp_input,
+            quant_method=quant_method,
+        )
+
+    assert output is down_out
+    expert_per_row, lora_per_row = apply_w13.call_args.kwargs["lora_routing"]
+    # Active row 0 comes from token 1 (adapter 0, global expert 3 -> local expert 1 on ep_rank=1).
+    # Trailing row 1 is inactive (-1 in expanded_row_idx) and must receive lora_slot=-1.
+    assert int(expert_per_row[0]) == 1
+    assert lora_per_row.tolist() == [0, -1]
+    assert apply_w2.call_args.kwargs["lora_routing"][1].tolist() == [0, -1]

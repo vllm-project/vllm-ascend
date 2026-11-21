@@ -46,6 +46,7 @@ _MOE_LORA_INDEX_FIELDS = (
     "split_lora_indices",
     "permuted_lora_indices",
     "exchanged_lora_indices",
+    "gathered_lora_indices",
 )
 
 
@@ -117,6 +118,21 @@ def should_exchange_all2all_lora_indices(lora_context) -> bool:
     return should_disable_all2all_quant_for_lora(lora_context)
 
 
+def should_gather_allgather_lora_indices(lora_context) -> bool:
+    """Return whether AllGather prepare must gather per-token LoRA indices.
+
+    Uses rank-consistent layer slot residency (and ACL graph capture state)
+    so every DP/EP/PCP rank issues the same collective count even when one DP
+    rank serves a base request and another serves an adapter request.
+    """
+    if lora_context is None:
+        return False
+    if _is_lora_graph_capturing():
+        return True
+    slots = getattr(lora_context, "layer_lora_slots", None)
+    return slots is None or bool(slots)
+
+
 def _is_lora_graph_capturing() -> bool:
     if is_forward_context_available():
         if getattr(get_forward_context(), "capturing", False) is True:
@@ -154,6 +170,36 @@ def reset_lora_indices(lora_context) -> None:
             delattr(lora_context, field)
 
 
+def slice_local_lora_indices(
+    lora_context,
+    *,
+    num_tokens: int,
+    pad_size: int = 0,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Slice and right-pad local per-token LoRA indices to match routed tokens.
+
+    Pads inactive/padding positions with ``-1`` (never ``0``, which selects
+    adapter slot 0).
+    """
+    token_indices = lora_context.punica_wrapper.token_lora_indices
+    if token_indices.numel() < num_tokens:
+        token_indices = torch.nn.functional.pad(
+            token_indices,
+            (0, num_tokens - token_indices.numel()),
+            value=-1,
+        )
+    else:
+        token_indices = token_indices[:num_tokens]
+    if pad_size > 0:
+        token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
+    if token_indices.dtype != torch.long:
+        token_indices = token_indices.to(torch.long)
+    if device is not None and token_indices.device != device:
+        token_indices = token_indices.to(device)
+    return token_indices
+
+
 def prepare_lora_indices(
     lora_context,
     *,
@@ -167,17 +213,11 @@ def prepare_lora_indices(
 
     Caller must ensure ``lora_context`` is not ``None``.
     """
-    token_indices = lora_context.punica_wrapper.token_lora_indices
-    if token_indices.numel() < num_tokens:
-        token_indices = torch.nn.functional.pad(
-            token_indices,
-            (0, num_tokens - token_indices.numel()),
-            value=-1,
-        )
-    else:
-        token_indices = token_indices[:num_tokens]
-    if pad_size > 0:
-        token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
+    token_indices = slice_local_lora_indices(
+        lora_context,
+        num_tokens=num_tokens,
+        pad_size=pad_size,
+    )
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
@@ -300,24 +340,48 @@ def _recover_moe_lora_routing_allgather(lora_context, expanded_row_idx, topk_ids
 
     npu_moe_init_routing semantics (verified empirically): ``expanded_row_idx``
     is indexed by the ORIGINAL flat (token, k) position and gives where that
-    pair landed in the expert-sorted array -- not the reverse. So recovering
-    "which (token, k) pair does sorted row i hold" needs the inverse permutation
-    of ``expanded``, not a direct gather by it. ``argsort`` output shape ==
-    input shape (value-independent), so this stays graph-capturable -- no
-    ``.item()``/data-dependent host sync.
+    pair landed in the expert-sorted array -- or ``-1`` when its expert falls
+    outside the rank's ``active_expert_range`` under EP. Sending ``-1`` past
+    all valid indices keeps inactive tail rows from colliding with sorted row 1
+    while keeping ``argsort`` output shape static and graph-capturable. Under
+    DP > 1, looks up ``gathered_lora_indices`` aligned with the gathered tokens
+    rather than the rank-local Punica array.
     """
     top_k = lora_context.top_k
-    expanded = torch.abs(expanded_row_idx).to(torch.float32)
+    flat_expanded = expanded_row_idx.reshape(-1)
+    num_expanded = flat_expanded.numel()
+    expanded = torch.where(
+        flat_expanded >= 0,
+        flat_expanded,
+        torch.full_like(flat_expanded, num_expanded),
+    ).to(torch.float32)
     inv_perm = torch.argsort(expanded)
+    active_row = flat_expanded[inv_perm] >= 0
     expert_per_row = topk_ids.reshape(-1)[inv_perm].to(torch.long)
+    if getattr(lora_context, "use_ep", False):
+        ep_rank = getattr(lora_context, "ep_rank", 0)
+        local_num_experts = getattr(lora_context, "local_num_experts", 0)
+        if ep_rank and local_num_experts:
+            expert_per_row = expert_per_row - ep_rank * local_num_experts
 
-    # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
-    # (host-known constant). Clamping defensively to the last index is a no-op
-    # in normal operation but keeps the gather graph-safe.
+    gathered_lora_indices = getattr(lora_context, "gathered_lora_indices", None)
+    if gathered_lora_indices is not None:
+        token_lora_indices = gathered_lora_indices.reshape(-1).to(torch.long)
+    elif getattr(lora_context, "replicated_batch", True) is False:
+        raise AssertionError("AllGather MoE LoRA under DP > 1 requires gathered_lora_indices in lora_context.")
+    else:
+        # token_lora_indices is a 1D LongTensor sized to max_num_batched_tokens
+        # (host-known constant). Clamping defensively to the last index is a
+        # no-op in normal operation and keeps the gather graph-safe.
+        token_lora_indices = lora_context.punica_wrapper.token_lora_indices
+
     orig_token = inv_perm // top_k
-    token_lora_indices = lora_context.punica_wrapper.token_lora_indices
-    orig_token = orig_token.clamp_(max=token_lora_indices.numel() - 1)
-    lora_per_row = token_lora_indices[orig_token]
+    if token_lora_indices.numel() == 0:
+        lora_per_row = torch.full_like(orig_token, -1, dtype=torch.long)
+    else:
+        orig_token = orig_token.clamp(max=token_lora_indices.numel() - 1)
+        lora_per_row = token_lora_indices[orig_token]
+    lora_per_row = torch.where(active_row, lora_per_row, torch.full_like(lora_per_row, -1))
     return expert_per_row, lora_per_row
 
 
@@ -498,6 +562,7 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        lora_context.ep_rank = self.moe_config.moe_parallel_config.ep_rank
         lora_context.layer_lora_slots = self._lora_slots
         lora_context.replicated_batch = self.moe_config.dp_size == 1
         return lora_context

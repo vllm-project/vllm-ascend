@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -38,6 +39,9 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import (
     prepare_lora_indices,
     should_exchange_all2all_lora_indices,
+    should_gather_allgather_lora_indices,
+    should_use_unfused_quant_moe_for_lora,
+    slice_local_lora_indices,
 )
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_and_split_tokens, _pad_tokens_with_cat
@@ -62,7 +66,7 @@ class PrepareAndFinalize(ABC):
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        self.lora_context = None
+        self.lora_context: Any = None
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg()
 
     def set_lora_context(self, lora_context) -> None:
@@ -464,21 +468,24 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
+        local_sp_tokens = hidden_states.shape[0]
+        device = hidden_states.device
         pertoken_scale = None
-        if quant_type == QuantType.W8A8:
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states,
-                dst_type=torch.float8_e4m3fn,
-                scale_alg=self.dynamic_mx_quant_scale_alg,
-            )
-        elif quant_type == QuantType.W4A4MXFP:
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                hidden_states,
-                dst_type=torch_npu.float4_e2m1fn_x2,
-                round_mode="round",
-            )
+        if not (self.lora_context is not None and should_use_unfused_quant_moe_for_lora(self.lora_context, quant_type)):
+            if quant_type == QuantType.W8A8:
+                hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
+                hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states,
+                    dst_type=torch.float8_e4m3fn,
+                    scale_alg=self.dynamic_mx_quant_scale_alg,
+                )
+            elif quant_type == QuantType.W4A4MXFP:
+                hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states,
+                    dst_type=torch_npu.float4_e2m1fn_x2,
+                    round_mode="round",
+                )
 
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
@@ -487,6 +494,21 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         if pertoken_scale is not None:
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale)
+
+        lora_context = self.lora_context
+        if lora_context is not None and should_gather_allgather_lora_indices(lora_context):
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            lora_indices = slice_local_lora_indices(
+                lora_context,
+                num_tokens=local_sp_tokens * tp_size,
+                device=device,
+            )
+            if tp_size > 1:
+                lora_indices = lora_indices[tp_rank * local_sp_tokens : (tp_rank + 1) * local_sp_tokens]
+            lora_context.gathered_lora_indices = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                lora_indices.contiguous()
+            )
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
@@ -512,6 +534,21 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
+        lora_context = self.lora_context
+        gather_lora_indices = (
+            lora_context is not None
+            and (self.moe_config.dp_size > 1 or self.moe_config.pcp_size > 1)
+            and should_gather_allgather_lora_indices(lora_context)
+        )
+        lora_indices: torch.Tensor | None = (
+            slice_local_lora_indices(
+                lora_context,
+                num_tokens=hidden_states.shape[0],
+                device=hidden_states.device,
+            )
+            if gather_lora_indices
+            else None
+        )
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -520,10 +557,14 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if lora_indices is not None:
+                    lora_indices = nn.functional.pad(lora_indices, (0, pad_size), value=-1)
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+            if lora_indices is not None:
+                lora_indices = self.moe_config.dp_group.all_gather(lora_indices.contiguous(), 0)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -533,6 +574,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if lora_indices is not None:
+                    lora_indices = nn.functional.pad(lora_indices, (0, pad_size), value=-1)
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -542,6 +585,12 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 router_logits,
                 dim=0,
             )
+            if lora_indices is not None:
+                lora_indices = get_pcp_group().all_gather(lora_indices.contiguous(), dim=0)
+
+        if lora_indices is not None:
+            assert lora_context is not None
+            lora_context.gathered_lora_indices = lora_indices
 
         return MoEPrepareOutput(
             hidden_states=hidden_states,
