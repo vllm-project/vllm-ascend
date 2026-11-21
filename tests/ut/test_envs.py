@@ -75,7 +75,11 @@ class TestEnvVariables(TestBase):
         # The expected defaults are spelled out on purpose: deriving them from
         # the implementation would let a wrong default still pass the assertions
         # below.
-        expected_defaults = {"COMPILE_CUSTOM_KERNELS": True, "VERBOSE": False}
+        expected_defaults = {
+            "COMPILE_CUSTOM_KERNELS": True,
+            "VERBOSE": False,
+            "VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY": False,
+        }
         # Fail loudly if a boolean variable is added without covering it here.
         self.assertEqual(set(expected_defaults), self.boolean_vars)
 

@@ -145,6 +145,9 @@ def selection(monkeypatch, profiles):
         ),
         "_validate_fa3_backend": lambda *args: False,
         "_validate_flash_attn_backend": lambda *args: False,
+        # The B1 gate is opt-in and off by default; keep the extracted selector
+        # runnable without pulling in the full platform module.
+        "_want_b1_paged_verify": lambda *args: False,
     }
     path = ROOT / "vllm_ascend/platform.py"
     execute_nodes(

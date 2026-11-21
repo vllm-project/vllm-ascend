@@ -342,6 +342,7 @@ Recommended tuning order:
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
 | MXFP4 quantization | `--quantization ascend` | Reduces weight and activation memory and uses Ascend MXFP4 operators. | Required for the MXFP4 checkpoints; omit it for BF16 weights. |
+| MTP paged verify | `VLLM_ASCEND_ENABLE_B1_PAGED_VERIFY=1` with MTP speculative decoding | Captures the head_dim=512 MTP verify step in `FULL_DECODE_ONLY` ACLGraph. | Opt-in and disabled by default. Required for Gemma4 MTP on Atlas A2/A3; not needed on A5. |
 
 ## 10 FAQ
 
