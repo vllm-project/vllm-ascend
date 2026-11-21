@@ -73,7 +73,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在 Huawei A
 - 软件：
     - Python == 3.12
     - CANN == 9.2.1 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/latest/softwareinst/releasenote/9.2.1/release-notes.md))
-    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post7
+    - PyTorch == 2.14.0, TorchNPU == 2.14.0
     - vLLM （与vllm-ascend版本一致）
 
 ## 访问昇腾NPU

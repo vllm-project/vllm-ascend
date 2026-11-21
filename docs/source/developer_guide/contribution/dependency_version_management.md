@@ -2,15 +2,15 @@
 
 This page lists the pinned dependency stack of vLLM Ascend that changes most
 often: which files to update when a version changes, and where each component
-is installed from. The versions shown are example values of one known-good
-stack.
+is installed from. The example versions below follow the pins on the development branch.
 
 ## Pinned dependency stack
 
 | Component | Example version | Files to update | Installed from |
 |---|---|---|---|
-| torch | 2.10.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | PyTorch CPU index <https://download.pytorch.org/whl/cpu/> (images), PyPI <https://pypi.org/simple/> (CI) |
-| torch-npu | 2.10.0.post7 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
+| torch | 2.14.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]`<br>`CMakeLists.txt` | PyTorch CPU index <https://download.pytorch.org/whl/cpu/> (images), PyPI <https://pypi.org/simple/> (CI) |
+| torch-npu | 2.14.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
+| torchvision / torchaudio | 0.29.0 / 2.11.0 | `requirements.txt` | PyTorch CPU index (images), PyPI (CI) |
 | triton-ascend | 3.6.0.post2 | `requirements.txt`<br>`pyproject.toml` `[build-system]`<br>`.github/workflows/_selected_tests.yaml`<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
 | memfabric-hybrid / memcache-hybrid | 1.3.0 | `requirements.txt`<br>`pyproject.toml` `[build-system]` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi> |
 | flash-linear-attention-npu (FLA) | 26.10.0+feature | Image build —<br>`Dockerfile`<br>`Dockerfile.openEuler`<br>`Dockerfile.a3`<br>`Dockerfile.a3.openEuler`<br>`Dockerfile.a5`<br>`Dockerfile.a5.openEuler`<br>PR —<br>`.github/workflows/_selected_tests.yaml`<br>`_selected_tests_upstream.yaml`<br>`schedule_e2e_upstream_test.yaml`<br>main2main —<br>`.github/workflows/schedule_main2main.yaml` | Ascend mirror (stable) <https://mirrors.huaweicloud.com/ascend/repos/pypi>; the `v26.10.0-feature` release is published as `26.10.0+feature` for both x86_64 and aarch64, and pip selects the matching wheel |
@@ -30,13 +30,17 @@ file. The `-` lines use the example versions from the table; replace
 ### `requirements.txt`
 
 ```diff
--torch==2.10.0
--torch-npu==2.10.0.post7
+-torch==2.14.0
+-torch-npu==2.14.0
+-torchvision==0.29.0
+-torchaudio==2.11.0
 -triton-ascend===3.6.0.post2
 -memfabric-hybrid===1.3.0
 -memcache-hybrid===1.3.0
 +torch==<new-version>
 +torch-npu==<new-version>
++torchvision==<compatible-torchvision-version>
++torchaudio==<compatible-torchaudio-version>
 +triton-ascend===<new-version>
 +memfabric-hybrid===<new-version>
 +memcache-hybrid===<new-version>
@@ -45,8 +49,8 @@ file. The `-` lines use the example versions from the table; replace
 ### `pyproject.toml` `[build-system]`
 
 ```diff
--    "torch-npu==2.10.0.post7",
--    "torch==2.10.0",
+-    "torch-npu==2.14.0",
+-    "torch==2.14.0",
 -    "memfabric-hybrid===1.3.0",
 -    "memcache-hybrid===1.3.0",
 -    "triton-ascend===3.6.0.post2"
@@ -56,6 +60,10 @@ file. The `-` lines use the example versions from the table; replace
 +    "memcache-hybrid===<new-version>",
 +    "triton-ascend===<new-version>"
 ```
+
+### `CMakeLists.txt`
+
+Update `TORCH_REQUIRED_VERSION` to match the PyTorch pin in `requirements.txt`.
 
 ### `Dockerfile`, `Dockerfile.openEuler`, `Dockerfile.a3`, `Dockerfile.a3.openEuler`
 
@@ -129,6 +137,8 @@ file. The `-` lines use the example versions from the table; replace
 ```
 
 ### `mkdocs.yml`
+
+Update `release_pytorch_version` and `release_torch_npu_version` in `mkdocs.yml` when the installation guide switches to a release validated with the new versions.
 
 ```diff
 -  release_cann_version: "9.2.1"

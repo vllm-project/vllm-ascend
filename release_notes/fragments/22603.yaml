@@ -1,0 +1,4 @@
+pr: 22603
+entries:
+  - category: dependency
+    text: Source builds require PyTorch 2.14.0 and TorchNPU 2.14.0. When upgrading an existing source environment, reinstall the pinned dependencies to pick up the compatible TorchVision and TorchAudio versions.
