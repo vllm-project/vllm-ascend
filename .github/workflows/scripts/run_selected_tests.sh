@@ -6,13 +6,22 @@ if [ "${ENABLE_COVERAGE:-}" = "true" ]; then
   enable_coverage=true
 fi
 
-# Set to true temporarily to run all selected targets before reporting failure.
+# Coverage keeps going after a failed file so later tests are still measured.
+# The process still exits non-zero at the end when any target failed.
 continue_on_error=false
+if [ "${enable_coverage}" = "true" ]; then
+  continue_on_error=true
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enable-coverage)
       enable_coverage=true
+      continue_on_error=true
+      shift
+      ;;
+    --continue-on-error)
+      continue_on_error=true
       shift
       ;;
     *)
@@ -22,7 +31,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 [--enable-coverage] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
+  echo "Usage: $0 [--enable-coverage] [--continue-on-error] <npu_type> <num_npus> <with-device|without-device> [--timing] <test> [test ...]"
   exit 1
 fi
 
@@ -62,6 +71,11 @@ setup_coverage() {
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  # coverage.py imports the Triton plugin from the repo, including in spawned workers.
+  case ":${PYTHONPATH:-}:" in
+    *":${project_root}:"*) ;;
+    *) export PYTHONPATH="${project_root}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
 }
 
