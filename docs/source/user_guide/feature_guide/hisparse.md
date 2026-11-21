@@ -127,13 +127,12 @@ a later Prefill chunk publishes the full block from Host memory.
 With `kv_load_failure_policy=recompute`, a failed external import resumes
 from local compute and skips further external lookups for that request.
 
-Pool keys use the `hisparse-v5` namespace and include the target and draft
-checkpoint identities, resolved revisions, dummy-weight mode, effective model configurations (including
-RoPE settings), and page layout. Upgrading from an earlier
-namespace starts with a cold pool. If the Hub revision resolver is unavailable,
-pin the checkpoint commit when sharing a persistent pool. For local weights, use a versioned directory
-when replacing a checkpoint in a persistent pool. Files overwritten in place
-keep the same model path.
+Pool keys use the `hisparse-v1` namespace and include the target and draft
+checkpoint identities, resolved revisions, dummy-weight mode, effective model
+configurations (including RoPE settings), and page layout. If the Hub revision
+resolver is unavailable, pin the checkpoint commit when sharing a persistent
+pool. Use a versioned directory when replacing local weights in a persistent
+pool. Files overwritten in place keep the same model path.
 
 ### Verifying the Feature
 
