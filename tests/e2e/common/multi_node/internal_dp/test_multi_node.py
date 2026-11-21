@@ -196,6 +196,15 @@ def _run_benchmarks_with_acceptance_window(config: MultiNodeConfig, host: str, p
     tolerance = float(config.acceptance_rate.get("tolerance", 0.05))
     num_speculative_tokens = _speculative_num_tokens(config)
     metrics_servers = _spec_metrics_servers(config)
+    logger.info(
+        "spec-decode sampling: benchmark=%s mode=%s positions=%s endpoints=%s baseline_positions=%s tolerance=%s",
+        config.acceptance_rate.get("benchmark"),
+        "disaggregated-per-decoder" if config.disagg_cfg else "internal-dp-aggregated",
+        num_speculative_tokens,
+        [f"{endpoint.host}:{endpoint.port}" for endpoint in metrics_servers],
+        len(baseline_val) if isinstance(baseline_val, list) else 1,
+        tolerance,
+    )
 
     warmup_fn = make_chat_warmup_fn(f"http://{host}:{port}/v1/chat/completions", config.model)
 

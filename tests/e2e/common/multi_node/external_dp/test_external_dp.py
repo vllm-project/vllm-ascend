@@ -230,6 +230,15 @@ def _run_benchmarks_with_acceptance_window_ext(
     baseline_val = config.acceptance_rate.get("baseline")
     tolerance = float(config.acceptance_rate.get("tolerance", 0.05))
     num_speculative_tokens = _speculative_num_tokens(config, ranks, all_commands)
+    logger.info(
+        "spec-decode sampling: benchmark=%s mode=external-dp-decoder-only positions=%s endpoints=%s "
+        "baseline_positions=%s tolerance=%s",
+        config.acceptance_rate.get("benchmark"),
+        num_speculative_tokens,
+        [f"{endpoint.host}:{endpoint.port}" for endpoint in metrics_servers],
+        len(baseline_val) if isinstance(baseline_val, list) else 1,
+        tolerance,
+    )
 
     warmup_fn = make_chat_warmup_fn(completion_server.url_for("v1", "chat", "completions"), config.model)
 

@@ -3,13 +3,6 @@ model: "Eco-Tech/GLM-5.2-w8a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: internal
-test_content:
-  - spec_decode_acceptance
-acceptance_rate:
-  benchmark: acc_aime2025
-  # Provisional per-position baseline; re-measure on NPU before enforcing.
-  baseline: [0.90, 0.78, 0.66]
-  tolerance: 0.05
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
@@ -71,6 +64,14 @@ deployment:
       --additional-config '{"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
+
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional per-position baseline; re-measure on NPU before enforcing.
+  baseline: [0.90, 0.78, 0.66]
+  tolerance: 0.05
 benchmarks:
   acc_aime2025:
     case_type: accuracy

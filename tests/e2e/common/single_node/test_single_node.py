@@ -6,7 +6,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import openai
 import psutil
@@ -45,6 +45,9 @@ from tools.profiling.capture import (
     configure_profiler_command,
     profile_root,
 )
+
+if TYPE_CHECKING:
+    from tools.spec_decode_metrics import Baseline
 
 logger = logging.getLogger(__name__)
 
@@ -266,9 +269,9 @@ async def run_check_rank0_process_count(
 async def run_spec_decode_acceptance_test(
     config: SingleNodeConfig,
     server: "RemoteOpenAIServer | DisaggEpdProxy",
-    spec_baseline: tuple[int, list[int]] | None = None,
+    spec_baseline: "Baseline | None" = None,
 ) -> None:
-    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
+    from tools.spec_decode_metrics import Baseline, measure_acceptance_rate, validate_acceptance_rates
 
     num_speculative_tokens = _speculative_num_tokens(config)
 
@@ -281,7 +284,7 @@ async def run_spec_decode_acceptance_test(
         return
 
     if spec_baseline is None:
-        spec_baseline = (0, [0] * num_speculative_tokens)
+        spec_baseline = Baseline(0, [0] * num_speculative_tokens, [])
 
     _, all_rates = measure_acceptance_rate(_spec_metrics_servers(config, server), num_speculative_tokens, spec_baseline)
     validate_acceptance_rates(all_rates, baseline_val, float(tolerance))

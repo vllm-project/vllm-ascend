@@ -1,7 +1,34 @@
+import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import requests
 from prometheus_client.parser import text_string_to_metric_families
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EndpointSnapshot:
+    """Spec-decode counters and request total read from one metrics endpoint."""
+
+    endpoint: str
+    drafts: int
+    accepted_per_pos: list[int]
+    requests_total: int
+
+
+@dataclass
+class Baseline:
+    """Counter snapshot captured before the accuracy workload starts."""
+
+    drafts: int
+    accepted_per_pos: list[int]
+    endpoints: list[EndpointSnapshot]
+
+    @property
+    def endpoint_names(self) -> list[str]:
+        return [snapshot.endpoint for snapshot in self.endpoints]
 
 
 class MetricsEndpoint:
@@ -31,10 +58,11 @@ def fetch_metrics(server) -> str:
     return r.text
 
 
-def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[int, list[int]]:
-    """Parse prometheus text and return (num_drafts, num_accepted_tokens_per_pos)."""
+def _parse_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[int, list[int], int]:
+    """Return (num_drafts, num_accepted_tokens_per_pos, num_requests_total)."""
     num_drafts = 0
     num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    num_requests_total = 0
     for family in text_string_to_metric_families(metrics_text):
         if family.name == "vllm:spec_decode_num_drafts":
             for sample in family.samples:
@@ -44,68 +72,119 @@ def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[in
                 pos = int(sample.labels["position"])
                 if 0 <= pos < num_speculative_tokens:
                     num_accepted_tokens_per_pos[pos] += sample.value
-    return int(num_drafts), num_accepted_tokens_per_pos
+        elif family.name == "vllm:num_requests_total":
+            for sample in family.samples:
+                num_requests_total += sample.value
+    return int(num_drafts), num_accepted_tokens_per_pos, int(num_requests_total)
 
 
-def _sum_metrics(
-    server,
-    num_speculative_tokens: int,
-) -> tuple[int, list[int]]:
-    """Sum spec-decode counters across all endpoints in ``server``.
+def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[int, list[int]]:
+    """Parse prometheus text and return (num_drafts, num_accepted_tokens_per_pos)."""
+    num_drafts, num_accepted_tokens_per_pos, _ = _parse_metrics(metrics_text, num_speculative_tokens)
+    return num_drafts, num_accepted_tokens_per_pos
 
-    External-DP deployments route one workload across several decoder ranks, so
-    every participating decoder metrics endpoint contributes to the same
-    sampling window.
-    """
-    num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+
+def _snapshot_endpoints(server, num_speculative_tokens: int) -> list[EndpointSnapshot]:
+    """Read counters from every metrics endpoint that serves the sampled workload."""
+    snapshots = []
     for endpoint in metrics_endpoints(server):
-        endpoint_drafts, endpoint_accepted = analysis_metrics(fetch_metrics(endpoint), num_speculative_tokens)
-        num_drafts += endpoint_drafts
-        for position, accepted in enumerate(endpoint_accepted):
-            num_accepted_tokens_per_pos[position] += accepted
-    return int(num_drafts), num_accepted_tokens_per_pos
+        drafts, accepted, requests_total = _parse_metrics(fetch_metrics(endpoint), num_speculative_tokens)
+        snapshots.append(
+            EndpointSnapshot(
+                endpoint=f"{endpoint.host}:{endpoint.port}",
+                drafts=drafts,
+                accepted_per_pos=accepted,
+                requests_total=requests_total,
+            )
+        )
+    return snapshots
 
 
 def capture_baseline(
     server,
     num_speculative_tokens: int,
     warmup_fn: Callable | None = None,
-) -> tuple[int, list[int]]:
-    """Run warmup and capture baseline (num_drafts, num_accepted_tokens_per_pos).
+) -> Baseline:
+    """Run warmup and capture the counter snapshot before the benchmark workload.
 
     ``server`` may be a single metrics server or a list of metrics servers.
-    Call this BEFORE the actual benchmark/test requests. The returned tuple
+    Call this BEFORE the actual benchmark/test requests. The returned snapshot
     should be passed to measure_acceptance_rate() afterwards.
     """
     if warmup_fn is not None:
         warmup_fn()
-    return _sum_metrics(server, num_speculative_tokens)
+    endpoints = _snapshot_endpoints(server, num_speculative_tokens)
+    drafts = sum(snapshot.drafts for snapshot in endpoints)
+    accepted_per_pos = [
+        sum(snapshot.accepted_per_pos[position] for snapshot in endpoints)
+        for position in range(num_speculative_tokens)
+    ]
+    logger.info(
+        "spec-decode baseline: endpoints=%s drafts=%s accepted_per_pos=%s warmup_hit_decode=%s",
+        [snapshot.endpoint for snapshot in endpoints],
+        drafts,
+        accepted_per_pos,
+        drafts > 0,
+    )
+    if drafts == 0:
+        logger.error(
+            "spec-decode baseline has no drafts: the warmup request did not reach the decode-side "
+            "speculative path, so acceptance rates sampled from this window are meaningless"
+        )
+    return Baseline(drafts, accepted_per_pos, endpoints)
 
 
 def measure_acceptance_rate(
     server,
     num_speculative_tokens: int,
-    baseline: tuple[int, list[int]],
+    baseline: Baseline,
 ) -> tuple[float, list[float]]:
     """Fetch final metrics, subtract baseline, return (pos0_rate, all_rates)."""
-    base_drafts, base_accepted = baseline
+    endpoints = _snapshot_endpoints(server, num_speculative_tokens)
+    base_by_endpoint = {snapshot.endpoint: snapshot for snapshot in baseline.endpoints}
+    final_names = {snapshot.endpoint for snapshot in endpoints}
+    missing = [name for name in baseline.endpoint_names if name not in final_names]
+    if missing:
+        logger.warning("spec-decode metrics endpoints disappeared since baseline: %s", missing)
 
-    num_drafts, num_accepted_tokens_per_pos = _sum_metrics(server, num_speculative_tokens)
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for snapshot in endpoints:
+        base = base_by_endpoint.get(snapshot.endpoint)
+        draft_delta = snapshot.drafts - (base.drafts if base else 0)
+        accepted_delta = []
+        for position in range(num_speculative_tokens):
+            value = snapshot.accepted_per_pos[position]
+            if base is not None:
+                value -= base.accepted_per_pos[position]
+            num_accepted_tokens_per_pos[position] += value
+            accepted_delta.append(value)
+        logger.info(
+            "spec-decode endpoint delta: %s drafts=%s (+%s) accepted_per_pos=%s (+%s) requests_delta=%s",
+            snapshot.endpoint,
+            snapshot.drafts,
+            draft_delta,
+            snapshot.accepted_per_pos,
+            accepted_delta,
+            snapshot.requests_total - (base.requests_total if base else 0),
+        )
 
-    num_drafts -= base_drafts
-    for i in range(len(num_accepted_tokens_per_pos)):
-        if i < len(base_accepted):
-            num_accepted_tokens_per_pos[i] -= base_accepted[i]
-
+    final_drafts = sum(snapshot.drafts for snapshot in endpoints)
+    num_drafts = final_drafts - baseline.drafts
     if num_drafts <= 0:
+        logger.error(
+            "spec-decode sampled no drafts: baseline_drafts=%s final_drafts=%s positions=%s endpoints=%s; "
+            "verify the accuracy workload used the decode-side speculative configuration",
+            baseline.drafts,
+            final_drafts,
+            num_speculative_tokens,
+            [snapshot.endpoint for snapshot in endpoints],
+        )
         raise AssertionError(
             "No speculative decoding drafts were observed in the sampling window; "
             "verify the accuracy workload used the decode-side speculative configuration."
         )
 
-    acceptance_per_pos = [v / num_drafts for v in num_accepted_tokens_per_pos]
-
+    acceptance_per_pos = [value / num_drafts for value in num_accepted_tokens_per_pos]
     pos0_rate = acceptance_per_pos[0] if acceptance_per_pos else 0.0
     print("-" * 50)
     print(f"{num_drafts=}, {num_accepted_tokens_per_pos=}")

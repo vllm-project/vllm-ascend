@@ -4,14 +4,6 @@ model: "Eco-Tech/GLM-5.3-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
-test_content:
-  - spec_decode_acceptance
-acceptance_rate:
-  benchmark: acc_aime2025
-  # Provisional 5-position baseline (decode side sets num_speculative_tokens: 5);
-  # re-measure on NPU before enforcing.
-  baseline: [0.9058, 0.8123, 0.7317, 0.6623, 0.6040]
-  tolerance: 0.08
 
 routing:
   type: "disaggregated_prefill"
@@ -329,6 +321,14 @@ templates:
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional 5-position baseline (decode side sets num_speculative_tokens: 5);
+  # re-measure on NPU before enforcing.
+  baseline: [0.9058, 0.8123, 0.7317, 0.6623, 0.6040]
+  tolerance: 0.08
 benchmarks:
   perf_warmup:
     case_type: performance

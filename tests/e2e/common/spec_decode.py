@@ -9,14 +9,11 @@ stay in each harness.
 """
 
 import json
-import logging
 import shlex
 from collections.abc import Callable
 from typing import Any
 
 import requests
-
-logger = logging.getLogger(__name__)
 
 SPECULATIVE_CONFIG_FLAGS = ("--speculative-config", "--speculative_config")
 
@@ -103,7 +100,7 @@ def make_chat_warmup_fn(chat_url: str, model: str) -> Callable[[], None]:
     """Build a warmup request that initializes spec-decode counters before sampling."""
 
     def warmup_fn() -> None:
-        response = requests.post(
+        requests.post(
             chat_url,
             json={
                 "model": model,
@@ -112,10 +109,5 @@ def make_chat_warmup_fn(chat_url: str, model: str) -> Callable[[], None]:
             },
             timeout=120,
         )
-        if not response.ok:
-            logger.warning(
-                "Spec-decode warmup request returned HTTP %s; the acceptance sampling window may not be primed",
-                response.status_code,
-            )
 
     return warmup_fn
