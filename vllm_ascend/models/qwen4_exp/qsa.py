@@ -731,6 +731,291 @@ qsa_indexer.build_qsa_metadata = qsa_indexer._build_qsa_metadata_torch
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        # The selector overwrites its compact prefix; the remaining ABI columns
+        # stay at the sentinel value for the lifetime of this persistent buffer.
+        self.topk_indices_buffer.fill_(-1)
+
+    def _num_actual_tokens(self) -> int:
+        metadata = get_forward_context().attn_metadata
+        if isinstance(metadata, list):
+            metadata = metadata[0]
+        if not isinstance(metadata, dict):
+            return 0
+        return cast(QSAForwardMetadata, metadata[self.layer_name]).num_actual_tokens
+
+    def _start_indexer_projection(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Launch indexer projection and query norm/RoPE on an auxiliary stream."""
+        metadata = self.indexer._metadata()
+        if metadata is None:
+            return None, None
+        raw_metadata, _ = metadata
+        num_tokens = raw_metadata.num_actual_tokens
+        main_stream = torch.npu.current_stream()
+        aux_stream = _qsa_indexer_stream()
+        hidden_ready = main_stream.record_event()
+        hidden_states.record_stream(aux_stream)
+        positions.record_stream(aux_stream)
+        with npu_stream_switch(aux_stream):
+            aux_stream.wait_event(hidden_ready)
+            index_query, token_k = self.indexer.project_qk(
+                hidden_states[:num_tokens],
+                positions[..., :num_tokens],
+            )
+        index_query.record_stream(main_stream)
+        token_k.record_stream(main_stream)
+        return index_query, token_k
+
+    def _start_staggered_projections(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Pipeline Indexer Vector/Cube work against main Cube/Vector work.
+
+        ``index_qk_proj`` submits dynamic MX quantization followed by its Q/K
+        matmul.  Launch it on the auxiliary stream first, then submit the main
+        QKV projection and fused split/norm/RoPE on the main stream.  This
+        pairs Indexer quantization (Vector) with the main QKV matmul (Cube),
+        followed by the Indexer Q/K matmul (Cube) with main QKV
+        post-processing (Vector).
+        """
+        index_query, index_token_k = self._start_indexer_projection(
+            hidden_states,
+            positions,
+        )
+        qkv, _ = self.qkv_proj(hidden_states)
+        return qkv, index_query, index_token_k
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        if not current_platform.opaque_attention_op():
+            return self._forward_impl(positions, hidden_states)
+        num_tokens = hidden_states.shape[0]
+        attn_output = hidden_states.new_empty(num_tokens, self.num_heads, self.head_dim)
+        torch.ops.vllm.qwen4_exp_ascend_qsa_core_with_output(
+            hidden_states,
+            positions,
+            attn_output,
+            upstream_qsa._encode_layer_name(self.layer_name),
+        )
+        output, _ = self.o_proj(attn_output.view(num_tokens, -1))
+        return output
+
+    def _forward_impl(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens = hidden_states.shape[0]
+        attn_output = hidden_states.new_empty(num_tokens, self.num_heads, self.head_dim)
+        self._forward_core_with_output(positions, hidden_states, attn_output)
+        output, _ = self.o_proj(attn_output.view(num_tokens, -1))
+        return output
+
+    def _forward_core_with_output(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> None:
+        """Run the multi-stream QSA core into a graph-owned output buffer."""
+        qkv, index_query, index_token_k = self._start_staggered_projections(
+            hidden_states,
+            positions,
+        )
+        num_tokens = hidden_states.shape[0]
+        num_actual_tokens = self._num_actual_tokens()
+        encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
+        if self.use_fused_qsa_prepare:
+            gate = torch.empty_like(attn_output)
+            if index_query is not None and index_token_k is not None and current_platform.opaque_attention_op():
+                torch.ops.vllm.qwen4_exp_ascend_qsa_prepare_with_output(
+                    hidden_states,
+                    positions,
+                    qkv,
+                    index_query,
+                    index_token_k,
+                    attn_output,
+                    gate,
+                    encoded_layer_name,
+                )
+            elif index_query is not None and index_token_k is not None:
+                qwen4_exp_ascend_qsa_prepare_with_output(
+                    hidden_states,
+                    positions,
+                    qkv,
+                    index_query,
+                    index_token_k,
+                    attn_output,
+                    gate,
+                    encoded_layer_name,
+                )
+            elif current_platform.opaque_attention_op():
+                torch.ops.vllm.qwen4_exp_qsa_prepare_with_output(
+                    hidden_states,
+                    positions,
+                    qkv,
+                    attn_output,
+                    gate,
+                    encoded_layer_name,
+                )
+            else:
+                upstream_qsa.qwen4_exp_qsa_prepare_with_output(
+                    hidden_states,
+                    positions,
+                    qkv,
+                    attn_output,
+                    gate,
+                    encoded_layer_name,
+                )
+            flat_output = attn_output.view(num_tokens, -1)
+            flat_gate = gate.view(num_tokens, -1)
+            torch.ops.vllm.qwen4_exp_ascend_qsa_sigmoid_mul_(flat_output, flat_gate, num_actual_tokens)
+            return
+
+        q, k, v, gate = self._project_qkv_gate(qkv, positions)
+        query = q.view(num_tokens, self.num_heads, self.head_dim)
+        key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+        value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        if index_query is not None and index_token_k is not None and current_platform.opaque_attention_op():
+            torch.ops.vllm.qwen4_exp_ascend_qsa_with_output(
+                hidden_states,
+                positions,
+                query,
+                key,
+                value,
+                index_query,
+                index_token_k,
+                attn_output,
+                encoded_layer_name,
+            )
+        elif index_query is not None and index_token_k is not None:
+            qwen4_exp_ascend_qsa_with_output(
+                hidden_states,
+                positions,
+                query,
+                key,
+                value,
+                index_query,
+                index_token_k,
+                attn_output,
+                encoded_layer_name,
+            )
+        elif current_platform.opaque_attention_op():
+            torch.ops.vllm.qwen4_exp_qsa_with_output(
+                hidden_states,
+                positions,
+                query,
+                key,
+                value,
+                attn_output,
+                encoded_layer_name,
+            )
+        else:
+            upstream_qsa.qwen4_exp_qsa_with_output(
+                hidden_states,
+                positions,
+                query,
+                key,
+                value,
+                attn_output,
+                encoded_layer_name,
+            )
+        flat_output = attn_output.view(num_tokens, -1)
+        if gate is not None:
+            torch.ops.vllm.qwen4_exp_ascend_qsa_sigmoid_mul_(flat_output, gate, num_actual_tokens)
+        else:
+            flat_output[num_actual_tokens:].zero_()
+
+    def _main_fused_norm_rope_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            self.attn_output_gate
+            and qkv.dtype == torch.bfloat16
+            and qkv.ndim == 2
+            and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
+            and self.num_heads > 0
+            and self.num_kv_heads > 0
+            and self.head_dim == 256
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        gate_out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        # The Ascend fused MRoPE path gathers a temporary rotary-cache tensor.
+        # That temporary is not replay-safe in the MTP FULL graph: after the
+        # graph reuses its memory, the source QKV remains finite while the
+        # fused result can contain NaNs in Q/K. The draft model has only one
+        # QSA layer, so keep the target-model fusion and use the graph-safe
+        # decomposition for MTP.
+        # ForwardContext has no draft-model flag. The layer name is fixed when
+        # the target or MTP model is built and remains stable during graph replay.
+        if self.layer_name.startswith("mtp."):
+            q, k, v, projected_gate = super()._project_qkv_gate(qkv, positions)
+            if gate_out is not None and projected_gate is not None:
+                gate_out.copy_(projected_gate.view_as(gate_out))
+                projected_gate = gate_out.view(projected_gate.shape)
+            return q, k, v, projected_gate
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
+            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+
+        # Pass the full rotary table and positions into the Triton kernel.  It
+        # clamps and gathers each row while loading Q/K, removing the Prefill
+        # Slice/Clamp/Index chain without materializing a temporary cos/sin
+        # tensor in the forward path.
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        op_kwargs = dict(
+            qkv=qkv,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            is_interleaved=self.rotary_emb.mrope_interleaved,
+            rope_dim=self.rotary_emb.rotary_dim,
+            weight_offset=1.0,
+        )
+        if gate_out is None:
+            return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                **op_kwargs,
+                cos_sin=cache,
+                positions=positions,
+                has_gate=True,
+            )
+        flat_gate = gate_out.view(qkv.shape[0], -1)
+        q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+            **op_kwargs,
+            cos_sin=cache,
+            positions=positions,
+            gate_output=flat_gate,
+        )
+        return q, k, v, flat_gate
+
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
 
