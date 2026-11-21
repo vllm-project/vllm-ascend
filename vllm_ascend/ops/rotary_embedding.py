@@ -648,6 +648,14 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
     # Empirical safety threshold for large Triton grids on Ascend NPU
     _ASCEND_TRITON_GRID_LIMIT = 65535
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Scaled MRoPE uses the cache to preserve the cosine and sine scale.
+        # Initialize the unscaled frequencies before ACL graph capture.
+        self.inv_freq: torch.Tensor | None
+        inv_freq = None if self.scaling_factor is not None else self._compute_inv_freq(self.base)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
     def forward_triton(
         self,
         positions: torch.Tensor,

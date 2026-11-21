@@ -8,7 +8,7 @@ from vllm.model_executor.models.qwen3_vl import (
     pos_embed_interpolate_native,
 )
 
-from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.patch.worker.mrope_utils import can_use_fused_mrope, get_fused_mrope_inputs
 from vllm_ascend.utils import enable_sp
 
 
@@ -29,12 +29,8 @@ def tensor_parallel_wrap(func):
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
-    if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
-        if cos_sin.device != qkv.device:
-            cos_sin = cos_sin.to(qkv.device)
-        if cos_sin.dtype != qkv.dtype:
-            cos_sin = cos_sin.to(qkv.dtype)
+    if can_use_fused_mrope(self.rotary_emb, self.num_kv_heads):
+        cos_sin, inline_positions, inv_freq = get_fused_mrope_inputs(self.rotary_emb, positions, qkv)
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=self.q_norm.weight,
@@ -47,6 +43,8 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
             mrope_section=self.rotary_emb.mrope_section,
             is_interleaved=self.rotary_emb.mrope_interleaved,
             rope_dim=self.rotary_emb.rotary_dim,
+            positions=inline_positions,
+            inv_freq=inv_freq,
         )
     else:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
