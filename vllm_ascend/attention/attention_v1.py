@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -209,6 +209,7 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
     causal: bool = True
+    diffusion_causal: torch.Tensor | None = None
     # runner_type in model_config.
     model_runner_type: str = ""
     # prefill reshape_and_cache event
@@ -480,6 +481,7 @@ class FIAParamProvider:
     sliding_window: int | None
     is_draft_model: bool = False
     is_non_pa: bool = False
+    diffusion_causal: bool | None = None
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -708,8 +710,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value = value.contiguous()
 
         use_max_workspace = self._use_max_workspace_for_fia_graph
+        workspace_key: str | tuple = _FIA_WORKSPACE_KEY
+        if attn_metadata.diffusion_causal is not None:
+            # The graph contains both mask modes and Gemma layers with
+            # different head shapes. FIA's workspace tiling depends on both.
+            workspace_key = (
+                _FIA_WORKSPACE_KEY,
+                attn_metadata.causal,
+                self.sliding_window,
+                tuple(query.shape),
+                tuple(key.shape),
+                tuple(value.shape),
+            )
         workspace = get_capture_resource(
-            _FIA_WORKSPACE_KEY,
+            workspace_key,
             lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
@@ -757,6 +771,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sliding_window,
                 _EXTRA_CTX.is_draft_model,
                 is_non_pa=block_table is None,
+                diffusion_causal=attn_metadata.causal if attn_metadata.diffusion_causal is not None else None,
             ),
         )
         return output, num_tokens
@@ -1336,6 +1351,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         with attention_transfer_window():
+            if attn_metadata.diffusion_causal is not None:
+                # KV has already been written once by forward(). Both calls
+                # read the same cache; each has a fixed FIA mask mode even
+                # when request phases change between graph replays.
+                causal = replace(attn_metadata, num_decodes=0)
+                bidirectional = replace(causal, causal=False)
+                alternate = torch.empty_like(output)
+                self.forward_fused_infer_attention(query, key, value, causal, output, kv_cache)
+                self.forward_fused_infer_attention(query, key, value, bidirectional, alternate, kv_cache)
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+                mask = attn_metadata.diffusion_causal[:num_tokens].view(-1, 1, 1)
+                output[:num_tokens].copy_(torch.where(mask, output[:num_tokens], alternate[:num_tokens]))
+                return output
+
             num_tokens = query.shape[0]
 
             if (

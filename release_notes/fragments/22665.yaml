@@ -1,0 +1,4 @@
+pr: 22665
+entries:
+  - category: feature
+    text: Added DiffusionGemma text and image generation and structured decision serving on Ascend 950DT.

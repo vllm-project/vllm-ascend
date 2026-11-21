@@ -56,6 +56,11 @@ def _resolve_ascend_model_state_cls(
     model: nn.Module,
 ):
     """Pick the Ascend model state class; mirrors upstream ``resolve_model_state_cls``."""
+    if vllm_config.model_config.architecture == "DiffusionGemmaForBlockDiffusion":
+        from vllm_ascend.worker.v2.model_states.diffusion_gemma import AscendDiffusionGemmaModelState
+
+        return AscendDiffusionGemmaModelState
+
     # Keep model-provided state overrides ahead of the platform defaults.
     if hasattr(model, "get_model_state_cls"):
         return model.get_model_state_cls()
