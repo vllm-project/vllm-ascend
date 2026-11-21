@@ -305,12 +305,125 @@ def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, he
     return bool(pa_shape_list) if runtime_shape is None else runtime_shape in pa_shape_list
 
 
+def in_full_cudagraph_mode(vllm_config: VllmConfig | None = None) -> bool:
+    """Return True when the active engine config captures whole steps in FULL graphs.
+
+    In ``CUDAGraphMode.FULL``, ``head_dim == 512`` layers capture through
+    ``full_graph_pa`` and keep the natural LBNHC cache layout, while
+    ``FULL_DECODE_ONLY`` captures uniform decode/verify steps as BNSD
+    ``npu_fused_infer_attention_score_v2`` ops.
+    """
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    cudagraph_mode = getattr(getattr(vllm_config, "compilation_config", None), "cudagraph_mode", None)
+    if cudagraph_mode is None:
+        return False
+    from vllm.config.compilation import CUDAGraphMode
+
+    return cudagraph_mode == CUDAGraphMode.FULL
+
+
+def build_pa_per_token_rows(
+    block_tables: torch.Tensor | None,
+    actual_seq_lengths_q: list[int] | None,
+    seq_lens_list: list[int] | None,
+    *,
+    context_lens_device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Build per-token PagedAttention ``(block_tables, context_lens)`` without mutating inputs."""
+    if block_tables is None or not actual_seq_lengths_q or not seq_lens_list:
+        return None
+    if len(seq_lens_list) < len(actual_seq_lengths_q) or block_tables.shape[0] < len(actual_seq_lengths_q):
+        return None
+
+    query_lens: list[int] = []
+    prev = 0
+    for end in actual_seq_lengths_q:
+        query_lens.append(int(end) - prev)
+        prev = int(end)
+    num_tokens = int(actual_seq_lengths_q[-1])
+    if num_tokens <= 0 or any(q < 0 for q in query_lens) or sum(query_lens) != num_tokens:
+        return None
+
+    dev = context_lens_device if context_lens_device is not None else torch.device("cpu")
+    req_block_tables = block_tables[: len(query_lens)]
+    if all(q == 1 for q in query_lens):
+        return req_block_tables, torch.tensor(seq_lens_list[: len(query_lens)], dtype=torch.int32, device=dev)
+
+    context_lens: list[int] = []
+    for query_len, seq_len in zip(query_lens, seq_lens_list):
+        if query_len <= 0:
+            continue
+        prefix = max(int(seq_len) - query_len, 0)
+        context_lens.extend(prefix + j + 1 for j in range(query_len))
+    if len(context_lens) != num_tokens:
+        return None
+
+    counts = torch.tensor(query_lens, dtype=torch.long, device=block_tables.device)
+    return (
+        req_block_tables.repeat_interleave(counts, dim=0),
+        torch.tensor(context_lens, dtype=torch.int32, device=dev),
+    )
+
+
+def expand_pa_per_token_rows(metadata: Any) -> bool:
+    """Expand multi-query PagedAttention metadata into one query token per row.
+
+    ``torch_npu._npu_paged_attention`` assumes one query token per batch row.
+    Under ``CUDAGraphMode.FULL``, multi-query verify/prefill steps must split
+    each request into per-token rows whose ``context_lens`` reflect each
+    query token's exact causal prefix length. Zero-query pad rows are skipped.
+    """
+    if getattr(metadata, "pa_rows_expanded", False):
+        return True
+    block_tables = getattr(metadata, "block_tables", None)
+    query_lengths = getattr(metadata, "actual_seq_lengths_q", None)
+    seq_lens_list = getattr(metadata, "seq_lens_list", None)
+    if block_tables is None or not query_lengths or not seq_lens_list:
+        return False
+    if len(query_lengths) != len(seq_lens_list):
+        return False
+
+    if all(
+        int(end) - (int(query_lengths[i - 1]) if i > 0 else 0) == 1
+        for i, end in enumerate(query_lengths)
+    ):
+        metadata.pa_rows_expanded = True
+        return True
+
+    seq_lens_tensor = getattr(metadata, "seq_lens", None)
+    seq_lens_device = seq_lens_tensor.device if isinstance(seq_lens_tensor, torch.Tensor) else torch.device("cpu")
+    expanded = build_pa_per_token_rows(
+        block_tables,
+        query_lengths,
+        seq_lens_list,
+        context_lens_device=seq_lens_device,
+    )
+    if expanded is None:
+        return False
+    metadata.block_tables, metadata.seq_lens = expanded
+    metadata.pa_rows_expanded = True
+    return True
+
+
 def requires_contiguous_pa_kv_cache(layer, vllm_config: VllmConfig, spec: FullAttentionSpec) -> bool:
     """Require contiguous K/V only for unpadded ordinary Attention layers eligible for PA."""
     # Import lazily to avoid a circular dependency with attention_v1.
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
+    from vllm_ascend.attention.large_head_paged_verify import AscendLargeHeadPagedAttentionBackendImpl
 
     impl = getattr(layer, "impl", None)
+    if type(impl) is AscendLargeHeadPagedAttentionBackendImpl:
+        # 512-dim MTP verify captures as FIA-v2 BNSD paged ops, which require
+        # contiguous K/V tensors even though speculative_config turns off
+        # using_paged_attention().
+        return (
+            impl.sliding_window is None
+            and getattr(vllm_config.model_config, "runner_type", None) != "pooling"
+            and spec.page_size_bytes == spec.real_page_size_bytes
+        )
     return (
         type(impl) is AscendAttentionBackendImpl
         and impl.sliding_window is None

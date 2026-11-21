@@ -376,6 +376,9 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
 
+        if _should_use_large_head_paged_backend(attn_selector_config):
+            return "vllm_ascend.attention.large_head_paged_verify.AscendLargeHeadPagedBackend"
+
         return backend_map[backend_key]
 
     @classmethod
@@ -1995,6 +1998,40 @@ def _validate_fa3_backend(key, _attn_selector_config):
         "In training-inference consistency scenario, FA3 will be enabled, which may cause performance degradation."
     )
     return True
+
+
+def _should_use_large_head_paged_backend(attn_selector_config) -> bool:
+    """Select the paged 512-dim speculative backend only for compatible decoder layers."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.v1.attention.backend import AttentionType
+
+    from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.speculative_config is None:
+        return False
+    model_config = getattr(vllm_config, "model_config", None)
+    if getattr(model_config, "runner_type", None) == "pooling":
+        return False
+    if attn_selector_config.head_size != FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        return False
+    if attn_selector_config.has_sliding_window or attn_selector_config.attn_type != AttentionType.DECODER:
+        return False
+    if (
+        attn_selector_config.use_mla
+        or attn_selector_config.use_sparse
+        or attn_selector_config.use_pcp
+        or attn_selector_config.use_dcp
+        or attn_selector_config.use_kv_connector
+        or attn_selector_config.has_sink
+        or attn_selector_config.use_non_causal
+        or attn_selector_config.use_per_head_quant_scales
+        or getattr(attn_selector_config, "use_adaptive_verification", False)
+        or getattr(attn_selector_config, "use_rswa", False)
+        or getattr(attn_selector_config, "use_hisparse", False)
+    ):
+        return False
+    return get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION)
 
 
 def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:

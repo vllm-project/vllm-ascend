@@ -22,6 +22,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch_npu
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -122,8 +123,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
-        with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        attn_backend = getattr(self, "_graph_update_backend", None)
+        if attn_backend is None:
+            with set_current_vllm_config(self.vllm_config):
+                attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+            self._graph_update_backend = attn_backend
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         metadata = getattr(self.model_runner.model_state, "device_metadata", None)
@@ -193,7 +197,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
-        self.update_stream.wait_stream(torch.npu.current_stream())
+        current_stream = torch.npu.current_stream()
+        sync_event = getattr(self, "_sync_event", None)
+        if sync_event is None and hasattr(torch.npu, "Event") and torch.npu.is_available():
+            sync_event = torch.npu.Event()
+            self._sync_event = sync_event
+        if sync_event is not None:
+            sync_event.record(current_stream)
+            self.update_stream.wait_event(sync_event)
+        else:
+            self.update_stream.wait_stream(current_stream)
+        pa_op = getattr(torch_npu, "_npu_paged_attention", None)
+        if len(resolved_tasks) > 1 and resolved_tasks[0].operation != pa_op:
+            # Overlap layer-0 metadata update with graph launch and pre-attention work.
+            graph.update(self.update_stream, resolved_tasks[:1])
+            ret = super().run_fullgraph(desc)
+            graph.update(self.update_stream, resolved_tasks[1:])
+            return ret
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
         return ret

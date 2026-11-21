@@ -1,0 +1,6 @@
+pr: 14670
+entries:
+  - category: feature
+    text: Added Model Runner V2 speculative decoding (MTP) support for 512-dim global attention layers on Atlas A2 and Atlas A3 across FULL_DECODE_ONLY, FULL, and eager execution modes without extra environment variables.
+    model: gemma4
+    hardware: [A2, A3]

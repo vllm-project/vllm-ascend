@@ -24,6 +24,40 @@ FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE = 512
 SWA_INT_MAX = 2147483647
 
 
+def _run_large_head_fusion_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    actual_seq_qlen: list[int],
+    actual_seq_kvlen: list[int],
+    attn_mask: torch.Tensor | None,
+    *,
+    num_heads: int,
+    scale: float,
+    causal: bool,
+) -> torch.Tensor:
+    """Run TND ``npu_fusion_attention`` for head_dim=512 prefill or chunk slices."""
+    sparse_mode = 3 if causal else 0
+    pre_tokens = SWA_INT_MAX
+    next_tokens = 0 if causal else SWA_INT_MAX
+    if attn_mask is not None and attn_mask.dtype not in (torch.bool, torch.uint8):
+        attn_mask = attn_mask.bool()
+    return torch_npu.npu_fusion_attention(
+        query=query,
+        key=key,
+        value=value,
+        head_num=num_heads,
+        input_layout="TND",
+        atten_mask=attn_mask,
+        scale=scale,
+        pre_tockens=pre_tokens,
+        next_tockens=next_tokens,
+        actual_seq_qlen=actual_seq_qlen,
+        actual_seq_kvlen=actual_seq_kvlen,
+        sparse_mode=sparse_mode,
+    )[0]
+
+
 def npu_large_head_prefill_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -37,6 +71,7 @@ def npu_large_head_prefill_attention(
     head_size: int,
     scale: float,
     is_prefill_no_cache: bool,
+    use_bnsd: bool | None = None,
 ):
     # A2/A3 FIA TND does not support some large head sizes. Keep those prefill
     # cases on an NPU attention op instead of falling back to Python.
@@ -52,27 +87,19 @@ def npu_large_head_prefill_attention(
         num_kv_heads,
         head_size,
         is_prefill_no_cache,
+        use_bnsd=use_bnsd,
     )
-    sparse_mode = 3 if attn_metadata.causal else 0
-    pre_tokens = SWA_INT_MAX
-    next_tokens = 0 if attn_metadata.causal else SWA_INT_MAX
-    attn_mask = attn_metadata.attn_mask
-    if attn_mask is not None and attn_mask.dtype not in (torch.bool, torch.uint8):
-        attn_mask = attn_mask.bool()
-    attn_output = torch_npu.npu_fusion_attention(
-        query=query,
-        key=key,
-        value=value,
-        head_num=num_heads,
-        input_layout="TND",
-        atten_mask=attn_mask,
+    attn_output = _run_large_head_fusion_attention(
+        query,
+        key,
+        value,
+        attn_metadata.actual_seq_lengths_q,
+        actual_seq_lengths_kv,
+        attn_metadata.attn_mask,
+        num_heads=num_heads,
         scale=scale,
-        pre_tockens=pre_tokens,
-        next_tockens=next_tokens,
-        actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-        actual_seq_kvlen=actual_seq_lengths_kv,
-        sparse_mode=sparse_mode,
-    )[0]
+        causal=attn_metadata.causal,
+    )
     return attn_output, None
 
 
@@ -86,6 +113,8 @@ def _get_large_head_prefill_kv(
     num_kv_heads: int,
     head_size: int,
     is_prefill_no_cache: bool,
+    *,
+    use_bnsd: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
     # PrefillNoCache already has dense TND key/value tensors. Chunked prefill
     # may need historical paged KV cache gathered back to dense TND.
@@ -103,6 +132,7 @@ def _get_large_head_prefill_kv(
         seq_lens,
         num_kv_heads,
         head_size,
+        use_bnsd=use_bnsd,
     )
     actual_seq_lengths_kv = []
     cumsum = 0
@@ -119,21 +149,44 @@ def _gather_paged_kv_to_dense(
     seq_lens: list[int],
     num_kv_heads: int,
     head_size: int,
+    *,
+    use_bnsd: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # npu_fusion_attention consumes dense TND KV, while cached prefill KV is
     # stored by blocks. Gather only valid tokens from the block table.
-    block_size = key_cache.shape[1]
+    # BNSD/HND layout stores [num_blocks, num_kv_heads, block_size, head_size];
+    # select only the referenced blocks first so we never transpose or
+    # materialize the entire KV cache pool, then slice statically without
+    # nonzero boolean-mask syncs.
+    is_bnsd = (
+        use_bnsd
+        if use_bnsd is not None
+        else (key_cache.shape[1] == num_kv_heads and key_cache.shape[2] != num_kv_heads)
+    )
+    block_size = key_cache.shape[2] if is_bnsd else key_cache.shape[1]
     max_seq_len = max(seq_lens)
-    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, device=key_cache.device)
     num_blocks = (max_seq_len + block_size - 1) // block_size
     block_table = block_table[: len(seq_lens), :num_blocks].long()
 
     flat_block_ids = block_table.reshape(-1)
     max_tokens_padded = num_blocks * block_size
     dense_shape = (len(seq_lens), max_tokens_padded, num_kv_heads, head_size)
-    gathered_key = key_cache.index_select(0, flat_block_ids).reshape(dense_shape)
-    gathered_value = value_cache.index_select(0, flat_block_ids).reshape(dense_shape)
+    selected_key = key_cache.index_select(0, flat_block_ids)
+    selected_value = value_cache.index_select(0, flat_block_ids)
+    if is_bnsd:
+        selected_key = selected_key.permute(0, 2, 1, 3)
+        selected_value = selected_value.permute(0, 2, 1, 3)
+    gathered_key = selected_key.reshape(dense_shape)
+    gathered_value = selected_value.reshape(dense_shape)
 
-    positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key_cache.device)
-    valid_mask = positions.unsqueeze(0) < seq_lens_tensor.unsqueeze(1)
-    return gathered_key[valid_mask].contiguous(), gathered_value[valid_mask].contiguous()
+    if len(seq_lens) == 1:
+        seq_len = seq_lens[0]
+        return gathered_key[0, :seq_len].contiguous(), gathered_value[0, :seq_len].contiguous()
+    if all(length == max_tokens_padded for length in seq_lens):
+        return (
+            gathered_key.reshape(-1, num_kv_heads, head_size).contiguous(),
+            gathered_value.reshape(-1, num_kv_heads, head_size).contiguous(),
+        )
+    dense_key = torch.cat([gathered_key[i, :length] for i, length in enumerate(seq_lens)], dim=0)
+    dense_value = torch.cat([gathered_value[i, :length] for i, length in enumerate(seq_lens)], dim=0)
+    return dense_key.contiguous(), dense_value.contiguous()
