@@ -5,8 +5,8 @@ from vllm.v1.core.block_pool import BlockPool
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ReqMeta
 
-# Keep save event IDs in the non-negative range of a signed 64-bit integer.
-_SAVE_EVENT_ID_MASK = (1 << 63) - 1
+# Keep the first eight hexadecimal digits of the 128-bit UUID.
+_SAVE_EVENT_ID_SHIFT = 128 - 32
 
 
 class InFlightSaveBlockTracker:
@@ -36,9 +36,9 @@ class InFlightSaveBlockTracker:
             block_ids.extend(block_id for block_id in non_spec_block_ids if block_id > 0)
 
         assert block_pool is not None
-        event_id = uuid.uuid4().int & _SAVE_EVENT_ID_MASK
+        event_id = uuid.uuid4().int >> _SAVE_EVENT_ID_SHIFT
         while event_id in self.sending_events:
-            event_id = uuid.uuid4().int & _SAVE_EVENT_ID_MASK
+            event_id = uuid.uuid4().int >> _SAVE_EVENT_ID_SHIFT
         req_meta.event_id = event_id
         logger.debug("event: %s touch blocks: %s", event_id, block_ids)
         block_pool.touch([block_pool.blocks[block_id] for block_id in block_ids])
