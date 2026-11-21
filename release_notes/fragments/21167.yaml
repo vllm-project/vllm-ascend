@@ -1,0 +1,4 @@
+pr: 21167
+entries:
+  - category: feature
+    text: Added fine-grained external prefix-cache recovery to AscendStore bulk transfers when supported by Core-resolved cache geometry.
