@@ -290,8 +290,8 @@ class NPUWorker(GPUWorker):
         # the allocator backs them up instead of discarding them.
         return dict(model.named_parameters())
 
-    def _ascend_discardable_parameters(self, model: nn.Module) -> set[int]:
-        """0.33 fallback; mirrors GPUWorker._discardable_parameters on main."""
+    def _discardable_parameters(self, model: nn.Module) -> set[int]:
+        """Storage of the parameters the weight update rewrites."""
         storage = {
             name: parameter.untyped_storage().data_ptr()
             for name, parameter in self._get_sleep_parameters(model).items()
@@ -312,11 +312,6 @@ class NPUWorker(GPUWorker):
                 "to keep them."
             )
         return set(storage.values()) - preserved
-
-    def _discardable_parameters(self, model: nn.Module) -> set[int]:
-        if hasattr(GPUWorker, "_discardable_parameters"):
-            return super()._discardable_parameters(model)
-        return self._ascend_discardable_parameters(model)
 
     def discard(self, tags: tuple[str, ...]) -> None:
         raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
@@ -441,15 +436,7 @@ class NPUWorker(GPUWorker):
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Level 2 keeps everything the weight update does not rewrite; the
         # allocator backs up mixed/non-parameter weights-pool allocations.
-        from vllm_ascend.device_allocator.sleep_mode_backend import CaMemBackend
-
-        backend = self.sleep_mode_backend
-        if not (isinstance(backend, CaMemBackend) or hasattr(GPUWorker, "_discardable_parameters")):
-            raise ValueError(
-                "Third-party sleep-mode backends that take a sleep level are not "
-                "supported; this vLLM version requires a discardable backend."
-            )
-        suspend_arg = self._discardable_parameters(self.model_runner.model) if level == 2 else set()
+        discardable = self._discardable_parameters(self.model_runner.model) if level == 2 else set()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -458,7 +445,7 @@ class NPUWorker(GPUWorker):
         self.synchronize_device()
 
         global_te.unregister_buffer()
-        backend.suspend(suspend_arg)
+        self.sleep_mode_backend.suspend(discardable)
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
