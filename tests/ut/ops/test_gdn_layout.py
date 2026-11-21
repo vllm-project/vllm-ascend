@@ -10,7 +10,8 @@ from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
-def test_a5_prefill_layout_preserves_values_and_output(kind):
+@pytest.mark.parametrize("chunk32_enabled", [False, True])
+def test_a5_prefill_layout_preserves_values_and_output(kind, chunk32_enabled):
     tokens, nk, nv, dim = 7, 2, 4, 16
     qkv = [torch.randn(1, h, tokens, dim).transpose(1, 2) for h in (nk, nk, nv)]
     if kind == "sequence_first":
@@ -21,11 +22,19 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
     state = torch.randn(1, nv, dim, dim)
     output = torch.randn(1, count, nv, dim)
     gate = torch.randn(1, count, nv)
-    meta = SimpleNamespace(cu_seqlens_host=None, chunk_indices_chunk64_host=None, keep_meta=None)
+    meta = SimpleNamespace(
+        cu_seqlens_host=(0, count),
+        chunk_indices_chunk64_host=(0, 0),
+        chunk_indices_chunk32_host=(0, 0) if chunk32_enabled else None,
+        keep_meta=None,
+    )
 
     def fused(q, k, v, g, beta, **kwargs):
         expected_layout = "BNSD" if kind == "head_first" else "BSND"
         assert kwargs["layout"] == expected_layout
+        assert kwargs["chunk_size"] == (32 if chunk32_enabled else 64)
+        expected_indices = meta.chunk_indices_chunk32_host if chunk32_enabled else meta.chunk_indices_chunk64_host
+        assert kwargs["chunk_indices"] is expected_indices
         for actual, original in zip((q, k, v), qkv):
             assert actual.is_contiguous()
             expected = original.transpose(1, 2) if kind == "head_first" else original
@@ -36,7 +45,8 @@ def test_a5_prefill_layout_preserves_values_and_output(kind):
         torch.testing.assert_close(beta, gate)
         return output, state
 
-    result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+    with patch("vllm_ascend.device.device_op.is_fla_gdn_chunk32_supported", return_value=chunk32_enabled):
+        result, final_state = A5DeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
     assert result is output
     assert final_state is state
 
