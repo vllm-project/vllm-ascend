@@ -26,6 +26,7 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.ascend_config import uses_selective_kv_offload
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     DSparkContextDescriptor,
     resident_mla_context_group_ids,
@@ -35,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     SfaPDConsumerMetadata,
     SfaPDProducerMetadata,
     get_external_request_id,
+    infer_selective_sfa_group_ids,
     infer_sfa_component_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
@@ -250,7 +252,17 @@ class SFAPDRD2HScheduler:
         if kv_cache_config is None:
             raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
-        self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
+        self.selective_offload = uses_selective_kv_offload(vllm_config)
+        self.full_group_idx = None
+        if self.selective_offload and len(kv_cache_config.kv_cache_groups) == 1:
+            # The scheduler sees only the representative spec of a uniform group.
+            self.main_group_idx = self.full_group_idx = self.indexer_group_idx = 0
+        elif self.selective_offload:
+            self.main_group_idx, self.full_group_idx, self.indexer_group_idx = infer_selective_sfa_group_ids(
+                kv_cache_config
+            )
+        else:
+            self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
         self._dspark_context_groups = self._find_dspark_context_groups()
         self._dspark_context_requests: dict[str, tuple[DSparkContextDescriptor, dict[int, tuple[int, ...]]]] = {}
 
@@ -289,7 +301,7 @@ class SFAPDRD2HScheduler:
         # rank-local HBM. Both are vLLM-managed block ids captured at alloc
         # time, forwarded to the worker via build_connector_meta, and dropped
         # when the request finishes (vLLM owns the blocks themselves).
-        self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
+        self._request_trackers: dict[str, tuple[list[int], ...]] = {}
         # req_id -> (pool_slot, tail_tokens, tail_block_index, kv_tokens, dense)
         self._copy_sfa_bindings: dict[str, tuple[int, int, int, int, bool]] = {}
         self.main_block_size = self.block_size[self.main_group_idx]
@@ -298,6 +310,7 @@ class SFAPDRD2HScheduler:
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
+        self._selective_pending_recv: set[str] | None = set() if self.selective_offload else None
         self._dspark_pending_recv: set[str] = set()
         self._deferred_finished_req_ids: set[str] = set()
         self.executor = ThreadPoolExecutor(32)
@@ -360,15 +373,11 @@ class SFAPDRD2HScheduler:
             return ()
         # The pull restores the request's main MLA and indexer blocks and, with
         # DSpark, its resident draft-context blocks.
-        return tuple(
-            sorted(
-                {
-                    self.main_group_idx,
-                    self.indexer_group_idx,
-                    *getattr(self, "_dspark_context_groups", ()),
-                }
-            )
-        )
+        groups = {self.main_group_idx, self.indexer_group_idx, *getattr(self, "_dspark_context_groups", ())}
+        full_group_idx = getattr(self, "full_group_idx", None)
+        if full_group_idx is not None:
+            groups.add(full_group_idx)
+        return tuple(sorted(groups))
 
     def update_state_after_alloc(
         self,
@@ -381,7 +390,8 @@ class SFAPDRD2HScheduler:
             return
 
         block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(blocks.get_block_ids())
-        required_group = max(self.main_group_idx, self.indexer_group_idx)
+        full_group_idx = getattr(self, "full_group_idx", None)
+        required_group = max(self.main_group_idx, self.indexer_group_idx, full_group_idx or 0)
         if len(block_ids_by_group) <= required_group:
             raise RuntimeError(
                 "SFAPD D allocation did not provide all SFA KV cache groups: "
@@ -389,7 +399,12 @@ class SFAPDRD2HScheduler:
             )
         main_block_ids = list(block_ids_by_group[self.main_group_idx])
         indexer_block_ids = list(block_ids_by_group[self.indexer_group_idx])
-        self._request_trackers[request.request_id] = (main_block_ids, indexer_block_ids)
+        full_block_ids = list(block_ids_by_group[full_group_idx]) if full_group_idx is not None else None
+        self._request_trackers[request.request_id] = (
+            (main_block_ids, indexer_block_ids, full_block_ids)
+            if full_block_ids is not None
+            else (main_block_ids, indexer_block_ids)
+        )
         dspark_context_descriptor = None
         dspark_draft_block_ids_by_group = None
         if getattr(self, "_dspark_context_groups", ()):
@@ -485,7 +500,8 @@ class SFAPDRD2HScheduler:
             tracker = self._request_trackers.get(req_id)
             if tracker is None:
                 continue
-            main_block_ids, indexer_block_ids = tracker
+            main_block_ids, indexer_block_ids = tracker[:2]
+            full_block_ids = tracker[2] if len(tracker) > 2 else None
             binding = getattr(self, "_copy_sfa_bindings", {}).get(req_id)
             if binding is None:
                 descriptor, draft_ids = context_requests.get(req_id, (None, {}))
@@ -493,6 +509,7 @@ class SFAPDRD2HScheduler:
                     req_id,
                     main_block_ids,
                     indexer_block_ids,
+                    full_block_ids=full_block_ids,
                     dspark_context_descriptor=descriptor,
                     dspark_draft_group_ids=self._dspark_context_groups if descriptor is not None else (),
                     dspark_draft_block_ids_by_group=draft_ids if descriptor is not None else None,
@@ -503,6 +520,7 @@ class SFAPDRD2HScheduler:
                     req_id,
                     main_block_ids,
                     indexer_block_ids,
+                    full_block_ids=full_block_ids,
                     pool_slot=pool_slot,
                     tail_tokens=tail_tokens,
                     tail_block_index=tail_block_index,
@@ -513,6 +531,10 @@ class SFAPDRD2HScheduler:
                     dspark_draft_block_ids_by_group=context_requests.get(req_id, (None, None))[1],
                 )
         self._reqs_need_recv.clear()
+        pending = getattr(self, "_selective_pending_recv", None)
+        if pending is not None:
+            pending.update(req.req_id for req in meta.requests)
+            meta.pending_recv_ids = frozenset(pending)
         return meta
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
@@ -523,7 +545,9 @@ class SFAPDRD2HScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        if request.request_id in self._dspark_pending_recv:
+        if request.request_id in self._dspark_pending_recv or request.request_id in (
+            getattr(self, "_selective_pending_recv", None) or ()
+        ):
             # Let the existing rendezvous and reads drain naturally. vLLM
             # retains the KV blocks; retain the connector's destinations too.
             self._deferred_finished_req_ids.add(request.request_id)
@@ -534,6 +558,9 @@ class SFAPDRD2HScheduler:
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         completed = set(connector_output.finished_recving or ())
         self._dspark_pending_recv.difference_update(completed)
+        pending = getattr(self, "_selective_pending_recv", None)
+        if pending is not None:
+            pending.difference_update(completed)
         for request_id in completed & self._deferred_finished_req_ids:
             self._cleanup_finished_request(request_id)
 

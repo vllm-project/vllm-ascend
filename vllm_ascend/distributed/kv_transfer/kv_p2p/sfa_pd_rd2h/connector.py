@@ -3,10 +3,10 @@
 """PD-disaggregated SFA Remote D2H KV-transfer connector.
 
 This connector is dedicated to decode offload. On the Decode node
-(``kv_consumer``), remote Prefill exposes its KV and Decode pulls the bulk MLA
-KV directly into a CPU pinned offload pool; the indexer KV lands in HBM. The
-CPU pool and sparse resident-cache load path are owned by
-:class:`SparseKVOffloadManager`.
+(``kv_consumer``), remote Prefill exposes its KV. Selective offload pulls full
+MLA and Indexer KV into local HBM and stages shared MLA KV in HBM before
+copying it to a rank-local pinned Host pool. The pool and sparse resident-cache
+load path are owned by :class:`SparseKVOffloadManager`.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -51,8 +51,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     * SCHEDULER + producer : P-side metadata for memfabric pull notifications.
     * SCHEDULER + consumer : D-side vLLM block-id / advertisement tracking.
     * WORKER + producer    : P-side layer-wise READ_READY notifications.
-    * WORKER + consumer    : D-side manager CPU-pool + memfabric pull read +
-      indexer/main split registration.
+    * WORKER + consumer    : D-side manager CPU pool and MemFabric pull into
+      shared Host / full device / Indexer device destinations.
     """
 
     supports_layerwise_buffer_reuse = True
@@ -208,7 +208,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         if self.is_consumer:
-            return self.connector_worker.get_finished(finished_req_ids)
+            pending = getattr(self._connector_metadata, "pending_recv_ids", None)
+            return self.connector_worker.get_finished(finished_req_ids, pending_recv_ids=pending)
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
