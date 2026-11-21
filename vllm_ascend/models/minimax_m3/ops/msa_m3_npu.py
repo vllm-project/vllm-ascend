@@ -197,7 +197,7 @@ def minimax_m3_index_prefill(
     topk: int,
     init_blocks: int,
     local_blocks: int,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute AscendC prefill scores and finalize their block TopK."""
     score = _minimax_m3_index_score(
         idx_q,
@@ -279,6 +279,8 @@ def _minimax_m3_sparse_attn_a3(
     block_size: int,
     *,
     supports_fp8: bool = False,
+    select_num_idx: torch.Tensor | None = None,
+    query_lens: torch.Tensor | None = None,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
     # Q-gather-KV is also the A5 fallback when experimental Split-KV is
@@ -297,15 +299,18 @@ def _minimax_m3_sparse_attn_a3(
             "v_dequant_scale": dequant_scale,
             "attention_out_dtype": torch.bfloat16,
         }
-    q_lens_t = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    if select_num_idx is None:
+        select_num_idx = _select_num_idx_from_topk(topk_idx)
+    if query_lens is None:
+        query_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     out = torch.ops._C_ascend.npu_sparse_attention_score(
         q,
         key,
         value,
         topk_idx,
         block_table,
-        select_num_idx=_select_num_idx_from_topk(topk_idx),
-        actual_seq_lengths=q_lens_t,
+        select_num_idx=select_num_idx,
+        actual_seq_lengths=query_lens,
         actual_seq_lengths_kv=seq_lens,
         num_key_value_heads=num_kv_heads,
         scale_value=sm_scale,
@@ -332,6 +337,7 @@ def _minimax_m3_sparse_attn_kv_gather_q(
     max_kv_blocks: int,
     *,
     supports_fp8: bool,
+    query_lens: torch.Tensor | None = None,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
 
@@ -363,7 +369,9 @@ def _minimax_m3_sparse_attn_kv_gather_q(
     k2q_row_ptr = k2q_row_ptr.to(dtype=torch.int32).contiguous()
     k2q_q_indices = k2q_q_indices.to(dtype=torch.int32).contiguous()
     k2q_slot_indices = k2q_slot_indices.to(dtype=torch.int32).contiguous()
-    q_lens_t = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32).contiguous()
+    if query_lens is None:
+        query_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    q_lens_t = query_lens.to(torch.int32).contiguous()
     kv_lens_t = seq_lens.to(torch.int32).contiguous()
     out = torch.ops._C_ascend.npu_sparse_attention_score_prefill(
         q,
@@ -413,6 +421,9 @@ def minimax_m3_sparse_attn(
     block_size: int = 128,
     total_kv_blocks: int = -1,
     max_kv_blocks: int = -1,
+    *,
+    select_num_idx: torch.Tensor | None = None,
+    query_lens: torch.Tensor | None = None,
 ) -> None:
     del prefix_lens, max_query_len
     common_args = (
@@ -432,7 +443,12 @@ def minimax_m3_sparse_attn(
     # Select the optional optimization by ACLNN availability. The installed
     # experimental package must provide kernels for the current device.
     if not _is_minimax_sparse_attention_split_kv_available():
-        _minimax_m3_sparse_attn_a3(*common_args, supports_fp8=supports_fp8)
+        _minimax_m3_sparse_attn_a3(
+            *common_args,
+            supports_fp8=supports_fp8,
+            select_num_idx=select_num_idx,
+            query_lens=query_lens,
+        )
         return
 
     _minimax_m3_sparse_attn_kv_gather_q(
@@ -440,6 +456,7 @@ def minimax_m3_sparse_attn(
         total_kv_blocks,
         max_kv_blocks,
         supports_fp8=supports_fp8,
+        query_lens=query_lens,
     )
 
 
