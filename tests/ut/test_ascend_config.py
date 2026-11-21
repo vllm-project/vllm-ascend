@@ -2038,7 +2038,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    def test_fused_mc2_mode_3_rejects_a3(self, _mock_profile):
+    def test_fused_mc2_mode_3_allows_a3(self, _mock_profile):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             enable_fused_mc2=3,
@@ -2047,7 +2047,25 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
         )
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A5"):
+        # A3 supports the INT quant family (A16W16 / A8W8-INT / A8W4-INT)
+        # shared-expert fusion and must not raise.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_fused_mc2_mode_3_rejects_unsupported_hardware(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        self.assertTrue(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             config._validate_megamoe_shared_expert_fusion(vllm_config)
 
     @_clean_up
