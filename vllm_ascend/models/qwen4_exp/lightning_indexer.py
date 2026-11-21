@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Protocol
 
 import torch
@@ -16,8 +15,6 @@ from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm_ascend.ops.triton.qwen4_exp.qsa import pack_qsa_group_indices_npu
 
 _HEAD_DIM = 128
-# BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
-_LI_V2_WEIGHT_FRACTION_BITS = 11
 
 
 class QSAIndexerMetadataProtocol(Protocol):
@@ -32,10 +29,18 @@ class QSAIndexerMetadataProtocol(Protocol):
     seq_lens: torch.Tensor
 
 
+class QSACompressedIndexerMetadataProtocol(QSAIndexerMetadataProtocol, Protocol):
+    """Prepared fields that are mandatory on compressed QSA metadata."""
+
+    qsa_compressed_lengths: torch.Tensor
+    qsa_residual_lengths: torch.Tensor
+    qsa_score_weights: torch.Tensor
+
+
 def qsa_select_paged_tokens_lightning_v2(
     query: torch.Tensor,
     compressed_key_cache: torch.Tensor,
-    attn_metadata: QSAIndexerMetadataProtocol,
+    attn_metadata: QSACompressedIndexerMetadataProtocol,
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
@@ -82,8 +87,8 @@ def qsa_select_paged_tokens_lightning_v2(
     # Metadata uses original-token lengths. Only request-sized arrays are
     # materialized; there is no token-wise length or page-table gather.
     lengths = attn_metadata.seq_lens[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
+    compressed_lengths = attn_metadata.qsa_compressed_lengths[:requests]
+    residual_lengths = attn_metadata.qsa_residual_lengths[:requests]
     common = dict(
         cu_seqlens_q=attn_metadata.query_start_loc[: requests + 1].clamp_max(rows),
         seqused_k=compressed_lengths,
@@ -106,18 +111,7 @@ def qsa_select_paged_tokens_lightning_v2(
             batch_size=requests,
             **common,
         )
-    # Promote the old BF16-representable uniform weight to FP32. Keep its
-    # effective value while removing zero-head padding supported by native V2.
-    score_weight = math.ldexp(
-        round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
-        -_LI_V2_WEIGHT_FRACTION_BITS,
-    )
-    weights = torch.full(
-        (rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
+    weights = attn_metadata.qsa_score_weights[:rows]
     groups, _ = torch.ops.cann_ops_transformer.lightning_indexer(
         query,
         compressed_key_cache,

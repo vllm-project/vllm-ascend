@@ -14,6 +14,7 @@
 
 """Ascend QSA owner for Qwen3.8-Flash-Next."""
 
+import math
 from dataclasses import replace
 from typing import Any, TypeAlias, cast
 
@@ -49,18 +50,28 @@ from vllm_ascend.utils import vllm_version_is
 
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
-from .lightning_indexer import QSAIndexerMetadataProtocol, qsa_select_paged_tokens_lightning_v2
+from .lightning_indexer import (
+    QSACompressedIndexerMetadataProtocol,
+    QSAIndexerMetadataProtocol,
+    qsa_select_paged_tokens_lightning_v2,
+)
+from .qsa_prepare import (
+    prepare_qsa_gbsa_shared,
+    prepare_qsa_lengths,
+)
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_cache as qsa_indexer  # type: ignore[import-not-found]
 
     QSAIndexerBackend = qsa_indexer.QSAStateBackend
+    QSAIndexerMetadataBuilderBase = qsa_indexer.QSAMetadataBuilder
 else:
     import vllm.models.qwen4_exp.amd.qsa_indexer as upstream_indexer  # type: ignore[import-not-found]
     import vllm.models.qwen4_exp.common.qsa_indexer as qsa_indexer  # type: ignore[import-not-found]
 
     QSAIndexerBackend = qsa_indexer.QSAIndexerBackend
+    QSAIndexerMetadataBuilderBase = qsa_indexer.QSAIndexerMetadataBuilder
 
 # The upstream backend class is renamed per tree; the class definition below
 # carries the resulting valid-type/misc ignores.
@@ -177,7 +188,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
 
     def _metadata(
         self,
-    ) -> tuple[QSAIndexerMetadataProtocol, QSAIndexerMetadataProtocol] | None:
+    ) -> tuple[QSAIndexerMetadataProtocol, QSACompressedIndexerMetadataProtocol] | None:
         """Read paired QSA metadata without a graph-breaking host sync."""
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
@@ -186,7 +197,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             return None
         raw = cast(QSAIndexerMetadataProtocol, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAIndexerMetadataProtocol,
+            QSACompressedIndexerMetadataProtocol,
             metadata[self.compressed_key_cache.prefix],
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
@@ -379,7 +390,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         token_k: torch.Tensor,
         positions: torch.Tensor,
         raw_metadata: QSAIndexerMetadataProtocol,
-        compressed_metadata: QSAIndexerMetadataProtocol,
+        compressed_metadata: QSACompressedIndexerMetadataProtocol,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
@@ -419,7 +430,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     def _select(
         self,
         query: torch.Tensor,
-        metadata: QSAIndexerMetadataProtocol,
+        metadata: QSACompressedIndexerMetadataProtocol,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         logger.info_once("QSA is using native request-batched LightningIndexerV2 through the CANN Torch interface.")
@@ -504,6 +515,7 @@ class AscendQSAImpl:
             seq_lens: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
+            qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
         ) -> torch.Tensor:
             if output_scale is not None or output_block_scale is not None:
                 raise NotImplementedError("QSA output quantization is not supported on Ascend")
@@ -518,6 +530,7 @@ class AscendQSAImpl:
                 token_to_req,
                 logical_positions,
                 seq_lens,
+                qsa_step_metadata,
             )
 
     else:
@@ -535,6 +548,7 @@ class AscendQSAImpl:
             seq_lens: torch.Tensor | None = None,
             key: torch.Tensor | None = None,
             value: torch.Tensor | None = None,
+            qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
         ) -> torch.Tensor:
             # The base ABI forwards only `token_to_req`; the GBSA kernel also
             # needs the indexer-side positions/lengths, supplied by the Ascend
@@ -554,6 +568,7 @@ class AscendQSAImpl:
                 token_to_req,
                 logical_positions,
                 seq_lens,
+                qsa_step_metadata,
             )
 
     def _dispatch_qsa(
@@ -568,6 +583,7 @@ class AscendQSAImpl:
         token_to_req: torch.Tensor,
         logical_positions: torch.Tensor,
         seq_lens: torch.Tensor,
+        qsa_step_metadata: QSAIndexerMetadataProtocol | None = None,
     ) -> torch.Tensor:
         """Run GBSA, or the FIA/GBSA split planned for this step."""
         num_tokens = attn_metadata.num_actual_tokens
@@ -596,6 +612,21 @@ class AscendQSAImpl:
                 prepared_metadata=getattr(
                     attn_metadata,
                     "qsa_gbsa_metadata",
+                    None,
+                ),
+                prepared_visible_lengths=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_visible_lengths",
+                    None,
+                ),
+                prepared_cu_query=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_cu_query",
+                    None,
+                ),
+                prepared_row_block_table=getattr(
+                    qsa_step_metadata,
+                    "qsa_gbsa_row_block_table",
                     None,
                 ),
             )
@@ -657,6 +688,119 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
         # bypass the prefill planner for the decode-only graph contract.
         metadata = super().build(0, common_attn_metadata, fast_build=True)
         metadata.qsa_request_plan = None
+        return metadata
+
+
+class AscendQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilderBase):  # type: ignore[misc, valid-type]
+    """Prepare QSA indexer and decode GBSA inputs in the owning builder.
+
+    Main and compressed QSA caches share one composite cache group, hence this
+    builder sees the same scheduler block table as the main QSA builder.  Keep
+    the derived tensors on the compressed/indexer metadata and let the model
+    consume both metadata objects, matching the GLM KPool ownership model.
+    """
+
+    _COMPRESSED_SUFFIX = ".indexer.compressed_key_cache"
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: Any,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._qsa_layer_names = tuple(layer_names)
+
+    def _main_qsa_layer(self):
+        context = self.vllm_config.compilation_config.static_forward_context
+        for name in self._qsa_layer_names:
+            if name.endswith(self._COMPRESSED_SUFFIX):
+                source = name[: -len(self._COMPRESSED_SUFFIX)]
+                layer = context.get(f"{source}.attn")
+                if layer is not None and hasattr(layer, "indexer"):
+                    return layer
+        return None
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        if self.compress_ratio <= 1:
+            return metadata
+
+        layer = self._main_qsa_layer()
+        if layer is None:
+            raise RuntimeError("QSA compressed metadata builder cannot find its owning attention layer")
+
+        requests = int(metadata.seq_lens.shape[0])
+        rows = int(metadata.num_actual_tokens)
+        device = metadata.seq_lens.device
+        max_requests = self.vllm_config.scheduler_config.max_num_seqs
+        max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # FULL graphs may pad the request dimension up to the token capacity.
+        max_requests = max(max_requests, max_tokens, requests)
+        index_heads = int(layer.indexer.index_n_heads)
+        table_columns = int(common_attn_metadata.block_table_tensor.shape[1])
+        table_dtype = common_attn_metadata.block_table_tensor.dtype
+        signature = (device, max_requests, max_tokens, index_heads, table_columns, table_dtype)
+        buffer_cache = getattr(self, "_qsa_prepared_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            self._qsa_prepared_buffers = buffer_cache
+        buffers = buffer_cache.get(signature)
+        if buffers is None:
+            score_weight = math.ldexp(
+                round(math.ldexp(1.0 / math.sqrt(int(layer.indexer.index_head_dim)), 11)),
+                -11,
+            )
+            buffers = {
+                "compressed_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "residual_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "score_weights": torch.full(
+                    (max_tokens, index_heads),
+                    score_weight,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "visible_lengths": torch.empty(max_tokens, dtype=torch.int32, device=device),
+                "cu_query": torch.arange(max_tokens + 1, dtype=torch.int64, device=device),
+                "row_block_table": torch.empty(
+                    (max_tokens, table_columns),
+                    dtype=table_dtype,
+                    device=device,
+                ),
+            }
+            buffer_cache[signature] = buffers
+
+        prepare_qsa_lengths(
+            metadata.seq_lens,
+            buffers["compressed_lengths"],
+            buffers["residual_lengths"],
+            requests,
+            int(self.compress_ratio),
+        )
+        metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        metadata.qsa_score_weights = buffers["score_weights"]
+        if getattr(metadata, "num_prefills", 0):
+            return metadata
+
+        prepare_qsa_gbsa_shared(
+            metadata.logical_positions,
+            metadata.seq_lens,
+            metadata.token_to_req,
+            common_attn_metadata.block_table_tensor,
+            buffers["visible_lengths"],
+            buffers["row_block_table"],
+            rows,
+        )
+        metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
+        metadata.qsa_gbsa_cu_query = buffers["cu_query"]
+        metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
         return metadata
 
 
@@ -722,6 +866,7 @@ else:
 # Their physical block stride is honored by the runner, so no compact copy is
 # required before LightningIndexer or the Triton QSA selector consumes them.
 QSAIndexerBackend.uses_descriptor_cache_view = True
+QSAIndexerBackend.get_builder_cls = staticmethod(lambda: AscendQSAIndexerMetadataBuilder)
 
 # The indexer module selects its Triton metadata builder at import time. The
 # upstream kernel uses CUDA PDL intrinsics, so Ascend uses the Torch path.
@@ -822,6 +967,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     token_to_req=side_metadata.token_to_req,
                     logical_positions=side_metadata.logical_positions,
                     seq_lens=side_metadata.seq_lens,
+                    qsa_step_metadata=side_metadata,
                 )
             else:
                 # main's ABI drops K/V from the signature; pass them back so
@@ -837,6 +983,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
                     seq_lens=side_metadata.seq_lens,
                     key=key,
                     value=value,
+                    qsa_step_metadata=side_metadata,
                 )
         maybe_save_kv_layer_to_connector(self.layer_name, list(self.kv_cache))
 

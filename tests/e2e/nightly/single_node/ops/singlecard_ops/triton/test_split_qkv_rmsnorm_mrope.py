@@ -5,6 +5,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.models.qwen4_exp.qsa_prepare import prepare_qsa_rope_cache
 
 STRUCTURAL_CASES = [
     (1, 2, 1, 128, [24, 20, 20]),
@@ -25,6 +26,60 @@ DTYPES = [torch.bfloat16, torch.float16]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-2
 DEFAULT_RTOL = 1e-2
+
+
+@pytest.mark.parametrize("position_axes", [1, 3])
+def test_prepare_qsa_rope_cache_clamps_and_gathers(position_axes: int):
+    device = DEVICES[0]
+    cache = torch.arange(5 * 8, dtype=torch.float32, device=device).reshape(5, 8)
+    base_positions = torch.tensor([-2, 1, 7], dtype=torch.int64, device=device)
+    positions = (
+        base_positions if position_axes == 1 else torch.stack((base_positions, base_positions + 1, base_positions + 2))
+    )
+    output = torch.empty((*positions.shape, cache.shape[1]), dtype=torch.bfloat16, device=device)
+
+    prepare_qsa_rope_cache(positions, cache, output)
+
+    expected = cache[positions.clamp(0, cache.shape[0] - 1)].to(output.dtype)
+    torch.testing.assert_close(output, expected)
+
+
+def test_split_qkv_rmsnorm_mrope_applies_weight_offset_in_kernel():
+    device = DEVICES[0]
+    dtype = torch.bfloat16
+    num_q_heads, num_kv_heads, head_size = 2, 1, 128
+    q_size = num_q_heads * head_size
+    kv_size = num_kv_heads * head_size
+    qkv = torch.randn((1, 2 * q_size + 2 * kv_size), dtype=dtype, device=device)
+    q_weight = torch.randn(head_size, dtype=dtype, device=device)
+    k_weight = torch.randn(head_size, dtype=dtype, device=device)
+    cos_sin = torch.randn((3, 1, head_size), dtype=dtype, device=device)
+    kwargs = dict(
+        qkv=qkv,
+        cos_sin=cos_sin,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        eps=1e-6,
+        mrope_section=[24, 20, 20],
+        is_interleaved=True,
+        has_gate=True,
+    )
+
+    offset_outputs = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+        q_weight=q_weight,
+        k_weight=k_weight,
+        weight_offset=1.0,
+        **kwargs,
+    )
+    prepared_outputs = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+        q_weight=(q_weight.float() + 1.0).to(dtype),
+        k_weight=(k_weight.float() + 1.0).to(dtype),
+        **kwargs,
+    )
+
+    for actual, expected in zip(offset_outputs, prepared_outputs):
+        torch.testing.assert_close(actual, expected)
 
 
 def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
@@ -330,6 +385,64 @@ def test_split_qkv_rmsnorm_mrope(
     torch.testing.assert_close(real_v.cpu(), golden_v.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     if has_gate:
         torch.testing.assert_close(real_gate.cpu(), golden_gate.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        gate_out = torch.empty_like(real_gate)
+        out_q, out_k, out_v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin=cos_sin,
+            gate_output=gate_out,
+            num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            eps=eps,
+            mrope_section=mrope_section,
+            is_interleaved=is_interleaved,
+            rope_dim=rope_dim,
+        )
+        torch.testing.assert_close(out_q, real_q, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(out_k, real_k, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(out_v, real_v, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+        torch.testing.assert_close(gate_out, real_gate, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+
+        if num_tokens == 1 and num_q_heads == 2 and head_size == 256:
+            full_cache = torch.randn(4, rope_dim, dtype=dtype, device=device)
+            positions = torch.tensor([[0], [1], [2]], dtype=torch.int64, device=device)
+            gathered_cache = full_cache[positions]
+            gathered_gate = torch.empty_like(real_gate)
+            positioned_gate = torch.empty_like(real_gate)
+            gathered = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+                qkv=qkv,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                cos_sin=gathered_cache,
+                gate_output=gathered_gate,
+                num_q_heads=num_q_heads,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                eps=eps,
+                mrope_section=mrope_section,
+                is_interleaved=is_interleaved,
+                rope_dim=rope_dim,
+            )
+            positioned = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+                qkv=qkv,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                cos_sin=full_cache,
+                gate_output=positioned_gate,
+                num_q_heads=num_q_heads,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                eps=eps,
+                mrope_section=mrope_section,
+                is_interleaved=is_interleaved,
+                rope_dim=rope_dim,
+                positions=positions,
+            )
+            for positioned_tensor, gathered_tensor in zip(positioned, gathered):
+                torch.testing.assert_close(positioned_tensor, gathered_tensor, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+            torch.testing.assert_close(positioned_gate, gathered_gate, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()
