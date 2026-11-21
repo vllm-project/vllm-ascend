@@ -24,7 +24,6 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
@@ -139,10 +138,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.tp_size = (
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
         )
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
-        self.use_expert_weight_list = self.dynamic_eplb or (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
-        )
+        self.use_expert_weight_list = vllm_config.parallel_config.enable_eplb is True
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
             raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
 

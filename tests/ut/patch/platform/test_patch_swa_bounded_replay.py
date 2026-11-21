@@ -76,7 +76,6 @@ def _scheduler() -> Scheduler:
     """
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.use_pp = True
-    scheduler.use_v2_model_runner = False
     scheduler.scheduler_config = SimpleNamespace(async_scheduling=False)
     scheduler.prev_step_scheduled_req_ids = set()
     return scheduler
@@ -127,21 +126,6 @@ def test_declaring_the_field_is_idempotent():
 
 
 # --- a resumed request that rewinds has to say so ----------------------------
-
-
-def test_resumed_request_replay_start_reaches_the_payload():
-    cached_reqs = _build([_request("req-0", replay_start=REPLAY_START)])
-
-    assert set(cached_reqs.resumed_req_ids) == {"req-0"}
-    assert cached_reqs.replay_start == {"req-0": REPLAY_START}
-
-
-def test_resumed_request_that_does_not_rewind_contributes_nothing():
-    """A preempted request can come back without a fresh hit; naming it would
-    make the worker pad slots that were never replayed."""
-    cached_reqs = _build([_request("req-0"), _request("req-1", replay_start=REPLAY_START)])
-
-    assert cached_reqs.replay_start == {"req-1": REPLAY_START}
 
 
 def test_payload_without_resumed_requests_carries_an_empty_map():

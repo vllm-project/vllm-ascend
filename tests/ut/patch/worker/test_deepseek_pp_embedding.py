@@ -47,7 +47,6 @@ def _make_target(monkeypatch, pp_size, pp_rank, method, *, existing=False, quant
             uses_target_hidden_states=True,
             draft_model_config=SimpleNamespace(may_use_target_embed=True),
         ),
-        use_v2_model_runner=True,
     )
     initial = torch.nn.Embedding(65, 2) if group.is_first_rank or existing else PPMissingLayer()
 
