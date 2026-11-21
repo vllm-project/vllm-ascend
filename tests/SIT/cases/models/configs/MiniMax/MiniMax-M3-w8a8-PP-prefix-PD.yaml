@@ -111,7 +111,7 @@ templates:
       - '{
         "kv_connector":"MooncakeConnectorV1",
         "kv_role":"kv_producer",
-        "kv_port":"36000",
+        "kv_port":"26000",
         "kv_connector_extra_config":{
             "use_ascend_direct":true,
             "prefill":{"dp_size":1,"tp_size":4,"pp_size":4,"pp_layer_partition":"16,15,15,14"},
