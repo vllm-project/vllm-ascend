@@ -12,6 +12,7 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 def load_patch():
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/patch/worker/patch_worker_extension.py"
     spec = importlib.util.spec_from_file_location("_test_worker_extension_patch", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -88,23 +89,26 @@ def test_explicit_dummy_weight_flag_is_forwarded(wrapper):
 def test_descriptor_hooks_bind_on_worker(wrapper, monkeypatch, hook_type, load_dummy_weights):
     if hook_type is classmethod:
 
-        def before(cls, *, load_dummy_weights):
+        def before_class(cls, *, load_dummy_weights):
             assert cls is type(wrapper.wrapper.worker)
             wrapper.events.append(("before", load_dummy_weights))
 
-        def after(cls, *, load_dummy_weights):
+        def after_class(cls, *, load_dummy_weights):
             assert cls is type(wrapper.wrapper.worker)
             wrapper.events.append(("after", load_dummy_weights))
+
+        monkeypatch.setattr(wrapper.extension, "before_load_model", classmethod(before_class))
+        monkeypatch.setattr(wrapper.extension, "after_load_model", classmethod(after_class))
     else:
 
-        def before(*, load_dummy_weights):
+        def before_static(*, load_dummy_weights):
             wrapper.events.append(("before", load_dummy_weights))
 
-        def after(*, load_dummy_weights):
+        def after_static(*, load_dummy_weights):
             wrapper.events.append(("after", load_dummy_weights))
 
-    monkeypatch.setattr(wrapper.extension, "before_load_model", hook_type(before))
-    monkeypatch.setattr(wrapper.extension, "after_load_model", hook_type(after))
+        monkeypatch.setattr(wrapper.extension, "before_load_model", staticmethod(before_static))
+        monkeypatch.setattr(wrapper.extension, "after_load_model", staticmethod(after_static))
 
     if load_dummy_weights:
 

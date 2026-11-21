@@ -31,6 +31,7 @@ pre-fix negative-KV-cache condition.
 """
 
 import os
+from typing import Any
 
 import pytest
 
@@ -97,6 +98,8 @@ def test_two_instances_on_single_card() -> None:
 
 class ModelLoadProbe:
     """Check extension callbacks on workers created by both executors."""
+
+    model_runner: Any
 
     def before_load_model(self, *, load_dummy_weights):
         assert not load_dummy_weights
