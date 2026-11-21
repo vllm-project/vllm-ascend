@@ -126,10 +126,12 @@ class TestFLALazyImports(unittest.TestCase):
             events.append("device")
             return object()
 
-        # `init_device` imports the runner inside the function, so the module it
-        # resolves through has to be faked instead of the bound class.
-        runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
-        runner_module.__dict__.update(NPUModelRunner=lambda *args: events.append("model_runner"))
+        def make_model_runner():
+            events.append("model_runner")
+            return object()
+
+        # `init_device` is loaded as a free function, so the worker stand-in
+        # must provide the runner hook that the method now calls.
         namespace = {
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
@@ -137,11 +139,11 @@ class TestFLALazyImports(unittest.TestCase):
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
         worker = SimpleNamespace(
             _init_device=select_device,
+            _make_model_runner=make_model_runner,
             vllm_config=SimpleNamespace(is_mm_encoder_only=False),
             rank=1,
         )
-        with patch.dict(sys.modules, {"vllm_ascend.worker.v2.model_runner": runner_module}):
-            init_device(worker)
+        init_device(worker)
         self.assertEqual(events, ["device", "register", "model_runner"])
 
 
