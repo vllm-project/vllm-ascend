@@ -107,6 +107,21 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     assert result == 5
 
 
+def test_missing_vllm_config_falls_back_to_upstream(monkeypatch):
+    """Upstream scheduler doubles do not carry the Ascend VllmConfig."""
+    calls = []
+
+    def original(*args, **kwargs):
+        calls.append(args)
+        return 42
+
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", original)
+    scheduler = SimpleNamespace(block_size=128, use_eagle=True, use_eagle_block_drop=True)
+
+    assert _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8) == 42
+    assert len(calls) == 1
+
+
 def test_pd_consumer_preserves_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=True),
