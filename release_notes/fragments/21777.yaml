@@ -1,0 +1,4 @@
+pr: 21777
+entries:
+  - category: dependency
+    text: Pinned torch==2.10.0+cpu to match torch-npu 2.10.0.post7's exact requirement, fixing intermittent pip ResolutionImpossible failures when installing vllm-ascend.
