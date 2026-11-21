@@ -33,6 +33,8 @@ def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k,
     if ties:
         scores.fill_(1)
     ids[:, 0] = -1
+    if rows > 1:
+        ids[1::3, 1] = -1
     scores[..., :5] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0], dtype=dtype)
     if dtype == torch.float32:
         scores[..., 5:7] = torch.tensor([1.0, torch.nextafter(torch.tensor(1.0), torch.tensor(2.0))])
@@ -92,6 +94,8 @@ def test_candidate_pipeline_and_changed_graph_inputs(world, rows, topk, local_k,
             ids.fill_(-1)
         else:
             ids.copy_(ids.flip(-1))
+            if rows > 1:
+                ids[0, 1] = -1
             scores[0].fill_(100)
         device_ids.copy_(ids)
         device_scores.copy_(scores)
