@@ -2172,35 +2172,21 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         return None
 
     def _check_layerwise_transfer_errors(self) -> None:
-        def reject(reason: str, **state) -> None:
-            self._layer_load_aborted.set()
-            details = dict(
-                reason=reason,
-                layer=getattr(self, "current_layer", None),
-                requests=sorted(getattr(self, "_current_layerwise_request_ids", ()))[:8],
-                **state,
-            )
-            logger.error("Layerwise transfer guard failed: %s", details)
-            raise RuntimeError(f"Layerwise transfer failed; refusing incomplete KV/state: {details}")
-
         if self.layerwise_offload:
-            # Completion events fire on failure too. Keep the protection, and
-            # carry the actual failure state through the executor's exception.
-            save_disabled = self._save_disabled.is_set()
-            load_disabled = bool(self.kv_recv_thread and self.kv_recv_thread.load_disabled.is_set())
-            if save_disabled or load_disabled:
-                reject("transfer_disabled", save_disabled=save_disabled, load_disabled=load_disabled)
+            # Completion events also fire on failure. Reused buffers no longer
+            # have a resident copy to fall back to after a failed PUT or GET.
+            if self._save_disabled.is_set() or (self.kv_recv_thread and self.kv_recv_thread.load_disabled.is_set()):
+                self._layer_load_aborted.set()
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
         elif self.use_layerwise_transfer:
+            # Ordinary Memcache loads retain the existing scheduler policy.
             return
+        # A hybrid block ID can belong to SWA, compressed KV or compressor
+        # state. Do not feed partially restored state to the attention kernel.
         with self._invalid_block_ids_lock:
             if self._invalid_block_ids or (self.layerwise_offload and self._failed_requests):
-                reject(
-                    "invalid_blocks_or_failed_requests",
-                    invalid_block_count=len(self._invalid_block_ids),
-                    invalid_blocks=sorted(self._invalid_block_ids)[:8],
-                    failed_request_count=len(self._failed_requests),
-                    failed_requests=sorted(map(str, self._failed_requests))[:8],
-                )
+                self._layer_load_aborted.set()
+                raise RuntimeError("Layerwise transfer failed; refusing incomplete KV/state")
 
     def _build_shared_load_data(self) -> None:
         """Share load metadata, preserving layer-specific selections for reuse."""
