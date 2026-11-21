@@ -491,7 +491,10 @@ class NPUPlatform(Platform):
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
-        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if (
+            vllm_config.model_config.use_mla
+            and getattr(vllm_config.model_config.hf_config, "model_type", None) == "kimi_k31"
+        ):
             from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
             from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 
@@ -530,7 +533,7 @@ class NPUPlatform(Platform):
         # in logical units -- AscendDSAC128Backend reports 4096 for the same physical page.
         # Phase 2 is for hybrid models, Phase 3 for mixed KV dtypes, and the mamba handling
         # below is gated on mamba_cache_mode; none of those is a DeepSeek V4 configuration.
-        if model_config is not None and model_config.hf_config.model_type == "deepseek_v4":
+        if model_config is not None and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4":
             return
 
         # DeepSeek V4.1 keys its page geometry on the physical block size as well, and
@@ -1799,7 +1802,7 @@ def _is_supported_flash_attn_draft(spec: SpeculativeConfig, model_tag: str | Non
         return (
             bool(spec.enforce_eager)
             and model_tag == "dflash_head"
-            and target.hf_text_config.model_type == "glm_moe_dsa"
+            and getattr(getattr(target, "hf_text_config", None), "model_type", None) == "glm_moe_dsa"
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
         )
     if spec.method == "dspark":
@@ -1859,7 +1862,7 @@ def _validate_minimax_dspark_flash_attn(config, selector) -> bool:
     spec = config.speculative_config
     if spec.method != "dspark":
         return False
-    if spec.target_model_config.hf_text_config.model_type != "minimax_m3_text":
+    if getattr(getattr(spec.target_model_config, "hf_text_config", None), "model_type", None) != "minimax_m3_text":
         return False
     parallel = config.parallel_config
     return (

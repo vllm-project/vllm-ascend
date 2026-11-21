@@ -1388,7 +1388,8 @@ class NPUModelRunner(GPUModelRunner):
             spec is not None
             and self.speculator is not None
             and spec.method == "dflash"
-            and self.model_config.hf_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
+            and getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None)
+            in ("glm_moe_dsa", "glm5_next_text")
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
@@ -1402,7 +1403,7 @@ class NPUModelRunner(GPUModelRunner):
             and {"MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"}.intersection(
                 spec.draft_model_config.architectures or ()
             )
-            and self.model_config.hf_text_config.model_type == "minimax_m3_text"
+            and getattr(getattr(self.model_config, "hf_text_config", None), "model_type", None) == "minimax_m3_text"
         ):
             # Flash's sparse target uses device lengths, but a mixed target
             # GQA backend still consumes the shared CPU length mirror.

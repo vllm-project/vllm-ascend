@@ -1395,7 +1395,9 @@ class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[GDNAttentionMetadataBuilder]:
         vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is not None and vllm_config.model_config.hf_text_config.model_type in (
+        if vllm_config is not None and getattr(
+            getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None
+        ) in (
             "glm5_next",
             "glm5_next_text",
         ):

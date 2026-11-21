@@ -94,7 +94,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
         then vLLM's generic grouping.
         """
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
         if step5_groups is not None:
@@ -171,7 +171,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int | None:
         """Return the pool cost used to build the native descriptors."""
-        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        if getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         pools = _get_replicated_draft_pools(kv_cache_groups)
         if pools is not None:
@@ -505,7 +505,7 @@ def get_ascend_kv_cache_config_from_groups(
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
     pools = _get_replicated_draft_pools(kv_cache_groups)
-    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+    if getattr(getattr(vllm_config.model_config, "hf_config", None), "model_type", None) == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif is_step5_groups(kv_cache_groups):
         kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)

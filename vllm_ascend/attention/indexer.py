@@ -289,7 +289,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.k_cache = AscendSFAIndexerCache(self.k_cache, spec, backend_cls=type(self))
         vllm_indexer.k_cache = self.k_cache
 
-        model_type = get_current_vllm_config().model_config.hf_config.model_type
+        model_type = getattr(get_current_vllm_config().model_config.hf_config, "model_type", None)
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa", "kimi_k31"]
 
@@ -334,7 +334,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.register_buffer("q_hadamard", None, persistent=False)
         self.register_buffer("k_hadamard", None, persistent=False)
         hf_config = get_current_vllm_config().model_config.hf_config
-        self._is_kimi_k31 = hf_config.model_type == "kimi_k31" or getattr(type(hf_config), "is_kimi_k31", False)
+        self._is_kimi_k31 = getattr(hf_config, "model_type", None) == "kimi_k31" or getattr(
+            type(hf_config), "is_kimi_k31", False
+        )
         self._q_stream: torch.npu.Stream | None = None
         self._fused_k_cache: Callable[..., None] | None = None
 

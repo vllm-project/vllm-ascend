@@ -961,7 +961,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         spec_config = vllm_config.speculative_config
         if spec_config is not None and spec_config.method == "dspark":
             draft_config = spec_config.draft_model_config.hf_config
-            self.dspark_aux_capture_materialized = draft_config.model_type == "qwen3" and any(
+            self.dspark_aux_capture_materialized = getattr(draft_config, "model_type", None) == "qwen3" and any(
                 arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in (draft_config.architectures or ())
             )
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
