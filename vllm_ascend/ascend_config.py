@@ -685,6 +685,12 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Cache the decode steady-state GDN attention metadata across steps. The
+    # builder otherwise rebuilds the same object once per GDN KV-cache group on
+    # every decode step, which dominates host time for hybrid models.
+    enable_gdn_meta_cache: bool = True
+    # Emit hit/miss and block-table diagnostics for the GDN metadata cache.
+    enable_gdn_meta_cache_stats: bool = False
     shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;

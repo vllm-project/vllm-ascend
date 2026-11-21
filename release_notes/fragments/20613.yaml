@@ -1,0 +1,13 @@
+pr: 20613
+entries:
+  - category: feature
+    text: >-
+      Cache the decode steady-state GDN attention metadata across steps on
+      hybrid (linear attention) models. The metadata builder is otherwise
+      invoked once per GDN KV-cache group on every decode step and dominates
+      host time; the cache refreshes accepted-token counts in both the
+      top-level and nested spec-decode metadata and is invalidated on prefill,
+      request-set changes and block-table remaps. Switches live under
+      additional_config (enable_gdn_meta_cache, enable_gdn_meta_cache_stats).
+    model: Qwen3.5
+    hardware: [A2, A3]
