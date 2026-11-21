@@ -411,7 +411,7 @@ class AisbenchRunner:
             f"which is not greater than or equal to baseline {self.baseline}."
         )
         if self.threshold is not None and acc_value > self.baseline + self.threshold:
-            logging.info(
+            logging.warning(
                 "Accuracy of %s is %s, above baseline %s + threshold %s; consider re-baselining this case.",
                 self.dataset_path,
                 acc_value,
