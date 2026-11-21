@@ -206,8 +206,11 @@ void HcPreTiling::CalcVectorCoreNum()
 
 ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 {
-    // preMix 场景使用独立的 tilingKey=2 和按行分配策略。
-    if (tilingData_.get_hasPreMix() != 0) {
+    // preMix 场景：小 batch 使用独立的 tilingKey=2 和按行分配策略；
+    // 大 batch 复用 MPMD 分核，让 pre/post/y 与 Sinkhorn 并行。MPMD 的
+    // compact Sinkhorn 固定按 hcMult=4 实现，其他 hcMult 仍走 key 2。
+    if (tilingData_.get_hasPreMix() != 0 &&
+        (bs_ <= SMALL_BS_THRESHOLD || hcMult_ != SUPPORTED_HC_MULT)) {
         return CalcPremixPart2Tiling();
     }
     bool useOriginal = bs_ <= SMALL_BS_THRESHOLD;
@@ -345,16 +348,18 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             int64_t squareSize = kBlockNum * RoundUp(candidateRow * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
             int64_t squareReduce = candidateRow * SQUARE_SUM_SIZE * sizeof(float);
             int64_t rsqrt = RoundUp(candidateRow, BLOCK_SIZE / sizeof(float)) * sizeof(float);
-            int64_t post = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+            int64_t post = candidateRow * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             int64_t rowBrcb = RoundUp(candidateRow, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t hcBrcb = RoundUp(candidateRow * hcMultAlign_, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t mask = (candidateRow + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
+            int64_t preMix = candidateRow * hcMultAlign_ * sizeof(float);
             int64_t yX = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
             int64_t yY = rowFactor_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
             int64_t yXCast = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
             int64_t yYCast = rowFactor_ * RoundUp(dFactor_, 8) * sizeof(float);
             return originSize * 2 + reduceSize * 2 + squareSize + squareReduce + rsqrt +
-                post + base0Size + base1Size + yX + yY + yXCast + yYCast + rowBrcb + hcBrcb + mask;
+                post + base0Size + base1Size + yX + yY + yXCast + yYCast + rowBrcb + hcBrcb + mask +
+                preMix;
         };
         prePostRowFactor = 1;
         for (int64_t candidateRow = 1; candidateRow <= rowOfFormerBlock_; candidateRow++) {
