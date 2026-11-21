@@ -1,0 +1,4 @@
+pr: 17955
+entries:
+  - category: bugfix
+    text: Fixed non-causal attention metadata for encoder-only groups in hybrid pooling models.
