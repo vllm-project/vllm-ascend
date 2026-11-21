@@ -71,9 +71,9 @@ options with:
 These options select KV-cache quantization independently of model-weight
 quantization; keep the weight-quantization options required by the model.
 
-On A3 with HDK 25.5.1, select MemFabric in the HiSparse connector. The SDK
-must include the A3 AccOffload extension. If it is missing from the serving
-environment, build it after sourcing the CANN environment with
+On A3 with HDK 25.5.1, select MemFabric in the HiSparse connector to provide
+AIV Host-memory mapping. The SDK must include the A3 AccOffload extension.
+If the extension is missing, source the CANN environment and build it with
 `mfcli kernel install --soc-version A3`.
 
 ```bash
