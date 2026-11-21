@@ -347,6 +347,34 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
                     else:
                         self.assertEqual(worker.determine_available_memory(), expected_budget * GiB_bytes)
 
+    def test_hisparse_rejects_flat_free_memory_with_retained_allocations(self):
+        initial_free = 24 * GiB_bytes
+        total = 32 * GiB_bytes
+        retained = 2 * GiB_bytes
+        transient = 3 * GiB_bytes
+        worker = self._make_worker(20 * GiB_bytes, initial_free, total, retained)
+        worker.vllm_config.attention_config = SimpleNamespace(hisparse_config={})
+        worker.vllm_config.compilation_config = SimpleNamespace(static_forward_context={})
+        worker.init_snapshot.torch_allocated = 3 * GiB_bytes
+        worker.init_snapshot.torch_memory = 6 * GiB_bytes
+
+        # Core measures zero device free-memory loss, so its non-KV total contains only the transient peak.
+        profile = self._make_profile_result(initial_free, non_kv_cache_memory=transient)
+        profile.weights_memory = retained
+        profile.after_profile.total_memory = total
+        profile.after_profile.torch_allocated = worker.init_snapshot.torch_allocated + retained
+        profile.after_profile.torch_memory = worker.init_snapshot.torch_memory
+        with (
+            patch.dict(
+                "sys.modules",
+                {"vllm_ascend.hisparse.backend": SimpleNamespace(prepare_hisparse_workspaces=MagicMock())},
+            ),
+            self._patch_memory_profiling(profile),
+            self.assertRaisesRegex(ValueError, "HiSparse.*--kv-cache-memory-bytes"),
+        ):
+            worker.determine_available_memory()
+        self.assertFalse(hasattr(worker, "_hisparse_profiled_non_kv_memory"))
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
     def test_second_instance_tight_memory_still_positive(self, mock_logger, mock_get_ascend_config):

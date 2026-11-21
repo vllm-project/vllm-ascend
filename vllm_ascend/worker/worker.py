@@ -866,6 +866,13 @@ class NPUWorker(GPUWorker):
             profile_result.non_kv_cache_memory = (
                 profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
             )
+        elif self.init_snapshot.free_memory == profile_result.after_profile.free_memory:
+            # Core's non-KV total only includes transient headroom when the device free-memory delta is zero.
+            raise ValueError(
+                "Error in memory profiling. HiSparse cannot measure retained allocations from unchanged "
+                "free NPU memory. Check device memory reporting or set a known-safe budget "
+                "with --kv-cache-memory-bytes."
+            )
         else:
             # Reuse Core's measured total, including owners retained from an
             # earlier profile. Preserve this authority for startup suggestions.

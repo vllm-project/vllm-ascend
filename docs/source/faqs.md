@@ -164,8 +164,9 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 If startup reports that free NPU memory stayed unchanged and automatic KV cache
 sizing failed, check whether the device or virtualization layer reports the
-actual memory used by the worker. If you know the free memory available after
-model loading and warmup, you can set a conservative per-worker budget with
+actual memory used by the worker. HiSparse requires a drop in reported free
+memory to measure allocations retained after profiling. If you know the free
+memory available after model loading and warmup, you can set a conservative per-worker budget with
 `--kv-cache-memory-bytes`.
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
