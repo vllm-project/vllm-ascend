@@ -34,10 +34,10 @@
 
 ## Constraints
 
-- `a`, `b`: `[num_tokens, num_heads]`; `A_log`, `dt_bias`: `[num_heads]` with the same `num_heads`. All inputs are indexed with flat offsets and must be contiguous.
+- `a`, `b`: `[num_tokens, num_heads]`, with independent row/head strides. Split, transposed, sliced and expanded views can be read without materializing contiguous copies. `A_log`, `dt_bias`: contiguous `[num_heads]` with the same `num_heads`. Outputs remain contiguous; inputs are not modified.
 - The wrapper fixes `seq_len = 1` (decode-style flattened token batch); internal computation is fp32 regardless of input dtype.
 - Kernel-internal tiling constants: `BLK_HEADS=8`, `BLK_BATCHES=64`, `ROW_ITER = ceil(ceil(num_tokens / num_vectorcore) / 64)`.
-- `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` are `do_not_specialize`, so varying token counts or head counts do not trigger Triton recompilation.
+- `seq_len`, `NUM_HEADS`, `NUM_BATCHES`, `beta`, `threshold`, `ROW_ITER` and input strides are `do_not_specialize`. Layout categories select dense, unit-head-stride or generic-stride addressing via constexpr flags; concrete token counts and stride values are not specialization keys. There is no batch-size threshold.
 - Only for inference (prefill/decode) on NPU.
 
 ## Origin and Differences
@@ -50,6 +50,8 @@
 ## Test Cases
 
 The test compares the Triton kernel (through its 1:1 wrapper `fused_gdn_gating_patch`) against the independent PyTorch reference `fused_gdn_gating_pytorch` (from `vllm_ascend/_310p/ops/fla/fused_gdn_gating.py`) for both outputs, fp16 inputs, `num_tokens=37`, `num_heads=8`, unified elementwise tolerance `rtol=atol=1e-2`.
+
+The layout matrix additionally compares strided and contiguous inputs with zero tolerance on A2/A3/A5: FP16/BF16, 1/7/129/4868 rows, 1/8/13/32 heads, and dense/split/transposed/sliced/expanded layouts. It checks that inputs are unchanged. This compares layout paths in the current kernel; the performance benchmark requires an explicit pre-change kernel source to also detect overhead relative to the original implementation.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_gdn_gating.py
