@@ -1,0 +1,11 @@
+pr: 22655
+entries:
+  - category: performance
+    text: >-
+      Enable the fused engram_gate triton kernel (ENGRAM_UNROTATED_GATE) on
+      A2/A3, so 910B unrotated DeepSeek V4.1 Engram checkpoints take the fused
+      path instead of the bare FP32 fallback. ~5.9x lower per-token gate
+      latency on 910B (42.8us vs 252.4us), numerically equivalent (bf16 max
+      diff 7.8e-3). Rotated (QuaRot) checkpoints still use the bare path.
+    model: deepseek-v4.1
+    hardware: [A2, A3]
