@@ -1139,12 +1139,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
-        # Replicated DSpark queries keep PCP=1 in their config, but reuse the
-        # physical PCP group. Its ranks carry the same Q heads, so history
-        # gathers only distinct TP heads, as _dcp_all_gather_fragments does.
-        pcp_size = get_pcp_group().world_size if dcp_size > 1 else 1
-        query_gather_size = max(1, dcp_size // pcp_size)
-        if self.use_pcp or self.num_heads * query_gather_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
+        # History sees all Q heads in the DCP group; current uses local heads.
+        if self.use_pcp or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
         if not supports_component_major_mla_pd(config):
             return False
